@@ -4,19 +4,23 @@
 //! The daemon calls [`check_tx`] in `Evm::sign_tx` right after `tx::decode_unsigned` and the
 //! chainId check and before `tx::sign_decoded`, and [`check_message`] before every EIP-191
 //! signature, with the list that verifies against the anchor sealed in wallet.json
-//! ([`ListView::Usable`]) or the reason there is none ([`ListView::Unusable`]). The CLI may call
-//! the same functions on the unverified list to explain a refusal before asking the daemon; only
-//! the daemon's call decides.
+//! ([`ListView::Usable`]), or with why there is none: no whitelist yet ([`ListView::NoList`]) or
+//! nothing that can be trusted ([`ListView::Unusable`]). The CLI may call the same functions on the
+//! unverified list to explain a refusal before asking the daemon; only the daemon's call decides.
 //!
-//! Every refusal says what it is about (`counterparty`, `chain`) and, when an edit of the list can
-//! allow it, the exact `zwallet whitelist …` command a human runs (`command`).
+//! Every refusal says what it is about (`counterparty`, `chain`) and, when one edit of the list
+//! allows it, the exact `zwallet whitelist …` command a human runs (`command`). A list that cannot
+//! be trusted gets no such command: it is checked first (`zwallet whitelist list --verify`).
+//!
+//! No signature escapes a fee cap: the list's, or without a usable list the built-in default for
+//! the chain (`registry::DEFAULT_FEE_CAPS_WEI`), which only a self-transfer can reach.
 
 use crate::chains::Chain;
 use crate::chains::evm::tx::{Action, DecodedUnsigned};
 use crate::chains::evm::{config, registry};
 use crate::core::amount::format_units;
 use crate::core::error::{ErrorCode, Result, WalletError};
-use crate::core::whitelist::{Entry, EntryKind, Whitelist};
+use crate::core::whitelist::{EntryKind, Whitelist};
 use alloy::hex;
 use alloy::primitives::{Address, U256};
 
@@ -27,23 +31,32 @@ pub const NO_WHITELIST: &str = "this wallet has no whitelist yet; the first `zwa
 /// The command that lets `sign-message` sign.
 pub const MESSAGE_SIGNING_COMMAND: &str = "zwallet whitelist allow-message-signing on";
 
+/// What a human runs when the list cannot be trusted: it shows whether it verifies, and why not.
+pub const VERIFY_COMMAND: &str = "zwallet whitelist list --verify";
+
 /// The list a signature is checked against.
 #[derive(Debug)]
 pub enum ListView<'a> {
     /// A list that verified against the sealed anchor (the daemon), or the unverified list the CLI
     /// explains a dry-run with.
     Usable(&'a Whitelist),
-    /// No list can be trusted, and why: none yet ([`NO_WHITELIST`]), a malformed sealed anchor, or
-    /// a list that does not verify. Every value-moving signature is refused.
+    /// This wallet has no whitelist yet (wallet.json seals no anchor). Refusals name the edit
+    /// that would allow the request; that first edit creates the list.
+    NoList,
+    /// There is a list or an anchor, but nothing that can be trusted, and why: it does not
+    /// verify, cannot be read, or the sealed anchor is malformed. Refusals name no edit (one would
+    /// rebuild the list around whatever the request asks for); they point to
+    /// [`VERIFY_COMMAND`].
     Unusable(String),
 }
 
 /// Decides one decoded unsigned transaction against the list. `Ok(())` = may sign.
 ///
-/// In order: a native transfer to `signer` itself is allowed whatever the list's state (under the
-/// fee cap when a list is usable); without a usable list everything else is `WHITELIST_INVALID`;
-/// the fee limit must be within the list's cap for the chain (`FEE_CAP_EXCEEDED`, also when there
-/// is no cap); then the decoded action must be one the list allows (`WHITELIST_DENIED`).
+/// With a usable list: the fee limit must be within the list's cap for the chain
+/// (`FEE_CAP_EXCEEDED`, also when there is no cap), then a native transfer to `signer` itself
+/// passes and anything else must be an action the list allows (`WHITELIST_DENIED`). Without one,
+/// only a native transfer to `signer` passes, under the chain's built-in default fee cap; anything
+/// else is `WHITELIST_INVALID`.
 pub fn check_tx(
     view: &ListView,
     chain: &Chain,
@@ -52,22 +65,24 @@ pub fn check_tx(
 ) -> Result<()> {
     let action = decoded.action();
     let to_self = matches!(action, Action::NativeTransfer { to, .. } if to == signer);
-    let list = match view {
-        ListView::Usable(list) => *list,
-        ListView::Unusable(_) if to_self => return Ok(()),
-        ListView::Unusable(reason) => return Err(invalid(reason, chain, action)),
+    let ListView::Usable(list) = view else {
+        if !to_self {
+            return Err(invalid(view, chain, action));
+        }
+        return check_fee(view, default_fee_cap(chain.key), chain, decoded);
     };
-    check_fee(list, chain, decoded)?;
+    check_fee(view, list.policy.max_fee_wei(chain.key), chain, decoded)?;
     if to_self {
         return Ok(());
     }
     decide(list, chain, action).map_err(|d| {
-        let message = match &d.command {
-            Some(c) => format!(
+        let message = match &d.fix {
+            Fix::Add(c) => format!(
                 "refusing to sign: {}; a human can allow it with `{c}`",
                 d.why
             ),
-            None => format!(
+            Fix::Widen => format!("refusing to sign: {}", d.why),
+            Fix::Never => format!(
                 "refusing to sign: {}; no whitelist entry can allow this",
                 d.why
             ),
@@ -79,49 +94,78 @@ pub fn check_tx(
 /// The `sign-message` gate: refused unless the list verifies and has `allowMessageSigning` on
 /// (some contracts take an EIP-191 signature as spending authority).
 pub fn check_message(view: &ListView) -> Result<()> {
-    let (code, message) = match view {
+    let refuse = |code, message: String| WalletError::new(code, message);
+    Err(match view {
         ListView::Usable(list) if list.policy.allow_message_signing => return Ok(()),
-        ListView::Usable(_) => (
+        ListView::Usable(_) => refuse(
             ErrorCode::WhitelistDenied,
             format!(
                 "refusing to sign a message: the whitelist does not allow message signing (some \
                  contracts take an EIP-191 signature as spending authority); a human can turn it \
                  on with `{MESSAGE_SIGNING_COMMAND}`"
             ),
-        ),
-        ListView::Unusable(reason) => (
+        )
+        .with_detail("command", MESSAGE_SIGNING_COMMAND),
+        ListView::NoList => refuse(
             ErrorCode::WhitelistInvalid,
             format!(
-                "refusing to sign a message: {reason}. Message signing needs a whitelist that \
-                 verifies and allows it: `{MESSAGE_SIGNING_COMMAND}`"
+                "refusing to sign a message: {NO_WHITELIST}. Message signing needs a whitelist \
+                 that allows it: `{MESSAGE_SIGNING_COMMAND}`"
+            ),
+        )
+        .with_detail("command", MESSAGE_SIGNING_COMMAND),
+        ListView::Unusable(reason) => refuse(
+            ErrorCode::WhitelistInvalid,
+            format!(
+                "refusing to sign a message: the whitelist cannot be trusted: {reason}. A human \
+                 checks it with `{VERIFY_COMMAND}`"
             ),
         ),
-    };
-    Err(WalletError::new(code, message).with_detail("command", MESSAGE_SIGNING_COMMAND))
+    })
 }
 
-/// Why the action table refuses, about which address, and the edit that would allow it.
+/// What, if anything, lets the action table allow a refused action.
+enum Fix {
+    /// This one edit (adding an entry).
+    Add(String),
+    /// Changing the entry the message names (another chain or selector). No command: the CLI
+    /// edits an entry by removing it and adding it again, two edits a human chooses.
+    Widen,
+    /// No entry can.
+    Never,
+}
+
+/// Why the action table refuses, about which address, and what would allow it.
 struct Denial {
     counterparty: Address,
     why: String,
-    command: Option<String>,
+    fix: Fix,
 }
 
 impl Denial {
+    fn never(counterparty: &Address, why: String) -> Self {
+        Self {
+            counterparty: *counterparty,
+            why,
+            fix: Fix::Never,
+        }
+    }
+
     fn error(self, code: ErrorCode, chain: &Chain, message: String) -> WalletError {
-        let mut e = WalletError::new(code, message)
+        let e = WalletError::new(code, message)
             .with_detail("counterparty", self.counterparty.to_checksum(None))
             .with_detail("chain", chain.key);
-        if let Some(c) = self.command {
-            e = e.with_detail("command", c);
+        match self.fix {
+            Fix::Add(c) => e.with_detail("command", c),
+            Fix::Widen | Fix::Never => e,
         }
-        e
     }
 }
 
-/// Without a usable list: `WHITELIST_INVALID`, naming the edit the action would need (the first
-/// one also creates the list).
-fn invalid(reason: &str, chain: &Chain, action: &Action) -> WalletError {
+/// Without a usable list: `WHITELIST_INVALID`. With no list yet, naming the edit the action
+/// would need (the first edit creates the list); with an untrusted one, pointing to
+/// [`VERIFY_COMMAND`] and naming no edit.
+fn invalid(view: &ListView, chain: &Chain, action: &Action) -> WalletError {
     let until = "Until a human signs a whitelist that verifies, only transfers to this key's own \
                  address are signed";
     let empty = Whitelist::empty(&registry::WHITELIST_RULES);
@@ -131,16 +175,30 @@ fn invalid(reason: &str, chain: &Chain, action: &Action) -> WalletError {
         Ok(()) => Denial {
             counterparty: target(action),
             why: String::new(),
-            command: None,
+            fix: Fix::Widen,
         },
     };
-    let message = match (&d.command, d.why.is_empty()) {
-        (Some(c), _) => format!("refusing to sign: {reason}. {until}; to allow this one: `{c}`"),
-        (None, true) => format!("refusing to sign: {reason}. {until}"),
-        (None, false) => format!(
-            "refusing to sign: {reason}. {until}; and no whitelist entry can allow this one: {}",
+    let message = match (view, &d.fix) {
+        (ListView::Unusable(reason), _) => format!(
+            "refusing to sign: the whitelist cannot be trusted: {reason}. {until}; a human checks \
+             it with `{VERIFY_COMMAND}`"
+        ),
+        (_, Fix::Add(c)) => {
+            format!("refusing to sign: {NO_WHITELIST}. {until}; to allow this one: `{c}`")
+        }
+        (_, Fix::Widen) => format!("refusing to sign: {NO_WHITELIST}. {until}"),
+        (_, Fix::Never) => format!(
+            "refusing to sign: {NO_WHITELIST}. {until}; and no whitelist entry can allow this one: \
+             {}",
             d.why
         ),
+    };
+    let d = match view {
+        ListView::Unusable(_) => Denial {
+            fix: Fix::Never,
+            ..d
+        },
+        _ => d,
     };
     d.error(ErrorCode::WhitelistInvalid, chain, message)
 }
@@ -156,43 +214,92 @@ fn target(action: &Action) -> Address {
     }
 }
 
-/// `gasLimit × maxFeePerGas` (type 2) or `× gasPrice` (legacy) against the list's cap for the
-/// chain. A missing or malformed cap refuses too: the fix is the same command.
-fn check_fee(list: &Whitelist, chain: &Chain, decoded: &DecodedUnsigned) -> Result<()> {
+/// The built-in fee cap of chain `key` (`registry::DEFAULT_FEE_CAPS_WEI`): part of the binary,
+/// so nothing in the home can raise it.
+fn default_fee_cap(key: &str) -> Option<U256> {
+    registry::DEFAULT_FEE_CAPS_WEI
+        .iter()
+        .find(|(k, _)| *k == key)
+        .and_then(|(_, wei)| U256::from_str_radix(wei, 10).ok())
+}
+
+/// `gasLimit × maxFeePerGas` (type 2) or `× gasPrice` (legacy) against `cap`: the usable list's
+/// cap for the chain, or the built-in default without one. A missing cap refuses too.
+fn check_fee(
+    view: &ListView,
+    cap: Option<U256>,
+    chain: &Chain,
+    decoded: &DecodedUnsigned,
+) -> Result<()> {
     let fee = U256::from(decoded.gas_limit()) * U256::from(decoded.fees().max_price());
-    let cap = list.policy.max_fee_wei(chain.key);
     if cap.is_some_and(|cap| fee <= cap) {
         return Ok(());
     }
     let units = |wei: U256| format!("{} {}", format_units(wei, chain.decimals), chain.symbol);
-    let command = format!(
+    let set_cap = format!(
         "zwallet whitelist fee-cap {} {}",
         chain.key,
         format_units(fee, chain.decimals)
     );
-    let why = match cap {
-        Some(cap) => format!(
-            "the fee limit {} (gasLimit {} x {} wei) is above the whitelist's cap of {} on {}",
-            units(fee),
-            decoded.gas_limit(),
-            decoded.fees().max_price(),
-            units(cap),
-            chain.key
+    let limit = format!(
+        "the fee limit {} (gasLimit {} x {} wei)",
+        units(fee),
+        decoded.gas_limit(),
+        decoded.fees().max_price()
+    );
+    let (why, command) = match (view, cap) {
+        (ListView::Usable(_), Some(cap)) => (
+            format!(
+                "{limit} is above the whitelist's cap of {} on {}",
+                units(cap),
+                chain.key
+            ),
+            Some(set_cap),
         ),
-        None => format!(
-            "the whitelist has no fee cap for {} (or an unreadable one), and this fee limit is {}",
-            chain.key,
-            units(fee)
+        (ListView::Usable(_), None) => (
+            format!(
+                "the whitelist has no fee cap for {} (or an unreadable one), and {limit}",
+                chain.key
+            ),
+            Some(set_cap),
+        ),
+        (ListView::NoList, Some(cap)) => (
+            format!(
+                "{limit} is above the built-in cap of {} on {} that applies while there is no \
+                 whitelist; the first fee-cap edit creates the list with its own cap",
+                units(cap),
+                chain.key
+            ),
+            Some(set_cap),
+        ),
+        (ListView::Unusable(reason), Some(cap)) => (
+            format!(
+                "{limit} is above the built-in cap of {} on {} that applies while the whitelist \
+                 cannot be trusted ({reason}); a human checks it with `{VERIFY_COMMAND}`",
+                units(cap),
+                chain.key
+            ),
+            None,
+        ),
+        (_, None) => (
+            format!(
+                "there is no built-in fee cap for {}, and no whitelist that can be trusted",
+                chain.key
+            ),
+            None,
         ),
     };
-    let mut e = WalletError::new(
-        ErrorCode::FeeCapExceeded,
-        format!("refusing to sign: {why}; a human can allow it with `{command}`"),
-    )
-    .with_detail("counterparty", decoded.to().to_checksum(None))
-    .with_detail("chain", chain.key)
-    .with_detail("command", command)
-    .with_detail("feeWei", fee.to_string());
+    let message = match &command {
+        Some(c) => format!("refusing to sign: {why}; a human can allow it with `{c}`"),
+        None => format!("refusing to sign: {why}"),
+    };
+    let mut e = WalletError::new(ErrorCode::FeeCapExceeded, message)
+        .with_detail("counterparty", decoded.to().to_checksum(None))
+        .with_detail("chain", chain.key)
+        .with_detail("feeWei", fee.to_string());
+    if let Some(c) = command {
+        e = e.with_detail("command", c);
+    }
     if let Some(cap) = cap {
         e = e.with_detail("capWei", cap.to_string());
     }
@@ -202,16 +309,11 @@ fn check_fee(list: &Whitelist, chain: &Chain, decoded: &DecodedUnsigned) -> Resu
 /// The action table (`.prd/04-whitelist.md` §Daemon enforcement).
 fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Result<(), Denial> {
     let chain_id = config(chain).chain_id;
-    let never = |counterparty: &Address, why: String| Denial {
-        counterparty: *counterparty,
-        why,
-        command: None,
-    };
     match action {
         Action::NativeTransfer { to, .. } => payee(list, chain, to),
         Action::TransferCall { token, to, .. } => {
             if registry::lookup(chain_id, token).is_none() {
-                return Err(never(
+                return Err(Denial::never(
                     token,
                     format!(
                         "{} is not a registry token on {}; only the built-in USDC, USDT, DAI and \
@@ -222,7 +324,7 @@ fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Resu
                 ));
             }
             if registry::is_token_anywhere(to) {
-                return Err(never(
+                return Err(Denial::never(
                     to,
                     format!(
                         "{} is a token contract; a token transfer to one is never signed",
@@ -238,7 +340,7 @@ fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Resu
             value,
         } => {
             if registry::lookup(chain_id, contract).is_none() {
-                return Err(never(
+                return Err(Denial::never(
                     contract,
                     format!(
                         "approve on {}, which is not a registry token on {}",
@@ -248,7 +350,7 @@ fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Resu
                 ));
             }
             if !value.is_zero() {
-                return Err(never(
+                return Err(Denial::never(
                     spender,
                     format!(
                         "approvals are revoke-only: this approves {value} to {} on {}; only an \
@@ -260,7 +362,7 @@ fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Resu
             }
             Ok(())
         }
-        Action::TransferFromCall { contract, .. } => Err(never(
+        Action::TransferFromCall { contract, .. } => Err(Denial::never(
             contract,
             format!(
                 "transferFrom on {} is never signed (it moves tokens on an allowance)",
@@ -272,7 +374,7 @@ fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Resu
         } => {
             let sel = format!("0x{}", hex::encode(selector));
             if registry::is_token_anywhere(contract) {
-                return Err(never(
+                return Err(Denial::never(
                     contract,
                     format!(
                         "{} is a registry token: it takes only a transfer to a payee and an \
@@ -282,14 +384,13 @@ fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Resu
                 ));
             }
             let addr = contract.to_checksum(None);
-            match list.by_address(&addr) {
-                Some(e)
-                    if e.kind == EntryKind::Contract
-                        && e.covers_chain(chain.key)
-                        && e.allows_selector(&sel) =>
-                {
-                    Ok(())
-                }
+            if list
+                .contract(&addr, chain.key)
+                .is_some_and(|e| e.allows_selector(&sel))
+            {
+                return Ok(());
+            }
+            Err(match list.by_address(&addr) {
                 Some(e) if e.kind == EntryKind::Contract => {
                     let mut missing = Vec::new();
                     if !e.covers_chain(chain.key) {
@@ -298,34 +399,34 @@ fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Resu
                     if !e.allows_selector(&sel) {
                         missing.push(format!("selector {sel}"));
                     }
-                    Err(Denial {
+                    Denial {
                         counterparty: *contract,
                         why: format!(
                             "contract '{}' ({addr}) does not list {}",
                             e.nickname,
                             missing.join(" or ")
                         ),
-                        command: Some(widened(e, contract, chain, Some(&sel))),
-                    })
+                        fix: Fix::Widen,
+                    }
                 }
-                Some(e) => Err(never(
+                Some(e) => Denial::never(
                     contract,
                     format!(
                         "{addr} is the payee '{}', not a contract entry; a call needs a contract \
                          entry",
                         e.nickname
                     ),
-                )),
-                None => Err(Denial {
+                ),
+                None => Denial {
                     counterparty: *contract,
                     why: format!("{addr} is not a contract entry on {}", chain.key),
-                    command: Some(format!(
+                    fix: Fix::Add(format!(
                         "zwallet whitelist add <nick> {addr} --chains {} --contract --selectors \
                          {sel}",
                         chain.key
                     )),
-                }),
-            }
+                },
+            })
         }
     }
 }
@@ -333,9 +434,11 @@ fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Resu
 /// `to` must be an address entry that covers `chain`.
 fn payee(list: &Whitelist, chain: &Chain, to: &Address) -> std::result::Result<(), Denial> {
     let addr = to.to_checksum(None);
-    match list.by_address(&addr) {
-        Some(e) if e.kind == EntryKind::Address && e.covers_chain(chain.key) => Ok(()),
-        Some(e) if e.kind == EntryKind::Address => Err(Denial {
+    if list.payee(&addr, chain.key).is_some() {
+        return Ok(());
+    }
+    Err(match list.by_address(&addr) {
+        Some(e) if e.kind == EntryKind::Address => Denial {
             counterparty: *to,
             why: format!(
                 "payee '{}' ({addr}) is listed for {} only, not {}",
@@ -343,50 +446,25 @@ fn payee(list: &Whitelist, chain: &Chain, to: &Address) -> std::result::Result<(
                 e.chains.join(","),
                 chain.key
             ),
-            command: Some(widened(e, to, chain, None)),
-        }),
-        Some(e) => Err(Denial {
-            counterparty: *to,
-            why: format!(
+            fix: Fix::Widen,
+        },
+        Some(e) => Denial::never(
+            to,
+            format!(
                 "{addr} is the contract '{}', which takes calls with its selectors, never a \
                  payment",
                 e.nickname
             ),
-            command: None,
-        }),
-        None => Err(Denial {
+        ),
+        None => Denial {
             counterparty: *to,
             why: format!("{addr} is not in the whitelist as a payee on {}", chain.key),
-            command: Some(format!(
+            fix: Fix::Add(format!(
                 "zwallet whitelist add <nick> {addr} --chains {}",
                 chain.key
             )),
-        }),
-    }
-}
-
-/// The edit that lets entry `e` cover `chain` (and, for a contract, `selector`): `whitelist add`
-/// refuses a nickname or an address it already has, so the entry is removed and added again with
-/// its chains and selectors widened.
-fn widened(e: &Entry, address: &Address, chain: &Chain, selector: Option<&str>) -> String {
-    let mut chains = e.chains.clone();
-    if !e.covers_chain(chain.key) {
-        chains.push(chain.key.to_string());
-    }
-    let mut cmd = format!(
-        "zwallet whitelist remove {nick} && zwallet whitelist add {nick} {} --chains {}",
-        address.to_checksum(None),
-        chains.join(","),
-        nick = e.nickname
-    );
-    if e.kind == EntryKind::Contract {
-        let mut sels = e.selectors.clone().unwrap_or_default();
-        if let Some(s) = selector.filter(|s| !e.allows_selector(s)) {
-            sels.push(s.to_string());
-        }
-        cmd.push_str(&format!(" --contract --selectors {}", sels.join(",")));
-    }
-    cmd
+        },
+    })
 }
 
 #[cfg(test)]
@@ -530,19 +608,18 @@ mod tests {
         check(&v, "ethereum", &cheap("ethereum", SIGNER, 5, "0x")).unwrap();
         // Lower-case and checksummed entries are the same address.
         check(&v, "base", &cheap("base", &ALICE.to_lowercase(), 5, "0x")).unwrap();
-        // alice is listed for base only: widen her chains (remove, then add with both).
-        let cmd = format!(
-            "zwallet whitelist remove alice && zwallet whitelist add alice {ALICE} --chains \
-             base,ethereum"
-        );
+        // alice is listed for base only: the message names her entry and the chain it lacks,
+        // and suggests no command (changing an entry is a remove and an add, the human's call).
         let msg = refused(
             check(&v, "ethereum", &cheap("ethereum", ALICE, 5, "0x")),
             ErrorCode::WhitelistDenied,
             ALICE,
             "ethereum",
-            Some(&cmd),
+            None,
         );
         assert!(msg.contains("'alice'"), "{msg}");
+        assert!(msg.contains("listed for base only, not ethereum"), "{msg}");
+        assert!(!msg.contains("zwallet whitelist"), "{msg}");
         refused(
             check(&v, "base", &cheap("base", CAROL, 5, "0x")),
             ErrorCode::WhitelistDenied,
@@ -560,58 +637,224 @@ mod tests {
         );
     }
 
+    /// A legacy (EIP-155) transaction on `chain`.
+    fn legacy(chain: &str, to: &str, value: u64, gas: u64, price: u64) -> DecodedUnsigned {
+        let t = UnsignedEvmTx {
+            chain_id: crate::chains::evm::config(find(chain).unwrap()).chain_id,
+            nonce: 0,
+            gas_limit: gas,
+            fees: EvmFees::Legacy {
+                gas_price: U128::from(price),
+            },
+            to: a(to),
+            value: U256::from(value),
+            input: Default::default(),
+        };
+        tx::decode_unsigned(&tx::encoded_for_signing(&t)).unwrap()
+    }
+
+    /// The compiled-in default fee cap of `chain`, in wei.
+    fn default_cap(chain: &str) -> u64 {
+        let (_, wei) = registry::DEFAULT_FEE_CAPS_WEI
+            .iter()
+            .find(|(k, _)| *k == chain)
+            .unwrap();
+        wei.parse().unwrap()
+    }
+
     #[test]
-    fn without_a_usable_list_only_self_transfers_are_signed() {
-        for reason in [NO_WHITELIST, "whitelist.json: does not verify"] {
-            let v = ListView::Unusable(reason.into());
-            // Any value, any fee: there is no cap to apply.
-            let huge = decoded(
+    fn with_no_list_yet_refusals_name_the_edit_that_creates_one() {
+        let v = ListView::NoList;
+        check(&v, "ethereum", &cheap("ethereum", SIGNER, u64::MAX, "0x")).unwrap();
+        let msg = refused(
+            check(&v, "ethereum", &cheap("ethereum", BOB, 1, "0x")),
+            ErrorCode::WhitelistInvalid,
+            BOB,
+            "ethereum",
+            Some(&add_cmd(BOB, "ethereum")),
+        );
+        assert!(msg.contains(NO_WHITELIST), "{msg}");
+        // Contract calls name the contract entry that would allow them.
+        let cmd = format!(
+            "zwallet whitelist add <nick> {ROUTER} --chains base --contract --selectors {SEL}"
+        );
+        refused(
+            check(&v, "base", &cheap("base", ROUTER, 0, SEL)),
+            ErrorCode::WhitelistInvalid,
+            ROUTER,
+            "base",
+            Some(&cmd),
+        );
+        // Even a revoke, which a usable list needs no entry for.
+        let revoke = cheap("ethereum", USDC_ETH, 0, &approve_data(SPENDER, 0));
+        refused(
+            check(&v, "ethereum", &revoke),
+            ErrorCode::WhitelistInvalid,
+            USDC_ETH,
+            "ethereum",
+            None,
+        );
+        // A token transfer to the signer is no native self-transfer.
+        let token_self = cheap("ethereum", USDC_ETH, 0, &transfer_data(SIGNER, 1));
+        refused(
+            check(&v, "ethereum", &token_self),
+            ErrorCode::WhitelistInvalid,
+            SIGNER,
+            "ethereum",
+            Some(&add_cmd(SIGNER, "ethereum")),
+        );
+    }
+
+    #[test]
+    fn a_list_that_cannot_be_trusted_names_no_command_and_points_to_verify() {
+        // Tampered with or unreadable: suggesting an entry for the address in the request would
+        // hand whoever broke the list the address it picked. The human checks the list instead.
+        let reason = "whitelist.json: whitelist signature does not verify";
+        let v = ListView::Unusable(reason.into());
+        check(&v, "ethereum", &cheap("ethereum", SIGNER, u64::MAX, "0x")).unwrap();
+        let revoke = approve_data(SPENDER, 0);
+        let token_self = transfer_data(SIGNER, 1);
+        let cases = [
+            ("ethereum", cheap("ethereum", BOB, 1, "0x"), BOB),
+            ("base", cheap("base", ROUTER, 0, SEL), ROUTER),
+            (
                 "ethereum",
-                SIGNER,
-                u64::MAX,
-                "0x",
-                30_000_000,
-                10_000 * GWEI,
-            );
-            check(&v, "ethereum", &huge).unwrap();
-            let msg = refused(
-                check(&v, "ethereum", &cheap("ethereum", BOB, 1, "0x")),
-                ErrorCode::WhitelistInvalid,
-                BOB,
-                "ethereum",
-                Some(&add_cmd(BOB, "ethereum")),
-            );
-            assert!(msg.contains(reason), "{msg}");
-            // Contract calls name the contract entry that would allow them.
-            let cmd = format!(
-                "zwallet whitelist add <nick> {ROUTER} --chains base --contract --selectors {SEL}"
-            );
-            refused(
-                check(&v, "base", &cheap("base", ROUTER, 0, SEL)),
-                ErrorCode::WhitelistInvalid,
-                ROUTER,
-                "base",
-                Some(&cmd),
-            );
-            // Even a revoke, which a usable list needs no entry for.
-            let revoke = cheap("ethereum", USDC_ETH, 0, &approve_data(SPENDER, 0));
-            refused(
-                check(&v, "ethereum", &revoke),
-                ErrorCode::WhitelistInvalid,
+                cheap("ethereum", USDC_ETH, 0, &revoke),
                 USDC_ETH,
+            ),
+            (
                 "ethereum",
+                cheap("ethereum", USDC_ETH, 0, &token_self),
+                SIGNER,
+            ),
+        ];
+        for (chain, d, counterparty) in cases {
+            let msg = refused(
+                check(&v, chain, &d),
+                ErrorCode::WhitelistInvalid,
+                counterparty,
+                chain,
                 None,
             );
-            // A token transfer to the signer is no native self-transfer.
-            let token_self = cheap("ethereum", USDC_ETH, 0, &transfer_data(SIGNER, 1));
-            refused(
-                check(&v, "ethereum", &token_self),
-                ErrorCode::WhitelistInvalid,
-                SIGNER,
-                "ethereum",
-                Some(&add_cmd(SIGNER, "ethereum")),
-            );
+            assert!(msg.contains(reason), "{msg}");
+            assert!(msg.contains(&format!("`{VERIFY_COMMAND}`")), "{msg}");
+            assert!(!msg.contains("whitelist add"), "{msg}");
         }
+    }
+
+    #[test]
+    fn self_transfers_are_always_under_a_fee_cap() {
+        // Without a usable list the compiled-in default cap applies; with one, the list's cap.
+        let reason = "whitelist.json: whitelist signature does not verify";
+        for c in crate::chains::CHAINS {
+            let gas = 100_000;
+            let at = default_cap(c.key) / gas;
+            for v in [ListView::NoList, ListView::Unusable(reason.into())] {
+                check(&v, c.key, &decoded(c.key, SIGNER, u64::MAX, "0x", gas, at)).unwrap();
+                check(&v, c.key, &legacy(c.key, SIGNER, u64::MAX, gas, at)).unwrap();
+                for over in [
+                    decoded(c.key, SIGNER, 0, "0x", gas, at + 1),
+                    legacy(c.key, SIGNER, 0, gas, at + 1),
+                ] {
+                    let e = check(&v, c.key, &over).unwrap_err();
+                    assert_eq!(
+                        e.code,
+                        ErrorCode::FeeCapExceeded,
+                        "{}: {}",
+                        c.key,
+                        e.message
+                    );
+                    assert_eq!(e.details["capWei"], default_cap(c.key).to_string());
+                    assert_eq!(e.details["counterparty"], SIGNER);
+                    assert!(e.message.contains("built-in"), "{}", e.message);
+                    match &v {
+                        // The first fee-cap edit creates the list with that cap.
+                        ListView::NoList => assert!(
+                            e.details["command"]
+                                .as_str()
+                                .unwrap()
+                                .starts_with(&format!("zwallet whitelist fee-cap {} ", c.key)),
+                            "{e:?}"
+                        ),
+                        _ => {
+                            assert!(!e.details.contains_key("command"), "{e:?}");
+                            assert!(e.message.contains(VERIFY_COMMAND), "{}", e.message);
+                        }
+                    }
+                }
+            }
+        }
+        // A usable list's own cap, here below the default.
+        let mut l = list();
+        l.policy.set_max_fee_wei("base", U256::from(21_000 * GWEI));
+        let v = ListView::Usable(&l);
+        check(&v, "base", &cheap("base", SIGNER, 1, "0x")).unwrap();
+        let over = decoded("base", SIGNER, 1, "0x", 21_000, GWEI + 1);
+        let e = check(&v, "base", &over).unwrap_err();
+        assert_eq!(e.code, ErrorCode::FeeCapExceeded);
+        assert_eq!(e.details["capWei"], (21_000 * GWEI).to_string());
+    }
+
+    #[test]
+    fn a_broken_list_is_never_more_permissive_than_a_verified_default_list() {
+        // Over every action kind, target, fee shape and chain: whatever a missing or untrusted
+        // list lets through, a verified list with no entries and the default policy does too.
+        let mut verified = Whitelist::empty(&registry::WHITELIST_RULES);
+        verified.generation = 1;
+        verified.validate(&registry::WHITELIST_RULES).unwrap();
+        let broken = [
+            ListView::NoList,
+            ListView::Unusable("whitelist.json: does not verify".into()),
+        ];
+        let (mut cases, mut allowed) = (0, 0);
+        for c in crate::chains::CHAINS {
+            let gas = 100_000;
+            let cap = default_cap(c.key) / gas;
+            let id = crate::chains::evm::config(c).chain_id;
+            let mut targets = vec![SIGNER, BOB, ROUTER, USDC_ETH, WETH_BASE];
+            targets.extend(
+                registry::TOKENS
+                    .iter()
+                    .filter(|t| t.chain_id == id)
+                    .map(|t| t.address),
+            );
+            let mut calls = vec!["0x".to_string(), SEL.into(), DEPOSIT.into()];
+            for t in &targets {
+                calls.push(transfer_data(t, 1));
+                calls.push(approve_data(t, 0));
+                calls.push(approve_data(t, 1));
+                calls.push(transfer_from_data(t, SIGNER, 1));
+            }
+            for to in &targets {
+                for data in &calls {
+                    for price in [1, cap, cap + 1, cap * 10] {
+                        let value = if data.len() > 10 { 0 } else { 5 };
+                        let mut txs = vec![decoded(c.key, to, value, data, gas, price)];
+                        if data == "0x" {
+                            txs.push(legacy(c.key, to, value, gas, price));
+                        }
+                        for d in txs {
+                            let strict = check(&ListView::Usable(&verified), c.key, &d);
+                            for v in &broken {
+                                cases += 1;
+                                if check(v, c.key, &d).is_ok() {
+                                    allowed += 1;
+                                    assert!(
+                                        strict.is_ok(),
+                                        "{v:?} allows on {} what a verified default list \
+                                         refuses: {:?}",
+                                        c.key,
+                                        d.to_json()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Not vacuous: some self-transfers pass, most of the corpus does not.
+        assert!(allowed > 0 && allowed < cases / 10, "{allowed} of {cases}");
     }
 
     #[test]
@@ -734,28 +977,29 @@ mod tests {
             &cheap("base", ROUTER, 10u64.pow(15), &format!("{SEL}00")),
         )
         .unwrap();
-        let cmd = format!(
-            "zwallet whitelist remove router && zwallet whitelist add router {ROUTER} --chains \
-             base --contract --selectors {SEL},{DEPOSIT}"
-        );
-        refused(
+        // A listed contract without this selector, or this chain: the entry and what it lacks.
+        let msg = refused(
             check(&v, "base", &cheap("base", ROUTER, 0, DEPOSIT)),
             ErrorCode::WhitelistDenied,
             ROUTER,
             "base",
-            Some(&cmd),
+            None,
         );
-        let cmd = format!(
-            "zwallet whitelist remove router && zwallet whitelist add router {ROUTER} --chains \
-             base,ethereum --contract --selectors {SEL}"
+        assert!(
+            msg.contains(&format!(
+                "contract 'router' ({ROUTER}) does not list selector {DEPOSIT}"
+            )),
+            "{msg}"
         );
-        refused(
+        let msg = refused(
             check(&v, "ethereum", &cheap("ethereum", ROUTER, 0, SEL)),
             ErrorCode::WhitelistDenied,
             ROUTER,
             "ethereum",
-            Some(&cmd),
+            None,
         );
+        assert!(msg.contains("does not list chain ethereum"), "{msg}");
+        assert!(!msg.contains("zwallet whitelist"), "{msg}");
         let cmd = format!(
             "zwallet whitelist add <nick> {CAROL} --chains base --contract --selectors {DEPOSIT}"
         );
@@ -908,9 +1152,17 @@ mod tests {
         assert!(e.message.contains(MESSAGE_SIGNING_COMMAND), "{}", e.message);
         l.policy.allow_message_signing = true;
         check_message(&ListView::Usable(&l)).unwrap();
-        let e = check_message(&ListView::Unusable(NO_WHITELIST.into())).unwrap_err();
+        // No list yet: turning message signing on creates it.
+        let e = check_message(&ListView::NoList).unwrap_err();
         assert_eq!(e.code, ErrorCode::WhitelistInvalid);
         assert!(e.message.contains(NO_WHITELIST), "{}", e.message);
         assert_eq!(e.details["command"], MESSAGE_SIGNING_COMMAND);
+        // A list that cannot be trusted: checked first, no edit suggested.
+        let reason = "whitelist.json: whitelist signature does not verify";
+        let e = check_message(&ListView::Unusable(reason.into())).unwrap_err();
+        assert_eq!(e.code, ErrorCode::WhitelistInvalid);
+        assert!(e.message.contains(reason), "{}", e.message);
+        assert!(e.message.contains(VERIFY_COMMAND), "{}", e.message);
+        assert!(!e.details.contains_key("command"), "{e:?}");
     }
 }

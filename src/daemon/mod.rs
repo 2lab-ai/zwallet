@@ -101,6 +101,8 @@ fn load_list(
 fn view(list: &std::result::Result<Whitelist, String>) -> ListView<'_> {
     match list {
         Ok(list) => ListView::Usable(list),
+        // No anchor sealed yet: `session_anchor` gives exactly this reason.
+        Err(reason) if reason == policy::NO_WHITELIST => ListView::NoList,
         Err(reason) => ListView::Unusable(reason.clone()),
     }
 }

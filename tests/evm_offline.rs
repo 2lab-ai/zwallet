@@ -2502,11 +2502,14 @@ fn w3_a_payee_is_payable_only_on_its_chains() {
     // The same payee on Ethereum: listed, but not for this chain.
     let eth = MockRpc::start(healthy);
     let r = home.run(&pay("ethereum", ALICE, &eth.url, &[]));
-    let cmd = format!(
-        "zwallet whitelist remove alice && zwallet whitelist add alice {ALICE} --chains \
-         base,ethereum"
+    // Her entry and the chain it lacks are named; no command (an entry changes by a remove and
+    // an add, which the human chooses).
+    let v = refused(&r, "WHITELIST_DENIED", ALICE, "ethereum", None);
+    let msg = v["error"].as_str().unwrap();
+    assert!(
+        msg.contains("'alice'") && msg.contains("not ethereum"),
+        "{msg}"
     );
-    refused(&r, "WHITELIST_DENIED", ALICE, "ethereum", Some(&cmd));
     assert!(eth.sent().is_empty());
 }
 
@@ -2523,13 +2526,14 @@ fn w5_a_list_that_does_not_verify_refuses_every_value_send_but_self_transfers() 
     let rpc = mining_node();
     for to in [ALICE, BOB] {
         let r = home.run(&pay("ethereum", to, &rpc.url, &[]));
-        let cmd = format!("zwallet whitelist add <nick> {to} --chains ethereum");
-        let v = refused(&r, "WHITELIST_INVALID", to, "ethereum", Some(&cmd));
+        // No edit is suggested for a list that does not verify: the human checks it first.
+        let v = refused(&r, "WHITELIST_INVALID", to, "ethereum", None);
         let msg = v["error"].as_str().unwrap();
         assert!(
             msg.contains("generation 1 is not the sealed generation 2"),
             "{msg}"
         );
+        assert!(msg.contains("`zwallet whitelist list --verify`"), "{msg}");
     }
     // A hand edit of the current list (an entry added, the signature kept): the same.
     let current = home.path().join("whitelist.json");
@@ -2541,8 +2545,7 @@ fn w5_a_list_that_does_not_verify_refuses_every_value_send_but_self_transfers() 
     std::fs::write(&current, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
     home.unlock("10m");
     let r = home.run(&pay("ethereum", SPENDER, &rpc.url, &[]));
-    let v = r.json();
-    assert_eq!(v["errorCode"], "WHITELIST_INVALID", "{v:#}");
+    let v = refused(&r, "WHITELIST_INVALID", SPENDER, "ethereum", None);
     assert!(
         v["error"].as_str().unwrap().contains("does not verify"),
         "{v:#}"
@@ -2645,11 +2648,12 @@ fn w6_contract_calls_need_a_listed_contract_and_selector() {
     refused(&r, "WHITELIST_DENIED", ALICE, "ethereum", None);
     // A listed contract with a selector it does not list.
     let r = home.run(&invoke(ROUTER, &["--data", DEPOSIT], &rpc.url, &[]));
-    let cmd = format!(
-        "zwallet whitelist remove router && zwallet whitelist add router {ROUTER} --chains \
-         ethereum --contract --selectors 0x12345678,{DEPOSIT}"
+    let v = refused(&r, "WHITELIST_DENIED", ROUTER, "ethereum", None);
+    let msg = v["error"].as_str().unwrap();
+    assert!(
+        msg.contains("'router'") && msg.contains(&format!("does not list selector {DEPOSIT}")),
+        "{msg}"
     );
-    refused(&r, "WHITELIST_DENIED", ROUTER, "ethereum", Some(&cmd));
     // Any other call on a registry token, whatever the list says.
     let r = home.run(&invoke(USDC, &["--data", DEPOSIT], &rpc.url, &[]));
     refused(&r, "WHITELIST_DENIED", USDC, "ethereum", None);
@@ -2794,8 +2798,14 @@ fn a_malformed_sealed_anchor_unlocks_and_signs_only_self_transfers() {
     let me = unlocked["address"].as_str().unwrap().to_string();
     let rpc = mining_node();
     let r = home.run(&pay("ethereum", ALICE, &rpc.url, &[]));
-    let cmd = format!("zwallet whitelist add <nick> {ALICE} --chains ethereum");
-    refused(&r, "WHITELIST_INVALID", ALICE, "ethereum", Some(&cmd));
+    let v = refused(&r, "WHITELIST_INVALID", ALICE, "ethereum", None);
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("`zwallet whitelist list --verify`"),
+        "{v:#}"
+    );
     assert!(rpc.sent().is_empty());
     home.run(&pay("ethereum", &me, &rpc.url, &[])).ok();
     assert_eq!(rpc.sent().len(), 1);
@@ -2809,4 +2819,42 @@ fn unlocked_without_list() -> (Home, String) {
         .unwrap()
         .to_string();
     (home, me)
+}
+
+#[test]
+fn self_transfers_without_a_usable_list_are_under_the_built_in_fee_cap() {
+    // B-M2: with no list, or a list made unusable by whoever can write the home, a native
+    // self-transfer must not burn the balance in fees.
+    let (home, me) = unlocked_without_list();
+    let greedy = MockRpc::start(|m, p| fee_node(m, p, Some(GWEI), 500 * GWEI, GWEI + GWEI / 10));
+    let over = |home: &Home, command: bool| {
+        let r = home.run(&pay(
+            "ethereum",
+            &me,
+            &greedy.url,
+            &["--max-fee-gwei", "1000.5"],
+        ));
+        let v = r.json();
+        assert_eq!(v["errorCode"], "FEE_CAP_EXCEEDED", "{v:#}");
+        assert_eq!(v["counterparty"], me.as_str(), "{v:#}");
+        // The compiled-in default for Ethereum: 0.003 ETH.
+        assert_eq!(v["capWei"], "3000000000000000", "{v:#}");
+        assert_eq!(v.get("command").is_some(), command, "{v:#}");
+    };
+    // No list yet: the first fee-cap edit is the way to allow it.
+    over(&home, true);
+    // A list that stops verifying mid-session (junk written over it): the same cap, no edit hint.
+    home.stop_daemons();
+    home.allow("other", OTHER, &["*"]);
+    home.unlock("10m");
+    std::fs::write(home.path().join("whitelist.json"), b"{}").unwrap();
+    over(&home, false);
+    assert!(
+        greedy.sent().is_empty(),
+        "a fee-burning self-transfer was sent"
+    );
+    // At normal fees the self-transfer still goes through (A7).
+    let rpc = mining_node();
+    home.run(&pay("ethereum", &me, &rpc.url, &[])).ok();
+    assert_eq!(rpc.sent().len(), 1);
 }
