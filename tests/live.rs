@@ -306,3 +306,30 @@ fn op_stack_dry_run_includes_l1_fee() {
         .ok();
     assert!(eth["l1Fee"].is_null());
 }
+
+#[test]
+#[ignore = "live: public RPC"]
+fn bsc_legacy_dry_run_is_inside_the_ceiling() {
+    // BSC has no base fee: zwallet signs a legacy gasPrice, capped at 6 x 1 gwei without
+    // --max-fee-gwei (eth_gasPrice is not its own reference).
+    let (home, me) = unlocked_wallet();
+    let v = home
+        .run(&[
+            "transfer",
+            "--chain",
+            "bsc",
+            "--to",
+            &me,
+            "--amount",
+            "0",
+            "--dry-run",
+            "--json",
+        ])
+        .ok();
+    println!("{v:#}");
+    assert_eq!(v["type"], "legacy");
+    assert_eq!(v["chainId"], 56);
+    let price: u128 = v["gasPrice"].as_str().unwrap().parse().unwrap();
+    assert!(price > 0 && price <= 6_000_000_000, "{price}");
+    assert_eq!(v["signerDecoded"]["action"]["kind"], "native-transfer");
+}
