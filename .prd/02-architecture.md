@@ -70,12 +70,55 @@ seed, so the wallet file and the daemon protocol do not change.
   hint `zwallet unlock 24h`.
 - A reboot or a dead daemon means the wallet is locked. This is by design. There is no autostart.
 
-## Resistance (quantum / AI): open, under research 2026-10-20
+## Resistance (quantum / AI): decided 2026-10-20
 
-The user asked for a quantum-resistant or AI-resistant wallet from the start, if one is usable (see
-ssot 18). The decision goes here once the research is back. The daemon-as-key-holder boundary is
-where a signing policy (limits, allowlists) would be enforced. A different signature scheme would
-be a different family or account type behind the same key index.
+The user asked for this "from the start, if usable" (ssot 18). Evidence:
+[`research/01-pq-ai-resistance.md`](research/01-pq-ai-resistance.md).
+
+**Quantum: not usable today, so zwallet is PQ-ready instead of PQ.**
+- Every Ethereum PQ signature EIP is Draft: [EIP-8051](https://eips.ethereum.org/EIPS/eip-8051)
+  ML-DSA, [EIP-8052](https://eips.ethereum.org/EIPS/eip-8052) Falcon,
+  [EIP-7932](https://eips.ethereum.org/EIPS/eip-7932).
+- Fusaka (mainnet 2025-12-03) added only P-256. Hegotá's [EIP-8141](https://eips.ethereum.org/EIPS/eip-8141)
+  has no mainnet date.
+- The only PQ smart account, [Kohaku](https://github.com/ethereum/kohaku/tree/3044423edf212554284128b64355f0d38db3863a/packages/pq-account),
+  is testnet-only and unaudited, and its verifier READMEs warn "LOSS OF FUND WILL OCCUR".
+
+PQ-readiness in v0.1:
+1. **Keys are derived from a BIP39 seed.** Vitalik's quantum-emergency hard-fork proposal recovers
+   funds for seed-derived keys with a STARK proof.
+2. **The family/scheme boundary stays.** A hybrid ECDSA+PQ account becomes another account type
+   behind the same key index when either an audited verifier and factory are on a target chain's
+   mainnet, or EIP-8141 plus a PQ precompile activates.
+3. **Rotation is on demand.** `zwallet create <name>` gives a never-signed address, whose public key
+   is unexposed.
+
+Spend-once addresses are **not** the default. They break the stable deposit address the user asked
+for, and an EOA cannot sweep ERC-20 and ETH atomically.
+
+**AI resistance: usable, in v0.1, as a signing policy enforced by the daemon (WU1b).**
+- The policy lives inside the encrypted, authenticated part of wallet.json, under the
+  password-derived key. Viewing it works while locked; changing it needs the password, which only
+  the human holds.
+- In `sign_tx` the daemon decodes the tx and the calldata itself and never trusts CLI intent
+  fields, because the CLI is the process a prompt injection controls.
+- Defaults (the human confirms or edits them at `create` on the TTY):
+  - Native spend is allowed under a **per-period cap** (rolling 24 h), never a per-tx cap alone.
+  - `approve` / `increaseAllowance` / `setApprovalForAll` / Permit2 selectors are **denied** unless
+    the spender is allowlisted, since that is the real drain vector.
+  - ERC-20 transfers need a per-token cap set by the human; an unknown token is denied.
+  - Arbitrary `invoke` is allowed with native value under the cap.
+  - `sign-message` is EIP-191 only, with no typed-data signing.
+
+**Deferred hardening, with known limits stated:**
+- Running the daemon as a separate OS user.
+- A Secure Enclave biometric approval app for out-of-policy actions.
+- Holding only child keys in daemon memory.
+
+Until these exist, a process running as the same user can still swap the zwallet binary, fake the
+unlock prompt to capture the password, or talk to the socket within policy. Root defeats everything
+local. The policy stops a prompt-injected agent that uses zwallet as intended. It does not stop
+malware that already runs as the user.
 
 ## CLI contract
 

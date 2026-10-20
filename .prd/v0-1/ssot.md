@@ -35,8 +35,9 @@ Status: **in-progress**, 2026-10-20. This is the fixed target; do not reinterpre
   subkey; either way the new key becomes active. `zwallet list` shows the keys and
   `zwallet change <name>` switches the active one. The CLI is flat (`zwallet <verb>`).
 - **Quantum / AI resistance** (18): use it from the start if it is usable under the no-login,
-  public-RPC constraint. Under research 2026-10-20, and the decision is recorded in 02-architecture
-  §Resistance.
+  public-RPC constraint. Decided 2026-10-20 in 02-architecture §Resistance: PQ is not usable on any
+  target chain today, so zwallet is PQ-ready; AI resistance (a signing policy enforced by the
+  daemon) is usable and ships in v0.1.
 - **Chains** (10): EVM only in v0.1. The architecture leaves room for Solana and TON.
 - **No Trust Wallet anything** (5, 6, 7): no Trust API, packages, keychain, or telemetry. twak's
   source is not public, so "fork" = re-implement its wallet surface (see 01-spec §Problem).

@@ -70,6 +70,7 @@ and Solana/TON implementations in v0.1.
 | A7 | `transfer --dry-run` on ethereum mainnet (0-value self-transfer) | `recoveredFrom == from`; nonce and fees come from the live chain |
 | A8 | `call` USDC `decimals()(uint8)` on ethereum; `invoke --dry-run` | `6`; `recoveredFrom == from` |
 | A9 | `backup` from a non-TTY shell | refused; the mnemonic is never printed to an agent |
+| A9b | with the default policy: a transfer over the rolling-24h cap, `invoke` of `approve(…)` to a spender not on the allowlist, a transfer of an unknown ERC-20; then editing the policy without the password, or editing wallet.json by hand | each signing request is refused by the daemon (`POLICY_DENIED`); edits without the password fail; a hand-edited store fails authentication |
 | A10 | `brew install 2lab-ai/tap/zwallet` and `…/zwallet-preview` | `zwallet --version` shows the release version and the preview channel respectively |
 | A11 | `xbrew install zwallet` | installs it (macOS through the tap formula; Arch through the verified release binary) |
 | A12 | the user creates and unlocks the real wallet on fable-m5max | the agent reads the address and balance without the human present, and after funding broadcasts a transfer with a receipt |
