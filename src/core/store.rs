@@ -807,7 +807,29 @@ pub fn set_active(home: &Path, name: &str) -> Result<WalletFile> {
 /// Opens (creating 0600 if needed, never following a symlink) and exclusively flocks `path`,
 /// retrying until `wait` runs out. The lock lasts as long as the returned file is open.
 pub fn lock_exclusive(path: &Path, wait: Duration, busy: &str) -> Result<File> {
-    let file = OpenOptions::new()
+    let file = open_lock_file(path)?;
+    let deadline = Instant::now() + wait;
+    while !try_flock(&file, path)? {
+        if Instant::now() >= deadline {
+            return Err(WalletError::validation(format!(
+                "{busy}: {} is locked (waited {}s)",
+                path.display(),
+                wait.as_secs()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(file)
+}
+
+/// [`lock_exclusive`] without waiting: `None` while another holder has the lock.
+pub fn try_lock_exclusive(path: &Path) -> Result<Option<File>> {
+    let file = open_lock_file(path)?;
+    Ok(try_flock(&file, path)?.then_some(file))
+}
+
+fn open_lock_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -815,28 +837,18 @@ pub fn lock_exclusive(path: &Path, wait: Duration, busy: &str) -> Result<File> {
         .mode(FILE_MODE)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
-        .map_err(|e| WalletError::validation(format!("cannot open {}: {e}", path.display())))?;
-    let deadline = Instant::now() + wait;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(file),
-            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(TryLockError::WouldBlock) => {
-                return Err(WalletError::validation(format!(
-                    "{busy}: {} is locked (waited {}s)",
-                    path.display(),
-                    wait.as_secs()
-                )));
-            }
-            Err(TryLockError::Error(e)) => {
-                return Err(WalletError::validation(format!(
-                    "cannot lock {}: {e}",
-                    path.display()
-                )));
-            }
-        }
+        .map_err(|e| WalletError::validation(format!("cannot open {}: {e}", path.display())))
+}
+
+/// Takes `file`'s exclusive flock if it is free; `false` while another holder has it.
+fn try_flock(file: &File, path: &Path) -> Result<bool> {
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Error(e)) => Err(WalletError::validation(format!(
+            "cannot lock {}: {e}",
+            path.display()
+        ))),
     }
 }
 

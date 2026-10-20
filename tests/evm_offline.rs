@@ -776,10 +776,11 @@ fn rpc_returning_another_hash_is_reconciled_by_the_computed_hash() {
 }
 
 #[test]
-fn concurrent_sends_from_one_account_take_consecutive_nonces() {
+fn a_send_while_another_from_the_key_is_in_flight_fails_fast_and_signs_nothing() {
     let (home, me) = unlocked();
-    // A node whose pending nonce counts what it accepted, and which takes a while to accept: two
-    // sends that both read the pending nonce before either is accepted would both sign nonce 7.
+    // A node whose pending nonce counts what it accepted, and which takes a while to accept.
+    // Waiting for the first send would let a second attempt at the same payment sign the next
+    // nonce and land as well; it must fail at once instead.
     let accepted = Arc::new(AtomicUsize::new(0));
     let a = accepted.clone();
     let rpc = MockRpc::start(move |m, p| match m {
@@ -789,28 +790,53 @@ fn concurrent_sends_from_one_account_take_consecutive_nonces() {
             ))
         }
         "eth_sendRawTransaction" => {
-            std::thread::sleep(Duration::from_millis(1500));
+            std::thread::sleep(Duration::from_secs(4));
             a.fetch_add(1, Ordering::SeqCst);
             Reply::Result(json!(tx_hash_of(p[0].as_str().unwrap())))
         }
         _ => healthy(m, p),
     });
     let args = transfer(&rpc.url, &[]);
-    let (first, second) = std::thread::scope(|s| {
-        let one = s.spawn(|| home.run(&args));
-        let two = s.spawn(|| home.run(&args));
-        (one.join().unwrap(), two.join().unwrap())
+    let lock_name = format!("nonce-1-{}.lock", me.to_lowercase());
+    std::thread::scope(|s| {
+        let first = s.spawn(|| home.run(&args));
+        // Once the node has the first raw transaction, the first send holds the lock until the
+        // node answers.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while rpc.sent().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first send never arrived"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let calls_before = rpc.calls.lock().unwrap().len();
+        let msg = home.run(&args).err("VALIDATION_ERROR");
+        // It did not wait: the node is still holding the first send.
+        assert_eq!(accepted.load(Ordering::SeqCst), 0, "the second send waited");
+        assert!(
+            msg.starts_with("another send from this key on ethereum is in progress (lock "),
+            "{msg}"
+        );
+        let named = format!("{lock_name}); nothing was signed or broadcast. ");
+        for part in [
+            named.as_str(),
+            "If it is an earlier attempt at this same payment, wait for it to finish and look up \
+             its result before sending again; for a different payment, retry after it finishes",
+        ] {
+            assert!(msg.contains(part), "{msg}");
+        }
+        // Not one RPC call: it stopped before reading the nonce.
+        assert_eq!(rpc.calls.lock().unwrap().len(), calls_before);
+        assert_eq!(first.join().unwrap().ok()["nonce"], PENDING_NONCE);
     });
-    let mut nonces: Vec<u64> = rpc.sent().iter().map(|raw| nonce_of(raw)).collect();
-    nonces.sort_unstable();
+    assert_eq!(rpc.sent().len(), 1);
+    // Once the first send is done, the lock is free for the next payment.
+    assert_eq!(home.run(&args).ok()["nonce"], PENDING_NONCE + 1);
+    let nonces: Vec<u64> = rpc.sent().iter().map(|raw| nonce_of(raw)).collect();
     assert_eq!(nonces, vec![PENDING_NONCE, PENDING_NONCE + 1]);
-    let mut reported = [first.ok()["nonce"].clone(), second.ok()["nonce"].clone()];
-    reported.sort_by_key(|n| n.as_u64());
-    assert_eq!(reported, [json!(PENDING_NONCE), json!(PENDING_NONCE + 1)]);
     // The per-(chain, account) lock file in the home.
-    let lock = home
-        .path()
-        .join(format!("nonce-1-{}.lock", me.to_lowercase()));
+    let lock = home.path().join(&lock_name);
     assert!(lock.exists(), "{}", lock.display());
 }
 

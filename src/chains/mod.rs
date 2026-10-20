@@ -546,45 +546,36 @@ pub enum Broadcast {
     },
 }
 
-/// How long a send waits for another send from the same account to reach the node.
-const SEND_LOCK_WAIT: Duration = Duration::from_secs(120);
-
-/// Serializes the sends of one account on one chain within a home: held from reading the next
-/// nonce until the node has answered the broadcast, so two concurrent sends cannot sign the same
-/// nonce (the loser would be refused or replace the winner). An exclusive flock on
-/// `<home>/nonce-<chainId>-<address>.lock`, released when this value drops, or by the OS when the
-/// process dies.
+/// One send at a time per account and chain within a home: held from reading the next nonce
+/// until the node has answered the broadcast, so two concurrent sends never sign the same nonce.
+/// A second send fails at once instead of waiting: it may be a second attempt at the same
+/// payment, and after waiting it would sign the next nonce and land as well. An exclusive flock
+/// on `<home>/nonce-<chainId>-<address>.lock`, released when this value drops, or by the OS when
+/// the process dies.
 pub struct SendLock {
     _file: File,
 }
 
 impl SendLock {
-    /// Waits (bounded) for the lock on `address` (as printed by the family) on `chain`.
+    /// Takes the lock on `address` (as printed by the family) on `chain`, or fails with
+    /// `VALIDATION_ERROR` without waiting if another send holds it.
     pub fn acquire(home: &Path, chain: &Chain, address: &str) -> Result<Self> {
         let path = home.join(format!(
             "nonce-{}-{}.lock",
             chain.chain_id_json(),
             address.to_ascii_lowercase()
         ));
-        let file = store::lock_exclusive(
-            &path,
-            SEND_LOCK_WAIT,
-            &format!(
-                "another send from {address} on {} is in progress",
-                chain.key
-            ),
-        )
-        .map_err(|e| {
-            WalletError::new(
-                e.code,
-                format!(
-                    "{}; nothing was signed or broadcast. If that send is an earlier attempt at \
-                     this same payment, let it finish and look up its result before sending again",
-                    e.message
-                ),
-            )
-        })?;
-        Ok(Self { _file: file })
+        match store::try_lock_exclusive(&path)? {
+            Some(file) => Ok(Self { _file: file }),
+            None => Err(WalletError::validation(format!(
+                "another send from this key on {} is in progress (lock {}); nothing was signed \
+                 or broadcast. If it is an earlier attempt at this same payment, wait for it to \
+                 finish and look up its result before sending again; for a different payment, \
+                 retry after it finishes",
+                chain.key,
+                path.display()
+            ))),
+        }
     }
 }
 
