@@ -2810,3 +2810,107 @@ fn unlocked_without_list() -> (Home, String) {
         .to_string();
     (home, me)
 }
+
+/// `(op, the request)` of every request a [`common::FakeDaemon`] received.
+fn daemon_ops(fake: &common::FakeDaemon) -> Vec<String> {
+    fake.received
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let v: Value = serde_json::from_slice(m).unwrap_or_default();
+            v["op"].as_str().unwrap_or("?").to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn f1_a_dry_run_the_list_denies_is_explained_and_never_reaches_the_signer() {
+    let home = Home::new();
+    let me = home.create("t", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    home.allow("alice", ALICE, &["ethereum"]);
+    // A listener answering "unlocked" in place of the key daemon records every request.
+    let fake = common::FakeDaemon::answering(
+        &home.sock(),
+        json!({ "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z" }),
+    );
+    let rpc = MockRpc::start(healthy);
+    let v = home
+        .run(&pay("ethereum", OTHER, &rpc.url, &["--dry-run"]))
+        .ok();
+    assert_eq!(v["dryRun"], true, "{v:#}");
+    let w = &v["whitelist"];
+    assert_eq!(w["allowed"], false, "{v:#}");
+    assert_eq!(w["code"], "WHITELIST_DENIED", "{v:#}");
+    assert_eq!(
+        w["command"],
+        format!("zwallet whitelist add <nick> {OTHER} --chains ethereum"),
+        "{v:#}"
+    );
+    assert!(
+        w["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("refusing to sign"),
+        "{v:#}"
+    );
+    for k in ["recoveredFrom", "txHash", "signerDecoded", "rawTx"] {
+        assert!(v.get(k).is_none(), "{k}: {v:#}");
+    }
+    // An invoke of an unlisted contract: the same.
+    let v = home
+        .run(&invoke(
+            ROUTER,
+            &["--data", DEPOSIT],
+            &rpc.url,
+            &["--dry-run"],
+        ))
+        .ok();
+    assert_eq!(v["whitelist"]["allowed"], false, "{v:#}");
+    assert!(
+        v["whitelist"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("--contract --selectors 0xd0e30db0"),
+        "{v:#}"
+    );
+    // No list on disk: unusable, every value send refused; a self-transfer passes the check
+    // (and reaches the signer).
+    std::fs::remove_file(home.path().join("whitelist.json")).unwrap();
+    let v = home
+        .run(&pay("ethereum", OTHER, &rpc.url, &["--dry-run"]))
+        .ok();
+    assert_eq!(v["whitelist"]["allowed"], false, "{v:#}");
+    assert_eq!(v["whitelist"]["code"], "WHITELIST_INVALID", "{v:#}");
+    let ops = daemon_ops(&fake);
+    assert!(!ops.iter().any(|op| op == "sign_tx"), "{ops:?}");
+    let mut zero = pay("ethereum", &me, &rpc.url, &["--dry-run"]);
+    zero[6] = "0";
+    home.run(&zero);
+    let ops = daemon_ops(&fake);
+    assert_eq!(
+        ops.iter().filter(|op| *op == "sign_tx").count(),
+        1,
+        "{ops:?}"
+    );
+    assert!(rpc.sent().is_empty());
+}
+
+#[test]
+fn f1_a_dry_run_the_list_allows_is_signed_by_the_daemon() {
+    let (home, me) = listed(|l| payee(l, "alice", ALICE, &["ethereum"]));
+    let rpc = MockRpc::start(healthy);
+    let v = home
+        .run(&pay("ethereum", ALICE, &rpc.url, &["--dry-run"]))
+        .ok();
+    assert_eq!(v["whitelist"], json!({ "allowed": true }), "{v:#}");
+    assert_eq!(v["recoveredFrom"], me.as_str(), "{v:#}");
+    assert_eq!(v["signerDecoded"]["action"]["to"], ALICE, "{v:#}");
+    // A live send is unchanged: the daemon decides.
+    let r = home.run(&pay("ethereum", OTHER, &rpc.url, &[]));
+    r.err("WHITELIST_DENIED");
+    assert!(rpc.sent().is_empty());
+}
