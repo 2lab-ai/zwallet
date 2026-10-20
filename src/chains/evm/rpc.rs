@@ -1310,15 +1310,20 @@ pub async fn lookup_tx(p: &EvmProvider, net: &Net, hash: B256) -> Result<Map<Str
     if status == "mined" {
         out.insert("blockNumber".into(), json!(block));
     }
-    let success = receipt.as_ref().map(receipt_success);
+    // Mined by its block but with no receipt from this node: the outcome is unknown too.
+    let success = receipt.as_ref().and_then(receipt_success);
+    if status == "mined" {
+        out.insert("success".into(), json!(success));
+    }
     if let Some(r) = &receipt {
         let used =
             quantity(r.get("gasUsed").and_then(Value::as_str)).and_then(|g| u64::try_from(g).ok());
         out.insert("gasUsed".into(), json!(used));
-        out.insert("success".into(), json!(success.flatten()));
     }
     let hint = match (status, nonce) {
-        ("mined", _) if success == Some(None) => Some(outcome_unknown_hint(chain, &shown)),
+        ("mined", _) if success.is_none() => {
+            Some(outcome_unknown_hint(chain, &shown, receipt.is_some()))
+        }
         ("pending", Some(n)) => Some(crate::chains::pending_hint("still pending", n, &shown)),
         ("pending", None) => Some(
             "still pending; to speed up or cancel it, retry with --nonce <its nonce> --replace \
@@ -1391,12 +1396,17 @@ fn receipt_success(receipt: &Value) -> Option<bool> {
     }
 }
 
-/// The `hint` for a mined transaction whose receipt does not say how it executed.
-fn outcome_unknown_hint(chain: &Chain, hash: &str) -> String {
+/// The `hint` for a mined transaction whose receipt does not say how it executed, or that has
+/// no receipt on this node (`has_receipt` false).
+fn outcome_unknown_hint(chain: &Chain, hash: &str, has_receipt: bool) -> String {
+    let why = if has_receipt {
+        "the receipt's status is neither 0x1, success, nor 0x0, reverted"
+    } else {
+        "this node has no receipt for it"
+    };
     format!(
-        "mined, but the execution outcome is unknown (the receipt's status is neither 0x1, \
-         success, nor 0x0, reverted); do not send this payment again; check the receipt on the \
-         explorer: {}",
+        "mined, but the execution outcome is unknown ({why}); do not send this payment again; \
+         check the receipt on the explorer: {}",
         chain.explorer_tx_url(hash)
     )
 }
@@ -1424,7 +1434,11 @@ pub async fn wait_receipt(p: &EvmProvider, hash: B256, timeout: Duration) -> Res
                 "gasUsed": number("gasUsed"),
             });
             if success.is_none() {
-                out["hint"] = json!(outcome_unknown_hint(p.net.chain, &format!("{hash:#x}")));
+                out["hint"] = json!(outcome_unknown_hint(
+                    p.net.chain,
+                    &format!("{hash:#x}"),
+                    true
+                ));
             }
             return Ok(Some(out));
         }

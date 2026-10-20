@@ -131,7 +131,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   (`eth_getTransactionByHash` and `eth_getTransactionReceipt`). It needs no wallet and no key, so
   it works while locked. `status` is `"mined"` (with `blockNumber`, and `gasUsed` and `success`
   from the receipt: `true` for status `0x1`, `false` for `0x0`, `null` with the same `hint` as
-  `--wait` for anything else), `"pending"`, or `"not found"` (`found: false`, and `from`, `to`,
+  `--wait` for anything else, and `null` with a hint that this node has no receipt when the
+  transaction names its block but the node returns none), `"pending"`, or `"not found"` (`found: false`, and `from`, `to`,
   `nonce`, `value` are `null`). `value` is in the chain's coin (`valueRaw` in wei); for a token
   transfer it is `0` and `to` is the token contract. A pending transaction adds `hint: "still
   pending; to speed up or cancel use --nonce N --replace <txHash>; a run without --nonce is a

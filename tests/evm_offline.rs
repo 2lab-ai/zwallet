@@ -1973,6 +1973,33 @@ fn tx_reads_the_outcome_only_from_receipt_status_0x0_or_0x1() {
 }
 
 #[test]
+fn tx_mined_without_a_receipt_is_outcome_unknown() {
+    let home = Home::new();
+    let mined = format!("0x{}", "b2".repeat(32));
+    // The transaction names its block, but this node has no receipt for it (yet).
+    let m = mined.clone();
+    let rpc = MockRpc::start(move |method, p| match method {
+        "eth_chainId" => Reply::Result(json!("0x1")),
+        "eth_getTransactionByHash" if p[0] == m.as_str() => Reply::Result(json!({
+            "hash": m, "from": OTHER.to_lowercase(), "to": OTHER.to_lowercase(), "nonce": "0x7",
+            "value": "0x0", "blockNumber": "0x99",
+        })),
+        "eth_getTransactionByHash" | "eth_getTransactionReceipt" => Reply::Result(Value::Null),
+        other => panic!("mock: unexpected {other}"),
+    });
+    let v = home
+        .run(&[
+            "tx", "--chain", "ethereum", &mined, "--rpc", &rpc.url, "--json",
+        ])
+        .ok();
+    assert_eq!(v["status"], "mined", "{v:#}");
+    assert_eq!(v["blockNumber"], 0x99, "{v:#}");
+    assert_eq!(v.get("success"), Some(&Value::Null), "{v:#}");
+    assert_outcome_unknown_hint(&v, &mined);
+    assert!(v["hint"].as_str().unwrap().contains("no receipt"), "{v:#}");
+}
+
+#[test]
 fn wait_reads_the_outcome_only_from_receipt_status_0x0_or_0x1() {
     let (home, _) = unlocked();
     for (status, outcome) in RECEIPT_STATUSES {
