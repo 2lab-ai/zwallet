@@ -443,9 +443,12 @@ things a same-user process can still do, and what to do about them:
   stop. `unlock` and `create --unlock` refuse to start one before the password prompt (there is
   no flag to accept this), and `lock` and `status` fail instead of reporting the wallet locked.
   The same holds when `/proc/self/mountinfo` cannot be read. `subset=pid` is fine. Elsewhere,
-  a `/proc/<pid>` file that cannot be read is skipped only when the process is gone or is
-  another user's (`kill(pid, 0)` answers EPERM); one this user owns or may signal makes `lock`
-  and `status` fail ("refusing to trust a partial daemon list").
+  a `/proc/<pid>` file that cannot be read is skipped only when the process is gone or this user
+  may not signal it (`kill(pid, 0)` answers EPERM: another user's process, or one a security
+  module shields). One whose `status` shows this user's effective uid, or that this user may
+  signal (`kill(pid, 0)` succeeds: also for a process whose real or saved uid is this user's,
+  and for any process under root or CAP_KILL), makes `lock` and `status` fail ("refusing to
+  trust a partial daemon list"). Signal permission is what is checked, not ownership.
 - **Root** defeats all of this.
 
 ## Development

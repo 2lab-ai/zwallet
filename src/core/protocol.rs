@@ -1168,8 +1168,10 @@ fn process_argvs() -> Result<Vec<(i32, Vec<OsString>)>> {
     )
 }
 
-/// `kill(pid, 0)`: `Ok` when this process may signal `pid` (the same user, or root), EPERM when
-/// it is another user's, ESRCH when it is gone. Sends nothing.
+/// `kill(pid, 0)`: `Ok` when this process may signal `pid`, EPERM when it may not, ESRCH when it
+/// is gone. Sends nothing. Permission is not ownership: `Ok` also comes for a process whose real
+/// or saved uid is this user's while its effective uid is another, and for any process under
+/// root or CAP_KILL; EPERM also comes from a security module (LSM) refusing the signal.
 #[cfg(target_os = "linux")]
 fn may_signal(pid: i32) -> std::io::Result<()> {
     // SAFETY: kill(2) with signal 0 only checks that `pid` exists and may be signalled; `pid` is
@@ -1184,11 +1186,13 @@ fn may_signal(pid: i32) -> std::io::Result<()> {
 /// `read`. An error from the listing itself fails the whole lookup, as a full pid buffer does on
 /// macOS (`list_pids`): a listing cut short may miss a daemon, which `lock` would then leave
 /// running and `status` would not report. A pid whose files are gone (ENOENT, ESRCH) exited and
-/// is skipped. A denied read (EACCES, EPERM) is not proof the process is another user's: where
-/// `status` is denied, `signal` (`kill(pid, 0)`) tells them apart, and a process this user may
-/// signal (its own, or any as root) fails the lookup, while EPERM (another user's) or ESRCH (gone)
-/// skips it. A denied `cmdline` of a process whose `status` shows this user fails it too. Any
-/// other error reading them fails the lookup as well.
+/// is skipped. A denied read (EACCES, EPERM) is not proof the process is another user's. Where
+/// `status` is denied, `signal` (`kill(pid, 0)`) decides by signal permission, not ownership: a
+/// process this user may signal (its own, one whose real or saved uid is this user's, or any
+/// under root or CAP_KILL) fails the lookup, while EPERM (this user may not signal it: another
+/// user's, or one a security module shields) or ESRCH (gone) skips it. A denied `cmdline` of a
+/// process whose `status` shows this user's effective uid fails it too. Any other error reading
+/// them fails the lookup as well.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn proc_argvs(
     root: &Path,
@@ -1203,10 +1207,10 @@ fn proc_argvs(
             path.display()
         ))
     };
-    let owned_unreadable = |path: &Path, e: &std::io::Error| {
+    // `whose` says what the lookup established about the process, and no more.
+    let denied = |path: &Path, whose: &str, e: &std::io::Error| {
         WalletError::validation(format!(
-            "cannot read {} of a process this user owns ({e}); refusing to trust a partial \
-             daemon list",
+            "cannot read {} of a process {whose} ({e}); refusing to trust a partial daemon list",
             path.display()
         ))
     };
@@ -1228,12 +1232,12 @@ fn proc_argvs(
             Ok(bytes) => bytes,
             Err(e) if pid_gone(&e) => continue,
             Err(e) if access_denied(&e) => match signal(pid) {
-                Ok(()) => return Err(owned_unreadable(&status_path, &e)),
+                Ok(()) => return Err(denied(&status_path, "this user may signal", &e)),
                 Err(k) if matches!(k.raw_os_error(), Some(libc::EPERM | libc::ESRCH)) => continue,
                 Err(k) => {
                     return Err(WalletError::validation(format!(
-                        "cannot read {} ({e}) and cannot tell whose process {pid} is (kill: \
-                         {k}); refusing to trust a partial daemon list",
+                        "cannot read {} ({e}) and cannot tell whether this user may signal \
+                         process {pid} (kill: {k}); refusing to trust a partial daemon list",
                         status_path.display()
                     )));
                 }
@@ -1247,7 +1251,13 @@ fn proc_argvs(
         let cmdline = match read(&cmdline_path) {
             Ok(bytes) => bytes,
             Err(e) if pid_gone(&e) => continue,
-            Err(e) if access_denied(&e) => return Err(owned_unreadable(&cmdline_path, &e)),
+            Err(e) if access_denied(&e) => {
+                return Err(denied(
+                    &cmdline_path,
+                    "whose effective uid is this user's",
+                    &e,
+                ));
+            }
             Err(e) => return Err(unreadable(&cmdline_path, &e)),
         };
         out.push((pid, split_nul(&cmdline, usize::MAX)));
@@ -1561,7 +1571,7 @@ mod tests {
     }
 
     /// A `kill(pid, 0)` for [`proc_argvs`]: `pid` to `Ok` (`None`: this user may signal it) or an
-    /// errno. Any other pid is another user's (EPERM).
+    /// errno. This user may not signal any other pid (EPERM).
     fn fake_kill(answers: Vec<(i32, Option<i32>)>) -> impl Fn(i32) -> std::io::Result<()> {
         let answers: BTreeMap<i32, Option<i32>> = answers.into_iter().collect();
         move |pid| match answers.get(&pid) {
@@ -1634,8 +1644,8 @@ mod tests {
             ("62/status", Err(libc::ESRCH)),
             ("63/status", Ok(proc_status(ME))),
             ("63/cmdline", Err(libc::ESRCH)),
-            // Closed to this user, and kill(2) says another user's (EPERM is what `hidepid`
-            // answers)...
+            // Closed to this user (EPERM is what `hidepid` answers), and kill(2) says this user
+            // may not signal it (another user's, or shielded by a security module)...
             ("64/status", Err(libc::EACCES)),
             ("65/status", Err(libc::EPERM)),
             // ...or that it exited in between.
@@ -1662,41 +1672,53 @@ mod tests {
         };
         let lookup =
             |read, kill| proc_argvs(Path::new(FAKE_PROC), listing(&["70"]), ME, read, kill);
-        let refused = |err: WalletError, rel: &str| {
+        // The message says what was established about the process (`whose`), never ownership.
+        let refused = |err: WalletError, rel: &str, whose: &str, errno: i32| {
             assert_eq!(err.code, ErrorCode::ValidationError);
-            assert!(
-                err.message.starts_with(&format!(
-                    "cannot read /fake-proc/{rel} of a process this user owns"
-                )) && err
-                    .message
-                    .ends_with("; refusing to trust a partial daemon list"),
-                "{}",
-                err.message
+            assert_eq!(
+                err.message,
+                format!(
+                    "cannot read /fake-proc/{rel} of a process {whose} ({}); refusing to trust a \
+                     partial daemon list",
+                    std::io::Error::from_raw_os_error(errno)
+                )
             );
         };
         for errno in [libc::EACCES, libc::EPERM] {
-            // Its status shows this user, but its argv is closed: it may be a daemon.
+            // Its status shows this user's effective uid, but its argv is closed: it may be a
+            // daemon.
             let read = daemon(vec![("70/cmdline", Err(errno))]);
-            refused(lookup(read, fake_kill(vec![])).unwrap_err(), "70/cmdline");
-            // Its status is closed, but kill(2) says this user may signal it: its own (or any,
-            // as root), so it may be a daemon too.
+            refused(
+                lookup(read, fake_kill(vec![])).unwrap_err(),
+                "70/cmdline",
+                "whose effective uid is this user's",
+                errno,
+            );
+            // Its status is closed, but kill(2) says this user may signal it (its own, one whose
+            // real or saved uid is this user's, or any under root or CAP_KILL), so it may be a
+            // daemon too.
             let read = daemon(vec![("70/status", Err(errno))]);
             refused(
                 lookup(read, fake_kill(vec![(70, None)])).unwrap_err(),
                 "70/status",
+                "this user may signal",
+                errno,
             );
-            // kill(2) failing in an unexpected way cannot tell whose it is either.
+            // kill(2) failing in an unexpected way cannot tell whether it may be signalled.
             let read = daemon(vec![("70/status", Err(errno))]);
             let err = lookup(read, fake_kill(vec![(70, Some(libc::EINVAL))])).unwrap_err();
             assert!(
                 err.message.contains("cannot read /fake-proc/70/status")
                     && err
                         .message
+                        .contains("cannot tell whether this user may signal process 70")
+                    && err
+                        .message
                         .ends_with("refusing to trust a partial daemon list"),
                 "{}",
                 err.message
             );
-            // Closed and another user's: skipped.
+            // Closed, and this user may not signal it (kill(2) answers EPERM): skipped.
             let read = daemon(vec![("70/status", Err(errno))]);
             assert!(lookup(read, fake_kill(vec![])).unwrap().is_empty());
         }
