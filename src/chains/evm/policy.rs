@@ -886,7 +886,7 @@ mod tests {
         verified.generation = 1;
         verified.validate(&registry::WHITELIST_RULES).unwrap();
         let untrusted = ListView::Unusable("whitelist.json: does not verify".into());
-        let (mut cases, mut allowed, mut fee_refused) = (0, 0, 0);
+        let (mut cases, mut allowed, mut fee_refused, mut fee_refused_to_others) = (0, 0, 0, 0);
         let mut chains: Vec<&Chain> = crate::chains::CHAINS.iter().collect();
         chains.push(&NO_DEFAULT);
         for c in chains {
@@ -953,6 +953,9 @@ mod tests {
                             );
                             if e.code == ErrorCode::FeeCapExceeded {
                                 fee_refused += 1;
+                                if !to_self {
+                                    fee_refused_to_others += 1;
+                                }
                                 assert!(
                                     to_self || decide(&verified, c, d.action()).is_ok(),
                                     "a fee refusal for an action the list refuses: {}",
@@ -983,6 +986,11 @@ mod tests {
         // some allowed actions are over the cap.
         assert!(allowed > 0 && allowed < cases / 10, "{allowed} of {cases}");
         assert!(fee_refused > 0, "no fee refusal in {cases}");
+        // ...and some of them are not self-transfers, so the `decide` arm above is exercised.
+        assert!(
+            fee_refused_to_others > 0,
+            "no fee refusal of a transfer to another address in {cases}"
+        );
     }
 
     #[test]
