@@ -4,6 +4,8 @@
 
 mod common;
 
+use alloy::consensus::{Transaction, TxEnvelope};
+use alloy::eips::eip2718::Decodable2718;
 use alloy::primitives::keccak256;
 use common::Home;
 use serde_json::{Value, json};
@@ -11,6 +13,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// A second hardhat account, used as a plain recipient.
 const OTHER: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
@@ -140,6 +143,14 @@ fn hex(n: u128) -> Value {
 fn tx_hash_of(raw: &str) -> String {
     let bytes = alloy::hex::decode(raw.trim_start_matches("0x")).unwrap();
     format!("{:#x}", keccak256(bytes))
+}
+
+/// The nonce a raw signed transaction consumes.
+fn nonce_of(raw: &str) -> u64 {
+    let bytes = alloy::hex::decode(raw.trim_start_matches("0x")).unwrap();
+    TxEnvelope::decode_2718(&mut bytes.as_slice())
+        .unwrap()
+        .nonce()
 }
 
 fn block(base_fee: Option<u128>) -> Value {
@@ -660,6 +671,45 @@ fn rpc_returning_another_hash_is_reconciled_by_the_computed_hash() {
             .contains("not the transaction's own hash"),
         "{v:#}"
     );
+}
+
+#[test]
+fn concurrent_sends_from_one_account_take_consecutive_nonces() {
+    let (home, me) = unlocked();
+    // A node whose pending nonce counts what it accepted, and which takes a while to accept: two
+    // sends that both read the pending nonce before either is accepted would both sign nonce 7.
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let a = accepted.clone();
+    let rpc = MockRpc::start(move |m, p| match m {
+        "eth_getTransactionCount" if p[1] == "pending" => {
+            Reply::Result(hex(
+                u128::from(PENDING_NONCE) + a.load(Ordering::SeqCst) as u128
+            ))
+        }
+        "eth_sendRawTransaction" => {
+            std::thread::sleep(Duration::from_millis(1500));
+            a.fetch_add(1, Ordering::SeqCst);
+            Reply::Result(json!(tx_hash_of(p[0].as_str().unwrap())))
+        }
+        _ => healthy(m, p),
+    });
+    let args = transfer(&rpc.url, &[]);
+    let (first, second) = std::thread::scope(|s| {
+        let one = s.spawn(|| home.run(&args));
+        let two = s.spawn(|| home.run(&args));
+        (one.join().unwrap(), two.join().unwrap())
+    });
+    let mut nonces: Vec<u64> = rpc.sent().iter().map(|raw| nonce_of(raw)).collect();
+    nonces.sort_unstable();
+    assert_eq!(nonces, vec![PENDING_NONCE, PENDING_NONCE + 1]);
+    let mut reported = [first.ok()["nonce"].clone(), second.ok()["nonce"].clone()];
+    reported.sort_by_key(|n| n.as_u64());
+    assert_eq!(reported, [json!(PENDING_NONCE), json!(PENDING_NONCE + 1)]);
+    // The per-(chain, account) lock file in the home.
+    let lock = home
+        .path()
+        .join(format!("nonce-1-{}.lock", me.to_lowercase()));
+    assert!(lock.exists(), "{}", lock.display());
 }
 
 #[test]

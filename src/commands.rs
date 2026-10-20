@@ -599,6 +599,7 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     let max_fee_per_gas = max_fee_wei(&a.send)?;
     let (from, index, key_name) = signing_key(home, &a.key, chain).await?;
     require_unlocked(home).await?;
+    let lock = send_lock(home, chain, &from, &a.send)?;
     let net = net(chain, a.rpc.as_deref());
     let p = evm_rpc::connect(&net).await?;
     let intent = evm_rpc::Intent {
@@ -623,7 +624,23 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     base.insert("data".into(), json!(format!("0x{}", hex::encode(&input))));
     base.insert("value".into(), json!(format_units(value, chain.decimals)));
     base.insert("valueRaw".into(), json!(value.to_string()));
-    sign_and_send(&Evm, &net, home, index, &from, prepared, &a.send, base).await
+    sign_and_send(
+        &Evm, &net, home, index, &from, prepared, &a.send, base, lock,
+    )
+    .await
+}
+
+/// The account's send lock, from the nonce read through the broadcast. A dry-run consumes no
+/// nonce, so it takes none.
+fn send_lock(
+    home: &Path,
+    chain: &Chain,
+    from: &str,
+    send: &SendArgs,
+) -> Result<Option<chains::SendLock>> {
+    (!send.dry_run)
+        .then(|| chains::SendLock::acquire(home, chain, from))
+        .transpose()
 }
 
 /// `--max-fee-gwei` in wei (gwei = 10^9 wei), validated before any RPC.
@@ -665,6 +682,7 @@ async fn transfer_with<F: ChainFamily>(
     let max_fee_per_gas = max_fee_wei(&a.send)?;
     let (from, index, key_name) = signing_key(home, &a.key, chain).await?;
     require_unlocked(home).await?;
+    let lock = send_lock(home, chain, &from, &a.send)?;
     let req = TransferRequest {
         from: from.clone(),
         to: to.clone(),
@@ -681,11 +699,12 @@ async fn transfer_with<F: ChainFamily>(
     base.insert("key".into(), json!(key_name));
     base.insert("from".into(), json!(from));
     base.insert("to".into(), json!(to));
-    sign_and_send(fam, net, home, index, &from, prepared, &a.send, base).await
+    sign_and_send(fam, net, home, index, &from, prepared, &a.send, base, lock).await
 }
 
 /// Shared tail of `transfer` and `invoke`: sign through the daemon, check the raw bytes really
-/// come from `from`, then either report (dry-run) or broadcast (and optionally wait).
+/// come from `from`, then either report (dry-run) or broadcast (and optionally wait). `lock` is
+/// released once the node has answered the broadcast, before any `--wait`.
 #[allow(clippy::too_many_arguments)]
 async fn sign_and_send<F: ChainFamily>(
     fam: &F,
@@ -696,6 +715,7 @@ async fn sign_and_send<F: ChainFamily>(
     prepared: PreparedTx,
     send: &SendArgs,
     mut out: Map<String, Value>,
+    lock: Option<chains::SendLock>,
 ) -> Result<Out> {
     let signed_value = protocol::send_unlocked(
         home,
@@ -735,6 +755,7 @@ async fn sign_and_send<F: ChainFamily>(
         return Ok(Out::json(Value::Object(out)));
     }
     let outcome = fam.broadcast(net, &signed, send.nonce.is_some()).await?;
+    drop(lock);
     out.insert(
         "explorerUrl".into(),
         json!(net.chain.explorer_tx_url(&signed.tx_hash)),

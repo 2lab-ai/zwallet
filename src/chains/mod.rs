@@ -8,11 +8,14 @@ pub mod evm;
 
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
+use crate::core::store;
 use alloy::primitives::U256;
 use alloy::transports::http::reqwest::Url;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs::File;
+use std::path::Path;
 use std::time::Duration;
 
 /// Family plus its family-specific configuration.
@@ -507,6 +510,48 @@ pub enum Broadcast {
         warning: String,
         rpc_tx_hash: Option<String>,
     },
+}
+
+/// How long a send waits for another send from the same account to reach the node.
+const SEND_LOCK_WAIT: Duration = Duration::from_secs(120);
+
+/// Serializes the sends of one account on one chain within a home: held from reading the next
+/// nonce until the node has answered the broadcast, so two concurrent sends cannot sign the same
+/// nonce (the loser would be refused or replace the winner). An exclusive flock on
+/// `<home>/nonce-<chainId>-<address>.lock`, released when this value drops, or by the OS when the
+/// process dies.
+pub struct SendLock {
+    _file: File,
+}
+
+impl SendLock {
+    /// Waits (bounded) for the lock on `address` (as printed by the family) on `chain`.
+    pub fn acquire(home: &Path, chain: &Chain, address: &str) -> Result<Self> {
+        let path = home.join(format!(
+            "nonce-{}-{}.lock",
+            chain.chain_id_json(),
+            address.to_ascii_lowercase()
+        ));
+        let file = store::lock_exclusive(
+            &path,
+            SEND_LOCK_WAIT,
+            &format!(
+                "another send from {address} on {} is in progress",
+                chain.key
+            ),
+        )
+        .map_err(|e| {
+            WalletError::new(
+                e.code,
+                format!(
+                    "{}; nothing was signed or broadcast. If that send is an earlier attempt at \
+                     this same payment, let it finish and look up its result before sending again",
+                    e.message
+                ),
+            )
+        })?;
+        Ok(Self { _file: file })
+    }
 }
 
 /// The error for a transaction that may have reached the network: it carries `txHash`, `from`
