@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use zwallet::chains::evm::registry::WHITELIST_RULES;
+use zwallet::core::whitelist::{self, Entry, Whitelist};
 
 pub const PW: &str = "correct horse battery staple";
 
@@ -225,6 +227,53 @@ impl Home {
             serde_json::from_slice(&std::fs::read(self.wallet_json()).unwrap()).unwrap();
         edit(&mut v);
         std::fs::write(self.wallet_json(), serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    }
+}
+
+/// Seeds the signed whitelist of `home` (a wallet created with [`PW`]) through the core edit
+/// path, `zwallet::core::whitelist::edit` with the real chain rules: `change` edits the current
+/// list (the first call makes `whitelist.key` and generation 1, each call adds one generation).
+/// Returns the list now in `whitelist.json`, verified against the new seal.
+///
+/// Every call re-seals wallet.json, and a running daemon ends its session when wallet.json's
+/// ciphertext changes: seed before `unlock`, or unlock again afterwards (see
+/// `tests/whitelist_seed.rs`).
+pub fn seed_whitelist(home: &Path, change: impl FnOnce(&mut Whitelist)) -> Whitelist {
+    whitelist::edit(home, PW, &WHITELIST_RULES, |list| {
+        change(list);
+        Ok(())
+    })
+    .unwrap_or_else(|e| panic!("seeding the whitelist failed: {}", e.message))
+    .list
+}
+
+impl Home {
+    /// [`seed_whitelist`] on this home.
+    pub fn edit_whitelist(&self, change: impl FnOnce(&mut Whitelist)) -> Whitelist {
+        seed_whitelist(self.path(), change)
+    }
+
+    /// Lists `address` (any case) as payee `nickname` on `chains` (`&["*"]`: every chain).
+    pub fn allow(&self, nickname: &str, address: &str, chains: &[&str]) -> Whitelist {
+        self.edit_whitelist(|list| {
+            list.add(Entry::new_address(nickname, address, chains))
+                .unwrap_or_else(|e| panic!("{}", e.message))
+        })
+    }
+
+    /// Lists contract `address` as `nickname` on `chains`, callable with `selectors`
+    /// (`0x` + 8 hex digits each).
+    pub fn allow_contract(
+        &self,
+        nickname: &str,
+        address: &str,
+        chains: &[&str],
+        selectors: &[&str],
+    ) -> Whitelist {
+        self.edit_whitelist(|list| {
+            list.add(Entry::new_contract(nickname, address, chains, selectors))
+                .unwrap_or_else(|e| panic!("{}", e.message))
+        })
     }
 }
 
