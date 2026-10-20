@@ -1113,7 +1113,9 @@ fn verified_view(home: &Path, anchor: Result<Option<WhitelistAnchor>>) -> Value 
     // The genuine-copy remedy, as conditional as the edit's (none above the seal: the reason
     // says what to do).
     let remedy = |reason: String| match whitelist::unverified_remedy(&files, &anchor) {
-        Some(r) => format!("{reason}. If whitelist.json was only damaged or replaced, {r}"),
+        Some(r) => {
+            format!("{reason}. If whitelist.json was only damaged, replaced or deleted, {r}")
+        }
         None => reason,
     };
     let mut out = match base.source {

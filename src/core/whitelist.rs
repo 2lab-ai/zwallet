@@ -1147,7 +1147,7 @@ pub fn base_for_edit(
         // Above the seal, the reason says what to do; putting back the copy the seal names
         // could complete a rollback.
         let remedy = unverified_remedy(files, a)
-            .map(|r| format!(" If whitelist.json was only damaged or replaced, {r}."))
+            .map(|r| format!(" If whitelist.json was only damaged, replaced or deleted, {r}."))
             .unwrap_or_default();
         return Err(WalletError::validation(format!(
             "refusing to edit the whitelist: {reason}. An edit builds only on the list wallet.json \
@@ -1272,14 +1272,14 @@ fn load_key(home: &Path, password: &str, anchor: &WhitelistAnchor) -> Result<Whi
 }
 
 /// Runs one whitelist edit (`.prd/04-whitelist.md` §Edits, steps 2–4) with the typed
-/// `password`: under `w.lock`, decrypt wallet.json and `whitelist.key` (the first edit makes the
-/// key), pick the base ([`pick_base`]), apply `mutate`, set generation + 1, validate, sign, write
-/// `whitelist.next.json`, re-seal wallet.json with the new anchor, publish the signed bytes as
-/// `whitelist.json` (then remove `next`, best-effort: [`Edited::warning`] if that fails), and
-/// read it back verified. `mutate` runs before anything is written, so its
-/// error (or a validation error) leaves every file as it was. Stopping daemons before, and
-/// unlocking after, is the caller's. This binds nothing to what a human saw: it is for tests and
-/// seeding; the CLI uses [`edit_as_shown`].
+/// `password`: under `w.lock`, decrypt wallet.json, pick the base ([`pick_base`]), then decrypt
+/// `whitelist.key` (the first edit makes the key), apply `mutate`, set generation + 1, validate,
+/// sign, write `whitelist.next.json`, re-seal wallet.json with the new anchor, publish the signed
+/// bytes as `whitelist.json` (then remove `next`, best-effort: [`Edited::warning`] if that
+/// fails), and read it back verified. `mutate` runs before anything is written, so its error (or
+/// a validation error) leaves every file as it was. Stopping daemons before, and unlocking after,
+/// is the caller's. This binds nothing to what a human saw: it is for tests and seeding; the CLI
+/// uses [`edit_as_shown`].
 pub fn edit(
     home: &Path,
     password: &str,
