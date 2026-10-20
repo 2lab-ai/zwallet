@@ -880,12 +880,13 @@ mod tests {
     fn a_broken_list_is_never_more_permissive_than_a_verified_default_list() {
         // Over every action kind, target, fee shape and chain (plus one with no built-in cap):
         // an untrusted list allows nothing at all, and no list yet allows nothing a verified list
-        // with no entries and the default policy refuses.
+        // with no entries and the default policy refuses. With the verified list, a fee refusal
+        // (and its `fee-cap` command) only ever comes with an action the list allows.
         let mut verified = Whitelist::empty(&registry::WHITELIST_RULES);
         verified.generation = 1;
         verified.validate(&registry::WHITELIST_RULES).unwrap();
         let untrusted = ListView::Unusable("whitelist.json: does not verify".into());
-        let (mut cases, mut allowed) = (0, 0);
+        let (mut cases, mut allowed, mut fee_refused) = (0, 0, 0);
         let mut chains: Vec<&Chain> = crate::chains::CHAINS.iter().collect();
         chains.push(&NO_DEFAULT);
         for c in chains {
@@ -945,6 +946,26 @@ mod tests {
                         assert_eq!(e.code, ErrorCode::WhitelistInvalid, "{}", e.message);
                         assert!(!e.details.contains_key("command"), "{e:?}");
                         let strict = check_tx(&ListView::Usable(&verified), c, &signer(), &d);
+                        if let Err(e) = &strict {
+                            let to_self = matches!(
+                                d.action(),
+                                Action::NativeTransfer { to, .. } if *to == signer()
+                            );
+                            if e.code == ErrorCode::FeeCapExceeded {
+                                fee_refused += 1;
+                                assert!(
+                                    to_self || decide(&verified, c, d.action()).is_ok(),
+                                    "a fee refusal for an action the list refuses: {}",
+                                    e.message
+                                );
+                            } else {
+                                assert!(
+                                    !e.message.contains("fee-cap"),
+                                    "an action refusal names a fee-cap: {}",
+                                    e.message
+                                );
+                            }
+                        }
                         if check_tx(&ListView::NoList, c, &signer(), &d).is_ok() {
                             allowed += 1;
                             assert!(
@@ -958,8 +979,10 @@ mod tests {
                 }
             }
         }
-        // Not vacuous: some self-transfers pass with no list yet, most of the corpus does not.
+        // Not vacuous: some self-transfers pass with no list yet, most of the corpus does not;
+        // some allowed actions are over the cap.
         assert!(allowed > 0 && allowed < cases / 10, "{allowed} of {cases}");
+        assert!(fee_refused > 0, "no fee refusal in {cases}");
     }
 
     #[test]

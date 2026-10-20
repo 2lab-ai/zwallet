@@ -2738,6 +2738,22 @@ fn w9_fees_above_the_cap_or_without_a_cap_are_refused_by_the_daemon() {
     over(ALICE);
     // Self-transfers are under the cap too while a list verifies.
     over(&me);
+    // The action comes first: over the cap, an unlisted payee is denied with the add command
+    // and a forbidden action with none; neither names a fee-cap.
+    let cap = ["--max-fee-gwei", "1000.5"];
+    let r = home.run(&pay("ethereum", OTHER, &greedy.url, &cap));
+    let add = format!("zwallet whitelist add <nick> {OTHER} --chains ethereum");
+    let v = refused(&r, "WHITELIST_DENIED", OTHER, "ethereum", Some(&add));
+    assert!(v.get("feeWei").is_none(), "{v:#}");
+    let r = home.run(&invoke(
+        USDC,
+        &["--sig", "approve(address,uint256)", SPENDER, "1"],
+        &greedy.url,
+        &cap,
+    ));
+    let v = refused(&r, "WHITELIST_DENIED", SPENDER, "ethereum", None);
+    assert!(!v["error"].as_str().unwrap().contains("fee-cap"), "{v:#}");
+    assert!(v.get("feeWei").is_none(), "{v:#}");
     assert!(greedy.sent().is_empty());
     // No cap for the chain: refused, naming the command that sets one.
     let arb = MockRpc::start(healthy_on(42161));
