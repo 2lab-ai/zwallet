@@ -1,19 +1,20 @@
 //! `zwallet whitelist …` and `@nickname` recipients (`.prd/04-whitelist.md` §Edits, §CLI).
 //!
 //! A change runs only with a typed password, and in this order:
-//! 1. remember the running session's `expiresAt`, then stop every zwallet daemon of this user
-//!    (the `zwallet lock` path, which returns only once none is left): nothing is signed while
-//!    the list changes;
+//! 0. the arguments are checked, and the change is shown on the channel the password is read
+//!    from (the terminal, or stderr with `--password-stdin`), so the human sees what the password
+//!    authorizes; then the password is read and checked against wallet.json, and the change is
+//!    tried on the list the edit would start from. A wrong password or a refused change stops
+//!    nothing;
+//! 1. every zwallet daemon of this user is stopped (the `zwallet lock` path, which returns only
+//!    once none is left): nothing is signed while the list changes;
 //! 2. to 4. [`whitelist::edit`] (or [`whitelist::reset`]) under `w.lock`: the verified base,
 //!    the change at the next generation, signed, staged, re-sealed, renamed;
-//! 5. re-warm: unlock again with the same password until the remembered `expiresAt` (not for a
-//!    fresh duration) through the staged unlock, then wipe the password. Without a session, or
-//!    once it has run out, the wallet stays locked.
-//!
-//! Before step 1 the password is checked against wallet.json and the change is tried on the
-//! current list, so a typo or a refused change leaves a running session alone.
+//! 5. the wallet stays locked, unless `--unlock <duration>` starts a new session for that
+//!    duration with the password just typed (the staged unlock `zwallet unlock` uses). No
+//!    duration or expiry is taken from a running daemon.
 
-use super::{live_daemons, start_session};
+use super::start_session;
 use crate::chains::evm::{self, registry::WHITELIST_RULES};
 use crate::chains::{self, Chain, PRIMARY_CHAIN};
 use crate::cli::{
@@ -24,7 +25,7 @@ use crate::core::error::{Result, WalletError};
 use crate::core::password::read_password;
 use crate::core::protocol::{self, DaemonExe};
 use crate::core::store::{self, WhitelistAnchor};
-use crate::core::time::{parse_rfc3339_utc, rfc3339_utc, unix_secs};
+use crate::core::time::parse_duration;
 use crate::core::whitelist::{
     self, ANY_CHAIN, Base, BaseSource, Edited, Entry, EntryKind, NEXT_FILE, WHITELIST_FILE,
     Whitelist,
@@ -33,7 +34,6 @@ use alloy::hex;
 use alloy::primitives::U256;
 use serde_json::{Value, json};
 use std::path::Path;
-use std::time::{Duration, SystemTime};
 
 const LIST_HINT: &str = "see `zwallet whitelist list`";
 const FIRST_ADD: &str = "`zwallet whitelist add <nick> <addr> --chains <chain>` creates it";
@@ -192,119 +192,67 @@ fn try_change(change: &Change, base: &Base) -> Result<()> {
     })
 }
 
-/// What `unlock` checks before it starts a daemon, for an edit that will re-warm one.
-fn rewarm_checks(opts: &WhitelistEditArgs) -> Result<()> {
-    protocol::check_ptrace_scope(opts.allow_ptrace_scope_0)?;
-    protocol::check_daemons_findable()
-}
+/// Tells the human to start a new session after a change that left the wallet locked.
+const UNLOCK_HINT: &str = "pass --unlock <duration> to keep signing";
 
-/// The running session's `expiresAt` in UNIX seconds, as a daemon of this home that answers as
-/// unlocked reports it ([`live_daemons`]); `None` without one.
-async fn session_expiry(home: &Path) -> Result<Option<u64>> {
-    let (_, serving) = live_daemons(home).await?;
-    Ok(serving.and_then(|s| s["expiresAt"].as_str().and_then(parse_rfc3339_utc)))
-}
-
-/// What step 5 did with the session that was running.
+/// Step 5 with `--unlock`.
 enum Session {
-    /// None was running: the wallet stays locked.
-    NotRunning,
-    /// Unlocked again until the remembered expiry (plus the new daemon's start-up).
-    Rewarmed { previous: u64, ready: Value },
-    /// It had run out by the time of the re-warm: the wallet stays locked.
-    Expired { previous: u64 },
-    /// Unlocking again failed: the wallet is locked.
-    Failed { previous: u64, error: WalletError },
+    /// No `--unlock`: the wallet is locked.
+    Locked,
+    /// Unlocked for `duration` with the password just typed: the daemon's readiness report.
+    Unlocked { duration: String, ready: Value },
+    /// Unlocking failed after the change: the wallet is locked.
+    Failed(WalletError),
 }
 
 impl Session {
     /// Fills `locked` and the session fields of a change's output.
     fn report(&self, out: &mut Value) {
-        let previous = match self {
-            Self::NotRunning => {
+        match self {
+            Self::Locked => {
                 out["locked"] = json!(true);
-                return;
+                out["hint"] = json!(UNLOCK_HINT);
             }
-            Self::Rewarmed { previous, ready } => {
+            Self::Unlocked { duration, ready } => {
                 out["locked"] = json!(false);
+                out["duration"] = json!(duration);
                 out["expiresAt"] = ready["expiresAt"].clone();
                 out["daemonPid"] = ready["pid"].clone();
-                if let Some(w) = ready.get("whitelist") {
-                    out["whitelist"] = w.clone();
-                }
-                previous
+                // The list the new session signs under, as its daemon verified it.
+                out["whitelist"] = ready["whitelist"].clone();
             }
-            Self::Expired { previous } => {
+            Self::Failed(e) => {
                 out["locked"] = json!(true);
-                out["rewarm"] = json!("the session had expired");
-                previous
+                out["unlockError"] = json!(e.message);
+                out["hint"] = json!(UNLOCK_HINT);
             }
-            Self::Failed { previous, error } => {
-                out["locked"] = json!(true);
-                out["rewarm"] = json!(format!("unlocking again failed: {}", error.message));
-                previous
-            }
-        };
-        out["previousExpiresAt"] = json!(rfc3339_utc(*previous));
-    }
-
-    /// `error` (the edit failed after the daemons were stopped), saying what became of the
-    /// session.
-    fn annotate(&self, error: WalletError) -> WalletError {
-        let (note, locked) = match self {
-            Self::NotRunning => return error,
-            Self::Rewarmed { ready, .. } => (
-                format!(
-                    "the session that was running is unlocked again until {}",
-                    ready["expiresAt"].as_str().unwrap_or("?")
-                ),
-                false,
-            ),
-            Self::Expired { .. } => (
-                "the session that was running had expired; the wallet is locked".to_string(),
-                true,
-            ),
-            Self::Failed { error: e, .. } => (
-                format!(
-                    "unlocking the session again failed ({}); the wallet is locked, run `zwallet \
-                     unlock`",
-                    e.message
-                ),
-                true,
-            ),
-        };
-        WalletError::new(error.code, format!("{}; {note}", error.message))
-            .with_detail("locked", locked)
-    }
-}
-
-/// Step 5: unlock again with `password` until `remembered`, if that is still ahead.
-async fn rewarm(home: &Path, exe: &DaemonExe, password: &str, remembered: Option<u64>) -> Session {
-    let Some(previous) = remembered else {
-        return Session::NotRunning;
-    };
-    let now = unix_secs(SystemTime::now());
-    if previous <= now {
-        return Session::Expired { previous };
-    }
-    match start_session(home, exe, password, Duration::from_secs(previous - now)).await {
-        Ok(ready) => Session::Rewarmed { previous, ready },
-        Err(error) => Session::Failed { previous, error },
+        }
     }
 }
 
 /// One change, linearized as the module doc says.
 async fn edit(home: &Path, change: Change, opts: &WhitelistEditArgs) -> Result<Out> {
     store::read_wallet_file(home)?;
-    // Pinned before the prompt, as `unlock` pins it: a binary swapped in while the human types
-    // is never the one re-warmed.
-    let exe = DaemonExe::resolve()?;
-    let mut checked = false;
-    if session_expiry(home).await?.is_some() {
-        rewarm_checks(opts)?;
-        checked = true;
-    }
-    let password = read_password(opts.password.password_stdin, "Wallet password: ", false)?;
+    // `unlock`'s own checks, before the prompt and before anything changes. The binary is pinned
+    // here, as `unlock` pins it: one swapped in while the human types is never started.
+    let unlock = match opts.unlock.as_deref() {
+        None => None,
+        Some(d) => {
+            let ttl = parse_duration(d)?;
+            protocol::socket_path(home)?;
+            protocol::check_ptrace_scope(opts.allow_ptrace_scope_0)?;
+            protocol::check_daemons_findable()?;
+            Some((d.trim().to_string(), ttl, DaemonExe::resolve()?))
+        }
+    };
+    // 0. What the password authorizes, where the password is read.
+    let shown = summary(home, &change);
+    let password = if opts.password.password_stdin {
+        eprintln!("{shown}");
+        read_password(true, "", false)?
+    } else {
+        read_password(false, &format!("{shown}\nWallet password: "), false)?
+    };
     // A wrong password is refused here, before anything is stopped.
     let anchor = store::unlock(home, &password, &chains::derive_addresses)?
         .0
@@ -313,25 +261,198 @@ async fn edit(home: &Path, change: Change, opts: &WhitelistEditArgs) -> Result<O
     if !matches!(change, Change::Reset) {
         try_change(&change, &base)?;
     }
-
-    // 1. Remember the session, then stop every daemon.
-    let remembered = session_expiry(home).await?;
-    if remembered.is_some() && !checked {
-        rewarm_checks(opts)?;
-    }
+    // 1.
     let stopped = protocol::stop_all_daemons()?;
     // 2. to 4.
     let edited = match &change {
         Change::Reset => whitelist::reset(home, &password, &WHITELIST_RULES),
         _ => whitelist::edit(home, &password, &WHITELIST_RULES, |list| change.apply(list)),
+    }
+    .map_err(|e| {
+        WalletError::new(
+            e.code,
+            format!(
+                "{}; every zwallet daemon was stopped before the edit, so the wallet is locked",
+                e.message
+            ),
+        )
+        .with_detail("locked", true)
+    })?;
+    // 5.
+    let session = match unlock {
+        None => Session::Locked,
+        Some((duration, ttl, exe)) => match start_session(home, &exe, &password, ttl).await {
+            Ok(ready) => Session::Unlocked { duration, ready },
+            Err(e) => Session::Failed(e),
+        },
     };
-    // 5. Whether or not the edit went through: the session was this password's.
-    let session = rewarm(home, &exe, &password, remembered).await;
     drop(password);
-    let edited = edited.map_err(|e| session.annotate(e))?;
     let out = edit_output(&change, &base, &edited, &stopped, &session);
     let text = edit_text(&out);
     Ok(Out::with_text(out, text))
+}
+
+/// Step 0: the change the password is about to authorize, from the arguments and whitelist.json
+/// as it is on disk. That file is unverified here (only the password opens the seal that says
+/// whether it is the signed list), so the text says what happens if it is not. Every value read
+/// from the file is escaped ([`shown`], [`printable`]).
+fn summary(home: &Path, change: &Change) -> String {
+    let current = whitelist::read_list(&home.join(WHITELIST_FILE));
+    let on_disk = match &current {
+        Ok(Some(s)) => Some(&s.list),
+        _ => None,
+    };
+    let mut lines = vec!["The password authorizes this whitelist change:".to_string()];
+    match change {
+        Change::Add(e) => {
+            lines.push(format!("  add {}: {}", e.nickname, kind_text(e.kind)));
+            lines.push(format!("    address: {}", checksummed(&e.address)));
+            lines.push(format!("    chains: {}", chains_text(&e.chains)));
+            if let Some(sels) = &e.selectors {
+                lines.push(format!("    selectors: {}", sels.join(", ")));
+            }
+        }
+        Change::Remove(nickname) => {
+            let what = match on_disk.and_then(|l| l.by_nickname(nickname)) {
+                Some(e) => format!(
+                    "whitelist.json lists it as {} {} on {}",
+                    match e.kind {
+                        EntryKind::Address => "a payee",
+                        EntryKind::Contract => "a contract",
+                    },
+                    checksummed(&e.address),
+                    chains_text(&e.chains)
+                ),
+                None => "whitelist.json has no entry by that name".to_string(),
+            };
+            lines.push(format!("  remove {nickname}: {what}"));
+        }
+        Change::FeeCap { chain, wei } => {
+            let old = match &current {
+                Ok(Some(s)) => s.list.policy.max_fee_wei.get(chain.key).cloned(),
+                // A first edit starts from the default caps.
+                Ok(None) => WHITELIST_RULES
+                    .default_fee_caps_wei
+                    .iter()
+                    .find(|(k, _)| *k == chain.key)
+                    .map(|(_, v)| v.to_string()),
+                Err(_) => None,
+            };
+            let old = match old {
+                Some(v) => match U256::from_str_radix(&v, 10) {
+                    Ok(w) => fee_text(chain, w),
+                    Err(_) => format!("{} (unreadable)", shown(&v)),
+                },
+                None => "none".to_string(),
+            };
+            lines.push(format!(
+                "  fee-cap {}: {old} -> {}",
+                chain.key,
+                fee_text(chain, *wei)
+            ));
+        }
+        Change::MessageSigning(on) => {
+            let old = match &current {
+                Ok(Some(s)) => on_off(s.list.policy.allow_message_signing),
+                Ok(None) => on_off(false),
+                Err(_) => "unknown",
+            };
+            lines.push(format!(
+                "  allow-message-signing: {old} -> {} (some contracts take an EIP-191 signature \
+                 as spending authority)",
+                on_off(*on)
+            ));
+        }
+        Change::Reset => {
+            let dropped = on_disk.map(list_names).unwrap_or_default();
+            lines.push(format!(
+                "  reset: a new whitelist key and an empty list with the default fee caps and \
+                 message signing off; every entry is dropped: {}",
+                if dropped.is_empty() { "none" } else { &dropped }
+            ));
+        }
+    }
+    match &current {
+        Ok(Some(s)) => {
+            let n = s.list.entries.len();
+            lines.push(format!(
+                "  whitelist.json now: gen {}, {n} {} ({}), not verified yet; if it is not the \
+                 sealed list, the change starts from an empty list instead",
+                s.list.generation,
+                if n == 1 { "entry" } else { "entries" },
+                list_names(&s.list)
+            ));
+            lines.push(format!(
+                "  after the change: gen {}",
+                s.list.generation.saturating_add(1)
+            ));
+        }
+        Ok(None) => {
+            lines.push("  whitelist.json: none yet".to_string());
+            lines.push(
+                "  after the change: gen 1 with a new whitelist key (the sealed generation + 1 \
+                 if wallet.json already seals a whitelist)"
+                    .to_string(),
+            );
+        }
+        Err(e) => {
+            lines.push(format!(
+                "  whitelist.json: unreadable ({}); the change starts from an empty list",
+                printable(&e.message)
+            ));
+            lines.push("  after the change: the sealed generation + 1".to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+fn kind_text(kind: EntryKind) -> String {
+    match kind {
+        EntryKind::Address => {
+            "a payee (native coin and registry tokens may be sent to it)".to_string()
+        }
+        EntryKind::Contract => format!("a contract (only calls with its selectors; {RESIDUAL})"),
+    }
+}
+
+/// An address for a human: EIP-55, or escaped as found when it is not one.
+fn checksummed(address: &str) -> String {
+    evm::parse_address(address)
+        .map(|a| a.to_checksum(None))
+        .unwrap_or_else(|_| shown(address))
+}
+
+/// `["*"]` spelled out; chain keys otherwise.
+fn chains_text(chains: &[String]) -> String {
+    if chains.len() == 1 && chains[0] == ANY_CHAIN {
+        return "every chain (*)".to_string();
+    }
+    chains
+        .iter()
+        .map(|c| shown(c))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn fee_text(chain: &Chain, wei: U256) -> String {
+    format!(
+        "{} {} ({wei} wei)",
+        format_units(wei, chain.decimals),
+        chain.symbol
+    )
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// A list's nicknames, each [`shown`], comma-separated.
+fn list_names(list: &Whitelist) -> String {
+    list.entries
+        .iter()
+        .map(|e| shown(&e.nickname))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn base_name(source: BaseSource) -> &'static str {
@@ -469,17 +590,20 @@ fn edit_text(out: &Value) -> String {
     {
         lines.push(format!("stopped daemons: {}", join(&out["stoppedDaemons"])));
     }
-    lines.push(if out["locked"] == json!(false) {
-        format!(
-            "unlocked again until {} (daemon {})",
+    if out["locked"] == json!(false) {
+        lines.push(format!(
+            "unlocked for {} until {} (daemon {}); it signs under whitelist gen {}",
+            s("duration"),
             s("expiresAt"),
-            s("daemonPid")
-        )
-    } else if let Some(why) = out["rewarm"].as_str() {
-        format!("locked: {why}")
+            s("daemonPid"),
+            ascii_json(&out["whitelist"]["gen"])
+        ));
     } else {
-        "locked".into()
-    });
+        if let Some(e) = out["unlockError"].as_str() {
+            lines.push(format!("unlocking failed: {}", printable(e)));
+        }
+        lines.push(format!("locked: {UNLOCK_HINT}"));
+    }
     lines.join("\n")
 }
 
@@ -840,35 +964,91 @@ mod tests {
     }
 
     #[test]
-    fn the_session_note_never_claims_an_unlock_that_failed() {
-        let failed = Session::Failed {
-            previous: 0,
-            error: WalletError::validation("daemon refused"),
-        };
-        let e = failed.annotate(WalletError::validation("disk full"));
-        assert!(
-            e.message
-                .starts_with("disk full; unlocking the session again failed")
-                && e.message.contains("zwallet unlock"),
-            "{e}"
-        );
-        assert_eq!(e.details["locked"], true);
-        let ok = Session::Rewarmed {
-            previous: 0,
-            ready: json!({ "expiresAt": "2030-01-01T00:00:00Z", "pid": 9 }),
-        };
-        let e = ok.annotate(WalletError::validation("disk full"));
-        assert!(e.message.contains("unlocked again until 2030"), "{e}");
-        assert_eq!(e.details["locked"], false);
-        assert_eq!(
-            Session::NotRunning
-                .annotate(WalletError::validation("x"))
-                .message,
-            "x"
-        );
+    fn a_change_reports_locked_unless_a_new_session_started() {
         let mut out = json!({});
-        Session::Expired { previous: 0 }.report(&mut out);
+        Session::Locked.report(&mut out);
+        assert_eq!(out, json!({ "locked": true, "hint": UNLOCK_HINT }));
+        let mut out = json!({});
+        Session::Failed(WalletError::validation("daemon refused")).report(&mut out);
         assert_eq!(out["locked"], true);
-        assert_eq!(out["previousExpiresAt"], "1970-01-01T00:00:00Z");
+        assert_eq!(out["unlockError"], "daemon refused");
+        assert!(edit_text(&json!({ "change": "reset", "entries": [], "locked": true, "unlockError": "x\u{1b}" })).contains("locked: pass --unlock"));
+        let ready = json!({
+            "expiresAt": "2030-01-01T00:00:00Z",
+            "pid": 9,
+            "whitelist": { "gen": 4, "verified": true, "entries": ["alice"] },
+        });
+        let mut out = json!({});
+        Session::Unlocked {
+            duration: "24h".into(),
+            ready: ready.clone(),
+        }
+        .report(&mut out);
+        assert_eq!(
+            out,
+            json!({
+                "locked": false,
+                "duration": "24h",
+                "expiresAt": "2030-01-01T00:00:00Z",
+                "daemonPid": 9,
+                "whitelist": ready["whitelist"],
+            })
+        );
+    }
+
+    #[test]
+    fn the_summary_says_what_the_password_authorizes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let base = chains::find("base").unwrap();
+        let alice = Entry::new_address(
+            "alice",
+            "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+            &["*"],
+        );
+        let text = summary(home, &Change::Add(alice));
+        for want in [
+            "The password authorizes this whitelist change:",
+            "add alice: a payee",
+            "address: 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+            "chains: every chain (*)",
+            "whitelist.json: none yet",
+            "after the change: gen 1",
+        ] {
+            assert!(text.contains(want), "{want:?} not in {text}");
+        }
+        let cap = Change::FeeCap {
+            chain: base,
+            wei: U256::from(1_000_000_000_000_000u64),
+        };
+        let text = summary(home, &cap);
+        assert!(
+            text.contains("fee-cap base: 0.0005 ETH (500000000000000 wei) -> 0.001 ETH"),
+            "{text}"
+        );
+        let tmp = home_with(&[Entry::new_address(
+            "bob",
+            "0x3333333333333333333333333333333333333333",
+            &["base"],
+        )]);
+        let text = summary(tmp.path(), &Change::MessageSigning(true));
+        assert!(text.contains("allow-message-signing: off -> on"), "{text}");
+        assert!(
+            text.contains("now: gen 1, 1 entry (bob), not verified yet"),
+            "{text}"
+        );
+        assert!(text.contains("after the change: gen 2"), "{text}");
+        let text = summary(tmp.path(), &Change::Reset);
+        assert!(text.contains("every entry is dropped: bob"), "{text}");
+        let text = summary(tmp.path(), &Change::Remove("bob".into()));
+        assert!(
+            text.contains("remove bob: whitelist.json lists it as a payee 0x3333333333333333333333333333333333333333 on base"),
+            "{text}"
+        );
+        // An unreadable file: its reason, escaped.
+        std::fs::write(tmp.path().join(WHITELIST_FILE), "{\"x\u{1b}\": 1}").unwrap();
+        let text = summary(tmp.path(), &Change::Reset);
+        assert!(text.contains("whitelist.json: unreadable"), "{text}");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
     }
 }
