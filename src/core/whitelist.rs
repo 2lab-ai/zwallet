@@ -19,13 +19,16 @@
 //! - The sealed **generation** names that commit for humans (`unlock` and `whitelist list` show
 //!   it) and makes an older copy fail with a plain reason.
 //!
-//! An edit ([`edit`], [`reset`]) is linearized under `w.lock`: pick the base ([`pick_base`]:
-//! the current list if it verifies, else a staged list the seal already names, else empty — an
-//! unverified list is never signed), promote a staged sealed list to `whitelist.json`, apply the
-//! change at generation + 1, sign, write `whitelist.next.json`, re-seal wallet.json with the new
-//! anchor, rename `next` over `whitelist.json`. A crash at any point leaves the old generation
-//! standing or the staged one promotable. The caller stops every daemon first (a re-seal ends a
-//! running session anyway: the daemon notices wallet.json's ciphertext changed).
+//! An edit ([`edit`], [`reset`]) is linearized under `w.lock`: read `whitelist.json` and
+//! `whitelist.next.json` once ([`ListFiles`]; with [`edit_as_shown`] / [`reset_as_shown`], refuse
+//! if those bytes are not the ones the human was shown), pick the base from those bytes
+//! ([`pick_base_from`]: the current list if it verifies, else a staged list the seal already
+//! names; an edit with neither refuses, [`base_for_edit`], and only a reset starts over from
+//! empty), promote a staged sealed list to `whitelist.json`, apply the change at generation + 1,
+//! sign, write `whitelist.next.json`, re-seal wallet.json with the new anchor, rename `next` over
+//! `whitelist.json`. An unverified list is never signed. A crash at any point leaves the old
+//! generation standing or the staged one promotable. The caller stops every daemon first (a
+//! re-seal ends a running session anyway: the daemon notices wallet.json's ciphertext changed).
 //!
 //! The format is EVM-shaped (20-byte addresses, 4-byte selectors); which chain keys exist and
 //! which addresses are registry tokens come from the chains layer through [`ChainRules`].
@@ -40,7 +43,7 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 pub const WHITELIST_FILE: &str = "whitelist.json";
@@ -757,24 +760,151 @@ pub fn verify(signed: &SignedList, anchor: &WhitelistAnchor) -> Result<()> {
 /// this user's, at most 1 MiB) and parses it ([`SignedList::from_file_bytes`]). A missing file is
 /// `Ok(None)`. Nothing is verified.
 pub fn read_list(path: &Path) -> Result<Option<SignedList>> {
-    let bytes = match store::read_wallet_bytes(path) {
-        Ok(b) => b,
-        Err(e) if e.code == ErrorCode::WalletNotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    SignedList::from_file_bytes(&bytes)
-        .map(Some)
-        .map_err(|e| WalletError::validation(format!("{}: {}", path.display(), e.message)))
+    ListFileRead::read(path).parsed()
 }
 
 /// Reads and verifies the list file at `path` against `anchor`.
 fn read_verified(path: &Path, anchor: &WhitelistAnchor) -> Result<Whitelist> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let signed =
-        read_list(path)?.ok_or_else(|| WalletError::validation(format!("there is no {name}")))?;
-    verify(&signed, anchor)
-        .map_err(|e| WalletError::validation(format!("{name}: {}", e.message)))?;
-    Ok(signed.list)
+    ListFileRead::read(path).verified(anchor)
+}
+
+/// One list file read once through the safe reader, so that what is shown, compared and verified
+/// are the same bytes.
+#[derive(Debug, Clone)]
+pub struct ListFileRead {
+    path: PathBuf,
+    read: FileRead,
+}
+
+#[derive(Debug, Clone)]
+enum FileRead {
+    Absent,
+    /// The safe reader refused it or the read failed (a symlink, a FIFO, another user's file,
+    /// more than 1 MiB, an I/O error).
+    Unreadable(WalletError),
+    Bytes(Vec<u8>),
+}
+
+impl ListFileRead {
+    pub fn read(path: &Path) -> Self {
+        let read = match store::read_wallet_bytes(path) {
+            Ok(b) => FileRead::Bytes(b),
+            Err(e) if e.code == ErrorCode::WalletNotFound => FileRead::Absent,
+            Err(e) => FileRead::Unreadable(e),
+        };
+        Self {
+            path: path.to_path_buf(),
+            read,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn exists(&self) -> bool {
+        !matches!(self.read, FileRead::Absent)
+    }
+
+    /// The file parsed, unverified ([`SignedList::from_file_bytes`]): `Ok(None)` if there is no
+    /// file; `VALIDATION_ERROR` if it could not be read or is not a list.
+    pub fn parsed(&self) -> Result<Option<SignedList>> {
+        match &self.read {
+            FileRead::Absent => Ok(None),
+            FileRead::Unreadable(e) => Err(e.clone()),
+            FileRead::Bytes(b) => SignedList::from_file_bytes(b).map(Some).map_err(|e| {
+                WalletError::validation(format!("{}: {}", self.path.display(), e.message))
+            }),
+        }
+    }
+
+    /// The file's `entries` as found (raw JSON, unverified), or `null` if there is no file, it
+    /// could not be read, or it is not JSON with entries.
+    pub fn raw_entries(&self) -> Value {
+        match &self.read {
+            FileRead::Bytes(b) => serde_json::from_slice::<Value>(b)
+                .ok()
+                .and_then(|v| v.get("entries").cloned())
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
+        }
+    }
+
+    /// The list in this file if it verifies against `anchor`.
+    fn verified(&self, anchor: &WhitelistAnchor) -> Result<Whitelist> {
+        let name = self.path.file_name().unwrap_or_default().to_string_lossy();
+        let signed = self
+            .parsed()?
+            .ok_or_else(|| WalletError::validation(format!("there is no {name}")))?;
+        verify(&signed, anchor)
+            .map_err(|e| WalletError::validation(format!("{name}: {}", e.message)))?;
+        Ok(signed.list)
+    }
+
+    fn seen(&self) -> Seen {
+        match &self.read {
+            FileRead::Absent => Seen::Absent,
+            FileRead::Unreadable(_) => Seen::Unreadable,
+            FileRead::Bytes(b) => Seen::Bytes(keccak256(b).0),
+        }
+    }
+}
+
+/// `whitelist.json` and `whitelist.next.json` of a home, each read once ([`ListFileRead`]).
+#[derive(Debug, Clone)]
+pub struct ListFiles {
+    pub current: ListFileRead,
+    pub next: ListFileRead,
+}
+
+impl ListFiles {
+    pub fn read(home: &Path) -> Self {
+        Self {
+            current: ListFileRead::read(&home.join(WHITELIST_FILE)),
+            next: ListFileRead::read(&home.join(NEXT_FILE)),
+        }
+    }
+
+    /// What a human was shown of the two files, to bind an edit to it ([`edit_as_shown`]).
+    pub fn fingerprint(&self) -> Fingerprint {
+        Fingerprint {
+            current: self.current.seen(),
+            next: self.next.seen(),
+        }
+    }
+}
+
+/// The two list files as a human saw them: each absent, unreadable, or the keccak-256 of its
+/// bytes. An edit made [`edit_as_shown`] refuses before writing anything when the files it reads
+/// are not these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fingerprint {
+    current: Seen,
+    next: Seen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    Absent,
+    Unreadable,
+    Bytes([u8; 32]),
+}
+
+impl Fingerprint {
+    /// `VALIDATION_ERROR` naming the first file that is not as shown.
+    fn check(&self, now: &Fingerprint) -> Result<()> {
+        let changed = if self.current != now.current {
+            WHITELIST_FILE
+        } else if self.next != now.next {
+            NEXT_FILE
+        } else {
+            return Ok(());
+        };
+        Err(WalletError::validation(format!(
+            "{changed} changed after it was shown; nothing changed. Run the command again to see \
+             the list as it is now"
+        )))
+    }
 }
 
 /// The list a signer may trust: `whitelist.json` if it verifies against `anchor`, else
@@ -818,16 +948,26 @@ pub struct Base {
     pub discarded: Option<Discarded>,
 }
 
-/// Step 3 of the edit protocol. The current list if it verifies against `anchor`; else the
-/// staged `whitelist.next.json` if it does; else an empty list with the default policy, with the
-/// reason and the unverified `whitelist.json`'s entries in `discarded` for the human to look at.
-/// An unverified list is never the base, so it is never signed. With no anchor (no whitelist
-/// yet) the base is empty, and `discarded` is set only if a `whitelist.json` is there anyway. The
-/// base keeps the generation it verified at (the sealed one, or 0 without an anchor).
+/// [`pick_base_from`] on the files of `home` as they are now.
 pub fn pick_base(home: &Path, anchor: Option<&WhitelistAnchor>, rules: &ChainRules) -> Base {
-    let current = home.join(WHITELIST_FILE);
+    pick_base_from(&ListFiles::read(home), anchor, rules)
+}
+
+/// Step 3 of the edit protocol, from the bytes in `files`. The current list if it verifies
+/// against `anchor`; else the staged `whitelist.next.json` if it does; else an empty list with
+/// the default policy, with the reason and the unverified `whitelist.json`'s entries in
+/// `discarded` for the human to look at. An unverified list is never the base, so it is never
+/// signed; only a reset starts from the empty one when there is an anchor ([`base_for_edit`]).
+/// With no anchor (no whitelist yet) the base is empty, and `discarded` is set only if a
+/// `whitelist.json` is there anyway. The base keeps the generation it verified at (the sealed
+/// one, or 0 without an anchor).
+pub fn pick_base_from(
+    files: &ListFiles,
+    anchor: Option<&WhitelistAnchor>,
+    rules: &ChainRules,
+) -> Base {
     let why = match anchor {
-        Some(a) => match read_verified(&current, a) {
+        Some(a) => match files.current.verified(a) {
             Ok(list) => {
                 return Base {
                     list,
@@ -835,7 +975,7 @@ pub fn pick_base(home: &Path, anchor: Option<&WhitelistAnchor>, rules: &ChainRul
                     discarded: None,
                 };
             }
-            Err(e) => match read_verified(&home.join(NEXT_FILE), a) {
+            Err(e) => match files.next.verified(a) {
                 Ok(list) => {
                     return Base {
                         list,
@@ -850,22 +990,36 @@ pub fn pick_base(home: &Path, anchor: Option<&WhitelistAnchor>, rules: &ChainRul
     };
     let mut list = Whitelist::empty(rules);
     list.generation = anchor.map_or(0, |a| a.generation);
-    let discarded = match store::read_wallet_bytes(&current) {
-        Err(e) if e.code == ErrorCode::WalletNotFound && anchor.is_none() => None,
-        read => Some(Discarded {
-            reason: why,
-            entries: read
-                .ok()
-                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                .and_then(|v| v.get("entries").cloned())
-                .unwrap_or(Value::Null),
-        }),
-    };
+    let discarded = (anchor.is_some() || files.current.exists()).then(|| Discarded {
+        reason: why,
+        entries: files.current.raw_entries(),
+    });
     Base {
         list,
         source: BaseSource::Empty,
         discarded,
     }
+}
+
+/// The base an edit (not a reset) builds on: [`pick_base_from`], but with a sealed anchor and
+/// neither file verifying, `VALIDATION_ERROR` instead of an empty list. Rebuilding from empty
+/// would drop every entry and loosen every stricter fee cap on the strength of whoever damaged
+/// the file; starting over is `reset`, a choice the human makes by name.
+pub fn base_for_edit(
+    files: &ListFiles,
+    anchor: Option<&WhitelistAnchor>,
+    rules: &ChainRules,
+) -> Result<Base> {
+    let base = pick_base_from(files, anchor, rules);
+    if anchor.is_some() && base.source == BaseSource::Empty {
+        let reason = base.discarded.map(|d| d.reason).unwrap_or_default();
+        return Err(WalletError::validation(format!(
+            "refusing to edit the whitelist: {reason}. An edit builds only on the list wallet.json \
+             seals, so nothing changed; check it with `zwallet whitelist list --verify`. \
+             `zwallet whitelist reset` starts over with a new key and an empty list"
+        )));
+    }
+    Ok(base)
 }
 
 /// Points in an edit where a test can stop it as a crash would: after each write.
@@ -889,7 +1043,9 @@ pub struct Edited {
     /// The sealed generation before the edit (`None`: there was no whitelist).
     pub previous_generation: Option<u64>,
     pub base: BaseSource,
-    /// The unverified list the edit refused to start from, if any.
+    /// The unverified list that was not built on: what a reset dropped, or a `whitelist.json`
+    /// found before there was any whitelist. An edit with an anchor never has one (it refuses
+    /// instead, [`base_for_edit`]).
     pub discarded: Option<Discarded>,
     /// A new `whitelist.key` was made (the first edit, or [`reset`]).
     pub key_created: bool,
@@ -964,13 +1120,45 @@ pub fn edit_with_hook(
     mutate: impl FnOnce(&mut Whitelist) -> Result<()>,
     hook: &dyn Fn(EditStage<'_>) -> Result<()>,
 ) -> Result<Edited> {
-    transact(home, password, rules, Some(Box::new(mutate)), hook)
+    transact(home, password, rules, Some(Box::new(mutate)), None, hook)
+}
+
+/// [`edit`] bound to what the human was `shown` ([`ListFiles::fingerprint`] of the files the
+/// summary was made from): the files are read once under `w.lock`, and if they are not those
+/// bytes the edit refuses before writing anything. So the change lands on exactly the list
+/// shown, or nothing changes.
+pub fn edit_as_shown(
+    home: &Path,
+    password: &str,
+    rules: &ChainRules,
+    shown: &Fingerprint,
+    mutate: impl FnOnce(&mut Whitelist) -> Result<()>,
+) -> Result<Edited> {
+    transact(
+        home,
+        password,
+        rules,
+        Some(Box::new(mutate)),
+        Some(shown),
+        &|_| Ok(()),
+    )
 }
 
 /// `whitelist reset`: a new key and an empty list with the default policy, at the next
-/// generation, for when `whitelist.key` is lost or damaged. The old list stops verifying.
+/// generation, for when `whitelist.key` is lost or damaged or the list no longer verifies. The
+/// old list stops verifying.
 pub fn reset(home: &Path, password: &str, rules: &ChainRules) -> Result<Edited> {
     reset_with_hook(home, password, rules, &|_| Ok(()))
+}
+
+/// [`reset`] bound to what the human was `shown`, as [`edit_as_shown`].
+pub fn reset_as_shown(
+    home: &Path,
+    password: &str,
+    rules: &ChainRules,
+    shown: &Fingerprint,
+) -> Result<Edited> {
+    transact(home, password, rules, None, Some(shown), &|_| Ok(()))
 }
 
 /// [`reset`] with the hook of [`edit_with_hook`].
@@ -980,17 +1168,18 @@ pub fn reset_with_hook(
     rules: &ChainRules,
     hook: &dyn Fn(EditStage<'_>) -> Result<()>,
 ) -> Result<Edited> {
-    transact(home, password, rules, None, hook)
+    transact(home, password, rules, None, None, hook)
 }
 
 type Mutation<'a> = Box<dyn FnOnce(&mut Whitelist) -> Result<()> + 'a>;
 
-/// One edit; `mutate: None` is a reset.
+/// One edit; `mutate: None` is a reset; `shown: Some` binds it to those files.
 fn transact(
     home: &Path,
     password: &str,
     rules: &ChainRules,
     mutate: Option<Mutation<'_>>,
+    shown: Option<&Fingerprint>,
     hook: &dyn Fn(EditStage<'_>) -> Result<()>,
 ) -> Result<Edited> {
     store::read_wallet_file(home)?;
@@ -999,12 +1188,20 @@ fn transact(
     let anchor = opened.unsealed().whitelist_anchor()?;
     let previous_generation = anchor.map(|a| a.generation);
 
-    // Everything that can fail on its own happens before the first write.
+    // Everything that can fail on its own happens before the first write. The list files are
+    // read once, here: every decision below is made from these bytes.
+    let files = ListFiles::read(home);
+    if let Some(shown) = shown {
+        shown.check(&files.fingerprint())?;
+    }
     let (key, key_created) = match (&mutate, &anchor) {
         (Some(_), Some(a)) => (load_key(home, password, a)?, false),
         _ => (WhitelistKey::generate()?, true),
     };
-    let picked = pick_base(home, anchor.as_ref(), rules);
+    let picked = match &mutate {
+        Some(_) => base_for_edit(&files, anchor.as_ref(), rules)?,
+        None => pick_base_from(&files, anchor.as_ref(), rules),
+    };
     // The sealed list may still sit in `whitelist.next.json` (an edit that re-sealed and died
     // before its rename, or an agent's copy). Staging this edit overwrites that file, so it is
     // made `whitelist.json` first, by reset too; otherwise a crash after staging would leave no
@@ -1018,7 +1215,8 @@ fn transact(
         Base {
             list,
             source: BaseSource::Empty,
-            discarded: None,
+            // What the reset drops without it having verified, for the human to look at.
+            discarded: picked.discarded,
         }
     };
     let mut list = base.list.clone();
@@ -1034,14 +1232,15 @@ fn transact(
     let new_anchor = key.anchor_for(&signed);
     let policy = new_anchor.to_policy(&opened.unsealed().policy)?;
 
-    if let (true, Some(sealed)) = (promote, &anchor) {
+    if promote {
         lock.rename_file(NEXT_FILE, WHITELIST_FILE)?;
-        read_verified(&home.join(WHITELIST_FILE), sealed).map_err(|e| {
-            WalletError::validation(format!(
-                "the staged whitelist changed while it was promoted; nothing else was written: {}",
-                e.message
-            ))
-        })?;
+        // The file now in place must be the staged bytes that verified, not a re-read of
+        // something new.
+        if ListFileRead::read(&home.join(WHITELIST_FILE)).seen() != files.next.seen() {
+            return Err(WalletError::validation(
+                "the staged whitelist changed while it was promoted; nothing else was written",
+            ));
+        }
     }
     if key_created {
         // The KDF parameters that opened wallet.json, never a re-read.
@@ -1594,32 +1793,31 @@ mod tests {
         let err = load_verified(home, &anchor).unwrap_err();
         assert!(err.message.contains("does not verify"), "{}", err.message);
 
-        // The next password-backed edit refuses to start from it, shows it, starts empty.
+        // It is never a base: pick_base shows it, an edit refuses and writes nothing.
         let base = pick_base(home, Some(&anchor), &RULES);
         assert_eq!(base.source, BaseSource::Empty);
         assert_eq!(base.list.entries, vec![]);
         let shown = base.discarded.unwrap();
         assert!(shown.reason.contains("does not verify"), "{}", shown.reason);
         assert_eq!(shown.entries, v["entries"]);
-        let edited = edit(
+        let before = snapshot(home);
+        let err = edit(
             home,
             PW,
             &RULES,
             add(Entry::new_address("bob", BOB, &["base"])),
         )
-        .unwrap();
-        assert_eq!(edited.base, BaseSource::Empty);
-        assert_eq!(edited.discarded.unwrap().entries, v["entries"]);
-        assert_eq!(
-            nicknames(&edited.list),
-            ["bob"],
-            "neither alice nor mallory was signed"
-        );
-        assert_eq!(edited.list.generation, 2);
-        let list = load_verified(home, &sealed(home).unwrap()).unwrap();
-        assert_eq!(nicknames(&list), ["bob"]);
+        .unwrap_err();
+        for want in [
+            "does not verify",
+            "zwallet whitelist list --verify",
+            "zwallet whitelist reset",
+        ] {
+            assert!(err.message.contains(want), "{want}: {}", err.message);
+        }
+        assert_eq!(snapshot(home), before, "a refused edit wrote something");
 
-        // A deleted list: the edit starts empty and says why.
+        // A deleted list: the same refusal, saying why.
         fs::remove_file(home.join(WHITELIST_FILE)).unwrap();
         let shown = pick_base(home, sealed(home).as_ref(), &RULES)
             .discarded
@@ -1630,6 +1828,46 @@ mod tests {
             shown.reason
         );
         assert_eq!(shown.entries, Value::Null);
+        let before = snapshot(home);
+        let err = edit(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("bob", BOB, &["base"])),
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("there is no whitelist.json"),
+            "{}",
+            err.message
+        );
+        assert_eq!(snapshot(home), before);
+
+        // Only reset starts over; it reports what it dropped without it having verified.
+        fs::write(home.join(WHITELIST_FILE), serde_json::to_vec(&v).unwrap()).unwrap();
+        let done = reset(home, PW, &RULES).unwrap();
+        assert_eq!(done.list.generation, 2);
+        assert_eq!(done.list.entries, vec![]);
+        let dropped = done.discarded.unwrap();
+        assert!(
+            dropped.reason.contains("does not verify"),
+            "{}",
+            dropped.reason
+        );
+        assert_eq!(dropped.entries, v["entries"]);
+        let edited = edit(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("bob", BOB, &["base"])),
+        )
+        .unwrap();
+        assert_eq!((edited.base, edited.discarded), (BaseSource::Current, None));
+        assert_eq!(
+            nicknames(&edited.list),
+            ["bob"],
+            "neither alice nor mallory was signed"
+        );
 
         // A list planted before there is any whitelist is never signed either.
         let tmp = wallet();
@@ -1649,6 +1887,74 @@ mod tests {
                 .unwrap()
                 .reason
                 .contains("no whitelist key yet")
+        );
+    }
+
+    #[test]
+    fn an_edit_bound_to_what_was_shown_refuses_any_other_bytes() {
+        let tmp = wallet();
+        let home = tmp.path();
+        // Before any whitelist: both files absent.
+        let shown = ListFiles::read(home).fingerprint();
+        edit_as_shown(home, PW, &RULES, &shown, add(alice())).unwrap();
+        let path = home.join(WHITELIST_FILE);
+        let genuine = fs::read(&path).unwrap();
+        let shown = ListFiles::read(home).fingerprint();
+
+        // The same signed content in other bytes, a staged file appearing, or the list going
+        // missing: refused before anything is written, naming the file.
+        let compact =
+            serde_json::to_vec(&serde_json::from_slice::<Value>(&genuine).unwrap()).unwrap();
+        let cases: [(&str, &dyn Fn()); 3] = [
+            (WHITELIST_FILE, &|| fs::write(&path, &compact).unwrap()),
+            (NEXT_FILE, &|| {
+                fs::write(home.join(NEXT_FILE), &genuine).unwrap()
+            }),
+            (WHITELIST_FILE, &|| fs::remove_file(&path).unwrap()),
+        ];
+        for (file, change) in cases {
+            change();
+            let before = snapshot(home);
+            for result in [
+                edit_as_shown(
+                    home,
+                    PW,
+                    &RULES,
+                    &shown,
+                    add(Entry::new_address("bob", BOB, &["base"])),
+                ),
+                reset_as_shown(home, PW, &RULES, &shown),
+            ] {
+                let err = result.unwrap_err();
+                assert_eq!(
+                    err.message,
+                    format!(
+                        "{file} changed after it was shown; nothing changed. Run the command \
+                         again to see the list as it is now"
+                    )
+                );
+            }
+            assert_eq!(snapshot(home), before, "{file}: something was written");
+            let _ = fs::remove_file(home.join(NEXT_FILE));
+            fs::write(&path, &genuine).unwrap();
+        }
+        // As shown: the edit goes through, and the reset after it.
+        let edited = edit_as_shown(
+            home,
+            PW,
+            &RULES,
+            &shown,
+            add(Entry::new_address("bob", BOB, &["base"])),
+        )
+        .unwrap();
+        assert_eq!(nicknames(&edited.list), ["alice", "bob"]);
+        let shown = ListFiles::read(home).fingerprint();
+        assert_eq!(
+            reset_as_shown(home, PW, &RULES, &shown)
+                .unwrap()
+                .list
+                .generation,
+            3
         );
     }
 
@@ -2124,12 +2430,16 @@ mod tests {
         let anchor = sealed(home).unwrap();
         assert_ne!(anchor.public_key, old_anchor.public_key);
         load_verified(home, &anchor).unwrap();
-        // The old list no longer verifies, even at a matching generation.
+        // The old list no longer verifies, even at a matching generation, and no edit builds on
+        // it.
+        let reset_list = fs::read(home.join(WHITELIST_FILE)).unwrap();
         fs::write(home.join(WHITELIST_FILE), &old_list).unwrap();
         assert!(load_verified(home, &anchor).is_err());
-        // Edits work again with the new key.
+        edit(home, PW, &RULES, add(alice())).unwrap_err();
+        // Edits work again with the new key, on the list the reset made.
+        fs::write(home.join(WHITELIST_FILE), &reset_list).unwrap();
         let edited = edit(home, PW, &RULES, add(alice())).unwrap();
-        assert_eq!(edited.base, BaseSource::Empty);
+        assert_eq!(edited.base, BaseSource::Current);
         assert_eq!(edited.list.generation, 3);
 
         // A reset that dies after writing its key: the old list still verifies; an edit asks for
