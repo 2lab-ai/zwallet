@@ -195,11 +195,11 @@ impl Home {
         v["daemonPid"].as_i64().map(|p| p as i32)
     }
 
-    /// Waits (bounded) until no daemon answers for this home.
+    /// Waits (bounded) until `status` reports this home locked: no daemon process for it.
     pub fn wait_locked(&self, limit: Duration) -> bool {
         let start = Instant::now();
         while start.elapsed() < limit {
-            if self.daemon_pid().is_none() {
+            if self.run(&["status", "--json"]).json()["locked"] == true {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(100));

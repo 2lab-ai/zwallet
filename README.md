@@ -309,7 +309,8 @@ things a same-user process can still do, and what to do about them:
 - **Attach a debugger on macOS**: a same-user debugger (where the system allows one) can read a
   zwallet process's memory.
 - **Linux with `kernel.yama.ptrace_scope` 0** (or without Yama): any same-user process can
-  attach to a new daemon before it turns non-dumpable and stay attached. `unlock` refuses this by
+  attach to a new daemon before it turns non-dumpable and stay attached (or copy its descriptors
+  with `pidfd_getfd`, which takes the same permission). `unlock` refuses this by
   default (`--allow-ptrace-scope-0` accepts it). With `ptrace_scope` 1, a process that is an
   ancestor of `zwallet unlock` (e.g. the shell an agent started, if the human types `unlock`
   into it) still can: run `unlock` from a terminal the agent did not start.
