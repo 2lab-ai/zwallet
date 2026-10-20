@@ -3,12 +3,10 @@
 Status: **in-progress**, 2026-10-21. Target = [`ssot.md`](ssot.md), [`../01-spec.md`](../01-spec.md)
 acceptance A1–A12. This file holds only open work.
 
-## Round 5 — plan (WU1, WU2, WU3, WU1b closed: see [`loop.done.md`](loop.done.md))
+## Round 6 — plan (WU1–WU5 and WU1b closed: see [`loop.done.md`](loop.done.md))
 
 | WU | Repo · branch · worktree | Scope | Owner | State |
 |---|---|---|---|---|
-| WU4 | xbrew · branch per repo convention | `recipes/zwallet.toml` (macos formula + arch pinned binaries from the v0.1.0 release) | after v0.1.0 release | planned |
-| WU5 | all | tag `v0.1.0` (the repo is already public), release green, render the stable formula by hand, `brew install 2lab-ai/tap/zwallet` + `brew test`, a preview at the same version, `xbrew install zwallet` (A10, A11). The preview channel is already live (see loop.done.md R3) | dispatcher | planned |
 | WU6 | live | user runs create and unlock on fable-m5max, then the agent reads address and balance (A12) | user TTY + dispatcher | planned |
 
 ## Build facts
@@ -26,12 +24,11 @@ acceptance A1–A12. This file holds only open work.
 
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
-| G2 | A10 | preview channel live; stable needs the v0.1.0 release and its formula | WU5 | 🟡 |
-| G3 | A11 | no xbrew recipe | WU4, WU5 | 🔴 |
+| G3 | A11 | `xbrew install zwallet` measured on the xbrew preview build (macOS formula, Arch pinned binary); stable xbrew users need an xbrew release, pending the owner (it also ships xbrew PRs #1–#3, on preview since 2026-08-26) | xbrew release | 🚪 |
 | G4 | A12 | no real wallet; needs the user's password at a TTY | WU6 | 🚪 |
 
 ## Next
 
-WU5: tag `v0.1.0` (the user's release request, 2026-10-20), release green, stable formula,
-`brew install` + `brew test`, then a preview at the same version. Then WU4 (xbrew) and WU6 (the
-user creates the wallet at a TTY, `backup`, first `whitelist add`; the agent reports the address).
+WU6: the user creates the wallet at a TTY (`zwallet create <name> --unlock <dur>`), runs `zwallet
+backup`, adds the first payee (`zwallet whitelist add`); the agent then reads the address and
+balance (A12). Funding comes after that. Then v0.2 (TUI, [`../03-tui.md`](../03-tui.md)).
