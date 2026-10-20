@@ -59,8 +59,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   It starts no daemon unless `--unlock` is given. Concurrent creates get distinct indices.
 - **Address trust** (`verified`): the addresses in `wallet.json` are a plain cache that anything
   running as the same user can edit, and that user can also swap `wallet.json` for its own wallet
-  and run a genuine `zwallet daemon` over it, or put a listener on `d.sock`. So only an address
-  this process derived from the seed after the human's password is `verified: true`:
+  and run a genuine `zwallet daemon` over it, or put a listener on `d.sock`. So `verified: true`
+  only for an address derived from the seed after the human's password, by this process or by
+  the daemon child it just started:
   - `address --verify` and `list --verify` (password at the terminal prompt, or
     `--password-stdin`): decrypt `wallet.json` here, derive, and compare with the cache. A
     mismatch is `VALIDATION_ERROR`; a wallet the password does not open is `WRONG_PASSWORD`.
@@ -69,11 +70,12 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - `create`: the first key, derived from the seed generated in the same process, and a later
     key when the password was asked for (see above).
 
-  Everything else (`address`, `addresses`, `list`, `status` and `change` without `--verify`, an
-  agent's `create`, and `balance`) shows the cache with `verified: false`, and in human output the
-  line ``not verified: run `zwallet address --verify` before funding``. While a daemon answers,
-  those commands still compare the cache with its derivation and fail with `VALIDATION_ERROR` on
-  a mismatch, but a match only means nothing visibly tampered: it is never `verified`. Take a
+  Everything else is `verified: false`: `address` and `list` without `--verify`, `addresses`,
+  `status`, `change`, an agent's `create` (derived by whatever daemon answers), and `balance` (the
+  cache). All but `balance` add the line ``not verified: run `zwallet address --verify` before
+  funding`` in human output. While a daemon answers, `address`, `addresses`, `list`, `status` and
+  `change` still compare the cache with its derivation and fail with `VALIDATION_ERROR` on a
+  mismatch, but a match only means nothing visibly tampered: it is never `verified`. Take a
   funding address from `address --verify` (or `unlock`) on your own terminal.
 - **`call` / `invoke` signatures** are `name(argTypes)(returnTypes)`, e.g.
   `balanceOf(address)(uint256)` or `getReserves()(uint112,uint112,uint32)`. Return types are
@@ -101,9 +103,12 @@ Commands that act on a key take `--key <name>` (default: the active key).
   decoded from the bytes it signed, and an empty wallet can be dry-run. Live: `{ ..., txHash,
   explorerUrl, broadcastWarning?, rpcTxHash? }` plus `{ status, blockNumber, gasUsed }` with
   `--wait` (`status: "pending"` if not mined within 5 minutes; a receipt problem never turns a
-  broadcast into an error). Sends from one key on one chain take turns: each holds
-  `nonce-<chainId>-<address>.lock` in the wallet home from reading the nonce until the node has
-  answered the broadcast (waiting up to 120 s), so concurrent sends sign consecutive nonces.
+  broadcast into an error). Sends from one key on one chain never overlap: each holds
+  `nonce-<chainId>-<address>.lock` in the wallet home from before reading the nonce until the node
+  has answered the broadcast. A send that finds the lock held does not wait (after waiting, a
+  second attempt at the same payment would sign the next nonce and land too): it fails at once
+  with `VALIDATION_ERROR`, before any RPC call, so nothing is signed or broadcast (see **Error
+  codes**). A dry-run takes no lock.
 - **`signerDecoded.action`** names the ABI method the calldata calls, never an asset, because
   ERC-20 and ERC-721 share these selectors: `{ kind: "native-transfer", to, value }`,
   `{ kind: "transfer-call", token, to, amount, assetType: "unverified" }`,
@@ -122,9 +127,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   adds `replacesTx`.
 - **`--max-fee-gwei <gwei>`**: fees come from the RPC node, so zwallet refuses a tip above 2x and a
   price per gas above 6x of max(base fee, `eth_gasPrice`, 1 gwei) with `VALIDATION_ERROR` before
-  signing. On a legacy chain (no base fee, e.g. BSC) the price is `eth_gasPrice` itself, so the
-  ceiling there is 6x of max(base fee, 1 gwei). `--max-fee-gwei` replaces that ceiling with one
-  explicit price per gas (higher or lower); it is checked after the replacement bump.
+  signing. On a legacy chain (no base fee, e.g. BSC) the price is `eth_gasPrice` itself, so it is
+  left out of its own ceiling: `gasPrice` may be at most 6x of max(base fee, 1 gwei), i.e. 6 gwei.
+  `--max-fee-gwei` replaces these ceilings with one explicit price per gas (higher or lower); it
+  is checked after the replacement bump.
 - **`--force`** (`transfer`) allows a recipient that is almost always a mistake: the zero address,
   or the token contract itself. Without it they are `INVALID_ADDRESS`.
 - **Amounts** are decimal strings converted exactly (no floats); more fractional digits than the
@@ -153,6 +159,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - A send error or another hash for a transaction the node does report by its own hash (e.g.
     "already known", or "nonce too low" for this very transaction) is a success with
     `broadcastWarning` (and `rpcTxHash` if the node answered another hash).
+  - `VALIDATION_ERROR` "another send from this key on <chain> is in progress (lock <path>)":
+    nothing was signed or broadcast. If the running send is an earlier attempt at this same
+    payment, wait for it to finish and look up its result before sending again; for a different
+    payment, retry after it finishes.
 
 ## Chains
 
@@ -202,42 +212,49 @@ than 8 characters only where it stands as a whole word.
   1 MiB, so a FIFO or link planted in its place fails fast instead of hanging a reader.
 - **Keys**: named subkeys of the master by index, in creation order, never reused. EVM uses
   `m/44'/60'/0'/0/<index>` (the MetaMask/Trust account order), so the phrase imports into standard
-  wallets with the same accounts. One address per key on every EVM chain.
+  wallets with the same accounts. One address per key on every EVM chain. Indices stay below
+  2^31, where BIP32's hardened range starts (`VALIDATION_ERROR` at or above it).
 - **Daemon**: `unlock` pins the zwallet binary before it asks for the password (on Linux the
   running image, `/proc/self/exe`; on macOS the file's identity, checked again right before the
   start, so a binary swapped in meanwhile is refused). It then starts that binary as its own child
   `zwallet daemon --home <canonical home>` (own session, empty environment, no inherited
-  descriptor but its three pipes). Over those pipes:
+  descriptor but its stdin and stdout pipes; stderr is `/dev/null`). Over those pipes:
   1. the child disables core dumps (on Linux it becomes non-dumpable) and only then asks for
      input;
   2. `unlock` writes the TTL and password into the child's stdin pipe. The password never goes
      over the socket, argv or env;
   3. the child decrypts the wallet and says so. A wrong password ends here, and a session that was
      already running is left untouched;
-  4. only now does `unlock` stop the daemons already serving this home (see **`lock`**);
-  5. the child takes an exclusive lock on `d.lock` for its whole life, replaces whatever is at
-     `$ZWALLET_HOME/d.sock`, binds it (0600; peer uid checked on both ends), and reports
-     `{ expiresAt, active, address }`.
+  4. only now does `unlock` stop the daemons already serving this home (see **`lock`**), then
+     tells the child to go on;
+  5. the child takes an exclusive lock on `d.lock` for its whole life (waiting up to 5 s),
+     replaces whatever is at `$ZWALLET_HOME/d.sock`, binds it (0600; peer uid checked on both
+     ends), and reports `{ locked, expiresAt, active, index, address, pid }`.
 
   `unlock` reports success only after that line, and kills the child on any failure or timeout.
-  Concurrent unlocks take turns on `u.lock`. Something else squatting on `d.sock` or `d.lock`
-  makes `unlock` fail visibly; it never receives the password.
+  Concurrent unlocks take turns on `u.lock`, held from after the password prompt until the new
+  daemon is ready or has failed (another `unlock` waits up to 30 s for it). A listener squatting
+  on `d.sock` gets only requests that carry nothing and is replaced; a process holding `d.lock`
+  makes `unlock` fail visibly. Neither ever receives the password.
 - **`lock`** asks whatever answers on `d.sock` to lock (the request carries nothing), then finds
-  every process of this user whose argv is `zwallet daemon --home <this home>` in the OS process
-  table (macOS `KERN_PROCARGS2`, Linux `/proc/<pid>/cmdline`), sends it SIGTERM, and SIGKILL after
-  2 s. It reports `locked: true` only when none is left; otherwise it fails naming the pids. File
-  names (`d.sock`, `d.lock`) never decide which daemons exist, since any same-user process can
-  rename or replace them.
-- **Daemon duties**: the daemon keeps only the
-  master seed in memory, and does nothing but derive addresses and sign; it
-  makes no network request. For a transaction it receives only the unsigned signing payload bytes,
-  decodes them itself (type, chain id, recipient, value, and ERC-20 `transfer` / `approve` /
-  `transferFrom` from the calldata), refuses anything zwallet does not produce (other tx types,
-  access lists, contract creation, non-canonical encodings), and signs exactly the bytes it decoded.
-  It never trusts intent fields from the CLI, which is the agent-controlled side. On `lock`, at expiry (wall clock), or on SIGTERM it wipes the seed and
-  exits. A reboot or a dead daemon means locked. Everything else (RPC, ABI, tx building, broadcast)
-  runs in the one-shot CLI process, which checks every signature it gets back by recovering the
-  signer.
+  every process of this user whose arguments are `daemon --home <this home>` in the OS process
+  table (macOS `KERN_PROCARGS2`, Linux `/proc/<pid>/cmdline`; the home matched by path or by
+  inode), sends it SIGTERM (with SIGCONT, so a stopped daemon still wipes its seed), and SIGKILL
+  after 2 s. It reports `locked: true` only when none is left; otherwise it fails naming the pids.
+  `unlock` stops old daemons the same way. File names (`d.sock`, `d.lock`) never decide which
+  daemons exist, since any same-user process can rename or replace them.
+- **Daemon duties**: the daemon keeps only the master seed in memory, and does nothing but derive
+  addresses and sign; it makes no network request. For a transaction it receives only the
+  unsigned signing payload bytes and decodes them itself: type, chain id, recipient, value, and
+  the ABI method the calldata calls (`transfer-call` / `approve-call` / `transfer-from-call`, each
+  `assetType: "unverified"`, else `contract-call`; see **`signerDecoded.action`**). It refuses
+  anything zwallet does not produce (other tx types, access lists, contract creation,
+  non-canonical encodings, calldata for those three methods that is not their canonical ABI
+  encoding or that also sends native value) and signs exactly the bytes it decoded. It never
+  trusts intent fields from the CLI, which is the agent-controlled side. On `lock`, at expiry
+  (wall clock), or on SIGTERM it wipes the seed and exits. A reboot or a dead daemon means locked.
+  Everything else (RPC, ABI, tx building, broadcast) runs in the one-shot CLI process, which
+  checks every signature it gets back by recovering the signer.
 - **Daemon lifetime**: each connection is served in its own task with a 10 s I/O budget, so a
   silent client never delays expiry. Every second and on every request (including `status`) the
   daemon also checks that `wallet.json`'s ciphertext is still the one it decrypted and that
