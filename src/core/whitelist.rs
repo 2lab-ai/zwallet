@@ -1305,9 +1305,9 @@ pub fn edit_as_shown(
 
 /// `whitelist reset`: a new key and an empty list with the default policy (every fee cap back to
 /// the built-in default, no payee and no contract), at the next generation, for when
-/// `whitelist.key` is lost or damaged or the list cannot be recovered. The old list stops
-/// verifying. This binds nothing to what a human saw (tests and seeding); the CLI uses
-/// [`reset_as_shown`].
+/// `whitelist.key` is lost or damaged, or the list does not verify and the current wallet.json is
+/// in place (or there is no copy of it). The old list stops verifying. This binds nothing to what
+/// a human saw (tests and seeding); the CLI uses [`reset_as_shown`].
 pub fn reset(home: &Path, password: &str, rules: &ChainRules) -> Result<Edited> {
     reset_with_hook(home, password, rules, &|_| Ok(()))
 }
@@ -1534,14 +1534,14 @@ mod tests {
         list.entries.iter().map(|e| e.nickname.as_str()).collect()
     }
 
-    /// Every file in the home but the writer lock, with its bytes.
-    /// Advice with the one recovery and no suggestion to restore an older whitelist.json.
+    /// Advice with the one recovery, and nothing that suggests restoring an older list.
     fn assert_recovery_only(text: &str) {
         assert!(text.contains(&recovery()), "{text}");
         assert!(!text.contains(&["put", "back"].join(" ")), "{text}");
         assert!(!text.contains(&["genuine", "copy"].join(" ")), "{text}");
     }
 
+    /// Every file in the home but the writer lock, with its bytes.
     fn snapshot(home: &Path) -> BTreeMap<OsString, Vec<u8>> {
         fs::read_dir(home)
             .unwrap()
@@ -2788,15 +2788,36 @@ mod tests {
 
     #[test]
     fn r8_zwallet_never_suggests_restoring_an_older_whitelist_json() {
-        // A copy of whitelist.json that verifies against the seal is the older list whenever the
-        // seal was rolled back, and zwallet keeps nothing outside the home to tell: no text of
-        // its own (code, comments, tests, the user docs) may suggest restoring one, under any
-        // condition. The phrases are built here so this test does not find itself.
+        // A copy of the list that verifies against the seal is the older list whenever the seal
+        // was rolled back, and zwallet keeps nothing outside the home to tell: no text of its own
+        // (code, comments, tests, the user docs) may suggest restoring one, under any condition,
+        // nor keep the vocabulary of the conditions that were tried (rounds 4 to 7). The phrases
+        // are built here so this test does not find itself.
+        let words = |w: &[&str]| w.join(" ");
         let needles = [
-            ["put", "back"].join(" "),
-            ["put", "it", "back"].join(" "),
-            ["genuine", "copy"].join(" "),
+            words(&["put", "back"]),
+            words(&["put", "it", "back"]),
+            words(&["genuine", "copy"]),
+            words(&["copy", "of", "whitelist.json"]),
+            words(&["restore", "an", "older", "whitelist"]),
+            words(&["restore", "whitelist.json"]),
+            words(&["highest", "generation"]),
+            words(&["seen", "since"]),
+            words(&["pins", "its", "digest"]),
         ];
+        // The one label that names a copy without suggesting to restore it: a staged file left
+        // after a change, shown before the password.
+        let allowed = [words(&[
+            "a",
+            "copy",
+            "of",
+            "whitelist.json",
+            "(e.g.",
+            "left",
+            "after",
+            "a",
+            "change)",
+        ])];
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = vec![
             root.join("README.md"),
@@ -2817,12 +2838,29 @@ mod tests {
         assert!(files.len() > 10, "{files:?}");
         let mut found = Vec::new();
         for file in &files {
-            // Words wrapped across lines (and Rust's `\` continuations) are joined first.
-            let text = fs::read_to_string(file)
-                .unwrap()
+            let mut text = fs::read_to_string(file).unwrap();
+            // The spec's history of review rounds records the removed wording; it is no advice.
+            if file.ends_with(".prd/04-whitelist.md") {
+                let from = text
+                    .find("\n## As built")
+                    .expect("04 has its As built section");
+                let to = text[from + 1..]
+                    .find("\n## ")
+                    .map_or(text.len(), |n| from + 1 + n);
+                text.replace_range(from..to, "\n");
+            }
+            // Words wrapped across lines (and Rust's `\` continuations), hyphenated forms and
+            // markup are normalised first: hyphens and whitespace to one space, no backticks or
+            // asterisks, lower case.
+            let text = text
                 .replace("\\\n", " ")
+                .replace('-', " ")
+                .replace(['`', '*'], "")
                 .to_lowercase();
-            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            for ok in &allowed {
+                text = text.replace(ok.as_str(), " ");
+            }
             for needle in &needles {
                 for (at, _) in text.match_indices(needle.as_str()) {
                     let from = text[..at]

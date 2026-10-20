@@ -919,7 +919,7 @@ fn edit_output(
         out["discarded"] = json!({ "reason": d.reason, "entries": d.entries });
     }
     // A reset also drops a whitelist.next.json that was not the sealed list (an unfinished or
-    // planted edit; not a copy of whitelist.json): its unverified entries as found, `null` if it
+    // planted edit; not whitelist.json's own bytes): its unverified entries as found, `null` if it
     // cannot be read or has none.
     if matches!(change, Change::Reset)
         && files.next.exists()
