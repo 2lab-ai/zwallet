@@ -16,24 +16,29 @@
 //! 5. take an exclusive flock on `<home>/d.lock`, held for the daemon's whole life,
 //! 6. replace whatever is at `d.sock` and bind it (a squatter there is a visible failure, never a
 //!    leak: no secret ever goes over the socket),
-//! 7. report `{ expiresAt, active, index, address, pid }` on the channel, then serve. If that
-//!    write fails (the unlocking CLI is gone), it wipes the seed and exits instead.
+//! 7. report `{ expiresAt, active, index, address, pid, whitelist }` on the channel, then serve.
+//!    If that write fails (the unlocking CLI is gone), it wipes the seed and exits instead.
 //!
-//! It keeps only the master seed in memory, derives keys and signs on request, and nothing else:
-//! it makes no network request and writes no file. Each connection is served in its own task
-//! with I/O timeouts, while the main loop keeps the clock: on `lock`, on expiry (wall clock, so
-//! system sleep counts), on SIGTERM/SIGINT, or as soon as wallet.json's ciphertext changes or
-//! `d.sock` is no longer its socket (checked every tick and on every request), it drops the seed
-//! (zeroized) and exits, even while connections are open. A daemon process exists only while the
-//! wallet is unlocked.
+//! It keeps only the master seed (and the whitelist anchor sealed with it) in memory, derives keys
+//! and signs on request, and nothing else: it makes no network request and writes no file. Every
+//! signature first passes the signing policy (`chains::evm::policy`): on each signing request the
+//! daemon reads `whitelist.json` (or a staged `whitelist.next.json`) through the safe reader and
+//! trusts it only if it verifies against that anchor (`.prd/04-whitelist.md`). Each connection is
+//! served in its own task with I/O timeouts, while the main loop keeps the clock: on `lock`, on
+//! expiry (wall clock, so system sleep counts), on SIGTERM/SIGINT, or as soon as wallet.json's
+//! ciphertext changes or `d.sock` is no longer its socket (checked every tick and on every
+//! request), it drops the seed (zeroized) and exits, even while connections are open. A daemon
+//! process exists only while the wallet is unlocked.
 
 use crate::chains;
+use crate::chains::evm::policy::{self, ListView};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::password::into_password;
 use crate::core::protocol::{self, MAX_MESSAGE, Request, Response};
 use crate::core::seed::Seed;
-use crate::core::store::{self, FILE_MODE};
+use crate::core::store::{self, FILE_MODE, WhitelistAnchor};
 use crate::core::time::{rfc3339_utc, unix_secs};
+use crate::core::whitelist::{self, Whitelist};
 use alloy::hex;
 use serde_json::{Value, json};
 use std::fs;
@@ -63,6 +68,62 @@ struct Session {
     expires_at: SystemTime,
     /// Ciphertext of the wallet.json this seed came from.
     sealed: String,
+    /// The whitelist anchor sealed with the seed, or why there is none to trust (no whitelist
+    /// yet, or a malformed anchor: the session still serves, and signs only self-transfers).
+    anchor: std::result::Result<WhitelistAnchor, String>,
+}
+
+impl Session {
+    /// The list signatures are checked against right now: read on every call, never cached.
+    fn list(&self, home: &Path) -> std::result::Result<Whitelist, String> {
+        load_list(home, &self.anchor)
+    }
+}
+
+/// The sealed anchor as the session keeps it.
+fn session_anchor(unsealed: &store::Unsealed) -> std::result::Result<WhitelistAnchor, String> {
+    match unsealed.whitelist_anchor() {
+        Ok(Some(anchor)) => Ok(anchor),
+        Ok(None) => Err(policy::NO_WHITELIST.to_string()),
+        Err(e) => Err(e.message),
+    }
+}
+
+/// `whitelist.json`, else a staged `whitelist.next.json`, that verifies against `anchor`.
+fn load_list(
+    home: &Path,
+    anchor: &std::result::Result<WhitelistAnchor, String>,
+) -> std::result::Result<Whitelist, String> {
+    let anchor = anchor.as_ref().map_err(Clone::clone)?;
+    whitelist::load_verified(home, anchor).map_err(|e| e.message)
+}
+
+fn view(list: &std::result::Result<Whitelist, String>) -> ListView<'_> {
+    match list {
+        Ok(list) => ListView::Usable(list),
+        Err(reason) => ListView::Unusable(reason.clone()),
+    }
+}
+
+/// What `unlock` and `status` show of the list: `{ gen, verified, entries: [nicknames] }`, or
+/// `{ gen (the sealed one, if any), verified: false, entries: [], reason }`.
+fn list_summary(
+    anchor: &std::result::Result<WhitelistAnchor, String>,
+    list: &std::result::Result<Whitelist, String>,
+) -> Value {
+    match list {
+        Ok(list) => json!({
+            "gen": list.generation,
+            "verified": true,
+            "entries": list.entries.iter().map(|e| e.nickname.as_str()).collect::<Vec<_>>(),
+        }),
+        Err(reason) => json!({
+            "gen": anchor.as_ref().ok().map(|a| a.generation),
+            "verified": false,
+            "entries": [],
+            "reason": reason,
+        }),
+    }
 }
 
 /// What the main loop and the connection tasks share.
@@ -207,6 +268,7 @@ async fn start(home: &Path) -> Result<Started> {
     fs::set_permissions(&sock, fs::Permissions::from_mode(FILE_MODE))
         .map_err(fail("cannot restrict daemon socket"))?;
     let meta = fs::symlink_metadata(&sock).map_err(fail("cannot inspect daemon socket"))?;
+    let anchor = session_anchor(&unsealed);
     let ready = json!({
         "locked": false,
         "expiresAt": rfc3339_utc(unix_secs(expires_at)),
@@ -214,6 +276,7 @@ async fn start(home: &Path) -> Result<Started> {
         "index": key.index,
         "address": address,
         "pid": std::process::id(),
+        "whitelist": list_summary(&anchor, &load_list(home, &anchor)),
     });
     let shared = Arc::new(Shared {
         home: home.to_path_buf(),
@@ -223,6 +286,7 @@ async fn start(home: &Path) -> Result<Started> {
             seed: unsealed.seed,
             expires_at,
             sealed: file.crypto.ciphertext.clone(),
+            anchor,
         })),
         stop: Notify::new(),
     });
@@ -425,6 +489,7 @@ fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
             "locked": false,
             "expiresAt": rfc3339_utc(unix_secs(s.expires_at)),
             "pid": pid,
+            "whitelist": list_summary(&s.anchor, &s.list(&shared.home)),
         })),
         Request::Address { chain, index } => chains::find(chain).and_then(|chain| {
             let address = chain.family.keys().derive_address(&s.seed, *index)?;
@@ -437,13 +502,19 @@ fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
         } => chains::find(chain).and_then(|chain| {
             let message = hex::decode(message_hex)
                 .map_err(|_| WalletError::validation("message_hex is not hex"))?;
+            let list = s.list(&shared.home);
             chain
                 .family
                 .keys()
-                .sign_message(&s.seed, *index, chain, &message)
+                .sign_message(&s.seed, *index, chain, &message, &view(&list))
         }),
-        Request::SignTx { chain, index, tx } => chains::find(chain)
-            .and_then(|chain| chain.family.keys().sign_tx(&s.seed, *index, chain, tx)),
+        Request::SignTx { chain, index, tx } => chains::find(chain).and_then(|chain| {
+            let list = s.list(&shared.home);
+            chain
+                .family
+                .keys()
+                .sign_tx(&s.seed, *index, chain, tx, &view(&list))
+        }),
     };
     let resp = match result {
         Ok(v) => Response::ok(v),

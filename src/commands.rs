@@ -1023,6 +1023,8 @@ async fn status(home: &Path) -> Result<Out> {
     if let Some(d) = &serving {
         out["daemonPid"] = d["pid"].clone();
         out["expiresAt"] = d["expiresAt"].clone();
+        // The whitelist as the serving daemon verifies it right now.
+        out["whitelist"] = d["whitelist"].clone();
     }
     let mut shows_address = false;
     if let Some(file) = &file {
@@ -1121,6 +1123,9 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
         "daemonPid": session["pid"],
         // Derived by this process's own daemon child from the seed this password opened.
         "verified": true,
+        // The whitelist this session signs under, as its daemon verified it: the generation and
+        // the entries, so a rolled-back list is visible.
+        "whitelist": session["whitelist"],
     });
     if let Some(w) = session_index_warning(&file, &session) {
         out["warning"] = json!(w);

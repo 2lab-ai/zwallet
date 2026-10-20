@@ -3,8 +3,8 @@
 //! Trust boundary: the CLI (agent side) builds an [`UnsignedEvmTx`] and sends the daemon only its
 //! signing payload bytes. The daemon runs [`decode_unsigned`] on those bytes to get its own view
 //! of what the transaction does, including the ABI decoding of known calldata selectors, and then
-//! signs exactly that with [`sign_decoded`]. No intent field from the CLI is ever trusted. A
-//! future signing policy checks the [`DecodedUnsigned`] between those two calls.
+//! signs exactly that with [`sign_decoded`]. No intent field from the CLI is ever trusted. The
+//! signing policy (`policy::check_tx`) decides the [`DecodedUnsigned`] between those two calls.
 
 use crate::core::error::{Result, WalletError};
 use alloy::consensus::transaction::{RlpEcdsaDecodableTx, SignerRecoverable};

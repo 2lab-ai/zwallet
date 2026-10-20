@@ -191,6 +191,8 @@ fn daemon_unlock_sign_lock_expire_wrong_password() {
         .as_str()
         .unwrap()
         .to_string();
+    // `sign-message` signs only under a signed whitelist that allows it (`.prd/04-whitelist.md`).
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
 
     let before = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -269,6 +271,11 @@ fn named_keys_create_list_change_sign() {
     let a = home.create("a", &["--unlock", "30s"]);
     assert_eq!(a["locked"], false);
     let a_addr = a["address"].as_str().unwrap().to_string();
+    // `sign-message` signs only under a signed whitelist that allows it; the edit re-seals
+    // wallet.json, which ends the session, so unlock again.
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
+    assert!(home.wait_locked(Duration::from_secs(15)));
+    home.unlock("30s");
 
     // While unlocked the agent can add keys without the password (stdin is empty).
     let b = home.run(&["create", "b", "--json"]).ok();
@@ -471,6 +478,8 @@ fn c1_fake_daemon_on_the_socket_never_receives_the_password() {
         .as_str()
         .unwrap()
         .to_string();
+    // `sign-message` signs only under a signed whitelist that allows it (`.prd/04-whitelist.md`).
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
     let fake = FakeDaemon::bind(&home.sock());
     let r = home.run_stdin(
         &["unlock", "30s", "--password-stdin", "--json"],
@@ -502,6 +511,8 @@ fn c3_concurrent_unlocks_leave_exactly_one_daemon() {
         .as_str()
         .unwrap()
         .to_string();
+    // `sign-message` signs only under a signed whitelist that allows it (`.prd/04-whitelist.md`).
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
     let runs: Vec<common::Run> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..3)
             .map(|_| {
@@ -900,6 +911,8 @@ fn k6_wrong_password_on_re_unlock_leaves_the_session_running() {
         .as_str()
         .unwrap()
         .to_string();
+    // `sign-message` signs only under a signed whitelist that allows it (`.prd/04-whitelist.md`).
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
     home.unlock("30s");
     let pid = only_daemon(&home);
     home.run_stdin(
@@ -1306,6 +1319,8 @@ fn r1_unlock_handshake_over_a_socketpair() {
         .as_str()
         .unwrap()
         .to_string();
+    // `sign-message` signs only under a signed whitelist that allows it (`.prd/04-whitelist.md`).
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
     // This test plays the unlocking CLI on the other end of the daemon's socketpair.
     let mut daemon = DaemonChild::spawn(home.path());
     assert_eq!(daemon.next()["result"]["stage"], "input");
