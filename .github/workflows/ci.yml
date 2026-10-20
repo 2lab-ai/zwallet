@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS first because aarch64-apple-darwin is the platform that ships first.
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ci-${{ matrix.os }}
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --locked
+
+      # The build env reaches `zwallet --version` exactly (src/lib.rs version_line):
+      # channel verbatim, build id cut to 12 chars. After `cargo test`, so the tests
+      # above still see an unset channel.
+      - name: Version line smoke test
+        shell: bash
+        env:
+          ZWALLET_BUILD_CHANNEL: preview
+          ZWALLET_BUILD_ID: 0123456789abcdef0123
+        run: |
+          set -euo pipefail
+          version="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          expected="zwallet $version (preview 0123456789ab)"
+          actual="$(cargo run --locked -q -- --version)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::version line mismatch: expected '$expected', got '$actual'"
+            exit 1
+          fi
+          echo "$actual"

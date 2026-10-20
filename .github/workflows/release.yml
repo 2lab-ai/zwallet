@@ -1,0 +1,153 @@
+name: Release
+
+# Stable release on tag v*. The tag must match Cargo.toml's version
+# (.prd/02-architecture.md §Distribution). Same asset shape as llmux, so the
+# tap's bump job renders Formula/zwallet.rb with a name change only.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: zwallet-macos-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: zwallet-macos-x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: zwallet-linux-x86_64
+          # Native arm64 runner (free for public repos) — no cross/zigbuild needed.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            name: zwallet-linux-aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      # `zwallet --version` = `zwallet <ver> (<channel> <rev12>)` (src/lib.rs version_line).
+      ZWALLET_BUILD_CHANNEL: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify tag matches Cargo.toml version
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "error: tag $GITHUB_REF_NAME doesn't match Cargo.toml version $CARGO_VERSION"
+            exit 1
+          fi
+
+      # ZWALLET_BUILD_ID is a revision: version_line keeps its first 12 chars, so it
+      # must start with the commit sha (a `<tag>-<sha12>` id would print the tag).
+      - name: Set build id
+        shell: bash
+        run: echo "ZWALLET_BUILD_ID=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Exact version line of the shipped binary, expected from sources independent of
+      # the build env: channel literal, Cargo.toml version, checked-out commit. Every
+      # target runs on its own runner except x86_64-apple-darwin (cross-built on arm64).
+      - name: Smoke-test version line
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          commit="$(git rev-parse HEAD)"
+          expected="zwallet $version (release ${commit:0:12})"
+          actual="$("target/$TARGET/release/zwallet" --version)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::version line mismatch: expected '$expected', got '$actual'"
+            exit 1
+          fi
+          echo "$actual"
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "target/${{ matrix.target }}/release/zwallet" "${{ matrix.name }}"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sha256sum "${{ matrix.name }}" > "${{ matrix.name }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.name }}" > "${{ matrix.name }}.sha256"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.name }}
+            ${{ matrix.name }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+
+      - name: Assemble release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for asset in zwallet-macos-aarch64 zwallet-macos-x86_64 zwallet-linux-x86_64 zwallet-linux-aarch64; do
+            cp "artifacts/$asset/$asset" "release/$asset"
+          done
+          (cd release && sha256sum zwallet-* > SHA256SUMS)
+          cat release/SHA256SUMS
+
+      - name: Create release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          # GitHub prepends `body` to the generated notes.
+          body: "Install: `brew install 2lab-ai/tap/zwallet`"
+          generate_release_notes: true
+          files: |
+            release/zwallet-macos-aarch64
+            release/zwallet-macos-x86_64
+            release/zwallet-linux-x86_64
+            release/zwallet-linux-aarch64
+            release/SHA256SUMS
