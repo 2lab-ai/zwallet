@@ -152,11 +152,45 @@ impl Entry {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Policy {
     /// Chain key → the most `gasLimit × max price` may cost, in wei, as a decimal string (wei
-    /// amounts exceed 2^53).
+    /// amounts exceed 2^53). A chain named twice in a file is refused, not collapsed.
+    #[serde(deserialize_with = "unique_keys")]
     pub max_fee_wei: BTreeMap<String, String>,
     /// Whether `sign-message` may sign at all (off by default: some contracts take EIP-191
     /// signatures as spending authority).
     pub allow_message_signing: bool,
+}
+
+/// A JSON object of strings into a map, refusing a key that appears twice (a map would keep the
+/// last one silently, so two files that read differently would parse alike).
+fn unique_keys<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, String>, D::Error> {
+    struct Unique;
+    impl<'de> serde::de::Visitor<'de> for Unique {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an object of strings")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, String>()? {
+                if out.contains_key(&key) {
+                    return Err(serde::de::Error::custom(format!(
+                        "maxFeeWei names chain {} twice",
+                        quote(&key)
+                    )));
+                }
+                out.insert(key, value);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_map(Unique)
 }
 
 impl Policy {
@@ -1854,6 +1888,19 @@ mod tests {
             assert_eq!(done.list.generation, 3, "{how}");
             load_verified(home, &sealed(home).unwrap()).unwrap();
         }
+    }
+
+    #[test]
+    fn n3_a_repeated_fee_cap_chain_is_refused() {
+        let signed = WhitelistKey::from_secret(&[1u8; 32]).sign(&golden_list());
+        let text = String::from_utf8(signed.to_file_bytes().unwrap()).unwrap();
+        let cap = "\"base\": \"500000000000000\"";
+        let twice = text.replacen(cap, &format!("\"base\": \"1\", {cap}"), 1);
+        assert_ne!(twice, text);
+        let err = SignedList::from_file_bytes(twice.as_bytes()).unwrap_err();
+        assert!(err.message.contains("base"), "{}", err.message);
+        // The same key once is fine.
+        SignedList::from_file_bytes(text.as_bytes()).unwrap();
     }
 
     /// No control character (a terminal escape) and never more than 64 characters of a value
