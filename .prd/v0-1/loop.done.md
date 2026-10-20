@@ -83,3 +83,21 @@ The daemon signs only what a human-signed whitelist allows; edits land on exactl
 - **Reviews**: gpt6 (gpt-6-astra) through round 2; from round 3 the llmux GPT engines refused ("not supported when using Codex with a ChatGPT account"), so opus (zworkflow:reviewer) and grok-4.7 reviewed, plus gpt-5.6-terra once. Final: code APPROVE (opus, terra), docs findings fixed in the last text pass (no logic change, dispatcher-verified diff).
 - **Dispatcher gate** on every round head (62fa40c, f308bbc, 51ceac9, b64bf32, f5e7670) green, with a second cli + evm_offline run; on f0745b3: fmt, clippy `-D warnings`, 215 lib + 62 cli + 54 evm_offline + 4 whitelist_daemon + 3 whitelist_seed, live 10/10 (all 19 registry rows' `symbol()`/`decimals()`). Coders' Linux Docker uid 1001: 217 + 64 + 54 + 4 + 3.
 - **Closed**: merged to main as PR #4; `.prd/04-whitelist.md` Status shipped.
+
+## R5 — closed (WU5 release, WU4 xbrew recipe)
+
+zwallet v0.1.0 is released; brew stable and preview install it; `xbrew install zwallet` installs it on macOS and Arch from the xbrew preview build.
+
+### Closed rows
+
+| WU | Repo · branch · worktree | Scope | Owner | State |
+|---|---|---|---|---|
+| WU5 | all | tag `v0.1.0` (the repo is already public), release green, render the stable formula by hand, `brew install 2lab-ai/tap/zwallet` + `brew test`, a preview at the same version, `xbrew install zwallet` (A10, A11). The preview channel is already live (see loop.done.md R3) | dispatcher | planned |
+| WU4 | xbrew · branch per repo convention | `recipes/zwallet.toml` (macos formula + arch pinned binaries from the v0.1.0 release) | after v0.1.0 release | planned |
+
+| ID | Acceptance | Gap | Source | Status |
+|---|---|---|---|---|
+| G2 | A10 | closed: v0.1.0 stable formula and the preview at the same commit installed and tested | WU5 | ✅ |
+
+- **WU5** (2026-10-21): tag `v0.1.0` on e17b2be (PR #4's merge; the user's request 2026-10-20 "brew에도 올리고 xbrew에도 올려줘"). Release, CI and Preview runs on e17b2be all green; the release's 4 assets match SHA256SUMS; the preview `preview-2026-10-20-2311-e17b2bebb0c8` is the same commit. Tap PR #10 (4682f6b) rendered `Formula/zwallet.rb` 0.1.0 and `zwallet-preview.rb` 2026.10.20.2311 by hand. On fable-m5max: `brew install 2lab-ai/tap/zwallet` → `zwallet 0.1.0 (release e17b2bebb0c8)`, `brew test` rc=0; `brew upgrade 2lab-ai/tap/zwallet-preview` → `zwallet 0.1.0 (preview e17b2bebb0c8)`, `brew test` rc=0; `bin/zwallet` links the preview.
+- **WU4** (2026-10-21): xbrew PR #4 (5978635) adds `recipes/zwallet.toml` (macOS `formula = "2lab-ai/tap/zwallet"`; Arch `[arch.binary]` pinned to the v0.1.0 linux assets) and `tests/zwallet_recipe_contract.rs` (RED 0/3 → GREEN 3/3; `just check` 76 tests; CI macOS + Ubuntu green; opus review APPROVE). With the xbrew preview build `preview-2026-10-20-2341-5978635097d6` (assets match SHA256SUMS): on fable-m5max, `xbrew uninstall zwallet` then `xbrew install zwallet` → brew formula, `zwallet 0.1.0 (release e17b2bebb0c8)`, tracked; on cachy-z13 (CachyOS x86_64), `xbrew install zwallet` → recipe-binary at `~/.xbrew/bin/zwallet`, `zwallet 0.1.0 (release e17b2bebb0c8)`, sha256 `131109e6…` = the pin. Stable xbrew (0.4.11) does not carry the recipe yet: G3 stays open on the owner's xbrew release.
