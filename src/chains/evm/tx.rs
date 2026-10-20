@@ -152,27 +152,37 @@ pub fn encoded_for_signing(tx: &UnsignedEvmTx) -> Vec<u8> {
     to_consensus(tx).encoded_for_signing()
 }
 
-/// What a transaction does, from the daemon's own ABI decoding of the calldata. Amounts are raw
-/// base units (the daemon makes no RPC, so it does not know token decimals).
+/// What a transaction does, from the daemon's own ABI decoding of the calldata.
+///
+/// A known selector is named after the ABI method it calls, never after an asset: ERC-20 and
+/// ERC-721 share `approve(address,uint256)` and `transferFrom(address,address,uint256)` (and some
+/// early NFTs have `transfer(address,uint256)`), so the bytes alone cannot say whether a fungible
+/// amount or a token id moves. Every such action is `assetType: "unverified"`. The `uint256`
+/// argument is raw (the daemon makes no RPC, so it knows neither decimals nor the contract's
+/// standard).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// Empty calldata: plain value transfer to `to`.
     NativeTransfer { to: Address, value: U256 },
-    Erc20Transfer {
+    /// `transfer(address,uint256)` called on `token`.
+    TransferCall {
         token: Address,
-        recipient: Address,
+        to: Address,
         amount: U256,
     },
-    Erc20Approve {
-        token: Address,
+    /// `approve(address,uint256)` called on `contract`: an ERC-20 allowance or an ERC-721
+    /// approval of one token id.
+    ApproveCall {
+        contract: Address,
         spender: Address,
-        amount: U256,
+        value: U256,
     },
-    Erc20TransferFrom {
-        token: Address,
+    /// `transferFrom(address,address,uint256)` called on `contract`.
+    TransferFromCall {
+        contract: Address,
         from: Address,
-        recipient: Address,
-        amount: U256,
+        to: Address,
+        value: U256,
     },
     /// Any other selector.
     ContractCall {
@@ -182,6 +192,9 @@ pub enum Action {
     },
 }
 
+/// Which asset standard a method-shaped action moves: the selector does not say.
+const UNVERIFIED: &str = "unverified";
+
 impl Action {
     pub fn to_json(&self) -> Value {
         let a = |x: &Address| x.to_checksum(None);
@@ -189,30 +202,26 @@ impl Action {
             Self::NativeTransfer { to, value } => {
                 json!({ "kind": "native-transfer", "to": a(to), "value": value.to_string() })
             }
-            Self::Erc20Transfer {
-                token,
-                recipient,
-                amount,
-            } => json!({
-                "kind": "erc20-transfer", "token": a(token), "recipient": a(recipient),
-                "amount": amount.to_string(),
+            Self::TransferCall { token, to, amount } => json!({
+                "kind": "transfer-call", "token": a(token), "to": a(to),
+                "amount": amount.to_string(), "assetType": UNVERIFIED,
             }),
-            Self::Erc20Approve {
-                token,
+            Self::ApproveCall {
+                contract,
                 spender,
-                amount,
+                value,
             } => json!({
-                "kind": "erc20-approve", "token": a(token), "spender": a(spender),
-                "amount": amount.to_string(),
+                "kind": "approve-call", "contract": a(contract), "spender": a(spender),
+                "value": value.to_string(), "assetType": UNVERIFIED,
             }),
-            Self::Erc20TransferFrom {
-                token,
+            Self::TransferFromCall {
+                contract,
                 from,
-                recipient,
-                amount,
+                to,
+                value,
             } => json!({
-                "kind": "erc20-transfer-from", "token": a(token), "from": a(from),
-                "recipient": a(recipient), "amount": amount.to_string(),
+                "kind": "transfer-from-call", "contract": a(contract), "from": a(from),
+                "to": a(to), "value": value.to_string(), "assetType": UNVERIFIED,
             }),
             Self::ContractCall {
                 contract,
@@ -229,11 +238,12 @@ impl Action {
 /// Decodes known-selector calldata and requires it to be that call's canonical ABI encoding.
 /// alloy's default decoder ignores trailing bytes and the 12 high bytes of address words, so
 /// different byte strings would decode to the same action; re-encoding must reproduce `input`.
-fn decode_canonical<C: SolCall>(input: &[u8], name: &str) -> Result<C> {
+fn decode_canonical<C: SolCall>(input: &[u8]) -> Result<C> {
     let malformed = || {
         WalletError::validation(format!(
-            "refusing to sign: calldata has the ERC-20 {name} selector but is not its canonical \
-             ABI encoding"
+            "refusing to sign: calldata has the {} selector but is not its canonical ABI \
+             encoding",
+            C::SIGNATURE
         ))
     };
     let call = C::abi_decode(input).map_err(|_| malformed())?;
@@ -253,45 +263,46 @@ fn classify(to: Address, value: U256, input: &[u8]) -> Result<Action> {
             ))
         };
     };
-    // zwallet never attaches native value to an ERC-20 call; a policy keyed on the ERC-20 action
-    // would not see that native spend, so such a transaction is refused outright.
-    let erc20 = |name: &str| {
+    // zwallet never attaches native value to these calls (ERC-721 declares approve and
+    // transferFrom payable, but nothing zwallet sends uses that); a policy keyed on the
+    // method-shaped action would not see that native spend, so such a transaction is refused.
+    let no_value = |sig: &str| {
         if value.is_zero() {
             Ok(())
         } else {
             Err(WalletError::validation(format!(
-                "refusing to sign: ERC-20 {name} call that also sends {value} wei of native value"
+                "refusing to sign: a {sig} call that also sends {value} wei of native value"
             )))
         }
     };
     let selector: [u8; 4] = selector.try_into().unwrap_or_default();
     Ok(match selector {
         IERC20::transferCall::SELECTOR => {
-            erc20("transfer")?;
-            let c: IERC20::transferCall = decode_canonical(input, "transfer")?;
-            Action::Erc20Transfer {
+            no_value(IERC20::transferCall::SIGNATURE)?;
+            let c: IERC20::transferCall = decode_canonical(input)?;
+            Action::TransferCall {
                 token: to,
-                recipient: c.to,
+                to: c.to,
                 amount: c.amount,
             }
         }
         IERC20::approveCall::SELECTOR => {
-            erc20("approve")?;
-            let c: IERC20::approveCall = decode_canonical(input, "approve")?;
-            Action::Erc20Approve {
-                token: to,
+            no_value(IERC20::approveCall::SIGNATURE)?;
+            let c: IERC20::approveCall = decode_canonical(input)?;
+            Action::ApproveCall {
+                contract: to,
                 spender: c.spender,
-                amount: c.amount,
+                value: c.amount,
             }
         }
         IERC20::transferFromCall::SELECTOR => {
-            erc20("transferFrom")?;
-            let c: IERC20::transferFromCall = decode_canonical(input, "transferFrom")?;
-            Action::Erc20TransferFrom {
-                token: to,
+            no_value(IERC20::transferFromCall::SIGNATURE)?;
+            let c: IERC20::transferFromCall = decode_canonical(input)?;
+            Action::TransferFromCall {
+                contract: to,
                 from: c.from,
-                recipient: c.to,
-                amount: c.amount,
+                to: c.to,
+                value: c.amount,
             }
         }
         _ => Action::ContractCall {
@@ -550,13 +561,15 @@ mod tests {
         // The daemon's own reading of the calldata, not anything the CLI claimed.
         assert_eq!(
             *decoded.action(),
-            Action::Erc20Transfer {
+            Action::TransferCall {
                 token: USDC,
-                recipient: RECIPIENT,
+                to: RECIPIENT,
                 amount
             }
         );
-        assert_eq!(decoded.to_json()["action"]["kind"], "erc20-transfer");
+        let action = &decoded.to_json()["action"];
+        assert_eq!(action["kind"], "transfer-call");
+        assert_eq!(action["assetType"], "unverified");
         assert_eq!(back.signer, HARDHAT0);
         assert_eq!(back.chain_id, Some(8453));
     }
@@ -577,8 +590,8 @@ mod tests {
         )))
         .unwrap();
         assert!(
-            matches!(*d.action(), Action::Erc20Approve { spender, amount, .. }
-            if spender == RECIPIENT && amount == U256::MAX)
+            matches!(*d.action(), Action::ApproveCall { spender, value, .. }
+            if spender == RECIPIENT && value == U256::MAX)
         );
 
         let from = IERC20::transferFromCall {
@@ -595,7 +608,7 @@ mod tests {
             from.into(),
         )))
         .unwrap();
-        assert!(matches!(d.action(), Action::Erc20TransferFrom { .. }));
+        assert!(matches!(d.action(), Action::TransferFromCall { .. }));
 
         let weth_deposit = Bytes::from_static(&[0xd0, 0xe3, 0x0d, 0xb0]);
         let d = decode_unsigned(&encoded_for_signing(&tx(
@@ -611,6 +624,64 @@ mod tests {
             "0xd0e30db0",
             "unknown selectors are reported, not guessed"
         );
+    }
+
+    sol! {
+        interface IERC721 {
+            function approve(address to, uint256 tokenId) external payable;
+            function transferFrom(address from, address to, uint256 tokenId) external payable;
+        }
+    }
+
+    #[test]
+    fn nft_calls_on_shared_selectors_never_claim_erc20() {
+        let nft = address!("0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D");
+        let approve = IERC721::approveCall {
+            to: RECIPIENT,
+            tokenId: U256::from(7u64),
+        }
+        .abi_encode();
+        let move_it = IERC721::transferFromCall {
+            from: HARDHAT0,
+            to: RECIPIENT,
+            tokenId: U256::from(7u64),
+        }
+        .abi_encode();
+        // Same selectors and shapes as ERC-20 approve / transferFrom.
+        assert_eq!(approve[..4], IERC20::approveCall::SELECTOR);
+        assert_eq!(move_it[..4], IERC20::transferFromCall::SELECTOR);
+        let decode = |data: Vec<u8>| {
+            decode_unsigned(&encoded_for_signing(&tx(
+                1,
+                eip1559(),
+                nft,
+                U256::ZERO,
+                data.into(),
+            )))
+            .unwrap()
+            .action()
+            .to_json()
+        };
+        let a = decode(approve);
+        assert_eq!(
+            a,
+            json!({
+                "kind": "approve-call", "contract": nft.to_checksum(None),
+                "spender": RECIPIENT.to_checksum(None), "value": "7", "assetType": "unverified",
+            })
+        );
+        let t = decode(move_it);
+        assert_eq!(
+            t,
+            json!({
+                "kind": "transfer-from-call", "contract": nft.to_checksum(None),
+                "from": HARDHAT0.to_checksum(None), "to": RECIPIENT.to_checksum(None),
+                "value": "7", "assetType": "unverified",
+            })
+        );
+        for v in [a, t] {
+            assert!(!v.to_string().to_lowercase().contains("erc"), "{v}");
+        }
     }
 
     #[test]
