@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{FakeDaemon, Home, PW, pid_alive, run_in, wait_dead};
+use common::{DaemonChild, FakeDaemon, Home, PW, pid_alive, run_in, wait_dead};
 use serde_json::json;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -185,6 +185,7 @@ fn backup_refuses_without_a_terminal() {
 
 #[test]
 fn daemon_unlock_sign_lock_expire_wrong_password() {
+    let _alone = common::exclusive();
     let home = Home::new();
     let address = home.create("main", &[])["address"]
         .as_str()
@@ -237,6 +238,7 @@ fn daemon_unlock_sign_lock_expire_wrong_password() {
     // lock -> signing is WALLET_LOCKED and the daemon is gone.
     let locked = home.run(&["lock", "--json"]).ok();
     assert_eq!(locked["wasUnlocked"], true);
+    assert_eq!(locked["stopped"], json!([pid]), "{locked}");
     home.run(&["sign-message", "--message", "x", "--json"])
         .err("WALLET_LOCKED");
     std::thread::sleep(Duration::from_millis(200));
@@ -326,7 +328,7 @@ fn named_keys_create_list_change_sign() {
         .err("KEY_NOT_FOUND");
 
     // Locked: creating a key takes the password for that one operation and starts no daemon.
-    home.run(&["lock", "--json"]).ok();
+    home.stop_daemons();
     home.run(&["create", "c", "--json"]).err("VALIDATION_ERROR"); // no terminal, no stdin flag
     home.run_stdin(
         &["create", "c", "--password-stdin", "--json"],
@@ -808,7 +810,7 @@ fn c14_unlock_durations_set_expires_at() {
             lo <= expires && expires <= hi,
             "{duration}: {lo} <= {expires} <= {hi}"
         );
-        home.run(&["lock", "--json"]).ok();
+        home.stop_daemons();
     }
 }
 
@@ -849,6 +851,7 @@ fn only_daemon(home: &Home) -> i32 {
 
 #[test]
 fn k2_lock_stops_a_daemon_whose_socket_was_swapped_for_a_fake() {
+    let _alone = common::exclusive();
     let home = Home::new();
     home.create("main", &[]);
     home.unlock("30s");
@@ -982,14 +985,22 @@ fn k5_binary_swapped_during_the_prompt_never_gets_the_password() {
     cmd.env_clear()
         .env("ZWALLET_HOME", home.path())
         .args(["unlock", "30s", "--json"]);
+    if common::ptrace_scope_is_open() {
+        cmd.arg("--allow-ptrace-scope-0");
+    }
     let mut pty = common::PtyChild::spawn(cmd);
     pty.wait_for("Wallet password: ", Duration::from_secs(10));
-    // While the human types, the binary at that path is replaced by one that keeps whatever it
-    // is given.
+    // While the human types, the binary at that path is replaced by one that plays the daemon's
+    // first step (asks for its input, as the real one does once core dumps are off) and keeps
+    // whatever it is given: an unlock that started it would hand it the password.
     let fake = home.path().join("fake");
     fs::write(
         &fake,
-        format!("#!/bin/sh\n/bin/cat > '{}'\n", captured.display()),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"v\":2,\"ok\":true,\"result\":{{\"stage\":\"input\"}}}}'\n\
+             exec /bin/cat > '{}'\n",
+            captured.display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1015,30 +1026,11 @@ fn k5_binary_swapped_during_the_prompt_never_gets_the_password() {
 
 #[test]
 fn k4_daemon_asks_for_the_password_before_anything_is_written() {
-    use std::io::BufRead as _;
     let home = Home::new();
     home.create("main", &[]);
-    // Started the way `unlock` starts it; nothing is written to its stdin yet.
-    let mut child = common::command_in(home.path(), &[])
-        .args(["daemon", "--home"])
-        .arg(fs::canonicalize(home.path()).unwrap())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let _ = std::io::BufReader::new(stdout).read_line(&mut line);
-        let _ = tx.send(line);
-    });
-    let first = rx.recv_timeout(Duration::from_secs(5));
-    let _ = child.kill();
-    let _ = child.wait();
-    let first = first.expect("the daemon said nothing before getting its input");
-    let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+    // Started the way `unlock` starts it; nothing is written to its channel yet.
+    let mut daemon = DaemonChild::spawn(home.path());
+    let v = daemon.next();
     assert_eq!(v["result"]["stage"], "input", "{v}");
 }
 
@@ -1167,7 +1159,7 @@ fn k1_verify_derives_from_the_password_and_checks_the_cache() {
         (&b["verified"], &b["address"]),
         (&json!(false), &json!(addr))
     );
-    home.run(&["lock", "--json"]).ok();
+    home.stop_daemons();
 
     // A poisoned cache fails --verify; so do a wrong password and a missing terminal.
     poison_cache(&home);
@@ -1267,20 +1259,21 @@ impl Drop for FifoWallet {
 
 #[test]
 fn k10_fifo_in_place_of_wallet_json_does_not_stall_the_daemon() {
+    let _alone = common::exclusive();
     let home = Home::new();
     home.create("main", &[]);
 
-    // lock works (and promptly) while wallet.json is a FIFO.
+    // lock works while wallet.json is a FIFO, and the daemon ends on its own: it removes its
+    // socket on the way out, which a daemon stuck on the FIFO and then SIGKILLed by `lock`
+    // never does (see c14_stale_socket_without_a_daemon_is_wallet_locked).
     home.unlock("30s");
     let fifo = FifoWallet::plant(&home);
-    let start = std::time::Instant::now();
     home.run(&["lock", "--json"]).ok();
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        start.elapsed()
-    );
     assert!(home.daemon_pids().is_empty(), "{:?}", home.daemon_pids());
+    assert!(
+        !home.sock().exists(),
+        "the daemon did not exit by itself (it was killed, leaving d.sock)"
+    );
     drop(fifo);
 
     // With no request at all, the daemon still ends by its expiry.
@@ -1292,4 +1285,392 @@ fn k10_fifo_in_place_of_wallet_json_does_not_stall_the_daemon() {
         "a FIFO in place of wallet.json kept the daemon past its expiry"
     );
     drop(fifo);
+}
+
+// ---- Review round 3 (R1-R8) ----
+
+/// A JSON line the daemon wrote, or `None` once it closed its end.
+#[cfg(target_os = "linux")]
+fn read_json_line(reader: &mut impl std::io::BufRead) -> Option<serde_json::Value> {
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(n) if n > 0 => Some(serde_json::from_str(&line).unwrap()),
+        _ => None,
+    }
+}
+
+#[test]
+fn r1_unlock_handshake_over_a_socketpair() {
+    let home = Home::new();
+    let address = home.create("main", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // This test plays the unlocking CLI on the other end of the daemon's socketpair.
+    let mut daemon = DaemonChild::spawn(home.path());
+    assert_eq!(daemon.next()["result"]["stage"], "input");
+    let input = zwallet::core::protocol::encode_unlock_input(Duration::from_secs(30), PW).unwrap();
+    daemon.send(&input);
+    assert_eq!(daemon.next()["result"]["stage"], "decrypted");
+    daemon.send(&[zwallet::core::protocol::GO]);
+    let ready = daemon.next();
+    assert_eq!(ready["ok"], true, "{ready}");
+    assert_eq!(ready["result"]["address"], address.as_str(), "{ready}");
+    assert_eq!(ready["result"]["pid"], daemon.child.id(), "{ready}");
+    let signed = home.run(&["sign-message", "--message", "m", "--json"]).ok();
+    assert_eq!(signed["address"], address.as_str());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn r1_daemon_refuses_a_pipe_for_its_channel() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let mut child = common::command_in(home.path(), &[])
+        .args(["daemon", "--home"])
+        .arg(fs::canonicalize(home.path()).unwrap())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    let first = read_json_line(&mut out);
+    let status = child.wait().unwrap();
+    let first = first.expect("the daemon said nothing");
+    // It never asks for the password over a pipe: its first and last word is the refusal.
+    assert_eq!(first["ok"], false, "{first}");
+    assert!(
+        first["error"].as_str().unwrap().contains("socket"),
+        "{first}"
+    );
+    assert!(!status.success());
+    assert!(read_json_line(&mut out).is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn r1_unlock_refuses_ptrace_scope_0_without_the_flag() {
+    // Built without `command_in`, which adds --allow-ptrace-scope-0 where the host needs it.
+    let raw = |home: &Home, args: &[&str]| {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_zwallet"));
+        cmd.env_clear()
+            .env("ZWALLET_HOME", home.path())
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        use std::io::Write as _;
+        let _ = child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{PW}\n").as_bytes());
+        let out = child.wait_with_output().unwrap();
+        common::Run {
+            code: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    };
+    let fresh = Home::new();
+    let first = raw(
+        &fresh,
+        &[
+            "create",
+            "main",
+            "--unlock",
+            "30s",
+            "--password-stdin",
+            "--json",
+        ],
+    );
+    let home = Home::new();
+    home.create("main", &[]);
+    let unlock = raw(&home, &["unlock", "30s", "--password-stdin", "--json"]);
+    if common::ptrace_scope_is_open() {
+        // Refused before the prompt, and before anything was created or started.
+        for r in [&first, &unlock] {
+            let msg = r.err("VALIDATION_ERROR");
+            assert!(
+                msg.contains("ptrace_scope") && msg.contains("--allow-ptrace-scope-0"),
+                "{msg}"
+            );
+        }
+        assert!(!fresh.wallet_json().exists());
+        assert!(home.daemon_pids().is_empty());
+        // The flag accepts that risk.
+        let ok = raw(
+            &home,
+            &[
+                "unlock",
+                "30s",
+                "--password-stdin",
+                "--json",
+                "--allow-ptrace-scope-0",
+            ],
+        )
+        .ok();
+        assert_eq!(ok["locked"], false, "{ok}");
+    } else {
+        assert_eq!(first.ok()["locked"], false);
+        assert_eq!(unlock.ok()["locked"], false);
+    }
+}
+
+#[test]
+fn r2_lock_stops_a_daemon_behind_a_repointed_symlink() {
+    let _alone = common::exclusive();
+    let first = Home::new();
+    let second = Home::new();
+    let links = Home::new();
+    // The wallet home is a symlink; its daemon's argv names the directory it pointed at.
+    let link = links.path().join("h");
+    std::os::unix::fs::symlink(first.path(), &link).unwrap();
+    run_in(
+        &link,
+        &["create", "main", "--password-stdin", "--json"],
+        Some(&format!("{PW}\n")),
+        &[],
+    )
+    .ok();
+    let pid = run_in(
+        &link,
+        &["unlock", "30s", "--password-stdin", "--json"],
+        Some(&format!("{PW}\n")),
+        &[],
+    )
+    .ok()["daemonPid"]
+        .as_i64()
+        .unwrap() as i32;
+    // A same-user process repoints the link: this home's path no longer leads to that daemon.
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(second.path(), &link).unwrap();
+    assert!(common::daemon_pids(&link).is_empty());
+    let locked = run_in(&link, &["lock", "--json"], None, &[]).ok();
+    assert_eq!(locked["wasUnlocked"], true, "{locked}");
+    assert!(
+        locked["stopped"].as_array().unwrap().contains(&json!(pid)),
+        "{locked}"
+    );
+    assert!(wait_dead(pid, Duration::from_secs(3)));
+    assert_eq!(
+        common::all_daemon_pids(),
+        Vec::<i32>::new(),
+        "a zwallet daemon of this user survived lock"
+    );
+}
+
+#[test]
+fn r2_status_reports_the_real_daemon_over_a_listener_saying_locked() {
+    let home = Home::new();
+    home.create("main", &[]);
+    home.unlock("30s");
+    let pid = only_daemon(&home);
+    // Frozen, so it cannot notice its socket being swapped; a listener that claims the session
+    // is locked (even naming the real pid) takes d.sock.
+    freeze(pid);
+    fs::rename(home.sock(), home.path().join("moved.sock")).unwrap();
+    let fake = FakeDaemon::answering(
+        &home.sock(),
+        json!({ "locked": true, "pid": pid, "wasUnlocked": false }),
+    );
+    let status = home.run(&["status", "--json"]).ok();
+    assert_eq!(status["locked"], false, "{status}");
+    assert_eq!(status["daemonPids"], json!([pid]), "{status}");
+    drop(fake);
+}
+
+#[test]
+fn r2_lock_during_an_unlock_ends_locked_with_no_daemon() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    let mut unlock = home.command(&["unlock", "30s", "--password-stdin", "--json"]);
+    unlock
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut unlocking = unlock.spawn().unwrap();
+    use std::io::Write as _;
+    unlocking
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{PW}\n").as_bytes())
+        .unwrap();
+    // The unlock's daemon child exists (decrypting, waiting for the go byte, or binding).
+    let start = std::time::Instant::now();
+    let child = loop {
+        if let Some(pid) = home.daemon_pids().first() {
+            break *pid;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the unlock never started its daemon"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let locked = home.run(&["lock", "--json"]).ok();
+    assert!(
+        locked["stopped"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(child)),
+        "{locked}"
+    );
+    let out = unlocking.wait_with_output().unwrap();
+    assert!(
+        home.daemon_pids().is_empty() && common::all_daemon_pids().is_empty(),
+        "a daemon outlived lock; unlock said {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], true);
+}
+
+#[test]
+fn r3_daemon_inherits_no_descriptor_above_the_soft_limit() {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    const HIGH: libc::c_int = 200;
+    const SOFT: libc::rlim_t = 64;
+    let home = Home::new();
+    home.create("main", &[]);
+    // The unlocking CLI inherits a pipe's write end as fd 200 (not close-on-exec), and then its
+    // soft RLIMIT_NOFILE is lowered to 64: a scan of fds below the soft limit misses fd 200.
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    let w = writer.as_raw_fd();
+    let mut cmd = home.command(&["unlock", "30s", "--password-stdin", "--json"]);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // SAFETY: dup2/getrlimit/setrlimit are async-signal-safe.
+    unsafe {
+        cmd.pre_exec(move || {
+            let mut lim = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::dup2(w, HIGH) == -1 || libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            lim.rlim_cur = SOFT;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().unwrap();
+    drop(cmd);
+    drop(writer);
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{PW}\n").as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(home.daemon_pids().len(), 1);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = tx.send(reader.read_to_end(&mut sink).map(|_| ()));
+    });
+    assert!(
+        rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+        "the key daemon inherited fd {HIGH}, above the CLI's soft descriptor limit"
+    );
+}
+
+#[test]
+fn r5_verify_prints_the_index_and_warns_about_edited_indices() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let pw = format!("{PW}\n");
+    let v = home
+        .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
+        .ok();
+    assert_eq!(v["index"], 0, "{v}");
+    assert!(v.get("warning").is_none(), "{v}");
+    let l = home
+        .run_stdin(&["list", "--verify", "--password-stdin", "--json"], &pw)
+        .ok();
+    assert!(l.get("warning").is_none(), "{l}");
+
+    // A same-user process moves key 'main' to index 5 (with that index's real addresses, so the
+    // cache check passes): an address of this seed, but one zwallet never assigned.
+    let seed = store::unlock(home.path(), PW, &chains::derive_addresses)
+        .unwrap()
+        .0
+        .seed;
+    let five = chains::derive_addresses(&seed, 5).unwrap();
+    home.edit_wallet(|v| {
+        v["keys"][0]["index"] = json!(5);
+        v["keys"][0]["addresses"] = json!(five);
+    });
+    let v = home
+        .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
+        .ok();
+    assert_eq!(
+        (&v["index"], &v["verified"], &v["address"]),
+        (&json!(5), &json!(true), &json!(five["ethereum"])),
+        "{v}"
+    );
+    let warning = v["warning"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert!(
+        warning.contains("at or past nextIndex 1") && warning.contains("belong to no key"),
+        "{warning}"
+    );
+    let human = home.run_stdin(&["address", "--verify", "--password-stdin"], &pw);
+    assert!(
+        human.stdout.contains("index: 5") && human.stdout.contains("warning: "),
+        "{}",
+        human.stdout
+    );
+    let l = home
+        .run_stdin(&["list", "--verify", "--password-stdin", "--json"], &pw)
+        .ok();
+    assert!(l["warning"].as_str().is_some(), "{l}");
+}
+
+#[test]
+fn r8_daemon_wipes_and_exits_when_its_cli_dies_after_the_go_byte() {
+    let home = Home::new();
+    home.create("main", &[]);
+    // Holding d.lock keeps the daemon from binding (and so from reporting readiness) until this
+    // test, playing the CLI, has gone away.
+    let squat = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.path().join("d.lock"))
+        .unwrap();
+    squat.try_lock().unwrap();
+    let mut daemon = DaemonChild::spawn(home.path());
+    assert_eq!(daemon.next()["result"]["stage"], "input");
+    let input = zwallet::core::protocol::encode_unlock_input(Duration::from_secs(30), PW).unwrap();
+    daemon.send(&input);
+    assert_eq!(daemon.next()["result"]["stage"], "decrypted");
+    daemon.send(&[zwallet::core::protocol::GO]);
+    // The CLI is killed: every handle on its end of the channel is gone.
+    daemon.close();
+    drop(squat);
+    // The daemon binds, its readiness write fails (EPIPE), and it wipes the seed and exits
+    // instead of serving a key nobody unlocked.
+    let status = daemon.wait_exit(Duration::from_secs(10));
+    assert!(
+        status.is_some_and(|s| !s.success()),
+        "the daemon kept running after its unlocking CLI died: {status:?}"
+    );
+    assert!(!home.sock().exists(), "it left its socket behind");
+    assert!(home.daemon_pids().is_empty());
 }

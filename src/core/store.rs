@@ -894,7 +894,8 @@ fn wallet_exists(home: &Path) -> WalletError {
 
 /// Creates `home` with 0700, or tightens an existing one to 0700. Only the final directory is
 /// created: its parent must already exist (`VALIDATION_ERROR` naming it otherwise), and is
-/// fsynced so the new entry survives a crash.
+/// fsynced so the entry survives a crash, also when the home already existed (an earlier run may
+/// have created it and died before its fsync).
 fn ensure_home_dir(home: &Path) -> Result<()> {
     let fail = |e: std::io::Error| {
         WalletError::validation(format!(
@@ -925,7 +926,7 @@ fn ensure_home_dir(home: &Path) -> Result<()> {
             if meta.permissions().mode() & 0o777 != DIR_MODE {
                 fs::set_permissions(home, fs::Permissions::from_mode(DIR_MODE)).map_err(fail)?;
             }
-            Ok(())
+            sync_dir(parent)
         }
         Err(e) if e.kind() == ErrorKind::NotFound => Err(WalletError::validation(format!(
             "the parent of wallet home {}, {}, does not exist; create it first",
@@ -1603,6 +1604,23 @@ mod tests {
         fs::write(&path, vec![b' '; (1 << 20) + 1]).unwrap();
         let err = read_wallet_file(&home).unwrap_err();
         assert!(err.message.contains("1 MiB"), "{}", err.message);
+    }
+
+    #[test]
+    fn existing_home_still_fsyncs_its_parent() {
+        // R6: a home left by an earlier run (whose parent fsync may never have happened) gets
+        // its parent fsynced too. Observable through a parent that cannot be opened to sync.
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("p");
+        let home = parent.join("zw");
+        fs::create_dir(&parent).unwrap();
+        ensure_home_dir(&home).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+        let existing = ensure_home_dir(&home);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let err = existing.unwrap_err();
+        assert!(err.message.contains("cannot sync"), "{}", err.message);
+        assert_eq!(mode(&home), 0o700);
     }
 
     #[test]

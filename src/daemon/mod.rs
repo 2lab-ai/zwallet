@@ -2,16 +2,22 @@
 //!
 //! Started by `zwallet unlock` (or `create --unlock`) as that process's own child, through
 //! [`protocol::start_daemon`], as `zwallet daemon --home <canonical home>` (the argv `lock` finds
-//! it by). Startup, in order:
-//! 1. disable core dumps (on Linux: non-dumpable, so no same-user process can read its memory
-//!    or its stdin pipe through /proc), and only then ask for input on stdout,
-//! 2. read the TTL and the password from the stdin pipe (raw read(2) into one zeroized buffer),
+//! it by), with one end of a socketpair as its fds 0 and 1. Startup, in order:
+//! 1. core dumps are already off: the first line of the process entry (`cli::main_entry`)
+//!    disables them, and on Linux makes the process non-dumpable from then on, which keeps other
+//!    same-user processes out of its memory and its `/proc/<pid>/fd`. Not before that line: exec
+//!    makes every process dumpable again. What keeps the channel safe in that window is that it
+//!    is a socket, which cannot be reopened through `/proc/<pid>/fd` (on Linux the daemon refuses
+//!    to start on anything else); against ptrace in that window, `unlock` requires Yama
+//!    `ptrace_scope` ≥ 1 on Linux (see [`protocol::check_ptrace_scope`]). Then it asks for input,
+//! 2. read the TTL and the password from the channel (raw read(2) into one zeroized buffer),
 //! 3. decrypt wallet.json, derive the active key's address from the seed, report `decrypted`,
 //! 4. wait for the go byte: the unlocking CLI has stopped the old daemons meanwhile,
 //! 5. take an exclusive flock on `<home>/d.lock`, held for the daemon's whole life,
 //! 6. replace whatever is at `d.sock` and bind it (a squatter there is a visible failure, never a
 //!    leak: no secret ever goes over the socket),
-//! 7. report `{ expiresAt, active, index, address, pid }` on the stdout pipe, then serve.
+//! 7. report `{ expiresAt, active, index, address, pid }` on the channel, then serve. If that
+//!    write fails (the unlocking CLI is gone), it wipes the seed and exits instead.
 //!
 //! It keeps only the master seed in memory, derives keys and signs on request, and nothing else:
 //! it makes no network request and writes no file. Each connection is served in its own task
@@ -23,7 +29,7 @@
 
 use crate::chains;
 use crate::core::error::{ErrorCode, Result, WalletError};
-use crate::core::password::{disable_core_dumps, into_password};
+use crate::core::password::into_password;
 use crate::core::protocol::{self, MAX_MESSAGE, Request, Response};
 use crate::core::seed::Seed;
 use crate::core::store::{self, FILE_MODE};
@@ -103,7 +109,7 @@ impl Shared {
 }
 
 pub async fn run(home: PathBuf) -> Result<()> {
-    disable_core_dumps();
+    // Core dumps are off already: the first line of `cli::main_entry`.
     // SAFETY: umask(2) only changes this process's file-creation mask.
     unsafe {
         libc::umask(0o077);
@@ -155,8 +161,10 @@ async fn start(home: &Path) -> Result<Started> {
             "`zwallet daemon` is started by `zwallet unlock`, not by hand",
         ));
     }
+    #[cfg(target_os = "linux")]
+    require_socket_channel()?;
     let gone = || WalletError::validation("the unlocking process went away");
-    // Core dumps are off (first thing in `run`): only now may the password come.
+    // Core dumps are off (first line of `cli::main_entry`): only now may the password come.
     if !report(&Response::ok(json!({ "stage": protocol::STAGE_INPUT }))) {
         return Err(gone());
     }
@@ -233,7 +241,28 @@ async fn start(home: &Path) -> Result<Started> {
     })
 }
 
-/// Writes one progress line to stdout (the unlocking CLI's pipe). Returns whether it was
+/// Refuses to start unless fds 0 and 1 are sockets (the socketpair `unlock` gives its child). A
+/// pipe there can be reopened by any same-user process through `/proc/<pid>/fd/0` or `/1` while
+/// this process is still dumpable, to read the password or to fake the readiness line; a socket
+/// cannot (ENXIO).
+#[cfg(target_os = "linux")]
+fn require_socket_channel() -> Result<()> {
+    for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO] {
+        // SAFETY: stat is plain old data; fstat fills it for a descriptor number.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let is_socket =
+            unsafe { libc::fstat(fd, &mut st) } == 0 && st.st_mode & libc::S_IFMT == libc::S_IFSOCK;
+        if !is_socket {
+            return Err(WalletError::validation(
+                "`zwallet daemon` needs the socket `zwallet unlock` gives it as its input and \
+                 output (a pipe can be reopened through /proc); not starting",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Writes one progress line to stdout (the unlocking CLI's channel). Returns whether it was
 /// delivered.
 fn report(resp: &Response) -> bool {
     let mut line = serde_json::to_vec(resp).unwrap_or_default();
@@ -254,7 +283,7 @@ fn report(resp: &Response) -> bool {
 }
 
 /// The last line (readiness or the startup error), after which stdout points at /dev/null so
-/// the pipe closes.
+/// the channel closes.
 fn report_last(resp: &Response) -> bool {
     let ok = report(resp);
     redirect_to_null(libc::STDOUT_FILENO);

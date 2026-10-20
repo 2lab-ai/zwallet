@@ -5,30 +5,36 @@
 //! `chain` picks the family, `index` the key, and `tx` is the family's own unsigned-tx JSON.
 //!
 //! No request carries a secret. The password never travels over the socket: [`start_daemon`]
-//! hands it to the daemon child it spawns, on that child's inherited stdin pipe, and reads the
-//! child's progress on its stdout pipe. Whatever else listens on `d.sock` (a stale socket, or a
-//! squatter run by the same user) can learn nothing from a client and is replaced by the new
-//! daemon, which binds under an exclusive lock on `d.lock`.
+//! hands it to the daemon child it spawns over one end of a socketpair, the child's fds 0 and 1
+//! (a socket, unlike a pipe, cannot be reopened through `/proc/<pid>/fd`), and reads the child's
+//! progress on it. Whatever else listens on `d.sock` (a stale socket, or a squatter run by the
+//! same user) can learn nothing from a client and is replaced by the new daemon, which binds under
+//! an exclusive lock on `d.lock`.
 //!
 //! Which daemons exist is never read from `d.sock` or `d.lock` (any same-user process can rename
-//! or replace those): `lock` and `unlock` find them by argv in the OS process table and stop them
-//! by signal ([`stop_daemons`]).
+//! or replace those): they are found by argv in the OS process table and stopped by signal.
+//! `lock` stops every daemon of this user ([`stop_all_daemons`]), `unlock` the ones for its home
+//! ([`stop_daemons`]).
 
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::password::{MAX_SECRET, read_exact_secret};
 use crate::core::store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::os::fd::RawFd;
+use std::net::Shutdown;
+use std::os::fd::{OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::net::UnixStream as ChildChannel;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use zeroize::Zeroizing;
@@ -252,22 +258,64 @@ pub async fn status(home: &Path) -> Result<Option<Value>> {
     send(home, &Request::Status, QUICK).await
 }
 
-/// Locks the wallet for `home`. First, politely, asks whatever answers on `d.sock` to lock (the
-/// request carries nothing; errors and lies there are ignored); then stops every daemon for this
-/// home found in the process table. Succeeds only when none is left (see [`stop_daemons`]).
-/// Returns whether a daemon was running.
-pub async fn lock(home: &Path) -> Result<bool> {
-    let polite = polite_lock(home).await;
-    let stopped = stop_daemons(home, None)?;
-    Ok(polite || !stopped.is_empty())
+/// `zwallet lock`, the panic button: ends every signing session of this user. First, politely,
+/// asks whatever answers on `home`'s `d.sock` to lock (the request carries nothing; errors and
+/// lies there are ignored); then stops every zwallet daemon of this user found in the process
+/// table, whatever home it serves, so a home moved or re-linked since its unlock cannot hide one
+/// ([`stop_all_daemons`]). Succeeds only when none is left; returns the pids that were running.
+pub async fn lock(home: &Path) -> Result<Vec<i32>> {
+    let mut stopped = all_daemon_pids()?;
+    polite_lock(home).await;
+    stopped.extend(stop_all_daemons()?);
+    stopped.sort_unstable();
+    stopped.dedup();
+    Ok(stopped)
 }
 
-/// Whether whatever answers on `d.sock` says it was unlocked and now locks.
-async fn polite_lock(home: &Path) -> bool {
-    matches!(
-        send(home, &Request::Lock, QUICK).await,
-        Ok(Some(v)) if v["wasUnlocked"] == json!(true)
-    )
+/// Asks whatever answers on `d.sock` to lock; the answer decides nothing.
+async fn polite_lock(home: &Path) {
+    let _ = send(home, &Request::Lock, QUICK).await;
+}
+
+/// Where Linux's Yama LSM publishes its ptrace policy.
+pub const YAMA_PTRACE_SCOPE: &str = "/proc/sys/kernel/yama/ptrace_scope";
+
+/// Before a daemon is started (and before the password is asked for): on Linux, refuses where
+/// any same-user process may ptrace it, i.e. without Yama or with `kernel.yama.ptrace_scope` 0,
+/// unless `allow_scope_0`. From exec until its first line makes it non-dumpable, the daemon (like
+/// any new process) can be attached to, and a tracer attached then stays attached when the
+/// password arrives. Elsewhere this checks nothing.
+pub fn check_ptrace_scope(allow_scope_0: bool) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    return ptrace_scope_check(Path::new(YAMA_PTRACE_SCOPE), allow_scope_0);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = allow_scope_0;
+        Ok(())
+    }
+}
+
+/// [`check_ptrace_scope`] reading the policy from `path`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn ptrace_scope_check(path: &Path, allow_scope_0: bool) -> Result<()> {
+    let scope = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    if allow_scope_0 || scope.is_some_and(|s| s >= 1) {
+        return Ok(());
+    }
+    let found = match scope {
+        Some(0) => "kernel.yama.ptrace_scope is 0".to_string(),
+        _ => format!(
+            "{path} is missing or unreadable (no Yama)",
+            path = path.display()
+        ),
+    };
+    Err(WalletError::validation(format!(
+        "{found}: any same-user process can attach to the daemon during start-up and read the \
+         password; set kernel.yama.ptrace_scope ≥ 1 (sysctl), or pass --allow-ptrace-scope-0 to \
+         accept that risk"
+    )))
 }
 
 /// What the CLI writes to the daemon child's stdin once the child asked for it: a header line
@@ -372,10 +420,13 @@ pub fn read_go(fd: RawFd, wait: Duration) -> Result<()> {
     }
 }
 
-/// The binary `unlock` starts as the daemon, pinned before the password prompt so a binary
-/// swapped in meanwhile is never handed the password. On Linux that is the image this process
-/// runs (`/proc/self/exe`); elsewhere the canonical path of `current_exe()`, whose (dev, ino) is
-/// recorded now and checked again right before the spawn.
+/// The binary `unlock` starts as the daemon, pinned before the password prompt. On Linux that is
+/// the image this process runs (`/proc/self/exe`), so a binary swapped in at that path meanwhile
+/// is never started. Elsewhere it is the canonical path of `current_exe()`, whose (dev, ino) is
+/// recorded now and checked again right before the spawn: that refuses a binary swapped in while
+/// the human types, but not one swapped in between that check and the exec (macOS has no
+/// `fexecve`). A binary swapped in before `unlock` started gets the password either way; the
+/// README's "Known limits" says where to install zwallet so an agent cannot write it.
 pub struct DaemonExe {
     path: PathBuf,
     #[cfg(not(target_os = "linux"))]
@@ -426,7 +477,8 @@ impl DaemonExe {
 /// daemon from the seed it decrypted with `password`, never read from the cache in wallet.json).
 ///
 /// The new daemon is this process's own child (`setsid`, argv `zwallet daemon --home <canonical
-/// home>`, no environment, no descriptor but its pipes), started from `exe`. Over its pipes:
+/// home>`, no environment, no descriptor but its channel), started from `exe`. Its fds 0 and 1
+/// are one end of a socketpair whose other end only this process holds. Over that channel:
 /// 1. it asks for input only once core dumps are off; it then gets the TTL and the password,
 /// 2. it decrypts and reports `decrypted`. A wrong password ends here and leaves any running
 ///    session untouched;
@@ -451,8 +503,8 @@ pub async fn start_daemon(
         "another `zwallet unlock` is running",
     )?;
     exe.check()?;
-    let mut child = spawn_daemon(exe, &canonical)?;
-    let ready = drive_daemon(home, &mut child, password, ttl).await;
+    let (mut child, chan) = spawn_daemon(exe, &canonical)?;
+    let ready = drive_daemon(home, &mut child, chan, password, ttl).await;
     if ready.is_err() {
         let _ = child.kill();
         let _ = child.wait();
@@ -460,7 +512,15 @@ pub async fn start_daemon(
     ready
 }
 
-fn spawn_daemon(exe: &DaemonExe, canonical_home: &Path) -> Result<Child> {
+/// Spawns the daemon with one end of a socketpair as its fds 0 and 1 and returns the other end.
+/// A pipe there could be reopened by any same-user process through `/proc/<pid>/fd/0` or `/1`
+/// until the child turns non-dumpable, to read the password or to write a fake readiness line;
+/// opening a socket that way fails (ENXIO).
+fn spawn_daemon(exe: &DaemonExe, canonical_home: &Path) -> Result<(Child, ChildChannel)> {
+    let fail = io_err("cannot start the key daemon");
+    let (ours, theirs) = ChildChannel::pair().map_err(&fail)?;
+    let theirs_out = theirs.try_clone().map_err(&fail)?;
+    let mut fds = OpenFds::prepare()?;
     let mut cmd = Command::new(&exe.path);
     cmd.arg0(DAEMON_ARG0)
         .arg(DAEMON_SUBCOMMAND)
@@ -468,26 +528,33 @@ fn spawn_daemon(exe: &DaemonExe, canonical_home: &Path) -> Result<Child> {
         .arg(canonical_home)
         .env_clear()
         .current_dir("/")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+        .stdin(Stdio::from(OwnedFd::from(theirs)))
+        .stdout(Stdio::from(OwnedFd::from(theirs_out)))
         .stderr(Stdio::null());
     // SAFETY: runs between fork and exec and only calls async-signal-safe functions (setsid,
-    // getrlimit, fcntl, syscall); stdio is already in place on 0-2.
+    // syscall, open, fcntl, close, proc_pidinfo) on memory allocated before the fork; the
+    // channel is already on 0 and 1.
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            cloexec_from(3);
-            Ok(())
+            cloexec_from(3, &mut fds)
         });
     }
-    cmd.spawn().map_err(io_err("cannot start the key daemon"))
+    let child = cmd.spawn().map_err(&fail);
+    // The command holds this process's copies of the child's end: dropped here, so that the
+    // child's exit reads as EOF on `ours`.
+    drop(cmd);
+    Ok((child?, ours))
 }
 
-/// Marks every descriptor from `first` up close-on-exec, so the daemon starts with only its
-/// three pipes whatever this process inherited. Async-signal-safe.
-fn cloexec_from(first: libc::c_int) {
+/// Marks every open descriptor from `first` up close-on-exec, so the daemon starts with only its
+/// channel (and /dev/null on fd 2) whatever this process inherited: Linux `close_range`, else
+/// the descriptors actually open (not a scan up to the soft `RLIMIT_NOFILE`, which misses one
+/// opened above a limit lowered later). A failure to mark one fails the spawn.
+/// Async-signal-safe.
+fn cloexec_from(first: libc::c_int, fds: &mut OpenFds) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
         // SAFETY: close_range(2) with CLOSE_RANGE_CLOEXEC only changes descriptor flags.
@@ -500,63 +567,228 @@ fn cloexec_from(first: libc::c_int) {
             )
         };
         if rc == 0 {
-            return;
+            return Ok(());
+        }
+        // Before Linux 5.11, or under a seccomp filter: list the open ones instead.
+    }
+    fds.for_each(|fd| if fd >= first { set_cloexec(fd) } else { Ok(()) })
+}
+
+/// Sets `FD_CLOEXEC` on `fd`; a descriptor closed meanwhile is fine. Async-signal-safe.
+fn set_cloexec(fd: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: fcntl(2) on a descriptor number only reads or changes its flags.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags == -1 {
+            let e = std::io::Error::last_os_error();
+            return if e.raw_os_error() == Some(libc::EBADF) {
+                Ok(())
+            } else {
+                Err(e)
+            };
+        }
+        if flags & libc::FD_CLOEXEC == 0
+            && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) == -1
+        {
+            return Err(std::io::Error::last_os_error());
         }
     }
-    let mut lim = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: getrlimit fills a valid rlimit.
-    let ok = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0;
-    let max = if ok && lim.rlim_cur != libc::RLIM_INFINITY {
-        lim.rlim_cur.min(1 << 20) as libc::c_int
-    } else {
-        1 << 16
-    };
-    for fd in first..max {
-        // SAFETY: fcntl on a descriptor number; EBADF for unused ones is ignored.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
-                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+    Ok(())
+}
+
+/// Lists this process's open descriptors where nothing may allocate (in the child, between fork
+/// and exec): the buffer is allocated by [`OpenFds::prepare`] before the fork.
+struct OpenFds {
+    #[cfg(target_os = "macos")]
+    buf: Vec<libc::proc_fdinfo>,
+    #[cfg(not(target_os = "macos"))]
+    buf: Vec<u8>,
+}
+
+impl OpenFds {
+    #[cfg(target_os = "macos")]
+    fn prepare() -> Result<Self> {
+        // SAFETY: with a null buffer proc_pidinfo returns the size the list needs now.
+        let need = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDLISTFDS,
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if need <= 0 {
+            return Err(WalletError::validation(
+                "cannot list this process's open descriptors",
+            ));
+        }
+        // Room for descriptors opened before the fork.
+        let n = need as usize / std::mem::size_of::<libc::proc_fdinfo>() + 64;
+        let empty = libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        };
+        Ok(Self {
+            buf: vec![empty; n],
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn prepare() -> Result<Self> {
+        Ok(Self { buf: vec![0; 8192] })
+    }
+
+    /// Calls `f` with each open descriptor. Async-signal-safe; an error from `f` stops the walk.
+    #[cfg(target_os = "macos")]
+    fn for_each(
+        &mut self,
+        mut f: impl FnMut(libc::c_int) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let entry = std::mem::size_of::<libc::proc_fdinfo>();
+        let size = libc::c_int::try_from(self.buf.len() * entry).unwrap_or(libc::c_int::MAX);
+        // SAFETY: the kernel writes at most `size` bytes of proc_fdinfo into `buf`.
+        let got = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDLISTFDS,
+                0,
+                self.buf.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if got <= 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if got >= size {
+            // A full buffer may have been cut short.
+            return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+        }
+        for info in &self.buf[..got as usize / entry] {
+            f(info.proc_fd)?;
+        }
+        Ok(())
+    }
+
+    /// Calls `f` with each open descriptor, from `/proc/self/fd` read with raw getdents64.
+    /// Async-signal-safe; an error from `f` stops the walk.
+    #[cfg(target_os = "linux")]
+    fn for_each(
+        &mut self,
+        mut f: impl FnMut(libc::c_int) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        // SAFETY: open(2) of a NUL-terminated literal.
+        let dir = unsafe {
+            libc::open(
+                c"/proc/self/fd".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if dir < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let result = (|| loop {
+            // SAFETY: the kernel writes at most `buf.len()` bytes of dirent64 records.
+            let n = unsafe {
+                libc::syscall(
+                    libc::SYS_getdents64,
+                    dir,
+                    self.buf.as_mut_ptr(),
+                    self.buf.len(),
+                )
+            };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error());
             }
-        }
+            if n == 0 {
+                return Ok(());
+            }
+            // linux_dirent64: d_ino u64, d_off i64, d_reclen u16, d_type u8, d_name (NUL-ended).
+            let mut at = 0usize;
+            while at < n as usize {
+                let bad = || std::io::Error::from_raw_os_error(libc::EIO);
+                let rec = self.buf.get(at..).ok_or_else(bad)?;
+                let reclen = match (rec.get(16), rec.get(17)) {
+                    (Some(lo), Some(hi)) => u16::from_ne_bytes([*lo, *hi]) as usize,
+                    _ => return Err(bad()),
+                };
+                let name = rec.get(19..reclen).ok_or_else(bad)?;
+                if let Some(fd) = parse_fd(name)
+                    && fd != dir
+                {
+                    f(fd)?;
+                }
+                at += reclen;
+            }
+        })();
+        // SAFETY: closes the directory opened above.
+        unsafe { libc::close(dir) };
+        result
     }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn for_each(
+        &mut self,
+        _f: impl FnMut(libc::c_int) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+}
+
+/// A descriptor number from a NUL-terminated `/proc/self/fd` entry name (`.` and `..` are
+/// `None`). Async-signal-safe.
+#[cfg(target_os = "linux")]
+fn parse_fd(name: &[u8]) -> Option<libc::c_int> {
+    let mut fd: libc::c_int = 0;
+    let mut digits = 0;
+    for &b in name {
+        if b == 0 {
+            break;
+        }
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        fd = fd
+            .checked_mul(10)?
+            .checked_add(libc::c_int::from(b - b'0'))?;
+        digits += 1;
+    }
+    (digits > 0).then_some(fd)
 }
 
 async fn drive_daemon(
     home: &Path,
     child: &mut Child,
+    chan: ChildChannel,
     password: &str,
     ttl: Duration,
 ) -> Result<Value> {
-    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        return Err(WalletError::validation("the key daemon has no pipes"));
-    };
-    let lines = line_reader(stdout);
+    let lines = line_reader(
+        chan.try_clone()
+            .map_err(io_err("cannot read from the key daemon"))?,
+    );
     expect_stage(&lines, STAGE_INPUT, INPUT_TIMEOUT)?;
-    // Unbuffered pipe writes: no intermediate copy of the password in this process.
-    stdin
+    // Unbuffered socket writes: no intermediate copy of the password in this process.
+    (&chan)
         .write_all(&encode_unlock_input(ttl, password)?)
         .map_err(io_err("cannot hand the password to the key daemon"))?;
     expect_stage(&lines, STAGE_DECRYPTED, UNLOCK_TIMEOUT)?;
     // The password is right: only now is the running session replaced.
-    let _ = polite_lock(home).await;
+    polite_lock(home).await;
     stop_daemons(home, Some(child.id() as i32))?;
-    stdin
+    (&chan)
         .write_all(&[GO])
         .map_err(io_err("cannot start the key daemon"))?;
-    drop(stdin);
+    let _ = chan.shutdown(Shutdown::Write);
     next_response(&lines, BIND_TIMEOUT)?.into_result()
 }
 
-/// Lines of the child's stdout, read on a thread so each can be awaited with a timeout. `None`
-/// once it closed.
-fn line_reader(stdout: ChildStdout) -> mpsc::Receiver<Option<Vec<u8>>> {
+/// Lines from the daemon's end of the channel, read on a thread so each can be awaited with a
+/// timeout. `None` once it closed.
+fn line_reader(chan: ChildChannel) -> mpsc::Receiver<Option<Vec<u8>>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout.take(4 * MAX_MESSAGE));
+        let mut reader = BufReader::new(chan.take(4 * MAX_MESSAGE));
         loop {
             let mut line = Vec::new();
             match reader.read_until(b'\n', &mut line) {
@@ -607,11 +839,12 @@ fn expect_stage(
 
 // ---- Finding daemons by the OS process table ----
 //
-// A socket or lock file is a name any process of this user can rename or replace, so `lock` and
-// `unlock` never trust one to say which daemons exist. Every daemon is started as
+// A socket or lock file is a name any process of this user can rename or replace, so `lock`,
+// `unlock` and `status` never trust one to say which daemons exist. Every daemon is started as
 // `zwallet daemon --home <canonical home>`; its argv is fixed for its life and readable from the
 // process table (macOS `KERN_PROCARGS2`, Linux `/proc/<pid>/cmdline`, both readable while the
-// daemon is non-dumpable), so that is how they are found and stopped.
+// daemon is non-dumpable), so that is how they are found and stopped. Only an absolute `--home`
+// counts: every daemon zwallet starts has one.
 
 /// `argv[0]` of every daemon this binary starts, whatever the binary file is called.
 pub const DAEMON_ARG0: &str = "zwallet";
@@ -621,6 +854,9 @@ pub const HOME_FLAG: &str = "--home";
 const STOP_GRACE: Duration = Duration::from_secs(2);
 /// After SIGKILL, how long the kernel gets to remove it before `lock` reports failure.
 const STOP_KILL_WAIT: Duration = Duration::from_secs(3);
+/// How long a lookup waits for the stat of other processes' `--home` paths, all together. A path
+/// on a FUSE mount can hang a stat; an answer that does not come in time is no match.
+const STAT_WAIT: Duration = Duration::from_secs(1);
 
 /// The home as written into a daemon's argv: absolute and canonical (symlinks resolved).
 pub fn daemon_home(home: &Path) -> Result<PathBuf> {
@@ -638,6 +874,9 @@ pub fn daemon_home(home: &Path) -> Result<PathBuf> {
 struct HomeMatch {
     names: Vec<OsString>,
     id: Option<(u64, u64)>,
+    /// Identity verdicts already reached per argv path, so that repeated looks at the process
+    /// table (while stopping daemons) stat each path once.
+    same_dir: RefCell<BTreeMap<OsString, bool>>,
 }
 
 impl HomeMatch {
@@ -653,14 +892,72 @@ impl HomeMatch {
             names.push(p.join(name).into_os_string());
         }
         let id = std::fs::metadata(&abs).ok().map(|m| (m.dev(), m.ino()));
-        Self { names, id }
+        Self {
+            names,
+            id,
+            same_dir: RefCell::new(BTreeMap::new()),
+        }
     }
 
-    fn matches(&self, home: &OsStr) -> bool {
-        self.names.iter().any(|n| n == home)
-            || self
-                .id
-                .is_some_and(|id| std::fs::metadata(home).is_ok_and(|m| (m.dev(), m.ino()) == id))
+    /// The pids among `daemons` (pid, absolute argv home) that serve this home. Names are
+    /// compared first, and only the rest are stat'ed for the home's identity, each on its own
+    /// thread and for [`STAT_WAIT`] at most, so another process's argv cannot hang the lookup.
+    fn select(&self, daemons: &[(i32, OsString)]) -> Vec<i32> {
+        let (named, rest): (Vec<_>, Vec<_>) = daemons
+            .iter()
+            .partition(|(_, home)| self.names.contains(home));
+        let mut pids: Vec<i32> = named.iter().map(|(pid, _)| *pid).collect();
+        let Some(id) = self.id else {
+            return pids;
+        };
+        let unseen: Vec<OsString> = {
+            let seen = self.same_dir.borrow();
+            let mut v: Vec<OsString> = rest
+                .iter()
+                .map(|(_, home)| home.clone())
+                .filter(|home| !seen.contains_key(home))
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        self.stat_bounded(unseen, id);
+        let seen = self.same_dir.borrow();
+        pids.extend(
+            rest.iter()
+                .filter(|(_, home)| seen.get(home) == Some(&true))
+                .map(|(pid, _)| *pid),
+        );
+        pids
+    }
+
+    /// Records, for each path, whether it is the directory `id`; a stat that does not answer
+    /// within [`STAT_WAIT`] (its thread is left behind) records no match.
+    fn stat_bounded(&self, paths: Vec<OsString>, id: (u64, u64)) {
+        if paths.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let mut seen = self.same_dir.borrow_mut();
+        for path in paths {
+            seen.insert(path.clone(), false);
+            let tx = tx.clone();
+            let _ = std::thread::Builder::new().spawn(move || {
+                let same = std::fs::metadata(&path).is_ok_and(|m| (m.dev(), m.ino()) == id);
+                let _ = tx.send((path, same));
+            });
+        }
+        drop(tx);
+        let deadline = Instant::now() + STAT_WAIT;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok((path, same)) => {
+                    seen.insert(path, same);
+                }
+                // Every thread answered, or the time is up.
+                Err(_) => break,
+            }
+        }
     }
 }
 
@@ -672,33 +969,71 @@ fn daemon_argv_home(argv: &[OsString]) -> Option<&OsStr> {
     }
 }
 
-/// Pids of this user's zwallet daemons for `home`, other than this process and `keep`.
-pub fn daemon_pids(home: &Path, keep: Option<i32>) -> Result<Vec<i32>> {
-    let wanted = HomeMatch::new(home);
+/// `(pid, --home)` of every zwallet daemon of this user, other than this process and `keep`:
+/// any process whose argv is `<any> daemon --home <absolute path>`.
+fn daemon_processes(keep: Option<i32>) -> Result<Vec<(i32, OsString)>> {
     let me = std::process::id() as i32;
-    let mut pids: Vec<i32> = process_argvs()?
+    Ok(process_argvs()?
         .into_iter()
-        .filter(|(pid, argv)| {
-            *pid > 1
-                && *pid != me
-                && Some(*pid) != keep
-                && daemon_argv_home(argv).is_some_and(|h| wanted.matches(h))
+        .filter(|(pid, _)| *pid > 1 && *pid != me && Some(*pid) != keep)
+        .filter_map(|(pid, argv)| {
+            let home = daemon_argv_home(&argv)?;
+            Path::new(home)
+                .is_absolute()
+                .then(|| (pid, home.to_os_string()))
         })
-        .map(|(pid, _)| pid)
-        .collect();
-    pids.sort_unstable();
-    pids.dedup();
-    Ok(pids)
+        .collect())
 }
 
-/// Stops every daemon for `home` except `keep`: SIGTERM (plus SIGCONT, so a stopped one runs its
-/// handler and wipes its seed), then SIGKILL for any still there after [`STOP_GRACE`]. Succeeds,
-/// returning the pids it signalled, only once a fresh look at the process table finds none left.
+fn sorted(mut pids: Vec<i32>) -> Vec<i32> {
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// Pids of every zwallet daemon of this user, whatever home it serves.
+pub fn all_daemon_pids() -> Result<Vec<i32>> {
+    Ok(sorted(
+        daemon_processes(None)?
+            .into_iter()
+            .map(|(pid, _)| pid)
+            .collect(),
+    ))
+}
+
+/// Pids of this user's zwallet daemons for `home`, other than this process and `keep`.
+pub fn daemon_pids(home: &Path, keep: Option<i32>) -> Result<Vec<i32>> {
+    home_daemons(&HomeMatch::new(home), keep)
+}
+
+fn home_daemons(wanted: &HomeMatch, keep: Option<i32>) -> Result<Vec<i32>> {
+    Ok(sorted(wanted.select(&daemon_processes(keep)?)))
+}
+
+/// Stops every daemon for `home` except `keep` (`unlock` replacing a session); see
+/// [`stop_until_gone`].
 pub fn stop_daemons(home: &Path, keep: Option<i32>) -> Result<Vec<i32>> {
-    let start = std::time::Instant::now();
+    let wanted = HomeMatch::new(home);
+    stop_until_gone(
+        || home_daemons(&wanted, keep),
+        &format!(" for {}", home.display()),
+    )
+}
+
+/// Stops every zwallet daemon of this user, whatever home it serves (`zwallet lock`); see
+/// [`stop_until_gone`].
+pub fn stop_all_daemons() -> Result<Vec<i32>> {
+    stop_until_gone(all_daemon_pids, "")
+}
+
+/// Stops the daemons `alive` lists: SIGTERM (plus SIGCONT, so a stopped one runs its handler and
+/// wipes its seed), then SIGKILL for any still there after [`STOP_GRACE`]. Succeeds, returning
+/// the pids it signalled, only once a fresh look at the process table finds none left.
+fn stop_until_gone(mut alive: impl FnMut() -> Result<Vec<i32>>, scope: &str) -> Result<Vec<i32>> {
+    let start = Instant::now();
     let mut signalled: Vec<i32> = Vec::new();
     loop {
-        let alive = daemon_pids(home, keep)?;
+        let alive = alive()?;
         if alive.is_empty() {
             return Ok(signalled);
         }
@@ -710,9 +1045,8 @@ pub fn stop_daemons(home: &Path, keep: Option<i32>) -> Result<Vec<i32>> {
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(WalletError::validation(format!(
-                "could not stop the key daemon process(es) {list} for {}; the wallet may still \
-                 be unlocked",
-                home.display()
+                "could not stop the key daemon process(es) {list}{scope}; the wallet may still \
+                 be unlocked"
             )));
         }
         for pid in alive {
@@ -724,7 +1058,7 @@ pub fn stop_daemons(home: &Path, keep: Option<i32>) -> Result<Vec<i32>> {
             } else {
                 continue;
             };
-            // SAFETY: kill(2) on a pid > 1 that is not this process (see `daemon_pids`).
+            // SAFETY: kill(2) on a pid > 1 that is not this process (see `daemon_processes`).
             unsafe {
                 libc::kill(pid, signal);
                 if signal == libc::SIGTERM {
@@ -983,6 +1317,93 @@ mod tests {
         assert!(!mine.1.is_empty(), "own argv read");
         // ...but never as a daemon of any home.
         assert!(daemon_pids(Path::new("/"), None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ptrace_scope_check_reads_the_given_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ptrace_scope");
+        let missing = ptrace_scope_check(&path, false).unwrap_err();
+        assert_eq!(missing.code, ErrorCode::ValidationError);
+        assert!(
+            missing.message.contains("missing") && missing.message.contains("ptrace_scope ≥ 1"),
+            "{}",
+            missing.message
+        );
+        ptrace_scope_check(&path, true).unwrap();
+        for (content, ok) in [
+            ("0\n", false),
+            ("garbage\n", false),
+            ("1\n", true),
+            ("2\n", true),
+            ("3", true),
+        ] {
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(ptrace_scope_check(&path, false).is_ok(), ok, "{content:?}");
+            ptrace_scope_check(&path, true).unwrap();
+        }
+        std::fs::write(&path, "0\n").unwrap();
+        let zero = ptrace_scope_check(&path, false).unwrap_err().message;
+        assert!(
+            zero.contains("ptrace_scope is 0")
+                && zero.contains("attach to the daemon during start-up")
+                && zero.contains("--allow-ptrace-scope-0"),
+            "{zero}"
+        );
+    }
+
+    #[test]
+    fn open_descriptors_are_listed_and_marked_close_on_exec() {
+        // A pipe without FD_CLOEXEC, as a parent could leak into zwallet.
+        let mut fds = [0; 2];
+        // SAFETY: pipe(2) fills two fds that are closed below.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (r, w) = unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        };
+        let mut seen = Vec::with_capacity(4096);
+        let mut open = OpenFds::prepare().unwrap();
+        open.for_each(|fd| {
+            if seen.len() < seen.capacity() {
+                seen.push(fd);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            seen.contains(&0) && seen.contains(&r.as_raw_fd()),
+            "{seen:?}"
+        );
+        assert!(seen.contains(&w.as_raw_fd()), "{seen:?}");
+        // An error from the callback stops the walk and comes back.
+        let err = open
+            .for_each(|_| Err(std::io::Error::from_raw_os_error(libc::EPERM)))
+            .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+
+        let flags = |fd| unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_eq!(flags(w.as_raw_fd()) & libc::FD_CLOEXEC, 0);
+        set_cloexec(w.as_raw_fd()).unwrap();
+        assert_ne!(flags(w.as_raw_fd()) & libc::FD_CLOEXEC, 0);
+        // A closed descriptor is fine; a failing F_SETFD would not be.
+        let closed = w.as_raw_fd();
+        drop(w);
+        set_cloexec(closed).unwrap();
+        drop(r);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_fd_names_parse() {
+        assert_eq!(parse_fd(b"12\0"), Some(12));
+        assert_eq!(parse_fd(b"0\0\0\0"), Some(0));
+        assert_eq!(parse_fd(b".\0"), None);
+        assert_eq!(parse_fd(b"..\0"), None);
+        assert_eq!(parse_fd(b"\0"), None);
+        assert_eq!(parse_fd(b"99999999999\0"), None);
     }
 
     #[test]

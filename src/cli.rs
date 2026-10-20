@@ -87,6 +87,9 @@ pub struct CreateArgs {
     /// Also unlock for this duration after creating (e.g. 24h).
     #[arg(long, value_name = "DURATION")]
     pub unlock: Option<String>,
+    /// With --unlock: see `unlock --allow-ptrace-scope-0`.
+    #[arg(long, requires = "unlock")]
+    pub allow_ptrace_scope_0: bool,
     /// Mnemonic length for a new master seed: 12, 15, 18, 21 or 24 (default 24).
     #[arg(long, value_name = "N")]
     pub words: Option<usize>,
@@ -243,6 +246,10 @@ pub struct UnlockArgs {
     pub duration: String,
     #[command(flatten)]
     pub password: PasswordStdin,
+    /// Linux only: start the key daemon even though kernel.yama.ptrace_scope is 0 or missing,
+    /// i.e. any same-user process can attach to it during start-up.
+    #[arg(long)]
+    pub allow_ptrace_scope_0: bool,
 }
 
 /// A command's result: JSON, plus optional human text (generic rendering otherwise).
@@ -273,6 +280,8 @@ impl Out {
 
 /// Process entry: parse, run, print. Returns the exit code.
 pub fn main_entry() -> i32 {
+    // First, for every command: no core dump, and on Linux non-dumpable (see the function).
+    crate::core::password::disable_core_dumps();
     let args: Vec<OsString> = std::env::args_os().collect();
     let json = args.iter().skip(1).any(|a| a == "--json");
     let cli = match Cli::try_parse_from(&args) {

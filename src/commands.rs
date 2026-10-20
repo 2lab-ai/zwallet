@@ -12,7 +12,7 @@ use crate::cli::{
 };
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
-use crate::core::password::{disable_core_dumps, read_password};
+use crate::core::password::read_password;
 use crate::core::protocol::{self, DaemonExe, Request, SIGN_TIMEOUT};
 use crate::core::seed::{DEFAULT_WORD_COUNT, Seed, VALID_WORD_COUNTS};
 use crate::core::store::{self, KeyEntry, MasterOptions, WalletFile};
@@ -21,7 +21,7 @@ use crate::daemon;
 use alloy::hex;
 use alloy::primitives::{B256, U256};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -250,7 +250,6 @@ fn with_note(value: Value, verified: bool) -> Out {
 /// addresses against the seed (a mismatch is `VALIDATION_ERROR`). Addresses derived from this
 /// seed are the ones reported `verified: true`: no other process or file can make them.
 fn open_with_password(home: &Path, password_stdin: bool) -> Result<(Seed, WalletFile)> {
-    disable_core_dumps();
     store::read_wallet_file(home)?;
     let pw = read_password(password_stdin, "Wallet password: ", false)?;
     let (unsealed, file) = store::unlock(home, &pw, &chains::derive_addresses)?;
@@ -274,11 +273,12 @@ async fn start_session(
 }
 
 async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
-    disable_core_dumps();
     store::validate_key_name(&a.name)?;
     let ttl = a.unlock.as_deref().map(parse_duration).transpose()?;
     if ttl.is_some() {
         protocol::socket_path(home)?;
+        // Before the prompt and before anything is written: refused here, nothing was created.
+        protocol::check_ptrace_scope(a.allow_ptrace_scope_0)?;
     }
     // Pinned before any password prompt (see `DaemonExe`).
     let exe = ttl.map(|_| DaemonExe::resolve()).transpose()?;
@@ -341,15 +341,15 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
                 .zip(address.as_deref())
                 .is_some_and(|(d, c)| d.eq_ignore_ascii_case(c));
         if !same {
-            let _ = protocol::lock(home).await;
-            return Err(WalletError::validation(format!(
+            let mismatch = format!(
                 "after create the key daemon reports active key {} at {}, not '{}' at {}; \
-                 wallet.json changed meanwhile, so the wallet was locked again",
+                 wallet.json changed meanwhile",
                 session["active"],
                 session["address"],
                 a.name,
                 address.as_deref().unwrap_or("-")
-            )));
+            );
+            return Err(relocked(mismatch, protocol::lock(home).await));
         }
         out["locked"] = json!(false);
         out["expiresAt"] = session["expiresAt"].clone();
@@ -361,6 +361,19 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
         );
     }
     Ok(with_note(out, verified))
+}
+
+/// The error for a `create --unlock` whose new session shows another key: says whether locking
+/// again worked, never claims it when it did not.
+fn relocked(mismatch: String, relock: Result<Vec<i32>>) -> WalletError {
+    match relock {
+        Ok(_) => WalletError::validation(format!("{mismatch}, so the wallet was locked again")),
+        Err(e) => WalletError::validation(format!(
+            "{mismatch}, and locking the wallet again failed: {}. The wallet may still be \
+             unlocked: run `zwallet lock`",
+            e.message
+        )),
+    }
 }
 
 /// Adds key `a.name` to an existing master. With a terminal or `--password-stdin` (a human), or
@@ -432,6 +445,11 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
         }));
     }
     let verified = opened.is_some();
+    let warning = if verified {
+        index_warning(&file, &file.keys.iter().collect::<Vec<_>>())
+    } else {
+        None
+    };
     let mut text = keys
         .iter()
         .map(|k| {
@@ -449,10 +467,53 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
         text.push('\n');
         text.push_str(UNVERIFIED_NOTE);
     }
-    Ok(Out::with_text(
-        json!({ "active": file.active, "keys": keys, "verified": verified }),
-        text,
-    ))
+    let mut out = json!({ "active": file.active, "keys": keys, "verified": verified });
+    if let Some(w) = warning {
+        text.push_str(&format!("\nwarning: {w}"));
+        out["warning"] = json!(w);
+    }
+    Ok(Out::with_text(out, text))
+}
+
+/// For `--verify`: derivation indices in wallet.json's key list that zwallet never writes, so
+/// the list was edited: one of `shown` at or past `nextIndex`, or an index below the highest of
+/// `shown` that no key uses. The address is still this seed's, but where it sits matters for a
+/// wallet restored from the recovery phrase, which lists accounts in index order.
+fn index_warning(file: &WalletFile, shown: &[&KeyEntry]) -> Option<String> {
+    let mut notes: Vec<String> = shown
+        .iter()
+        .filter(|k| k.index >= file.next_index)
+        .map(|k| {
+            format!(
+                "key '{}' has index {}, at or past nextIndex {}",
+                k.name, k.index, file.next_index
+            )
+        })
+        .collect();
+    let used: BTreeSet<u32> = file.keys.iter().map(|k| k.index).collect();
+    if let Some(top) = shown.iter().map(|k| k.index).max() {
+        let below = used.range(..top).count() as u64;
+        if u64::from(top) > below {
+            // The lowest unused index: the first place the sorted indices skip one.
+            let first = used
+                .iter()
+                .zip(0u32..)
+                .find(|(used, expected)| *used != expected)
+                .map_or(used.len() as u32, |(_, expected)| expected);
+            notes.push(format!(
+                "{} index(es) below {top} belong to no key (the first is {first})",
+                u64::from(top) - below
+            ));
+        }
+    }
+    (!notes.is_empty()).then(|| {
+        format!(
+            "{}. zwallet never assigns indices like this, so wallet.json's key list was edited. \
+             The address is still derived from this seed, but a wallet restored from the \
+             recovery phrase lists accounts in index order and may not show it",
+            notes.join("; ")
+        )
+    })
 }
 
 async fn change(home: &Path, name: &str) -> Result<Out> {
@@ -474,10 +535,17 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         let (seed, file) = open_with_password(home, a.verify.password_stdin)?;
         let key = file.key(a.key.key.as_deref())?;
         let address = derive_checked(&seed, key, chain)?;
-        return Ok(with_note(
-            json!({ "chain": chain.key, "key": key.name, "address": address, "verified": true }),
-            true,
-        ));
+        let mut out = json!({
+            "chain": chain.key,
+            "key": key.name,
+            "index": key.index,
+            "address": address,
+            "verified": true,
+        });
+        if let Some(w) = index_warning(&file, &[key]) {
+            out["warning"] = json!(w);
+        }
+        return Ok(with_note(out, true));
     }
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
@@ -869,28 +937,30 @@ async fn status(home: &Path) -> Result<Out> {
         Err(e) if e.code == ErrorCode::WalletNotFound => None,
         Err(e) => return Err(e),
     };
-    let daemon = protocol::status(home).await?;
-    let locked = !daemon.as_ref().is_some_and(|s| s["locked"] == json!(false));
+    let (pids, serving) = live_daemons(home).await?;
+    let locked = pids.is_empty();
     let mut out = json!({
         "wallet": if file.is_some() { "configured" } else { "not configured" },
         "locked": locked,
         "home": home.display().to_string(),
     });
-    if let Some(d) = &daemon {
+    if !locked {
+        out["daemonPids"] = json!(pids);
+    }
+    if let Some(d) = &serving {
         out["daemonPid"] = d["pid"].clone();
-        if !locked {
-            out["expiresAt"] = d["expiresAt"].clone();
-        }
+        out["expiresAt"] = d["expiresAt"].clone();
     }
     let mut shows_address = false;
     if let Some(file) = &file {
         out["active"] = json!(file.active);
         if let Ok(key) = file.key(None) {
             let primary = chains::find(PRIMARY_CHAIN)?;
-            let derived = if locked {
-                None
-            } else {
+            // Cross-checked only against a listed daemon that says it serves this session.
+            let derived = if serving.is_some() {
                 daemon_derive(home, key.index, primary).await?
+            } else {
+                None
             };
             out["address"] = match derived {
                 Some(d) => {
@@ -906,13 +976,50 @@ async fn status(home: &Path) -> Result<Out> {
     Ok(with_note(out, !shows_address))
 }
 
+/// How long `status` waits for a daemon that says it is locking to leave the process table.
+const EXIT_GRACE: Duration = Duration::from_secs(1);
+
+/// This home's daemons, by the process table (any daemon process for the home means unlocked,
+/// whatever answers on `d.sock`), plus `d.sock`'s status reply when it comes from one of them
+/// and says unlocked. Any other reply (none, "locked", or one from no listed process) may come
+/// from a daemon on its way out, which noticed expiry or a changed wallet.json and has removed
+/// its socket or just said so: the process table is read again until it is empty, for
+/// [`EXIT_GRACE`] at most. A squatter's reply never hides a daemon that stays.
+async fn live_daemons(home: &Path) -> Result<(Vec<i32>, Option<Value>)> {
+    let pids = protocol::daemon_pids(home, None)?;
+    if pids.is_empty() {
+        return Ok((pids, None));
+    }
+    let reply = protocol::status(home).await?;
+    let from_listed = |v: &Value| {
+        v["pid"]
+            .as_i64()
+            .and_then(|p| i32::try_from(p).ok())
+            .is_some_and(|p| pids.contains(&p))
+    };
+    if let Some(v) = reply
+        && v["locked"] == json!(false)
+        && from_listed(&v)
+    {
+        return Ok((pids, Some(v)));
+    }
+    let start = std::time::Instant::now();
+    loop {
+        let now = protocol::daemon_pids(home, None)?;
+        if now.is_empty() || start.elapsed() >= EXIT_GRACE {
+            return Ok((now, None));
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
-    disable_core_dumps();
     let ttl = parse_duration(&a.duration)?;
     protocol::socket_path(home)?;
     // Fail before prompting when there is nothing to unlock. Nothing from this read is reported:
     // the human is shown what the daemon derived from the decrypted seed.
     store::read_wallet_file(home)?;
+    protocol::check_ptrace_scope(a.allow_ptrace_scope_0)?;
     // Pinned before the prompt, so a binary swapped in while the human types is never started.
     let exe = DaemonExe::resolve()?;
     let pw = read_password(a.password.password_stdin, "Wallet password: ", false)?;
@@ -930,15 +1037,18 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
     })))
 }
 
+/// The panic button: every zwallet daemon of this user, not only this home's (see
+/// [`protocol::lock`]).
 async fn lock(home: &Path) -> Result<Out> {
-    let was_unlocked = protocol::lock(home).await?;
-    Ok(Out::json(
-        json!({ "locked": true, "wasUnlocked": was_unlocked }),
-    ))
+    let stopped = protocol::lock(home).await?;
+    Ok(Out::json(json!({
+        "locked": true,
+        "wasUnlocked": !stopped.is_empty(),
+        "stopped": stopped,
+    })))
 }
 
 fn backup(home: &Path) -> Result<Out> {
-    disable_core_dumps();
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return Err(WalletError::validation(
             "backup prints the recovery phrase, so it only runs with stdin and stdout on an \
@@ -963,4 +1073,95 @@ fn backup(home: &Path) -> Result<Out> {
         json!({ "mnemonic": seed.phrase(), "words": seed.word_count() }),
         text,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(name: &str, index: u32) -> KeyEntry {
+        KeyEntry {
+            name: name.into(),
+            index,
+            created_at: String::new(),
+            addresses: BTreeMap::new(),
+        }
+    }
+
+    fn file(next_index: u32, keys: Vec<KeyEntry>) -> WalletFile {
+        serde_json::from_value(json!({
+            "version": 1,
+            "createdAt": "",
+            "active": keys[0].name,
+            "nextIndex": next_index,
+            "keys": keys,
+            "crypto": {
+                "cipher": "", "kdf": "", "nonce": "", "ciphertext": "",
+                "kdfparams": { "logN": 15, "r": 8, "p": 1, "dklen": 32, "salt": "" },
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn relock_failure_is_reported_not_swallowed() {
+        let ok = relocked("mismatch".into(), Ok(vec![42]));
+        assert!(
+            ok.message.ends_with("so the wallet was locked again"),
+            "{}",
+            ok.message
+        );
+        let failed = relocked(
+            "mismatch".into(),
+            Err(WalletError::validation(
+                "could not stop the key daemon process(es) 42",
+            )),
+        );
+        assert_eq!(failed.code, ErrorCode::ValidationError);
+        assert!(
+            !failed.message.contains("was locked again"),
+            "{}",
+            failed.message
+        );
+        assert!(
+            failed.message.contains("locking the wallet again failed")
+                && failed.message.contains("process(es) 42")
+                && failed.message.contains("zwallet lock"),
+            "{}",
+            failed.message
+        );
+    }
+
+    #[test]
+    fn index_warning_flags_indices_past_next_index_and_gaps() {
+        let plain = file(2, vec![key("a", 0), key("b", 1)]);
+        let all: Vec<&KeyEntry> = plain.keys.iter().collect();
+        assert_eq!(index_warning(&plain, &all), None);
+        assert_eq!(index_warning(&plain, &[&plain.keys[1]]), None);
+
+        let past = file(1, vec![key("a", 0), key("b", 1)]);
+        let w = index_warning(&past, &[&past.keys[1]]).unwrap();
+        assert!(
+            w.contains("key 'b' has index 1, at or past nextIndex 1"),
+            "{w}"
+        );
+        assert!(!w.contains("belong to no key"), "{w}");
+        // Key 'a' alone is fine.
+        assert_eq!(index_warning(&past, &[&past.keys[0]]), None);
+
+        let gap = file(9, vec![key("a", 0), key("b", 3), key("c", 4)]);
+        let w = index_warning(&gap, &[&gap.keys[1]]).unwrap();
+        assert!(
+            w.contains("2 index(es) below 3 belong to no key (the first is 1)"),
+            "{w}"
+        );
+        // Below index 0 nothing can be missing.
+        assert_eq!(index_warning(&gap, &[&gap.keys[0]]), None);
+
+        // A huge index is counted, not walked.
+        let far = file(1, vec![key("a", (1 << 31) - 1)]);
+        let w = index_warning(&far, &[&far.keys[0]]).unwrap();
+        assert!(w.contains("the first is 0"), "{w}");
+        assert!(w.contains("at or past nextIndex 1"), "{w}");
+    }
 }

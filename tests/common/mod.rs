@@ -1,14 +1,20 @@
 //! Helpers for driving the real binary. Every test gets its own short temp home under /tmp
 //! (the daemon socket path must fit `sun_path`), an empty environment except `ZWALLET_HOME`,
-//! and a guard that locks and, if needed, kills any daemon it started.
+//! and a guard that stops any daemon serving that home.
+//!
+//! `zwallet lock` stops every zwallet daemon of this user, so a test that runs it would end the
+//! daemons of tests running alongside. Every [`Home`] therefore holds a shared flock on a
+//! per-user file, and a test that runs `zwallet lock` takes it exclusively first ([`exclusive`]).
+//! The lock is cross-process, so concurrent `cargo test` runs on this machine take turns too.
 
 #![allow(dead_code)]
 
 use serde_json::Value;
+use std::cell::Cell;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -54,17 +60,90 @@ impl Run {
     }
 }
 
+fn serial_lock_file() -> File {
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(format!("/tmp/zwt-serial-{uid}.lock"))
+        .expect("open the test serialization lock")
+}
+
+thread_local! {
+    /// This thread holds the serialization lock exclusively (see [`exclusive`]).
+    static EXCLUSIVE: Cell<bool> = const { Cell::new(false) };
+    /// Shared holds this thread has open (one per live [`Home`]).
+    static SHARED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Held by a test that runs `zwallet lock` (which stops every daemon of this user): no other
+/// test with a [`Home`] runs meanwhile, in this process or another. Take it before creating any
+/// `Home`.
+pub struct Exclusive {
+    _file: File,
+}
+
+pub fn exclusive() -> Exclusive {
+    assert_eq!(
+        SHARED.with(Cell::get),
+        0,
+        "take common::exclusive() before creating a Home in this test"
+    );
+    let file = serial_lock_file();
+    file.lock().expect("exclusive test lock");
+    EXCLUSIVE.with(|e| e.set(true));
+    Exclusive { _file: file }
+}
+
+impl Drop for Exclusive {
+    fn drop(&mut self) {
+        EXCLUSIVE.with(|e| e.set(false));
+    }
+}
+
+/// A shared hold on the serialization lock, unless this thread holds it exclusively.
+struct Shared(Option<File>);
+
+impl Shared {
+    fn take() -> Self {
+        if EXCLUSIVE.with(Cell::get) {
+            return Self(None);
+        }
+        let file = serial_lock_file();
+        file.lock_shared().expect("shared test lock");
+        SHARED.with(|n| n.set(n.get() + 1));
+        Self(Some(file))
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            SHARED.with(|n| n.set(n.get() - 1));
+        }
+    }
+}
+
 pub struct Home {
     dir: tempfile::TempDir,
+    /// Dropped last: after the daemons are stopped and the directory is gone.
+    _serial: Shared,
 }
 
 impl Home {
     pub fn new() -> Self {
+        let serial = Shared::take();
         let dir = tempfile::Builder::new()
             .prefix("zwt-")
             .tempdir_in("/tmp")
             .expect("temp home");
-        Self { dir }
+        Self {
+            dir,
+            _serial: serial,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -133,6 +212,13 @@ impl Home {
         daemon_pids(self.path())
     }
 
+    /// Ends this home's session the way `unlock` stops old daemons (only this home's), for tests
+    /// that need the wallet locked but do not test `zwallet lock` itself (which stops every
+    /// daemon of this user, see [`exclusive`]).
+    pub fn stop_daemons(&self) {
+        zwallet::core::protocol::stop_daemons(self.path(), None).expect("stop this home's daemons");
+    }
+
     /// Rewrites `wallet.json` through a JSON edit (metadata only unless the edit says otherwise).
     pub fn edit_wallet(&self, edit: impl FnOnce(&mut Value)) {
         let mut v: Value =
@@ -144,15 +230,13 @@ impl Home {
 
 impl Drop for Home {
     fn drop(&mut self) {
-        let pid = self.daemon_pid();
-        let _ = self.run(&["lock", "--json"]);
-        let mut pids = self.daemon_pids();
-        pids.extend(pid);
-        for pid in pids {
-            // Never 0 or 1 (a fake daemon's reply could carry anything): kill(0) would hit
-            // this whole process group.
+        // Only this home's daemons, by the process table: `zwallet lock` would also stop the
+        // daemons of tests running alongside.
+        let _ = zwallet::core::protocol::stop_daemons(self.path(), None);
+        for pid in self.daemon_pids() {
+            // Never 0 or 1: kill(0) would hit this whole process group.
             if pid > 1 && pid_alive(pid) {
-                // SAFETY: plain kill(2) on a daemon this test's home started.
+                // SAFETY: plain kill(2) on a daemon serving this test's home.
                 unsafe {
                     libc::kill(pid, libc::SIGKILL);
                 }
@@ -178,9 +262,26 @@ pub fn wait_dead(pid: i32, limit: Duration) -> bool {
     !pid_alive(pid)
 }
 
+/// Linux without Yama, or with `kernel.yama.ptrace_scope` 0 (e.g. a Docker kernel): `unlock`
+/// refuses to start a daemon unless given `--allow-ptrace-scope-0`.
+pub fn ptrace_scope_is_open() -> bool {
+    cfg!(target_os = "linux")
+        && std::fs::read_to_string(zwallet::core::protocol::YAMA_PTRACE_SCOPE)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_none_or(|scope| scope == 0)
+}
+
+/// The binary with `args`, an empty environment but `ZWALLET_HOME`, and, where the host's
+/// ptrace policy makes `unlock` refuse ([`ptrace_scope_is_open`]), `--allow-ptrace-scope-0` on
+/// every command that starts a daemon. `r1_unlock_refuses_ptrace_scope_0_without_the_flag`
+/// builds its command without this helper.
 pub fn command_in(home: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_zwallet"));
     cmd.env_clear().env("ZWALLET_HOME", home).args(args);
+    if ptrace_scope_is_open() && args.iter().any(|a| *a == "unlock" || *a == "--unlock") {
+        cmd.arg("--allow-ptrace-scope-0");
+    }
     cmd
 }
 
@@ -212,10 +313,96 @@ pub fn run_in(home: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &st
 }
 
 /// Pids of the zwallet daemons for `home` (other than this process), found by argv
-/// (`zwallet daemon --home <home>`) in the OS process table: the same lookup `lock` uses, which
-/// also sees a non-dumpable daemon on Linux whose /proc fd directory is unreadable.
+/// (`zwallet daemon --home <home>`) in the OS process table: the same lookup `unlock` and
+/// `status` use, which also sees a non-dumpable daemon on Linux whose /proc fd directory is
+/// unreadable.
 pub fn daemon_pids(home: &Path) -> Vec<i32> {
     zwallet::core::protocol::daemon_pids(home, None).expect("process table")
+}
+
+/// Pids of every zwallet daemon of this user, whatever its home: what `zwallet lock` stops.
+pub fn all_daemon_pids() -> Vec<i32> {
+    zwallet::core::protocol::all_daemon_pids().expect("process table")
+}
+
+/// A `zwallet daemon --home <canonical home>` child started the way `unlock` starts it (fds 0
+/// and 1 one end of a socketpair), with this test playing the unlocking CLI on the other end.
+pub struct DaemonChild {
+    pub child: Child,
+    chan: Option<UnixStream>,
+    lines: Option<BufReader<UnixStream>>,
+}
+
+impl DaemonChild {
+    pub fn spawn(home: &Path) -> Self {
+        let (ours, theirs) = UnixStream::pair().expect("socketpair");
+        let theirs_out = theirs.try_clone().unwrap();
+        let mut cmd = command_in(home, &[]);
+        cmd.args(["daemon", "--home"])
+            .arg(std::fs::canonicalize(home).unwrap())
+            .stdin(Stdio::from(OwnedFd::from(theirs)))
+            .stdout(Stdio::from(OwnedFd::from(theirs_out)))
+            .stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn the daemon");
+        // Drops this process's copies of the child's end: its exit must read as EOF here.
+        drop(cmd);
+        ours.set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let lines = BufReader::new(ours.try_clone().unwrap());
+        Self {
+            child,
+            chan: Some(ours),
+            lines: Some(lines),
+        }
+    }
+
+    /// The next JSON line the daemon writes (panics on EOF or after 30 s).
+    pub fn next(&mut self) -> Value {
+        let mut line = String::new();
+        let n = self
+            .lines
+            .as_mut()
+            .expect("channel open")
+            .read_line(&mut line)
+            .expect("read from the daemon");
+        assert!(n > 0, "the daemon closed its end");
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"))
+    }
+
+    pub fn send(&mut self, bytes: &[u8]) {
+        self.chan
+            .as_mut()
+            .expect("channel open")
+            .write_all(bytes)
+            .expect("write to the daemon");
+    }
+
+    /// Closes every handle this process has on the channel, as a killed CLI would.
+    pub fn close(&mut self) {
+        self.chan = None;
+        self.lines = None;
+    }
+
+    /// Waits (bounded) for the daemon to exit; `None` if it is still running.
+    pub fn wait_exit(&mut self, limit: Duration) -> Option<std::process::ExitStatus> {
+        let start = Instant::now();
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if start.elapsed() >= limit {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl Drop for DaemonChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// A listener squatting on a socket path, recording every byte any client sends and answering

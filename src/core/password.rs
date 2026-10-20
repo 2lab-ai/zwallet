@@ -13,9 +13,13 @@ use zeroize::{Zeroize, Zeroizing};
 /// Longest password accepted on stdin or the terminal, in bytes, including its newline.
 pub const MAX_SECRET: usize = 1024;
 
-/// Best effort: no core dump of a process that holds the password or seed. On Linux this also
-/// clears the dumpable flag, which keeps other processes of the same user out of
-/// `/proc/<pid>/mem` and ptrace.
+/// Best effort: no core dump of a process that holds the password or seed. Called once, as the
+/// first line of the process entry (`cli::main_entry`), for every command. On Linux this also
+/// clears the dumpable flag, which from this call on keeps other processes of the same user out
+/// of `/proc/<pid>/mem`, `/proc/<pid>/fd` and new ptrace attachments. Not before it: exec makes a
+/// process dumpable again, and a tracer attached in that window stays attached. That is why the
+/// daemon's channel is a socket (not reopenable through `/proc/<pid>/fd`) and why `unlock`
+/// requires Yama `ptrace_scope` ≥ 1 on Linux.
 pub fn disable_core_dumps() {
     let zero = libc::rlimit {
         rlim_cur: 0,
