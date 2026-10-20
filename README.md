@@ -214,7 +214,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   unknown-`--replace` one below end with "If the transaction at nonce N is a different payment than
   the one you are retrying, do not replace it; that payment and yours are separate". A `--replace`
   hash that is already mined is refused with the same "already mined (nonce consumed)" text, its
-  `zwallet tx` command and explorer page, and its receipt's `minedTxHash` and `success`. zwallet
+  `zwallet tx` command and explorer page, and, when its receipt can be read, `minedTxHash` and
+  `success`. zwallet
   reads the replaced transaction's fees from the node and pays
   `--bump` times the higher of them and its own estimate (tip and max fee, or `gasPrice`; default
   1.25, allowed 1.1 to 3) so that nodes accept the replacement. An explicit `--bump` also applies
