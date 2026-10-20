@@ -2833,7 +2833,7 @@ fn c2_2_the_change_lands_on_exactly_the_list_shown_or_nothing_changes() {
         ),
         "{msg}"
     );
-    assert!(msg.contains("nothing changed"), "{msg}");
+    assert!(msg.contains("nothing in the whitelist changed"), "{msg}");
     assert_eq!(
         home.daemon_pids(),
         vec![pid],
@@ -2887,7 +2887,7 @@ fn r3_2_a_wallet_json_from_before_the_first_edit_refuses_every_edit() {
         for want in [
             "wallet.json seals no whitelist, but whitelist.json exists",
             "a wallet.json restored from before the first edit, or a planted file",
-            "nothing changed",
+            "nothing in the whitelist changed",
             "zwallet whitelist reset",
             "sets every fee cap back to the built-in default",
         ] {
@@ -2895,6 +2895,14 @@ fn r3_2_a_wallet_json_from_before_the_first_edit_refuses_every_edit() {
         }
         assert_eq!(files_of(&home), before, "{args:?} wrote something");
     }
+    // `list --verify` explains it the same way, instead of offering the add it refuses.
+    let v = verify_list(&home);
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("wallet.json seals no whitelist, but whitelist.json exists"),
+        "{v}"
+    );
+    assert!(!reason.contains("creates it"), "{v}");
     // Reset still works: a new key, an empty list, the list it dropped shown.
     let z = whitelist_edit(&home, &["reset"]).ok();
     assert_eq!(
@@ -2910,4 +2918,33 @@ fn r3_2_a_wallet_json_from_before_the_first_edit_refuses_every_edit() {
         (&json!(true), &json!(1)),
         "{v}"
     );
+}
+
+#[test]
+fn r4_2_a_wallet_json_rolled_back_under_a_newer_list_is_named() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    let gen1 = fs::read(home.wallet_json()).unwrap();
+    whitelist_edit(&home, &["remove", "alice"]).ok();
+    // wallet.json alone put back to generation 1: the genuine gen-2 list is newer than the seal.
+    fs::write(home.wallet_json(), &gen1).unwrap();
+    let rolled = "whitelist.json (gen 2) is newer than the seal (gen 1): wallet.json was rolled \
+                  back; restore the current wallet.json";
+    let v = verify_list(&home);
+    assert_eq!(v["verified"], false, "{v}");
+    assert!(v["reason"].as_str().unwrap_or("").contains(rolled), "{v}");
+    let before = files_of(&home);
+    let msg =
+        whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).err("VALIDATION_ERROR");
+    assert!(msg.contains(rolled), "{msg}");
+    assert!(msg.contains("never an older whitelist.json"), "{msg}");
+    assert!(!msg.contains("genuine copy"), "{msg}");
+    assert_eq!(files_of(&home), before);
+    // The daemon refuses with the same reason.
+    home.unlock("10m");
+    let r = home.run(&["sign-message", "--message", "m", "--json"]);
+    let msg = r.err("WHITELIST_INVALID");
+    assert!(msg.contains(rolled), "{msg}");
 }

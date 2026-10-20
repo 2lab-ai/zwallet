@@ -432,9 +432,7 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
             gen_entries(l)
         )),
         FileView::Absent => lines.push("  whitelist.json: none yet".to_string()),
-        FileView::Unreadable(why) => {
-            lines.push(format!("  whitelist.json: unreadable ({})", printable(why)))
-        }
+        FileView::Unreadable(why) => lines.push(unreadable_line(WHITELIST_FILE, why)),
     }
     match &next {
         FileView::List(l) => lines.push(format!(
@@ -442,10 +440,7 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
             gen_entries(l)
         )),
         FileView::Absent => {}
-        FileView::Unreadable(why) => lines.push(format!(
-            "  whitelist.next.json: unreadable ({})",
-            printable(why)
-        )),
+        FileView::Unreadable(why) => lines.push(unreadable_line(NEXT_FILE, why)),
     }
     outcome_lines(&mut lines, &current, &next, matches!(change, Change::Reset));
     lines.push(
@@ -473,7 +468,18 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
     lines.join("\n")
 }
 
-/// The reset's own lines: what it drops, every fee cap it sets back, and what to try first.
+/// A list file that exists but cannot be read or parsed: never "none", since a reset drops
+/// whatever it holds.
+fn unreadable_line(name: &str, why: &str) -> String {
+    format!(
+        "  {name} is there but cannot be read ({}): its entries are unknown, and a reset drops \
+         them",
+        printable(why)
+    )
+}
+
+/// The reset's own lines: what it drops, every fee cap it sets back (or leaves unset, for a
+/// chain with no built-in default), and what to try first.
 fn reset_lines(
     lines: &mut Vec<String>,
     current: &FileView,
@@ -482,13 +488,19 @@ fn reset_lines(
     unlocking: bool,
 ) {
     let names = |view: &FileView| view.list().map(list_names).filter(|n| !n.is_empty());
-    let dropped = match (names(current), names(next)) {
-        (None, None) => "none".to_string(),
-        (Some(c), None) => c,
-        (c, n) => format!(
-            "{WHITELIST_FILE}: {}; {NEXT_FILE}: {}",
-            c.unwrap_or_else(|| "none".into()),
-            n.unwrap_or_else(|| "none".into())
+    let unknown =
+        |name: &str| format!("{name} is there but cannot be read, so its entries are unknown");
+    let part = |view: &FileView, name: &str| match view {
+        FileView::Unreadable(_) => unknown(name),
+        _ => format!("{name}: {}", names(view).unwrap_or_else(|| "none".into())),
+    };
+    let dropped = match (current, next) {
+        (FileView::Unreadable(_), FileView::Absent) => unknown(WHITELIST_FILE),
+        (_, FileView::Absent) => names(current).unwrap_or_else(|| "none".into()),
+        _ => format!(
+            "{}; {}",
+            part(current, WHITELIST_FILE),
+            part(next, NEXT_FILE)
         ),
     };
     lines.push(format!(
@@ -499,23 +511,37 @@ fn reset_lines(
         .into_iter()
         .filter_map(|(name, view)| view.list().map(|l| (name, l)))
         .collect();
-    for key in fresh.policy.max_fee_wei.keys() {
+    let mut keys: Vec<&String> = fresh.policy.max_fee_wei.keys().collect();
+    for (_, l) in &shown {
+        keys.extend(l.policy.max_fee_wei.keys());
+    }
+    keys.sort();
+    keys.dedup();
+    for key in keys {
         let Ok(chain) = chains::find(key) else {
             continue;
         };
-        let default = cap_text(fresh, chain);
+        let default = fresh
+            .policy
+            .max_fee_wei
+            .contains_key(key)
+            .then(|| cap_text(fresh, chain));
         let differs: Vec<String> = shown
             .iter()
             .filter(|(_, l)| l.policy.max_fee_wei.get(key) != fresh.policy.max_fee_wei.get(key))
             .map(|(name, l)| format!("{name} says {}", cap_text(l, chain)))
             .collect();
-        lines.push(if differs.is_empty() {
-            format!("    {key}: {default}")
-        } else {
-            format!(
+        lines.push(match (default, differs.is_empty()) {
+            (Some(default), true) => format!("    {key}: {default}"),
+            (Some(default), false) => format!(
                 "    {key}: back to the default {default} ({}, not verified)",
                 differs.join("; ")
-            )
+            ),
+            (None, _) => format!(
+                "    {key}: no default: every send there is refused until `fee-cap` sets one \
+                 ({}, not verified)",
+                differs.join("; ")
+            ),
         });
     }
     let signing_on: Vec<&str> = shown
@@ -542,8 +568,10 @@ fn reset_lines(
             .to_string()
     });
     lines.push(
-        "  if whitelist.json was only damaged or replaced, put back a genuine copy instead: it \
-         verifies again without a reset, because the seal pins its digest"
+        "  if whitelist.json was only damaged or replaced, put back a genuine copy of it at the \
+         sealed generation instead: it verifies again without a reset, because the seal pins its \
+         digest; if wallet.json was rolled back (whitelist.json is newer than the seal), restore \
+         the current wallet.json instead"
             .to_string(),
     );
 }
@@ -552,14 +580,27 @@ fn reset_lines(
 fn outcome_lines(lines: &mut Vec<String>, current: &FileView, next: &FileView, reset: bool) {
     let gen_after = |view: &FileView| view.list().map(|l| l.generation.saturating_add(1));
     if reset {
-        lines.push(format!(
-            "  the reset makes a new key and an empty list at the sealed generation + 1: {}gen 1 \
-             if wallet.json seals no whitelist yet",
-            match gen_after(current) {
-                Some(g) => format!("gen {g} if whitelist.json is the sealed list, "),
-                None => String::new(),
-            }
-        ));
+        lines.push(
+            "  the reset makes a new key and an empty list, decided once the password opens \
+             wallet.json:"
+                .to_string(),
+        );
+        if let Some(g) = gen_after(current) {
+            lines.push(format!(
+                "    gen {g} if whitelist.json is the list wallet.json seals"
+            ));
+        }
+        if let Some(g) = gen_after(next) {
+            lines.push(format!(
+                "    gen {g} if whitelist.next.json is the list wallet.json seals (an unfinished \
+                 edit)"
+            ));
+        }
+        lines.push(
+            "    the sealed generation + 1 if neither file is (shown once the password opens it)"
+                .to_string(),
+        );
+        lines.push("    gen 1 if wallet.json seals no whitelist yet".to_string());
         return;
     }
     lines.push("  what happens, decided once the password opens wallet.json:".to_string());
@@ -881,7 +922,11 @@ fn edit_text(out: &Value) -> String {
         ),
         _ => format!("reset: a new key and an empty list (dropped {})", {
             let d = join(&out["dropped"]);
-            if d.is_empty() { "nothing".into() } else { d }
+            match (d.is_empty(), out["discarded"].is_object()) {
+                (false, _) => d,
+                (true, true) => "no verified entry".into(),
+                (true, false) => "nothing".into(),
+            }
         }),
     };
     let mut lines = vec![
@@ -899,11 +944,18 @@ fn edit_text(out: &Value) -> String {
         lines.push(format!("warning: {w}"));
     }
     if out["discarded"].is_object() {
+        // No entries: the file is missing or cannot be read (the reason says which), so what it
+        // held is unknown, never "none".
+        let entries = &out["discarded"]["entries"];
         lines.push(format!(
             "discarded (not signed, the edit started from an empty list): {}; its unverified \
              entries: {}",
             printable(out["discarded"]["reason"].as_str().unwrap_or("?")),
-            ascii_json(&out["discarded"]["entries"])
+            if entries.is_null() {
+                "unknown (the file is missing or cannot be read)".to_string()
+            } else {
+                ascii_json(entries)
+            }
         ));
     }
     if out["keyCreated"] == json!(true) {
@@ -1022,13 +1074,17 @@ fn list(home: &Path, a: WhitelistListArgs) -> Result<Out> {
 fn verified_view(home: &Path, anchor: Result<Option<WhitelistAnchor>>) -> Value {
     let anchor = match anchor {
         Err(e) => return unverified_view(home, Some(e.message)),
+        // A list file with no seal is never offered as the first add: that add refuses.
         Ok(None) => {
-            return unverified_view(
-                home,
-                Some(format!(
-                    "wallet.json seals no whitelist key yet; {FIRST_ADD}"
-                )),
-            );
+            let reason = match whitelist::unsealed_files_note(&ListFiles::read(home)) {
+                Some(note) => format!(
+                    "{note}: it is not verified, and every edit refuses; {} {}",
+                    whitelist::UNSEALED_REMEDY,
+                    whitelist::RESET_CAVEAT
+                ),
+                None => format!("wallet.json seals no whitelist key yet; {FIRST_ADD}"),
+            };
+            return unverified_view(home, Some(reason));
         }
         Ok(Some(a)) => a,
     };
@@ -1407,7 +1463,10 @@ mod tests {
         let bad = tempfile::tempdir().unwrap();
         std::fs::write(bad.path().join(WHITELIST_FILE), "{\"x\u{1b}\": 1}").unwrap();
         let text = at(bad.path(), &Change::MessageSigning(true));
-        assert!(text.contains("whitelist.json: unreadable"), "{text}");
+        assert!(
+            text.contains("whitelist.json is there but cannot be read"),
+            "{text}"
+        );
         assert!(!text.contains('\u{1b}'), "{text:?}");
         assert!(text.contains("otherwise: nothing changes"), "{text}");
         assert!(!text.contains("lands on"), "{text}");
@@ -1514,10 +1573,15 @@ mod tests {
             "message signing after the reset: off (whitelist.json says on, not verified)",
             "the reset allows nothing else (no payee, no contract); set `zwallet whitelist \
              fee-cap` again before `--unlock`",
-            "if whitelist.json was only damaged or replaced, put back a genuine copy instead: it \
-             verifies again without a reset, because the seal pins its digest",
-            "the reset makes a new key and an empty list at the sealed generation + 1: gen 2 if \
-             whitelist.json is the sealed list, gen 1 if wallet.json seals no whitelist yet",
+            "if whitelist.json was only damaged or replaced, put back a genuine copy of it at the \
+             sealed generation instead: it verifies again without a reset, because the seal pins \
+             its digest; if wallet.json was rolled back (whitelist.json is newer than the seal), \
+             restore the current wallet.json instead",
+            "the reset makes a new key and an empty list, decided once the password opens \
+             wallet.json:",
+            "    gen 2 if whitelist.json is the list wallet.json seals",
+            "    the sealed generation + 1 if neither file is (shown once the password opens it)",
+            "    gen 1 if wallet.json seals no whitelist yet",
         ] {
             assert!(text.contains(want), "{want:?} not in {text}");
         }
@@ -1538,6 +1602,131 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("again before `--unlock`"), "{text}");
+    }
+
+    #[test]
+    fn r4_3_the_reset_summary_states_every_generation_it_can_make() {
+        let tmp = home_with(&[Entry::new_address(
+            "bob",
+            "0x3333333333333333333333333333333333333333",
+            &["base"],
+        )]);
+        let mut staged = Whitelist::empty(&WHITELIST_RULES);
+        staged.generation = 6;
+        let signed = WhitelistKey::generate().unwrap().sign(&staged);
+        std::fs::write(tmp.path().join(NEXT_FILE), signed.to_file_bytes().unwrap()).unwrap();
+        let text = summary(&ListFiles::read(tmp.path()), &Change::Reset, None);
+        for want in [
+            "    gen 2 if whitelist.json is the list wallet.json seals",
+            "    gen 7 if whitelist.next.json is the list wallet.json seals (an unfinished edit)",
+            "    the sealed generation + 1 if neither file is (shown once the password opens it)",
+            "    gen 1 if wallet.json seals no whitelist yet",
+        ] {
+            assert!(text.contains(want), "{want:?} not in {text}");
+        }
+        assert!(!text.contains("nothing changes"), "{text}");
+        // No file at all: only the last two.
+        let empty = tempfile::tempdir().unwrap();
+        let text = summary(&ListFiles::read(empty.path()), &Change::Reset, None);
+        assert!(!text.contains("if whitelist.json is"), "{text}");
+        assert!(
+            text.contains("    gen 1 if wallet.json seals no whitelist yet"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn r4_4_a_file_that_cannot_be_read_is_never_shown_as_none() {
+        let unknown = "is there but cannot be read";
+        for how in ["garbage", "symlink"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join(WHITELIST_FILE);
+            match how {
+                "garbage" => std::fs::write(&path, "{ not a list").unwrap(),
+                _ => {
+                    let real = home_with(&[Entry::new_address(
+                        "bob",
+                        "0x3333333333333333333333333333333333333333",
+                        &["base"],
+                    )]);
+                    let target = tmp.path().join("elsewhere.json");
+                    std::fs::copy(real.path().join(WHITELIST_FILE), &target).unwrap();
+                    std::os::unix::fs::symlink(&target, &path).unwrap();
+                }
+            }
+            let files = ListFiles::read(tmp.path());
+            let text = summary(&files, &Change::Reset, None);
+            assert!(
+                text.contains(&format!("every entry is dropped: whitelist.json {unknown}")),
+                "{how}: {text}"
+            );
+            assert!(
+                text.contains("its entries are unknown, and a reset drops them"),
+                "{how}: {text}"
+            );
+            assert!(!text.contains("dropped: none"), "{how}: {text}");
+            let text = summary(&files, &Change::MessageSigning(true), None);
+            assert!(
+                text.contains(&format!("whitelist.json {unknown}")),
+                "{how}: {text}"
+            );
+            assert!(text.contains("its entries are unknown"), "{how}: {text}");
+            assert!(!text.contains("none yet"), "{how}: {text}");
+        }
+        // After the reset too: what it dropped from a file it could not read is unknown, not
+        // nothing.
+        let out = json!({
+            "change": "reset",
+            "gen": 3,
+            "previousGen": 2,
+            "entries": [],
+            "dropped": [],
+            "discarded": { "reason": "whitelist.json: not a whitelist file", "entries": null },
+        });
+        let text = edit_text(&out);
+        assert!(!text.contains("dropped nothing"), "{text}");
+        assert!(
+            text.contains(
+                "its unverified entries: unknown (the file is missing or cannot be read)"
+            ),
+            "{text}"
+        );
+        // The same for an unfinished edit that cannot be read.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(NEXT_FILE), "{ not a list").unwrap();
+        let text = summary(&ListFiles::read(tmp.path()), &Change::Reset, None);
+        assert!(
+            text.contains(&format!("whitelist.next.json {unknown}")),
+            "{text}"
+        );
+        assert!(!text.contains("dropped: none"), "{text}");
+    }
+
+    #[test]
+    fn n_f_a_chain_with_a_cap_but_no_default_is_named_in_the_reset_summary() {
+        // Every chain has a built-in default today; a chain added without one must not drop out
+        // of the summary. `fresh` here is the defaults without sepolia.
+        let mut fresh = Whitelist::empty(&WHITELIST_RULES);
+        fresh.policy.max_fee_wei.remove("sepolia");
+        let mut l = Whitelist::empty(&WHITELIST_RULES);
+        l.policy.set_max_fee_wei("sepolia", U256::from(7u64));
+        let mut lines = vec![];
+        reset_lines(
+            &mut lines,
+            &FileView::List(&l),
+            &FileView::Absent,
+            &fresh,
+            false,
+        );
+        let text = lines.join("\n");
+        assert!(
+            text.contains(
+                "    sepolia: no default: every send there is refused until `fee-cap` sets one \
+                 (whitelist.json says 0.000000000000000007 ETH (7 wei), not verified)"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("    base: 0.0005 ETH"), "{text}");
     }
 
     #[test]

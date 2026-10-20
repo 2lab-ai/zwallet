@@ -1091,7 +1091,8 @@ pub fn base_for_edit(
         && let Some(note) = unsealed_files_note(files)
     {
         return Err(WalletError::validation(format!(
-            "refusing to edit the whitelist: {note}"
+            "refusing to edit the whitelist: {note}; nothing in the whitelist changed. Check it \
+             with `zwallet whitelist list --verify`; {UNSEALED_REMEDY} {RESET_CAVEAT}"
         )));
     }
     let base = pick_base_from(files, anchor, rules);
@@ -1118,11 +1119,16 @@ pub fn base_for_edit(
     Ok(base)
 }
 
-/// When wallet.json seals no whitelist but a list file exists, why that is so and what the human
-/// can do (`None` otherwise, e.g. a fresh wallet): the refusal of every edit
-/// ([`base_for_edit`]), and what `whitelist list --verify` explains. A first edit interrupted
-/// between staging and re-seal leaves only `whitelist.next.json`, at generation 1, signed by the
-/// key in `whitelist.key`.
+/// What the human can do when wallet.json seals no whitelist but a list file exists, after
+/// [`unsealed_files_note`] (then [`RESET_CAVEAT`]).
+pub const UNSEALED_REMEDY: &str = "if wallet.json was put back from an older copy, restore the \
+                                   current one instead (zwallet keeps no copy of it).";
+
+/// When wallet.json seals no whitelist but a list file exists, which files and what can cause it
+/// (`None` otherwise, e.g. a fresh wallet): the refusal of every edit ([`base_for_edit`]), and
+/// what `whitelist list --verify` explains, each followed by [`UNSEALED_REMEDY`]. A first edit
+/// interrupted between staging and re-seal leaves only `whitelist.next.json`, at generation 1,
+/// signed by the key in `whitelist.key`.
 pub fn unsealed_files_note(files: &ListFiles) -> Option<String> {
     let found: Vec<String> = [&files.current, &files.next]
         .into_iter()
@@ -1139,9 +1145,7 @@ pub fn unsealed_files_note(files: &ListFiles) -> Option<String> {
     };
     Some(format!(
         "wallet.json seals no whitelist, but {} {} ({interrupted}a wallet.json restored from \
-         before the first edit, or a planted file); nothing in the whitelist changed. Check it \
-         with `zwallet whitelist list --verify`; if wallet.json was put back from an older copy, \
-         restore the current one instead (zwallet keeps no copy of it). {RESET_CAVEAT}",
+         before the first edit, or a planted file)",
         found.join(" and "),
         if found.len() == 1 { "exists" } else { "exist" }
     ))
