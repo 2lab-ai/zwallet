@@ -884,9 +884,10 @@ fn send_summary(out: &Map<String, Value>, chain: &Chain, kind: &str) -> chains::
 /// matches (`duplicateSends`) instead. A `--nonce` send is an explicit replacement or retry at a
 /// fixed nonce, so it cannot add a second payment and skips the check.
 ///
-/// A dry-run first runs the daemon's whitelist check on whitelist.json as it is on disk; if that
-/// refuses, it reports `whitelist: {allowed: false, …}` and asks the daemon for nothing. A live
-/// send is decided by the daemon alone.
+/// A dry-run first runs the daemon's whitelist check on whitelist.json as it is on disk, when
+/// there is one; if that refuses, it reports `whitelist: {allowed: false, …}` and asks the daemon
+/// for nothing. Without a whitelist.json the daemon decides, as for a live send, which is decided
+/// by the daemon alone.
 #[allow(clippy::too_many_arguments)]
 async fn sign_and_send<F: ChainFamily>(
     fam: &F,
@@ -915,9 +916,12 @@ async fn sign_and_send<F: ChainFamily>(
         out.insert("duplicateSends".into(), Value::Array(duplicates));
     }
     // A dry-run the whitelist on disk refuses is explained without asking the daemon to sign.
-    if send.dry_run
-        && let Some(denied) = whitelist::dry_run_denial(home, net.chain, from, &unsigned)?
-    {
+    let checked = if send.dry_run {
+        whitelist::dry_run_check(home, net.chain, from, &unsigned)?
+    } else {
+        whitelist::DryRunCheck::NotChecked
+    };
+    if let whitelist::DryRunCheck::Denied(denied) = checked {
         out.insert("dryRun".into(), json!(true));
         out.insert("whitelist".into(), denied);
         return Ok(Out::json(Value::Object(out)));
@@ -951,8 +955,10 @@ async fn sign_and_send<F: ChainFamily>(
     // The hash is computed from the signed bytes, never taken from the node.
     out.insert("txHash".into(), json!(signed.tx_hash));
     if send.dry_run {
-        // The key daemon signed it, so the whitelist the seal names allows it.
-        out.insert("whitelist".into(), json!({ "allowed": true }));
+        // Checked here against the list on disk, then by the daemon against the sealed one.
+        if matches!(checked, whitelist::DryRunCheck::Allowed) {
+            out.insert("whitelist".into(), json!({ "allowed": true }));
+        }
         // No rawTx: a dry-run must not hand out a transaction that can be broadcast without
         // zwallet.
         out.insert("recoveredFrom".into(), json!(signed.signer));

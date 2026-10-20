@@ -29,8 +29,8 @@ use crate::core::protocol::{self, DaemonExe};
 use crate::core::store::{self, WhitelistAnchor};
 use crate::core::time::parse_duration;
 use crate::core::whitelist::{
-    self, ANY_CHAIN, Base, BaseSource, Edited, Entry, EntryKind, NEXT_FILE, SignedList,
-    WHITELIST_FILE, Whitelist,
+    self, ANY_CHAIN, Base, BaseSource, Edited, Entry, EntryKind, NEXT_FILE, WHITELIST_FILE,
+    Whitelist,
 };
 use alloy::hex;
 use alloy::primitives::U256;
@@ -457,29 +457,38 @@ fn list_names(list: &Whitelist) -> String {
         .join(", ")
 }
 
-/// The list a dry-run is explained with: whitelist.json as it is on disk (unverified), or why
-/// there is none. The one place the CLI builds a [`ListView::Unusable`].
-fn dry_run_view(read: &Result<Option<SignedList>>) -> ListView<'_> {
-    match read {
-        Ok(Some(signed)) => ListView::Usable(&signed.list),
-        Ok(None) => ListView::Unusable(policy::NO_WHITELIST.to_string()),
-        Err(e) => ListView::Unusable(e.message.clone()),
-    }
+/// What the dry-run's whitelist check found ([`dry_run_check`]).
+pub(super) enum DryRunCheck {
+    /// There is no whitelist.json, so nothing was checked here: the daemon decides, against the
+    /// anchor it holds (this process cannot tell a wallet with no whitelist yet from one whose
+    /// list was deleted).
+    NotChecked,
+    /// The list on disk allows it; the daemon still checks the list the seal names.
+    Allowed,
+    /// The list on disk, or its absence of trust, refuses it: `{allowed: false, reason, code,
+    /// command?, counterparty, chain, …}`. The daemon is not asked to sign.
+    Denied(Value),
 }
 
 /// For `--dry-run`: the daemon's own check ([`policy::check_tx`]) of the unsigned transaction
-/// against whitelist.json as it is on disk. `Some({allowed: false, reason, code, command?, …})`
-/// when it refuses, and then the caller asks the daemon for no signature; `None` when the daemon
-/// would be asked. Only the daemon's check, against the list the seal names, decides a send.
-pub(super) fn dry_run_denial(
+/// against whitelist.json as it is on disk, unverified: the list if it parses, or unusable (with
+/// the reason) if it cannot be read. Without a whitelist.json nothing is checked here. Only the
+/// daemon's check, against the list the seal names, decides a send.
+pub(super) fn dry_run_check(
     home: &Path,
     chain: &Chain,
     from: &str,
     unsigned: &Value,
-) -> Result<Option<Value>> {
+) -> Result<DryRunCheck> {
     match &chain.family {
         Family::Evm(_) => {}
     }
+    let read = whitelist::read_list(&home.join(WHITELIST_FILE));
+    let view = match &read {
+        Ok(None) => return Ok(DryRunCheck::NotChecked),
+        Ok(Some(signed)) => ListView::Usable(&signed.list),
+        Err(e) => ListView::Unusable(e.message.clone()),
+    };
     let payload = unsigned
         .as_str()
         .and_then(|s| s.strip_prefix("0x"))
@@ -487,15 +496,14 @@ pub(super) fn dry_run_denial(
         .ok_or_else(|| WalletError::validation("the unsigned transaction is not 0x hex"))?;
     let decoded = tx::decode_unsigned(&payload)?;
     let signer = evm::parse_address(from)?;
-    let read = whitelist::read_list(&home.join(WHITELIST_FILE));
-    let Err(e) = policy::check_tx(&dry_run_view(&read), chain, &signer, &decoded) else {
-        return Ok(None);
+    let Err(e) = policy::check_tx(&view, chain, &signer, &decoded) else {
+        return Ok(DryRunCheck::Allowed);
     };
     let mut denied = e.details.clone();
     denied.insert("allowed".into(), json!(false));
     denied.insert("reason".into(), json!(e.message));
     denied.insert("code".into(), json!(e.code.as_str()));
-    Ok(Some(Value::Object(denied)))
+    Ok(DryRunCheck::Denied(Value::Object(denied)))
 }
 
 fn base_name(source: BaseSource) -> &'static str {

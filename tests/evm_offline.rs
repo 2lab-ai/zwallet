@@ -2827,10 +2827,7 @@ fn daemon_ops(fake: &common::FakeDaemon) -> Vec<String> {
 #[test]
 fn f1_a_dry_run_the_list_denies_is_explained_and_never_reaches_the_signer() {
     let home = Home::new();
-    let me = home.create("t", &[])["address"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    home.create("t", &[]);
     home.allow("alice", ALICE, &["ethereum"]);
     // A listener answering "unlocked" in place of the key daemon records every request.
     let fake = common::FakeDaemon::answering(
@@ -2877,9 +2874,9 @@ fn f1_a_dry_run_the_list_denies_is_explained_and_never_reaches_the_signer() {
             .contains("--contract --selectors 0xd0e30db0"),
         "{v:#}"
     );
-    // No list on disk: unusable, every value send refused; a self-transfer passes the check
-    // (and reaches the signer).
-    std::fs::remove_file(home.path().join("whitelist.json")).unwrap();
+    // A whitelist.json that cannot be read: nothing on it can be trusted, every value send is
+    // refused here too.
+    std::fs::write(home.path().join("whitelist.json"), b"{ not a list").unwrap();
     let v = home
         .run(&pay("ethereum", OTHER, &rpc.url, &["--dry-run"]))
         .ok();
@@ -2887,15 +2884,46 @@ fn f1_a_dry_run_the_list_denies_is_explained_and_never_reaches_the_signer() {
     assert_eq!(v["whitelist"]["code"], "WHITELIST_INVALID", "{v:#}");
     let ops = daemon_ops(&fake);
     assert!(!ops.iter().any(|op| op == "sign_tx"), "{ops:?}");
-    let mut zero = pay("ethereum", &me, &rpc.url, &["--dry-run"]);
-    zero[6] = "0";
-    home.run(&zero);
+    assert!(rpc.sent().is_empty());
+}
+
+#[test]
+fn f1_a_dry_run_without_a_whitelist_file_is_left_to_the_daemon() {
+    // Without whitelist.json this process cannot tell a fresh wallet from a deleted list (the
+    // anchor is sealed): it checks nothing and asks the daemon, as a live send would.
+    let home = Home::new();
+    home.create("t", &[]);
+    home.allow("alice", ALICE, &["ethereum"]);
+    std::fs::remove_file(home.path().join("whitelist.json")).unwrap();
+    let fake = common::FakeDaemon::answering(
+        &home.sock(),
+        json!({ "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z" }),
+    );
+    let rpc = MockRpc::start(healthy);
+    let r = home.run(&pay("ethereum", OTHER, &rpc.url, &["--dry-run"]));
     let ops = daemon_ops(&fake);
     assert_eq!(
         ops.iter().filter(|op| *op == "sign_tx").count(),
         1,
         "{ops:?}"
     );
+    // The listener signs nothing real, so the CLI refuses its answer; there is no whitelist
+    // verdict either way.
+    let v = r.json();
+    assert!(v.get("whitelist").is_none(), "{v:#}");
+    assert!(rpc.sent().is_empty());
+
+    // With the real daemon of a wallet that has no whitelist yet: its own refusal, the same as a
+    // live send's, and a self-transfer it signs, with no `whitelist` field.
+    let (home, me) = unlocked_without_list();
+    let r = home.run(&pay("ethereum", OTHER, &rpc.url, &["--dry-run"]));
+    r.err("WHITELIST_INVALID");
+    assert!(r.json().get("whitelist").is_none(), "{}", r.stdout);
+    let mut zero = pay("ethereum", &me, &rpc.url, &["--dry-run"]);
+    zero[6] = "0";
+    let v = home.run(&zero).ok();
+    assert_eq!(v["recoveredFrom"], me.as_str(), "{v:#}");
+    assert!(v.get("whitelist").is_none(), "{v:#}");
     assert!(rpc.sent().is_empty());
 }
 
