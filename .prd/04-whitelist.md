@@ -361,9 +361,9 @@ it replaces did not verify (or `wallet.json` sealed none), its output shows it a
 (the reason and its unverified entries as JSON; `null` when the file is missing, cannot be
 read or has no entries, and the human output then says on the line of what was dropped "no
 verified entry; whitelist.json's entries unknown (it is missing, cannot be read, or has no
-entries)"). A `whitelist.next.json` the reset drops that was not the sealed list (nor a copy of
-`whitelist.json`) is shown as `discardedNext: { entries }` the same way. An edit never has
-`discarded`: it refuses instead. A change's output: `{ change, gen, previousGen, base:
+entries)"). A `whitelist.next.json` the reset drops that was not the sealed list (nor
+`whitelist.json`'s own bytes) is shown as `discardedNext: { entries }` the same way. An edit
+never has `discarded`: it refuses instead. A change's output: `{ change, gen, previousGen, base:
 "current" | "promoted-next" | "empty", keyCreated, entries: [nicknames], verified: true,
 stoppedDaemons, entry? | feeCap? | allowMessageSigning? | dropped?, discarded?, discardedNext?,
 warning?, locked, hint? }`, and with `--unlock` `{ duration, expiresAt, daemonPid, whitelist }`
@@ -519,7 +519,7 @@ From part C (CLI), with review round 1:
 | W11 | 0-value self-transfer dry-run and live (A7), no list | allowed (under the built-in default fee cap); with a list that cannot be trusted, refused (`WHITELIST_INVALID`) |
 | W12 | invariant tests | type-4, typed-data and raw-hash requests have no protocol path and are refused |
 | W13 | `transfer --dry-run` to an address the list refuses | `whitelist: {allowed: false, …}` with the add command, and no signature request reaches the daemon; an allowed dry-run is signed and shows `allowed: true`; without a `whitelist.json` the daemon is asked and the output has no `whitelist` field |
-| W14 | rewrite `whitelist.json` after the summary is shown, before the password is typed; or show a forged list and put the genuine one back | refused, "changed after it was shown" or the list shown does not verify; nothing written, a running session left alone |
+| W14 | rewrite `whitelist.json` after the summary is shown, before the password is typed; or show a forged list and restore the genuine one | refused, "changed after it was shown" or the list shown does not verify; nothing written, a running session left alone |
 | W15 | a change with and without `--unlock` | the summary ends with "a new signing session for <dur> (until …)" or "the wallet stays locked", before the prompt |
 | W16 | restore a `wallet.json` from before the first edit under a real list | every edit refuses, nothing written; `reset` starts over; the daemon signs only native self-transfers under the built-in default caps |
 | W17 | an edit from an unfinished edit in `whitelist.next.json` | the summary shows both files and every outcome; the change lands on the staged list; `whitelist.json` is written from the verified bytes |

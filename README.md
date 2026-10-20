@@ -200,7 +200,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
     `source` and `sealedGen`, or `verified: false` with the `reason` (with no whitelist sealed
     but a list file there, why every edit refuses and what to do, not the first `add`; for a
     `whitelist.json` that does not verify and is not above the seal (deleted, unreadable, not a
-    list, edited, or older), the same conditional genuine-copy remedy as an edit's). Plain `list`
+    list, edited, or older), the same one recovery as an edit's). Plain `list`
     with only `whitelist.next.json` there names it and points to `--verify`. `unlock`, `create
     --unlock` and `status` show what the daemon trusts, read again on every `status`: `whitelist: {
     gen, verified: true, entries: [nicknames] }`, or `{ gen (null without a whitelist), verified:
@@ -250,7 +250,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
     }` plus the change's own fields, and with `--unlock` `{ duration, expiresAt, daemonPid,
     whitelist }` (or `unlockError`). The first `add` creates `whitelist.key` (`keyCreated: true`).
     `reset` makes a new key and an empty list with the default caps, for a lost or damaged
-    `whitelist.key` or a list that cannot be recovered; when the list it replaces did not verify (or
+    `whitelist.key`, or when the list does not verify and the current `wallet.json` is in place (or
+    there is no copy of it); when the list it replaces did not verify (or
     `wallet.json` sealed none), `discarded` shows it (the reason and its unverified entries, as
     JSON, `null` when the file is missing, cannot be read or has no entries; the human output then
     says "no verified entry; whitelist.json's entries unknown" where it says what was dropped), and
@@ -677,9 +678,10 @@ signs for such an agent. What it does not do:
   gen M): two or more edits above, under the sealed key, "whitelist.json (gen N) is newer than the
   seal (gen M): wallet.json was rolled back"; one edit above, an edit that never finished sealing
   or a rolled-back `wallet.json`; another key, a rollback across a reset, a reset that never
-  finished sealing, or a foreign file. The recovery is the current `wallet.json`. zwallet keeps
-  no copy of `wallet.json` (`zwallet backup` prints only the recovery phrase): keep your own copy
-  after each whitelist change, or `whitelist reset` and set the list up again.
+  finished sealing, or a foreign file. If wallet.json is an older copy, restore the current one
+  if you have it; zwallet keeps no copy of `wallet.json` (`zwallet backup` prints only the
+  recovery phrase), so keep your own copy after each whitelist change. Otherwise `whitelist
+  reset`, and set the list up again.
 - **zwallet never suggests restoring an older whitelist.json.** A copy restored by hand that
   verifies against the sealed digest is the older list, so restoring one can complete a
   rollback (W5b). zwallet keeps no counter outside the home, so it cannot tell such a copy from
