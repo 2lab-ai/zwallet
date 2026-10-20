@@ -2032,6 +2032,46 @@ fn wait_reads_the_outcome_only_from_receipt_status_0x0_or_0x1() {
 }
 
 #[test]
+fn wait_with_a_receipt_for_another_transaction_reports_no_outcome() {
+    let (home, _) = unlocked();
+    let other = format!("0x{}", "dd".repeat(32));
+    // Success or reverted, a receipt about another transaction says nothing about this one.
+    for status in ["0x1", "0x0"] {
+        let o = other.clone();
+        let rpc = MockRpc::start(move |m, p| match m {
+            "eth_getTransactionReceipt" => Reply::Result(receipt(&o, Some(status))),
+            _ => healthy(m, p),
+        });
+        let v = home
+            .run(&transfer(&rpc.url, &["--wait", "--allow-duplicate"]))
+            .ok();
+        let hash = tx_hash_of(&rpc.sent()[0]);
+        let case = format!("{status}: {v:#}");
+        assert!(
+            rpc.calls("eth_getTransactionReceipt")
+                .contains(&json!([hash])),
+            "{case}"
+        );
+        assert_eq!(v["txHash"], hash.as_str(), "{case}");
+        assert_eq!(v["nonce"], PENDING_NONCE, "{case}");
+        assert_eq!(v["status"], "unknown", "{case}");
+        for k in ["success", "blockNumber", "gasUsed"] {
+            assert!(v.get(k).is_none(), "{k}: {case}");
+        }
+        let why = v["receiptError"].as_str().unwrap();
+        assert!(
+            why.contains(&format!("answered about transaction {other}")),
+            "{case}"
+        );
+        let hint = v["hint"].as_str().unwrap();
+        assert!(
+            hint.starts_with("receipt unknown, it may still be pending"),
+            "{case}"
+        );
+    }
+}
+
+#[test]
 fn tx_refuses_a_bad_hash_and_a_node_answering_another_transaction() {
     let home = Home::new();
     // Not a hash: refused before any RPC (the port is closed).
@@ -2111,6 +2151,59 @@ fn replacing_a_mined_transaction_says_only_that_its_nonce_is_consumed() {
         // The receipt says how it executed.
         assert_eq!(v["minedTxHash"], mined.as_str(), "{case}");
         assert_eq!(v.get("success"), Some(&json!(outcome)), "{case}");
+        assert!(rpc.sent().is_empty());
+    }
+}
+
+#[test]
+fn replacing_a_mined_transaction_whose_receipt_cannot_be_read_names_no_outcome() {
+    let (home, me) = unlocked();
+    let mined = format!("0x{}", "9a".repeat(32));
+    let other = format!("0x{}", "dd".repeat(32));
+    // The receipt call fails, or answers about another transaction (`Some`): no receipt either way.
+    for broken in [None, Some(other)] {
+        let (m, from) = (mined.clone(), me.clone());
+        let inner = pending_node(&me, healthy);
+        let reply = broken.clone();
+        let rpc = MockRpc::start(move |method, p| match method {
+            "eth_getTransactionByHash" if p[0] == m.as_str() => Reply::Result(json!({
+                "hash": m, "from": from.to_lowercase(), "nonce": "0x6", "blockNumber": "0x99",
+                "maxFeePerGas": "0x1", "maxPriorityFeePerGas": "0x1",
+            })),
+            "eth_getTransactionReceipt" => match &reply {
+                None => Reply::Error("receipts unavailable"),
+                Some(o) => Reply::Result(receipt(o, Some("0x1"))),
+            },
+            _ => inner(method, p),
+        });
+        let v = home
+            .run(&transfer(
+                &rpc.url,
+                &["--nonce", "6", "--replace", &mined, "--dry-run"],
+            ))
+            .json();
+        let case = format!("{broken:?}: {v:#}");
+        // The receipt was asked for, and its failure only leaves the outcome out.
+        assert!(
+            rpc.calls("eth_getTransactionReceipt")
+                .contains(&json!([mined])),
+            "{case}"
+        );
+        assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{case}");
+        assert_eq!(
+            v["error"],
+            format!(
+                "--replace {mined}: the transaction at nonce 6 is already mined (nonce consumed); \
+                 whether the payment succeeded is not known from this alone: look up its receipt \
+                 with `zwallet tx --chain ethereum {mined}` or https://etherscan.io/tx/{mined} \
+                 before sending anything new; nothing was signed"
+            )
+            .as_str(),
+            "{case}"
+        );
+        for k in ["minedTxHash", "success"] {
+            assert!(v.get(k).is_none(), "{k}: {case}");
+        }
         assert!(rpc.sent().is_empty());
     }
 }
@@ -2207,4 +2300,58 @@ fn a_mined_nonce_reports_its_receipt_never_that_the_payment_went_through() {
         );
     }
     assert_eq!(rpc.sent().len(), 1);
+}
+
+#[test]
+fn a_mined_nonce_whose_receipt_cannot_be_read_names_no_outcome() {
+    let (home, me) = unlocked();
+    // A send at nonce 7, in the journal.
+    let first = MockRpc::start(healthy);
+    let sent = home.run(&transfer(&first.url, &[])).ok();
+    assert_eq!(sent["nonce"], PENDING_NONCE);
+    let hash = sent["txHash"].as_str().unwrap().to_string();
+    // Nonce 7 is mined now, as this key's, but its receipt cannot be read.
+    let (h, from) = (hash.clone(), me.to_lowercase());
+    let rpc = MockRpc::start(move |m, p| match m {
+        "eth_getTransactionCount" => Reply::Result(hex(u128::from(PENDING_NONCE) + 1)),
+        "eth_getTransactionByHash" if p[0] == h.as_str() => Reply::Result(json!({
+            "hash": h, "from": from, "nonce": hex(PENDING_NONCE.into()), "blockNumber": "0x99",
+            "maxFeePerGas": "0x1", "maxPriorityFeePerGas": "0x1",
+        })),
+        "eth_getTransactionReceipt" => Reply::Error("receipts unavailable"),
+        _ => healthy(m, p),
+    });
+    // The hash comes from the journal's entry at 7, or from --replace.
+    for extra in [vec![], vec!["--replace", hash.as_str()]] {
+        let before = rpc.calls("eth_getTransactionReceipt").len();
+        let mut args = vec!["--nonce", "7", "--dry-run"];
+        args.extend(extra);
+        let v = home.run(&transfer(&rpc.url, &args)).json();
+        let case = format!("{args:?}: {v:#}");
+        // The receipt was asked for, and its failure only leaves the outcome out.
+        let asked = rpc.calls("eth_getTransactionReceipt");
+        assert!(asked[before..].contains(&json!([hash])), "{case}");
+        assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{case}");
+        let msg = v["error"].as_str().unwrap();
+        assert!(
+            msg.starts_with(
+                "the transaction at nonce 7 is already mined (nonce consumed); whether the \
+                 payment succeeded is not known from this alone: look up its receipt with \
+                 `zwallet tx --chain ethereum <its txHash>` before sending anything new; nothing \
+                 was signed."
+            ),
+            "{case}"
+        );
+        assert!(!msg.contains(WENT_THROUGH), "{case}");
+        // The journal still names the transaction there, to look up.
+        assert!(
+            msg.contains(&format!("has at nonce 7: {hash} (nonce 7")),
+            "{case}"
+        );
+        assert_eq!(v["nonce"], 7, "{case}");
+        for k in ["minedTxHash", "success"] {
+            assert!(v.get(k).is_none(), "{k}: {case}");
+        }
+    }
+    assert!(rpc.sent().is_empty());
 }
