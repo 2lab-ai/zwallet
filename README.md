@@ -162,7 +162,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
     list never relaxes a stricter signed fee cap. The message gives the reason and points to
     `zwallet whitelist list --verify`, with no `command`: an edit suggested from the refused
     transaction would name an address an agent chose. A wallet with **no whitelist yet** signs
-    only a native self-transfer under the built-in cap; anything else is `WHITELIST_INVALID`.
+    only a native self-transfer under the built-in cap; a self-transfer above it, or on a chain
+    with no built-in cap, is `FEE_CAP_EXCEEDED` with the `whitelist fee-cap` command, and
+    anything else is `WHITELIST_INVALID`.
   - **What a refusal says.**
     - A transaction refusal (`WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED`)
       carries `counterparty` and `chain`, and `command` with the exact command when one edit of
@@ -193,28 +195,39 @@ Commands that act on a key take `--key <name>` (default: the active key).
     `whitelist.json` and `whitelist.next.json` are read once and the change is printed where the
     password is read from (the terminal, or stderr with `--password-stdin`): the nickname, the
     full address, payee or contract, the chains (`*` as "every chain"), the selectors, a policy
-    change's old and new value, what a `reset` drops, both files as they are (an unfinished
-    edit in `whitelist.next.json` too), the generation after the change, that every zwallet
-    daemon of this user is stopped, and what happens to signing: "after the change: the wallet
-    stays locked", or with `--unlock <duration>` "after the change: a new signing session for
-    <duration> (until about <local time>, <UTC>)". **The change is applied to exactly the list
-    shown, or nothing changes**: the edit reads the files again once under `w.lock` and refuses
-    ("<file> changed after it was shown; nothing changed") if they are not those bytes. An edit
-    builds only on the list `wallet.json` seals: if the list shown does not verify (edited by
-    hand, an older copy, deleted), nothing changes, and the message points to `zwallet
-    whitelist list --verify`; `zwallet whitelist reset` starts over. A wrong password, a list
-    that does not verify, or a change the list refuses stops nothing. Otherwise the change stops
-    every zwallet daemon of this user (as `lock` does), signs the next generation and re-seals
-    it into `wallet.json`, and the wallet stays locked unless `--unlock <duration>` starts a new
-    session for that duration with the password just typed (with `unlock`'s checks, so on Linux
-    it may need `--allow-ptrace-scope-0`). Output: `{ change, gen, previousGen, base,
-    keyCreated, entries: [nicknames], verified: true, stoppedDaemons, discarded?, locked, hint?
-    }` plus the change's own fields, and with `--unlock` `{ duration, expiresAt, daemonPid,
-    whitelist }` (or `unlockError`). The first `add` creates `whitelist.key` (`keyCreated:
-    true`). `reset` makes a new key and an empty list with the default caps, for a lost or
-    damaged `whitelist.key` or a list that no longer verifies; when the list it replaces did not
-    verify, `discarded` shows it (the reason and its unverified entries, as JSON). An edit has
-    `discarded` only for a `whitelist.json` found before there was any whitelist.
+    change's old and new value (from both files when an unfinished edit is in
+    `whitelist.next.json`), what a `reset` drops and every fee cap it sets back, both files as
+    they are (name lists cut at 20), every outcome that can still happen (the change lands on
+    `whitelist.json` if it is the sealed list, on the unfinished edit if that is, on a first list
+    from the defaults if there is no list file and no whitelist yet; otherwise nothing changes),
+    that every zwallet daemon of this user is stopped, and what happens to signing: "after the
+    change: the wallet stays locked", or with `--unlock <duration>` "after the change: a new
+    signing session for <duration> (until about <local time>, <UTC>)". The last line, right above
+    the prompt, repeats the change and what happens to signing. **The change is applied to
+    exactly the list shown, or nothing changes**: the files are checked again right before
+    anything is stopped, and read again once under `w.lock`; if they are not those bytes, the
+    change is refused ("<file> changed after it was shown; nothing in the whitelist changed").
+    An edit builds only on the list `wallet.json` seals: if the list shown does not verify
+    (edited by hand, an older copy, deleted), or `wallet.json` seals no whitelist but a list file
+    exists (a `wallet.json` put back from before the first edit, or a planted file), nothing
+    changes, and the message points to `zwallet whitelist list --verify`. Put the genuine file
+    back first: a genuine copy of `whitelist.json` verifies again without a reset, because the
+    seal pins its digest. `zwallet whitelist reset` starts over, at a cost the summary and the
+    message spell out: every fee cap goes back to the built-in default and nothing else is
+    allowed, so set `whitelist fee-cap` again before `--unlock`. A wrong password, a list an edit
+    cannot build on, or a change the list refuses stops nothing (an edit; a `reset` goes ahead).
+    Otherwise the change stops every zwallet daemon of this user (as `lock` does), signs the next
+    generation and re-seals it into `wallet.json`, and the wallet stays locked unless `--unlock
+    <duration>` starts a new session for that duration with the password just typed (with
+    `unlock`'s checks, so on Linux it may need `--allow-ptrace-scope-0`). Output: `{ change, gen,
+    previousGen, base, keyCreated, entries: [nicknames], verified: true, stoppedDaemons,
+    discarded?, locked, hint? }` plus the change's own fields, and with `--unlock` `{ duration,
+    expiresAt, daemonPid, whitelist }` (or `unlockError`). The first `add` creates
+    `whitelist.key` (`keyCreated: true`). `reset` makes a new key and an empty list with the
+    default caps, for a lost or damaged `whitelist.key` or a list that cannot be recovered; when
+    the list it replaces did not verify (or `wallet.json` sealed none), `discarded` shows it (the
+    reason and its unverified entries, as JSON). An edit never has `discarded`: it refuses
+    instead.
   - **`--dry-run`**, when there is a `whitelist.json`, first runs the daemon's own check on it as
     it is on disk (unverified; one that cannot be read counts as untrusted). If that refuses, the
     dry-run reports `whitelist: { allowed: false, reason, code, command?, counterparty, chain, …
@@ -626,9 +639,14 @@ signs for such an agent. What it does not do:
   with the password. Restoring an older `wallet.json`, `whitelist.json` and `whitelist.key`
   together brings back the older list, revoked entries included; nothing stored in the home can
   tell. `unlock`, `status` and `whitelist list` show the generation and the entries: check them.
-  Restoring `wallet.json` alone fails closed: an older anchor does not match the list, and every
-  signature is refused; one from before the first `whitelist add` seals none, and everything
-  but a self-transfer under the built-in fee cap is refused.
+  Restoring `wallet.json` alone to an older edit fails closed: its anchor does not match the
+  list, and every signature is refused.
+- **Rollback to before the first edit.** A `wallet.json` from before the first `whitelist add`
+  seals no whitelist, so the daemon sees "no whitelist yet": it signs no payee send and no
+  contract call, but it does sign native self-transfers under the **built-in default caps**,
+  which may be looser than the caps you signed. `unlock` and `status` show it (`whitelist:
+  { gen: null, verified: false }`), and every whitelist edit refuses while a list file exists;
+  put the current `wallet.json` back.
 - **Same password.** `whitelist.key` is encrypted under the wallet password, so the whitelist
   adds no second factor: whoever has the password can change the list. What it buys is that the
   daemon never holds the key that signs the list.

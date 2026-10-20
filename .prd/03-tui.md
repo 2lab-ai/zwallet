@@ -37,7 +37,11 @@ transaction in detail, transfer an asset to a whitelisted payee, and check the r
   5. the tx hash appears at once, and the screen follows its status (§Status).
 - **T7 Whitelist.** List the entries (gen, `verified` state, policy), add an address entry or a
   contract entry with selectors, remove an entry, set the fee cap.
-  - Every change asks for the password, even when warm, and runs the 04 edit protocol.
+  - Every change asks for the password, even when warm, and runs the 04 edit protocol: the
+    change and every outcome are shown above the password field, every daemon is stopped, and the
+    wallet is left locked. The screen offers to warm up again (`--unlock <dur>`, the duration
+    chosen on that screen, never the old expiry); the change shown says so before the password
+    is typed.
   - The add screen shows the full EIP-55 address and never pre-fills an address from history
     (address-poisoning defence).
 - **T8 Chain.** A chain switcher. The default is the last chain used, otherwise ethereum.
@@ -105,8 +109,9 @@ zwallet tx`. Leaving the screen never cancels anything; the journal has already 
 - The password has one owner: a fixed-capacity `Zeroizing` buffer, rendered as `●`. Paste events
   are appended into that buffer, and then their event copy is dropped.
 - No `Debug` or logging of any message that carries the password, and no event queue that keeps it.
-- The buffer is cleared on success, cancel and every failure path. For the re-warm after a
-  whitelist edit, it is kept only until that re-warm completes, then cleared.
+- The buffer is cleared on success, cancel and every failure path. When a whitelist edit also
+  warms up (`--unlock <dur>`), it is kept only until that new session has started, then
+  cleared.
 - A panic hook and normal unwinding both restore the terminal.
 
 ## Architecture
@@ -136,7 +141,7 @@ dispatcher reads the frames. Behaviour is checked against fixed fixtures on the 
 | T6 | asset → `alice` → amount → review → type `alice` | hash shown at once; status reaches mined on the mock; journal line written |
 | T6b | the payee picker | lists only address entries valid on this chain; a non-listed address cannot be entered |
 | T6c | nonce mined by another hash (fixture) | status `dropped/replaced` |
-| T7 | add `bob` while warm | asks for the password; `whitelist list --verify` shows `bob` at gen+1; session re-warmed to the old expiry |
+| T7 | add `bob` while warm | the change and its outcomes are shown above the password field; `whitelist list --verify` shows `bob` at gen+1; the wallet is locked afterwards, or warm for the duration chosen with the change |
 | T8 | `c` → base | every pane reloads for base; the RPC host shown redacted |
 | T9 | 80×24 resize; `q`; forced panic | layout fits; the terminal is restored after both |
 | T10 | `zwallet lock` from another shell | the TUI shows `locked` within one refresh |

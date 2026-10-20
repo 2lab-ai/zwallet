@@ -184,7 +184,8 @@ built 2026-10-20):
 The list and its key are edited only by the one-shot CLI with the typed password (`zwallet
 whitelist …`, never the daemon). An edit shows the change and what happens to signing before
 the password is read, applies it to exactly the list shown or changes nothing, and builds only
-on the list the seal names (an unverifiable list is refused; only `reset` starts over). It
+on the list the seal names (an unverifiable list, or a list file without a sealed whitelist, is
+refused; only `reset` starts over, with every fee cap back to the default). It
 stops every daemon, signs the next generation, re-seals the anchor into wallet.json, and leaves
 the wallet locked unless `--unlock <duration>` starts a new session. A dry-run runs the
 daemon's check on the list on disk first, when there is one, and asks for no signature when it
