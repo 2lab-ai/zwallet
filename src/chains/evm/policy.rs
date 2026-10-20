@@ -55,9 +55,10 @@ pub enum ListView<'a> {
 
 /// Decides one decoded unsigned transaction against the list. `Ok(())` = may sign.
 ///
-/// With a usable list: the fee limit must be within the list's cap for the chain
-/// (`FEE_CAP_EXCEEDED`, also when there is no cap), then a native transfer to `signer` itself
-/// passes and anything else must be an action the list allows (`WHITELIST_DENIED`). With no list
+/// With a usable list: anything but a native transfer to `signer` itself must first be an action
+/// the list allows (`WHITELIST_DENIED`); then the fee limit must be within the list's cap for the
+/// chain (`FEE_CAP_EXCEEDED`, also when there is no cap), so a fee refusal and its fee-cap command
+/// only ever concern a transaction the list would otherwise sign. With no list
 /// yet, only a native transfer to `signer` passes, under the chain's built-in default fee cap
 /// (`FEE_CAP_EXCEEDED` above it, or without one); anything else is `WHITELIST_INVALID`. With a
 /// list that cannot be trusted, everything is `WHITELIST_INVALID`.
@@ -81,29 +82,30 @@ pub fn check_tx(
         }
         ListView::NoList | ListView::Unusable(_) => return Err(invalid(view, chain, action)),
     };
+    // The action first: a fee refusal, and its fee-cap command, only for a transaction the list
+    // would otherwise sign (a forbidden action with a huge fee must not read as "raise the cap").
+    if !to_self {
+        decide(list, chain, action).map_err(|d| {
+            let message = match &d.fix {
+                Fix::Add(c) => format!(
+                    "refusing to sign: {}; a human can allow it with `{c}`",
+                    d.why
+                ),
+                Fix::Widen => format!("refusing to sign: {}", d.why),
+                Fix::Never => format!(
+                    "refusing to sign: {}; no whitelist entry can allow this",
+                    d.why
+                ),
+            };
+            d.error(ErrorCode::WhitelistDenied, chain, message)
+        })?;
+    }
     check_fee(
         CapSource::List,
         list.policy.max_fee_wei(chain.key),
         chain,
         decoded,
-    )?;
-    if to_self {
-        return Ok(());
-    }
-    decide(list, chain, action).map_err(|d| {
-        let message = match &d.fix {
-            Fix::Add(c) => format!(
-                "refusing to sign: {}; a human can allow it with `{c}`",
-                d.why
-            ),
-            Fix::Widen => format!("refusing to sign: {}", d.why),
-            Fix::Never => format!(
-                "refusing to sign: {}; no whitelist entry can allow this",
-                d.why
-            ),
-        };
-        d.error(ErrorCode::WhitelistDenied, chain, message)
-    })
+    )
 }
 
 /// The `sign-message` gate: refused unless the list verifies and has `allowMessageSigning` on
@@ -1171,12 +1173,45 @@ mod tests {
         assert_eq!(parse_units(amount, 18).unwrap(), fee);
         let cmd = format!("zwallet whitelist fee-cap base {amount}");
         refused(Err(e), ErrorCode::FeeCapExceeded, BOB, "base", Some(&cmd));
-        // Before the action table: an unlisted payee over the cap is a fee refusal.
+        // The action first: a fee refusal (and its fee-cap command) only for a transaction the
+        // list would otherwise sign. An unlisted payee over the cap is a denial with the add
+        // command; a forbidden action over the cap is a denial with no command at all.
         let unlisted = decoded("base", CAROL, 1, "0x", 100_000, 3 * GWEI + 1);
-        assert_eq!(
-            check(&v, "base", &unlisted).unwrap_err().code,
-            ErrorCode::FeeCapExceeded
+        refused(
+            check(&v, "base", &unlisted),
+            ErrorCode::WhitelistDenied,
+            CAROL,
+            "base",
+            Some(&add_cmd(CAROL, "base")),
         );
+        let forbidden = decoded(
+            "base",
+            USDC_BASE,
+            0,
+            &transfer_from_data(ALICE, BOB, 1),
+            100_000,
+            3 * GWEI + 1,
+        );
+        refused(
+            check(&v, "base", &forbidden),
+            ErrorCode::WhitelistDenied,
+            USDC_BASE,
+            "base",
+            None,
+        );
+        let raise = decoded(
+            "base",
+            USDC_BASE,
+            0,
+            &approve_data(BOB, 1),
+            100_000,
+            u64::MAX,
+        );
+        let e = check(&v, "base", &raise).unwrap_err();
+        assert_eq!(e.code, ErrorCode::WhitelistDenied, "{}", e.message);
+        assert!(!e.details.contains_key("command"), "{e:?}");
+        assert!(!e.message.contains("fee-cap"), "{}", e.message);
+        // An allowed action over the cap: the fee refusal, with its command (above, BOB).
         // The signer's own address too, while a list is usable.
         let own = decoded("base", SIGNER, 1, "0x", 100_000, 3 * GWEI + 1);
         assert_eq!(
