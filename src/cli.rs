@@ -6,11 +6,21 @@ use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
 use serde_json::Value;
 use std::ffi::OsString;
+use std::sync::LazyLock;
+
+/// [`crate::version_line`] without its `zwallet ` prefix (clap adds the name).
+fn version_text() -> &'static str {
+    static TEXT: LazyLock<String> = LazyLock::new(|| {
+        let line = crate::version_line();
+        line.strip_prefix("zwallet ").unwrap_or(&line).to_string()
+    });
+    TEXT.as_str()
+}
 
 #[derive(Debug, Parser)]
 #[command(
     name = "zwallet",
-    version,
+    version = version_text(),
     about = "Local, login-free wallet CLI for agents. A human unlocks it for a chosen time; \
              a key-only daemon signs meanwhile."
 )]
@@ -445,6 +455,15 @@ mod tests {
     #[test]
     fn clap_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn version_flag_prints_the_version_line() {
+        for flag in ["--version", "-V"] {
+            let err = Cli::try_parse_from(["zwallet", flag]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::DisplayVersion, "{flag}");
+            assert_eq!(err.to_string().trim_end(), crate::version_line(), "{flag}");
+        }
     }
 
     #[test]

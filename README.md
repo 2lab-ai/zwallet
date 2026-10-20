@@ -9,6 +9,25 @@ It does four things: create a wallet, read balances, call contract functions (re
 transfer. A human unlocks it for a chosen time; while unlocked, a small daemon holds only the key so
 an agent can sign without the human present.
 
+## Install
+
+```sh
+brew install 2lab-ai/tap/zwallet            # stable (v* releases)
+brew install 2lab-ai/tap/zwallet-preview    # preview (every push to main)
+xbrew install zwallet
+cargo install --git https://github.com/2lab-ai/zwallet
+```
+
+Homebrew works on macOS and Linux. Hold one channel at a time: both formulae install
+`bin/zwallet`, so `brew uninstall` the other one before switching. `xbrew` uses the stable tap
+formula on macOS and the checksummed release binary on Arch. Or download a binary from
+[GitHub Releases](https://github.com/2lab-ai/zwallet/releases) (`zwallet-macos-aarch64`,
+`zwallet-macos-x86_64`, `zwallet-linux-aarch64`, `zwallet-linux-x86_64`, checksums in
+`SHA256SUMS`), make it executable and put it on your `PATH` as `zwallet`.
+
+`zwallet --version` prints `zwallet <version> (<channel> <rev12>)`: channel `release` or `preview`
+for published binaries, `dev` for a local build.
+
 ## Quick start
 
 ```sh
@@ -469,3 +488,13 @@ Tests always use a temporary `ZWALLET_HOME` under `/tmp/zwt-*` (short, for the s
 and never touch the real `~/.zwallet`. Layout: `src/core` (custody, seed, amounts, durations,
 errors, daemon protocol), `src/chains` (registry and family traits; `src/chains/evm`),
 `src/daemon` (key holder), `src/cli.rs` and `src/commands.rs`. The spec lives in `.prd/`.
+
+## Release
+
+- **Stable**: set `version` in `Cargo.toml`, merge to `main`, then push the tag `vX.Y.Z` with the
+  same version. `release.yml` refuses a tag that does not match `Cargo.toml`, builds the four
+  binaries, and publishes them with `SHA256SUMS` as the GitHub release `vX.Y.Z`.
+- **Preview**: every push to `main` publishes the prerelease
+  `preview-<YYYY-MM-DD-HHMM>-<sha12>` with the same assets (`preview.yml`; the 15 newest are kept).
+- The `2lab-ai/homebrew-tap` formulae `zwallet` and `zwallet-preview` pick up new releases on the
+  tap's schedule.
