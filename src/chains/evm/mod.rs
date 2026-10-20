@@ -11,6 +11,7 @@ use crate::chains::{
 };
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
+use crate::core::store::KEY_INDEX_LIMIT;
 use alloy::hex;
 use alloy::primitives::{Address, B256, Signature};
 use alloy::signers::SignerSync;
@@ -45,6 +46,13 @@ pub fn derivation_path(index: u32) -> String {
 }
 
 pub fn signer_at(seed: &Seed, index: u32) -> Result<PrivateKeySigner> {
+    // The last step of the path is non-hardened; from 2^31 up it would be a hardened child.
+    if index >= KEY_INDEX_LIMIT {
+        return Err(WalletError::validation(format!(
+            "cannot derive EVM key at index {index}: key indices stay below 2^31, where BIP32's \
+             hardened range starts"
+        )));
+    }
     MnemonicBuilder::<English>::default()
         .phrase(seed.phrase())
         .derivation_path(derivation_path(index))
@@ -331,6 +339,18 @@ mod tests {
             "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
         );
         assert_eq!(Evm.derivation_path(1), "m/44'/60'/0'/0/1");
+    }
+
+    #[test]
+    fn key_index_stays_below_the_hardened_range() {
+        let chain = find("ethereum").unwrap();
+        assert!(Evm.derive_address(&seed(), (1 << 31) - 1).is_ok());
+        for index in [1 << 31, u32::MAX] {
+            let err = Evm.derive_address(&seed(), index).unwrap_err();
+            assert_eq!(err.code, ErrorCode::ValidationError);
+            assert!(err.message.contains("2^31"), "{}", err.message);
+            assert!(Evm.sign_message(&seed(), index, chain, b"x").is_err());
+        }
     }
 
     #[test]

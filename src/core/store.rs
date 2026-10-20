@@ -36,6 +36,9 @@ pub const WALLET_FILE: &str = "wallet.json";
 pub const WRITE_LOCK: &str = "w.lock";
 pub const STORE_VERSION: u32 = 1;
 pub const MIN_PASSWORD_LEN: usize = 12;
+/// Key indices stay below 2^31: BIP32 child numbers from 2^31 up are hardened, so a larger index
+/// could not be the non-hardened last step of a path such as EVM's `m/44'/60'/0'/0/<index>`.
+pub const KEY_INDEX_LIMIT: u32 = 1 << 31;
 const CIPHER: &str = "aes-256-gcm";
 const KDF: &str = "scrypt";
 const KEY_LEN: usize = 32;
@@ -668,7 +671,7 @@ fn create_steps(
 
 /// The derivation index the next [`add_key`] will use, after checking the name is free: past
 /// both `nextIndex` and every index in use, so a hand-edited counter can never reuse a key. An
-/// index with no successor to store as the next `nextIndex` is `VALIDATION_ERROR`.
+/// index at or above [`KEY_INDEX_LIMIT`] is `VALIDATION_ERROR`.
 pub fn plan_new_key(file: &WalletFile, name: &str) -> Result<u32> {
     validate_key_name(name)?;
     if file.keys.iter().any(|k| k.name == name) {
@@ -682,12 +685,17 @@ pub fn plan_new_key(file: &WalletFile, name: &str) -> Result<u32> {
         None => 0,
     };
     let index = file.next_index.max(past_used);
-    index.checked_add(1).ok_or_else(no_index_left)?;
+    if index >= KEY_INDEX_LIMIT {
+        return Err(no_index_left());
+    }
     Ok(index)
 }
 
 fn no_index_left() -> WalletError {
-    WalletError::validation("wallet.json has no derivation index left for a new key")
+    WalletError::validation(
+        "wallet.json has no derivation index left for a new key: indices stay below 2^31, where \
+         BIP32's hardened range starts",
+    )
 }
 
 /// Exclusive writer lock on `<home>/w.lock`, held across read → check → mutate → publish.
@@ -1296,6 +1304,31 @@ mod tests {
         file.keys.push(stale);
         assert_eq!(file.next_index, 1);
         assert_eq!(plan_new_key(&file, "b").unwrap(), 6);
+    }
+
+    #[test]
+    fn plan_new_key_stays_below_the_hardened_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_master(tmp.path(), PW, "a", fast(), &fake_derive).unwrap();
+        let base = read_wallet_file(tmp.path()).unwrap();
+        let last = (1u32 << 31) - 1;
+        // The last non-hardened index is still free.
+        let mut file = base.clone();
+        file.next_index = last;
+        assert_eq!(plan_new_key(&file, "b").unwrap(), last);
+        // From 2^31 on, by the counter or past the highest key, nothing is left.
+        let mut at_limit = base.clone();
+        at_limit.next_index = 1 << 31;
+        let mut past_last = base.clone();
+        let mut far = past_last.keys[0].clone();
+        far.name = "far".into();
+        far.index = last;
+        past_last.keys.push(far);
+        for file in [at_limit, past_last] {
+            let err = plan_new_key(&file, "b").unwrap_err();
+            assert_eq!(err.code, ErrorCode::ValidationError);
+            assert!(err.message.contains("2^31"), "{}", err.message);
+        }
     }
 
     #[test]
