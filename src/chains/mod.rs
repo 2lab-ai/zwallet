@@ -6,6 +6,7 @@
 
 pub mod evm;
 
+use crate::chains::evm::policy::ListView;
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
 use crate::core::store;
@@ -223,11 +224,26 @@ pub fn derive_addresses(seed: &Seed, index: u32) -> Result<BTreeMap<String, Stri
 pub trait FamilyKeys: Sync {
     fn derivation_path(&self, index: u32) -> String;
     fn derive_address(&self, seed: &Seed, index: u32) -> Result<String>;
-    /// Returns `{ address, signature, digest }` (family-defined encodings).
-    fn sign_message(&self, seed: &Seed, index: u32, chain: &Chain, message: &[u8])
-    -> Result<Value>;
-    /// Signs a family-specific unsigned transaction; returns `{ rawTx, txHash }`.
-    fn sign_tx(&self, seed: &Seed, index: u32, chain: &Chain, unsigned: &Value) -> Result<Value>;
+    /// Returns `{ address, signature, digest }` (family-defined encodings). Refused unless `list`
+    /// allows message signing ([`evm::policy::check_message`]).
+    fn sign_message(
+        &self,
+        seed: &Seed,
+        index: u32,
+        chain: &Chain,
+        message: &[u8],
+        list: &ListView<'_>,
+    ) -> Result<Value>;
+    /// Signs a family-specific unsigned transaction; returns `{ rawTx, txHash }`. Refused unless
+    /// `list` allows what the transaction does ([`evm::policy::check_tx`]).
+    fn sign_tx(
+        &self,
+        seed: &Seed,
+        index: u32,
+        chain: &Chain,
+        unsigned: &Value,
+        list: &ListView<'_>,
+    ) -> Result<Value>;
 }
 
 /// An RPC endpoint for one chain. `Debug` prints the URL through [`redact_url`].

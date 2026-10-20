@@ -3,15 +3,18 @@
 
 mod common;
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, U256, keccak256};
 use alloy::providers::Provider;
 use common::Home;
 use serde_json::Value;
 use zwallet::chains::{self, Net, evm};
 use zwallet::core::amount::parse_units;
+use zwallet::core::whitelist::{Entry, Whitelist};
 
 const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+/// Multicall3, the same address on every chain: a contract that is no registry token.
+const MULTICALL3: &str = "0xca11bde05977b3631167028862be2a173976ca11";
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "live: public RPC"]
@@ -40,6 +43,19 @@ fn unlocked_wallet() -> (Home, String) {
         .as_str()
         .unwrap()
         .to_string();
+    (home, address)
+}
+
+/// Like [`unlocked_wallet`], with a signed whitelist made by `change` (given the key's address)
+/// before the unlock.
+fn unlocked_wallet_with(change: impl FnOnce(&str, &mut Whitelist)) -> (Home, String) {
+    let home = Home::new();
+    let address = home.create("live", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    home.edit_whitelist(|l| change(&address, l));
+    home.unlock("1h");
     (home, address)
 }
 
@@ -96,23 +112,38 @@ async fn transfer_dry_run_self_zero_value_on_ethereum() {
 #[test]
 #[ignore = "live: public RPC"]
 fn invoke_dry_run_through_the_daemon() {
-    let (home, me) = unlocked_wallet();
+    // A registry token takes no other call (WETH's deposit() included), so the contract here is
+    // Multicall3, listed with the one selector called.
+    let selector = format!(
+        "0x{}",
+        alloy::hex::encode(&keccak256("getBlockNumber()")[..4])
+    );
+    let (home, me) = unlocked_wallet_with(|_, l| {
+        l.add(Entry::new_contract(
+            "multicall3",
+            MULTICALL3,
+            &["ethereum"],
+            &[&selector],
+        ))
+        .unwrap()
+    });
     let v = home
         .run(&[
             "invoke",
             "--chain",
             "ethereum",
             "--to",
-            WETH,
+            MULTICALL3,
             "--sig",
-            "deposit()",
+            "getBlockNumber()",
             "--dry-run",
             "--json",
         ])
         .ok();
     println!("{v:#}");
     assert_eq!(v["recoveredFrom"], me.as_str());
-    assert_eq!(v["data"], "0xd0e30db0");
+    assert_eq!(v["data"], selector.as_str());
+    assert_eq!(v["signerDecoded"]["action"]["kind"], "contract-call");
     assert!(v["gasLimit"].as_u64().unwrap() > 21_000);
     assert!(v.get("rawTx").is_none());
 }
@@ -144,7 +175,10 @@ fn invoke_from_an_empty_wallet_is_insufficient_funds_before_signing() {
 #[test]
 #[ignore = "live: public RPC"]
 fn token_transfer_dry_run_from_empty_wallet() {
-    let (home, me) = unlocked_wallet();
+    // A token transfer to the key's own address needs it listed as a payee (only a native
+    // self-transfer is allowed without one, and only while there is no whitelist yet).
+    let (home, me) =
+        unlocked_wallet_with(|me, l| l.add(Entry::new_address("me", me, &["ethereum"])).unwrap());
     let v = home
         .run(&[
             "transfer",
@@ -411,4 +445,45 @@ async fn tx_looks_up_a_mined_mainnet_transfer_without_a_wallet() {
         v["hint"].as_str().unwrap().contains("without --nonce"),
         "{v:#}"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live: public RPC"]
+async fn every_registry_token_answers_its_symbol_and_decimals() {
+    // Every row of the built-in registry, on its own chain through the default RPC: `symbol()`
+    // is the recorded on-chain symbol and `decimals()` the recorded decimals.
+    let mut failures = Vec::new();
+    for t in evm::registry::TOKENS {
+        let chain = chains::CHAINS
+            .iter()
+            .find(|c| evm::config(c).chain_id == t.chain_id)
+            .unwrap();
+        let net = Net {
+            chain,
+            rpc_url: chain.default_rpc().to_string(),
+        };
+        let token: Address = t.address.parse().unwrap();
+        let meta = match evm::rpc::connect(&net).await {
+            Ok(p) => evm::rpc::erc20_meta(&p, &net, token).await,
+            Err(e) => Err(e),
+        };
+        let row = format!("{:<9} {:<4} {}", chain.key, t.symbol, t.address);
+        match meta {
+            Ok(m) if m.symbol == t.onchain_symbol && m.decimals == t.decimals => {
+                println!("ok   {row} {} {}", m.symbol, m.decimals);
+            }
+            Ok(m) => {
+                println!("FAIL {row} {:?} {}", m.symbol, m.decimals);
+                failures.push(format!(
+                    "{row}: symbol {:?} decimals {}, expected {:?} {}",
+                    m.symbol, m.decimals, t.onchain_symbol, t.decimals
+                ));
+            }
+            Err(e) => {
+                println!("FAIL {row} {}", e.message);
+                failures.push(format!("{row}: {}", e.message));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }

@@ -22,6 +22,13 @@ pub enum ErrorCode {
     InsufficientFunds,
     /// The signed transaction was handed to the node but whether it was accepted is unknown.
     BroadcastUncertain,
+    /// The verified whitelist does not allow this signature (`.prd/04-whitelist.md`).
+    WhitelistDenied,
+    /// There is no whitelist the daemon can trust (none yet, or it does not verify against the
+    /// sealed anchor): every value-moving signature is refused.
+    WhitelistInvalid,
+    /// The transaction's fee limit is above the whitelist's cap for its chain, or there is none.
+    FeeCapExceeded,
 }
 
 impl ErrorCode {
@@ -40,6 +47,9 @@ impl ErrorCode {
             Self::RpcError => "RPC_ERROR",
             Self::InsufficientFunds => "INSUFFICIENT_FUNDS",
             Self::BroadcastUncertain => "BROADCAST_UNCERTAIN",
+            Self::WhitelistDenied => "WHITELIST_DENIED",
+            Self::WhitelistInvalid => "WHITELIST_INVALID",
+            Self::FeeCapExceeded => "FEE_CAP_EXCEEDED",
         }
     }
 }
@@ -125,5 +135,19 @@ mod tests {
             WalletError::validation("x").to_json(),
             serde_json::json!({ "error": "x", "errorCode": "VALIDATION_ERROR" })
         );
+    }
+
+    #[test]
+    fn whitelist_codes_serialize_as_their_names() {
+        for code in [
+            ErrorCode::WhitelistDenied,
+            ErrorCode::WhitelistInvalid,
+            ErrorCode::FeeCapExceeded,
+        ] {
+            let v = serde_json::to_value(code).unwrap();
+            assert_eq!(v, code.as_str());
+            assert_eq!(serde_json::from_value::<ErrorCode>(v).unwrap(), code);
+        }
+        assert_eq!(ErrorCode::FeeCapExceeded.as_str(), "FEE_CAP_EXCEEDED");
     }
 }

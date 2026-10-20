@@ -20,7 +20,7 @@ use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::password::{MAX_SECRET, read_exact_secret};
 use crate::core::store;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -105,6 +105,10 @@ pub struct Response {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<ErrorCode>,
+    /// The error's machine-readable fields ([`WalletError::details`], e.g. the whitelist command
+    /// a human runs to allow a refused signature). Never secrets.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub details: Map<String, Value>,
 }
 
 impl Response {
@@ -115,6 +119,7 @@ impl Response {
             result: Some(result),
             error: None,
             error_code: None,
+            details: Map::new(),
         }
     }
 
@@ -125,6 +130,7 @@ impl Response {
             result: None,
             error: Some(e.message.clone()),
             error_code: Some(e.code),
+            details: e.details.clone(),
         }
     }
 
@@ -132,10 +138,14 @@ impl Response {
         if self.ok {
             Ok(self.result.unwrap_or(Value::Null))
         } else {
-            Err(WalletError::new(
+            let mut e = WalletError::new(
                 self.error_code.unwrap_or(ErrorCode::ValidationError),
                 self.error.unwrap_or_else(|| "daemon error".into()),
-            ))
+            );
+            for (k, v) in self.details {
+                e = e.with_detail(&k, v);
+            }
+            Err(e)
         }
     }
 }
@@ -1452,6 +1462,83 @@ mod tests {
         // There is no unlock request any more: a password can never be sent over the socket.
         let unlock = serde_json::json!({ "op": "unlock", "password": "x", "ttlSecs": 5 });
         assert!(serde_json::from_value::<Request>(unlock).is_err());
+    }
+
+    #[test]
+    fn error_details_cross_the_socket() {
+        let e = WalletError::new(ErrorCode::WhitelistDenied, "refusing to sign: no")
+            .with_detail("command", "zwallet whitelist add <nick> 0x1 --chains base")
+            .with_detail("chain", "base");
+        let wire = serde_json::to_string(&Response::err(&e)).unwrap();
+        let back: Response = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.into_result().unwrap_err(), e);
+        // No details: no field on the wire, and none after.
+        let plain = WalletError::validation("x");
+        let wire = serde_json::to_value(Response::err(&plain)).unwrap();
+        assert!(wire.get("details").is_none(), "{wire}");
+        let back: Response = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.into_result().unwrap_err(), plain);
+        let ok = serde_json::to_value(Response::ok(json!({ "locked": true }))).unwrap();
+        assert!(ok.get("details").is_none(), "{ok}");
+    }
+
+    #[test]
+    fn w12_no_request_carries_a_hash_typed_data_or_an_authorization() {
+        // Every request there is, by its wire name: the only signing paths are an EIP-191
+        // message and an unsigned transaction's bytes (which the daemon decodes and checks).
+        let all = [
+            Request::Lock,
+            Request::Status,
+            Request::Address {
+                chain: "base".into(),
+                index: 0,
+            },
+            Request::SignMessage {
+                chain: "base".into(),
+                index: 0,
+                message_hex: "00".into(),
+            },
+            Request::SignTx {
+                chain: "base".into(),
+                index: 0,
+                tx: json!("0x02"),
+            },
+        ];
+        for r in &all {
+            // Exhaustive: a new request kind does not compile until it is listed above.
+            match r {
+                Request::Lock
+                | Request::Status
+                | Request::Address { .. }
+                | Request::SignMessage { .. }
+                | Request::SignTx { .. } => {}
+            }
+        }
+        let ops: Vec<String> = all
+            .iter()
+            .map(|r| {
+                serde_json::to_value(r).unwrap()["op"]
+                    .as_str()
+                    .unwrap()
+                    .into()
+            })
+            .collect();
+        assert_eq!(
+            ops,
+            ["lock", "status", "address", "sign_message", "sign_tx"]
+        );
+        let hash = format!("0x{}", "ab".repeat(32));
+        for op in [
+            json!({ "op": "sign_hash", "chain": "base", "index": 0, "hash": hash }),
+            json!({ "op": "sign_typed_data", "chain": "base", "index": 0, "typedData": {} }),
+            json!({ "op": "sign_authorization", "chain": "base", "index": 0, "address": hash }),
+            json!({ "op": "sign_raw", "chain": "base", "index": 0, "messageHex": "00" }),
+        ] {
+            assert!(
+                serde_json::from_value::<Request>(op.clone()).is_err(),
+                "{op}"
+            );
+        }
     }
 
     #[test]

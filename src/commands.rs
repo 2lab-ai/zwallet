@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+mod whitelist;
+
 /// How long `--wait` polls for a receipt before reporting `status: "pending"`, unless
 /// `--wait-timeout` says otherwise.
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
@@ -53,6 +55,7 @@ pub async fn run(cli: Cli) -> Result<Out> {
         Command::Backup => backup(&home()?),
         Command::Unlock(a) => unlock(&home()?, a).await,
         Command::Lock => lock(),
+        Command::Whitelist(w) => whitelist::run(&home()?, w).await,
         Command::Daemon { home } => {
             daemon::run(home).await?;
             Ok(Out::silent())
@@ -357,6 +360,8 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
         out["locked"] = json!(false);
         out["expiresAt"] = session["expiresAt"].clone();
         out["daemonPid"] = session["pid"].clone();
+        // The whitelist this session signs under, as `unlock` shows it.
+        out["whitelist"] = session["whitelist"].clone();
     }
     if master == "created" && std::io::stderr().is_terminal() {
         eprintln!(
@@ -677,7 +682,8 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
 async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
     chains::require_contract_calls(chain)?;
-    let to = evm::parse_address(&a.to)?;
+    let (to, nickname) = whitelist::recipient(home, &a.to)?;
+    let to = evm::parse_address(&to)?;
     let (input, sig) = match (&a.sig, &a.data) {
         (Some(sig), None) => {
             let func = abi::parse_function(sig)?;
@@ -729,6 +735,9 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     base.insert("key".into(), json!(key_name));
     base.insert("from".into(), json!(from));
     base.insert("to".into(), json!(to.to_checksum(None)));
+    if let Some(n) = nickname {
+        base.insert("toNickname".into(), json!(n));
+    }
     base.insert("sig".into(), json!(sig));
     base.insert("args".into(), json!(a.args));
     base.insert("data".into(), json!(format!("0x{}", hex::encode(&input))));
@@ -794,7 +803,8 @@ async fn transfer_with<F: ChainFamily>(
     a: TransferArgs,
 ) -> Result<Out> {
     let chain = net.chain;
-    let to = fam.normalize_address(&a.to)?;
+    let (to, nickname) = whitelist::recipient(home, &a.to)?;
+    let to = fam.normalize_address(&to)?;
     if let Some(t) = &a.token {
         fam.normalize_address(t)?;
     } else {
@@ -825,6 +835,9 @@ async fn transfer_with<F: ChainFamily>(
     base.insert("key".into(), json!(key_name));
     base.insert("from".into(), json!(from));
     base.insert("to".into(), json!(to));
+    if let Some(n) = nickname {
+        base.insert("toNickname".into(), json!(n));
+    }
     let kind = if a.token.is_some() {
         "token-transfer"
     } else {
@@ -870,6 +883,11 @@ fn send_summary(out: &Map<String, Value>, chain: &Chain, kind: &str) -> chains::
 /// once the first is mined passes the pending check and would pay twice. A dry-run reports the
 /// matches (`duplicateSends`) instead. A `--nonce` send is an explicit replacement or retry at a
 /// fixed nonce, so it cannot add a second payment and skips the check.
+///
+/// A dry-run first runs the daemon's whitelist check on whitelist.json as it is on disk, when
+/// there is one; if that refuses, it reports `whitelist: {allowed: false, …}` and asks the daemon
+/// for nothing. Without a whitelist.json the daemon decides, as for a live send, which is decided
+/// by the daemon alone.
 #[allow(clippy::too_many_arguments)]
 async fn sign_and_send<F: ChainFamily>(
     fam: &F,
@@ -896,6 +914,17 @@ async fn sign_and_send<F: ChainFamily>(
             return Err(journal.duplicate_error(duplicates));
         }
         out.insert("duplicateSends".into(), Value::Array(duplicates));
+    }
+    // A dry-run the whitelist on disk refuses is explained without asking the daemon to sign.
+    let checked = if send.dry_run {
+        whitelist::dry_run_check(home, net.chain, from, &unsigned)?
+    } else {
+        whitelist::DryRunCheck::NotChecked
+    };
+    if let whitelist::DryRunCheck::Denied(denied) = checked {
+        out.insert("dryRun".into(), json!(true));
+        out.insert("whitelist".into(), denied);
+        return Ok(Out::json(Value::Object(out)));
     }
     let signed_value = protocol::send_unlocked(
         home,
@@ -926,6 +955,10 @@ async fn sign_and_send<F: ChainFamily>(
     // The hash is computed from the signed bytes, never taken from the node.
     out.insert("txHash".into(), json!(signed.tx_hash));
     if send.dry_run {
+        // Checked here against the list on disk, then by the daemon against the sealed one.
+        if matches!(checked, whitelist::DryRunCheck::Allowed) {
+            out.insert("whitelist".into(), json!({ "allowed": true }));
+        }
         // No rawTx: a dry-run must not hand out a transaction that can be broadcast without
         // zwallet.
         out.insert("recoveredFrom".into(), json!(signed.signer));
@@ -1023,6 +1056,8 @@ async fn status(home: &Path) -> Result<Out> {
     if let Some(d) = &serving {
         out["daemonPid"] = d["pid"].clone();
         out["expiresAt"] = d["expiresAt"].clone();
+        // The whitelist as the serving daemon verifies it right now.
+        out["whitelist"] = d["whitelist"].clone();
     }
     let mut shows_address = false;
     if let Some(file) = &file {
@@ -1121,6 +1156,9 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
         "daemonPid": session["pid"],
         // Derived by this process's own daemon child from the seed this password opened.
         "verified": true,
+        // The whitelist this session signs under, as its daemon verified it: the generation and
+        // the entries, so a rolled-back list is visible.
+        "whitelist": session["whitelist"],
     });
     if let Some(w) = session_index_warning(&file, &session) {
         out["warning"] = json!(w);

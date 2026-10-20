@@ -59,7 +59,10 @@ From the 2026-10-20 spec reviews (gpt6, zhuge):
   selectors and explicit chains.
 - **A per-chain fee cap lives in the signed list.** `sign-message` is gated by a list flag.
 - **The daemon never holds the whitelist secret.** It only holds the public key and the generation.
-- **Edits stop every daemon first,** then re-warm to the previous expiry.
+- **Edits stop every daemon first,** then leave the wallet locked; `--unlock <dur>` starts a new
+  session for a duration typed with the change. (The re-warm to the previous expiry decided here
+  was dropped in the WU1b review: it trusted an expiry reported by whatever answered for the
+  home.)
 - **An invalid list is never re-signed.**
 - **Joint rollback of all files is a documented limit, not a claimed protection.**
 - **History = the send journal plus a keyless explorer where reachable.** ERC-20 log scanning was

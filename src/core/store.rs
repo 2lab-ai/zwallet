@@ -228,7 +228,8 @@ pub const SEALED_VERSION: u32 = 1;
 struct SealedPayload {
     version: u32,
     mnemonic: Zeroizing<String>,
-    /// Reserved for a future signing policy; `{}` for now and carried through intact.
+    /// The signing policy's anchor ([`WhitelistAnchor`]); `{}` while there is no whitelist. Keys
+    /// this version does not know are carried through intact.
     policy: Value,
 }
 
@@ -238,19 +239,16 @@ pub struct Unsealed {
     pub policy: Value,
 }
 
-/// Seals the mnemonic and `policy` (a JSON object) with a fresh salt and nonce.
-pub fn encrypt(seed: &Seed, policy: &Value, password: &str, kdf: KdfParams) -> Result<CryptoBox> {
-    if !policy.is_object() {
-        return Err(WalletError::validation("policy must be a JSON object"));
+impl Unsealed {
+    /// The whitelist anchor sealed in `policy` ([`WhitelistAnchor::from_policy`]).
+    pub fn whitelist_anchor(&self) -> Result<Option<WhitelistAnchor>> {
+        WhitelistAnchor::from_policy(&self.policy)
     }
-    let plaintext = Zeroizing::new(
-        serde_json::to_vec(&SealedPayload {
-            version: SEALED_VERSION,
-            mnemonic: Zeroizing::new(seed.phrase().to_string()),
-            policy: policy.clone(),
-        })
-        .map_err(|_| WalletError::validation("cannot serialize the sealed payload"))?,
-    );
+}
+
+/// Draws a fresh salt and nonce and seals `plaintext` under a key derived from `password`, with
+/// `aad` binding the ciphertext to the one file it belongs in.
+fn seal(plaintext: &[u8], password: &str, kdf: KdfParams, aad: &[u8]) -> Result<CryptoBox> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce = [0u8; NONCE_LEN];
     OsRng
@@ -263,8 +261,8 @@ pub fn encrypt(seed: &Seed, policy: &Value, password: &str, kdf: KdfParams) -> R
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
-                msg: plaintext.as_slice(),
-                aad: AAD,
+                msg: plaintext,
+                aad,
             },
         )
         .map_err(|_| WalletError::validation("encryption failed"))?;
@@ -283,15 +281,18 @@ pub fn encrypt(seed: &Seed, policy: &Value, password: &str, kdf: KdfParams) -> R
     })
 }
 
-/// Decrypts the sealed payload. A failed GCM tag check is reported as `WRONG_PASSWORD`.
-pub fn decrypt(sealed: &CryptoBox, password: &str) -> Result<Unsealed> {
-    let corrupt = |what: &str| WalletError::validation(format!("wallet.json is corrupt: {what}"));
+/// Opens a box [`seal`] made with the same `aad`. `file` names the file in errors. A failed GCM
+/// tag check (wrong password, or a box from another file) is `WRONG_PASSWORD`.
+fn open(sealed: &CryptoBox, password: &str, aad: &[u8], file: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let corrupt = |what: &str| WalletError::validation(format!("{file} is corrupt: {what}"));
     if sealed.cipher != CIPHER || sealed.kdf != KDF {
         return Err(corrupt("unsupported cipher or kdf"));
     }
-    let k = &sealed.kdfparams;
     // Before anything allocates: bounds the memory a tampered file can demand.
-    let kdf = KdfParams::checked(k.log_n, k.r, k.p)?;
+    let kdf = sealed
+        .kdf_params()
+        .map_err(|e| WalletError::validation(e.message.replacen(WALLET_FILE, file, 1)))?;
+    let k = &sealed.kdfparams;
     if k.dklen as usize != KEY_LEN {
         return Err(corrupt("kdf parameters out of range"));
     }
@@ -304,22 +305,51 @@ pub fn decrypt(sealed: &CryptoBox, password: &str) -> Result<Unsealed> {
     }
     let key = derive_key(password, &salt, &kdf)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
-    let plain = Zeroizing::new(
-        cipher
-            .decrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: &ciphertext,
-                    aad: AAD,
-                },
+    let plain = cipher
+        .decrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| {
+            WalletError::new(
+                ErrorCode::WrongPassword,
+                format!("wrong password: {file} could not be decrypted"),
             )
-            .map_err(|_| {
-                WalletError::new(
-                    ErrorCode::WrongPassword,
-                    "wrong password: wallet.json could not be decrypted",
-                )
-            })?,
+        })?;
+    Ok(Zeroizing::new(plain))
+}
+
+impl CryptoBox {
+    /// The scrypt parameters this box was sealed with, checked as in [`KdfParams::checked`].
+    pub fn kdf_params(&self) -> Result<KdfParams> {
+        let k = &self.kdfparams;
+        KdfParams::checked(k.log_n, k.r, k.p)
+    }
+}
+
+/// Seals the mnemonic and `policy` (a JSON object) with a fresh salt and nonce.
+pub fn encrypt(seed: &Seed, policy: &Value, password: &str, kdf: KdfParams) -> Result<CryptoBox> {
+    if !policy.is_object() {
+        return Err(WalletError::validation("policy must be a JSON object"));
+    }
+    let plaintext = Zeroizing::new(
+        serde_json::to_vec(&SealedPayload {
+            version: SEALED_VERSION,
+            mnemonic: Zeroizing::new(seed.phrase().to_string()),
+            policy: policy.clone(),
+        })
+        .map_err(|_| WalletError::validation("cannot serialize the sealed payload"))?,
     );
+    seal(&plaintext, password, kdf, AAD)
+}
+
+/// Decrypts the sealed payload. A failed GCM tag check is reported as `WRONG_PASSWORD`.
+pub fn decrypt(sealed: &CryptoBox, password: &str) -> Result<Unsealed> {
+    let corrupt = |what: &str| WalletError::validation(format!("wallet.json is corrupt: {what}"));
+    let plain = open(sealed, password, AAD, WALLET_FILE)?;
     let payload: SealedPayload =
         serde_json::from_slice(&plain).map_err(|_| corrupt("sealed payload is malformed"))?;
     if payload.version != SEALED_VERSION {
@@ -332,6 +362,114 @@ pub fn decrypt(sealed: &CryptoBox, password: &str) -> Result<Unsealed> {
         seed: Seed::from_phrase(payload.mnemonic)?,
         policy: payload.policy,
     })
+}
+
+/// `whitelist.key`'s associated data: a box sealed for one file never opens as the other.
+const WHITELIST_KEY_AAD: &[u8] = b"zwallet/whitelist.key/v1";
+/// The whitelist signing key's file, for errors.
+const WHITELIST_KEY_FILE: &str = "whitelist.key";
+
+/// Seals the whitelist's 32-byte ed25519 secret the way wallet.json seals the mnemonic (same
+/// cipher and KDF, a fresh salt and nonce), but under its own associated data, so neither
+/// ciphertext can stand in for the other.
+pub fn seal_whitelist_key(secret: &[u8; 32], password: &str, kdf: KdfParams) -> Result<CryptoBox> {
+    seal(secret, password, kdf, WHITELIST_KEY_AAD)
+}
+
+/// Opens a box [`seal_whitelist_key`] made. A wrong password, or a box from wallet.json, is
+/// `WRONG_PASSWORD`; anything but 32 bytes inside is `VALIDATION_ERROR`.
+pub fn open_whitelist_key(sealed: &CryptoBox, password: &str) -> Result<Zeroizing<[u8; 32]>> {
+    let plain = open(sealed, password, WHITELIST_KEY_AAD, WHITELIST_KEY_FILE)?;
+    let mut secret = Zeroizing::new([0u8; 32]);
+    if plain.len() != secret.len() {
+        return Err(WalletError::validation(
+            "whitelist.key is corrupt: the sealed key is not 32 bytes",
+        ));
+    }
+    secret.copy_from_slice(&plain);
+    Ok(secret)
+}
+
+/// What wallet.json's sealed `policy` pins about the signed whitelist
+/// (`.prd/04-whitelist.md`): the ed25519 public key that signs it, its generation, and the
+/// digest of the one list signed at that generation. A policy without these keys (`{}`) means
+/// there is no whitelist yet.
+///
+/// The digest binds the generation to exactly one list: an edit that died after signing
+/// `whitelist.next.json` but before re-sealing leaves a signed list at generation + 1 behind, and
+/// the next edit signs a different list at that same generation. Without the digest, a copy of
+/// the abandoned one would verify too.
+///
+/// AES-GCM authenticates the anchor but gives it no freshness: an authentic older wallet.json can
+/// be restored by anyone who can write the home. One sealed with `{}` reads as "no whitelist",
+/// which refuses every value-moving signature (fails closed); one with an older anchor, restored
+/// together with its list and key, is the documented joint rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WhitelistAnchor {
+    pub public_key: [u8; 32],
+    pub generation: u64,
+    pub digest: [u8; 32],
+}
+
+const POLICY_PUB: &str = "whitelistPub";
+const POLICY_GEN: &str = "whitelistGen";
+const POLICY_DIGEST: &str = "whitelistDigest";
+
+impl WhitelistAnchor {
+    /// The anchor in a sealed policy object. None of its three keys: `None`. All three
+    /// well-formed (`whitelistPub` and `whitelistDigest` 32 bytes of lower-case hex,
+    /// `whitelistGen` a number from 1): `Some`. Anything in between is `VALIDATION_ERROR`, so a
+    /// damaged anchor never reads as "no whitelist".
+    pub fn from_policy(policy: &Value) -> Result<Option<Self>> {
+        let obj = policy.as_object().ok_or_else(|| {
+            WalletError::validation("wallet.json is corrupt: sealed policy is not an object")
+        })?;
+        let keys = [POLICY_PUB, POLICY_GEN, POLICY_DIGEST];
+        let present = keys.iter().filter(|k| obj.contains_key(**k)).count();
+        if present == 0 {
+            return Ok(None);
+        }
+        let bad = |what: &str| {
+            WalletError::validation(format!(
+                "wallet.json's sealed whitelist anchor is malformed: {what}"
+            ))
+        };
+        let bytes32 = |key: &str| -> Result<[u8; 32]> {
+            let s = obj
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| bad(&format!("{key} is missing or not a string")))?;
+            let mut out = [0u8; 32];
+            let canonical =
+                s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            if !canonical || hex::decode_to_slice(s, &mut out).is_err() {
+                return Err(bad(&format!("{key} is not 32 bytes of lower-case hex")));
+            }
+            Ok(out)
+        };
+        let generation = obj
+            .get(POLICY_GEN)
+            .and_then(Value::as_u64)
+            .filter(|g| *g >= 1)
+            .ok_or_else(|| bad(&format!("{POLICY_GEN} is missing or not a number from 1")))?;
+        Ok(Some(Self {
+            public_key: bytes32(POLICY_PUB)?,
+            generation,
+            digest: bytes32(POLICY_DIGEST)?,
+        }))
+    }
+
+    /// `policy` (a JSON object) with this anchor's keys set; every other key is kept.
+    pub fn to_policy(&self, policy: &Value) -> Result<Value> {
+        let mut obj = policy
+            .as_object()
+            .cloned()
+            .ok_or_else(|| WalletError::validation("policy must be a JSON object"))?;
+        obj.insert(POLICY_PUB.into(), Value::from(hex::encode(self.public_key)));
+        obj.insert(POLICY_GEN.into(), Value::from(self.generation));
+        obj.insert(POLICY_DIGEST.into(), Value::from(hex::encode(self.digest)));
+        Ok(Value::Object(obj))
+    }
 }
 
 /// Derives one key's address cache (chain key → address) at a derivation index. Supplied by the
@@ -704,6 +842,33 @@ pub struct MetaLock {
     _file: File,
 }
 
+/// wallet.json as [`MetaLock::open`] decrypted it: the file, its sealed contents, and the
+/// password that opened them (zeroized on drop). Read-only, so what [`MetaLock::reseal`] seals is
+/// exactly what was opened. Deliberately not `Debug`.
+pub struct Opened {
+    file: WalletFile,
+    unsealed: Unsealed,
+    password: Zeroizing<String>,
+}
+
+impl Opened {
+    /// wallet.json as it was when opened. Its crypto envelope is authenticated: these KDF
+    /// parameters, salt and nonce are the ones that decrypted it.
+    pub fn file(&self) -> &WalletFile {
+        &self.file
+    }
+
+    /// The seed and the sealed policy.
+    pub fn unsealed(&self) -> &Unsealed {
+        &self.unsealed
+    }
+
+    /// The password that opened this wallet.json (for sealing `whitelist.key` alongside it).
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+}
+
 impl MetaLock {
     /// Waits (bounded) for the lock. `home` must exist.
     pub fn acquire(home: &Path) -> Result<Self> {
@@ -757,6 +922,139 @@ impl MetaLock {
             file.active = name.to_string();
             Ok(())
         })
+    }
+
+    /// The home this lock guards.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    /// Decrypts wallet.json as it is under this lock. The result is the proof [`MetaLock::reseal`]
+    /// needs: that `password` opens the master the file holds right now.
+    pub fn open(&self, password: &str) -> Result<Opened> {
+        let file = read_wallet_file(&self.home)?;
+        let unsealed = decrypt(&file.crypto, password)?;
+        Ok(Opened {
+            file,
+            unsealed,
+            password: Zeroizing::new(password.to_string()),
+        })
+    }
+
+    /// Re-seals the master in wallet.json with `policy` under the password that opened it (the
+    /// whitelist editor's commit point). If wallet.json's crypto envelope is no longer exactly
+    /// the one `opened` came from (cipher, KDF and every KDF parameter, salt, nonce,
+    /// ciphertext), nothing is written. The mnemonic, the password and the KDF parameters carry
+    /// over from `opened`, never from a re-read: a file can be edited on disk without the
+    /// password, so a re-read could downgrade the KDF. The salt and nonce are fresh; the metadata
+    /// is untouched.
+    ///
+    /// That comparison is a snapshot check among writers that take `w.lock`, not an atomic
+    /// compare-and-swap: a same-user process that ignores the lock can still race the rename
+    /// (the same-user limits in README §Known limits).
+    ///
+    /// The new file is written to a temp file, read back from disk and decrypted (the phrase and
+    /// the policy must come out as sealed, the metadata as it was), and only then renamed over
+    /// wallet.json, so a crash leaves either the old file or the new one. A failure before the
+    /// rename removes the temp file.
+    pub fn reseal(&self, opened: &Opened, policy: &Value) -> Result<WalletFile> {
+        let home = &self.home;
+        let before = read_wallet_file(home)?;
+        if serde_json::to_value(&before.crypto).ok()
+            != serde_json::to_value(&opened.file.crypto).ok()
+        {
+            return Err(WalletError::validation(
+                "wallet.json's master changed while the password was checked; retry",
+            ));
+        }
+        let (seed, password) = (&opened.unsealed.seed, opened.password.as_str());
+        let kdf = opened.file.crypto.kdf_params()?;
+        let mut file = before.clone();
+        file.crypto = encrypt(seed, policy, password, kdf)?;
+        let bytes = to_json_bytes(&file)?;
+        let path = home.join(WALLET_FILE);
+        let tmp = temp_path(home);
+        let mut journal = Journal::default();
+        let verify = || -> Result<()> {
+            let on_disk = parse_wallet_file(&tmp)?;
+            let reopened = decrypt(&on_disk.crypto, password)?;
+            let same_meta = on_disk.keys == before.keys
+                && on_disk.active == before.active
+                && on_disk.next_index == before.next_index
+                && on_disk.created_at == before.created_at;
+            if !same_meta || reopened.seed.phrase() != seed.phrase() || reopened.policy != *policy {
+                return Err(WalletError::validation("read-back mismatch"));
+            }
+            Ok(())
+        };
+        let written = write_new_file(&tmp, &bytes, &mut journal)
+            .and_then(|()| {
+                verify().map_err(|e| {
+                    WalletError::validation(format!(
+                        "post-write verification failed, wallet.json not replaced: {}",
+                        e.message
+                    ))
+                })
+            })
+            .and_then(|()| {
+                fs::rename(&tmp, &path).map_err(|e| {
+                    WalletError::validation(format!("cannot replace {}: {e}", path.display()))
+                })
+            });
+        if written.is_err() {
+            journal.rollback();
+        }
+        written?;
+        sync_dir(home)?;
+        match read_wallet_bytes(&path) {
+            Ok(b) if b == bytes => Ok(file),
+            Ok(_) => Err(WalletError::validation(
+                "wallet.json changed right after it was re-sealed",
+            )),
+            Err(e) => Err(WalletError::validation(format!(
+                "cannot read wallet.json back after re-sealing it: {}",
+                e.message
+            ))),
+        }
+    }
+
+    /// Atomically replaces `<home>/<name>` with `bytes`: a fresh 0600 temp file, fsync, rename,
+    /// then a directory fsync. For the whitelist's files; wallet.json and the lock files are
+    /// refused (they have their own writers).
+    pub(crate) fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        check_plain_name(name)?;
+        let home = &self.home;
+        let path = home.join(name);
+        let tmp = temp_path_for(home, name);
+        let mut journal = Journal::default();
+        let written = write_new_file(&tmp, bytes, &mut journal).and_then(|()| {
+            fs::rename(&tmp, &path).map_err(|e| {
+                WalletError::validation(format!("cannot replace {}: {e}", path.display()))
+            })
+        });
+        if written.is_err() {
+            journal.rollback();
+        }
+        written?;
+        sync_dir(home)
+    }
+
+    /// Removes the plain file `name` from the home (gone already is fine), then syncs the
+    /// directory.
+    pub(crate) fn remove_file(&self, name: &str) -> Result<()> {
+        check_plain_name(name)?;
+        let path = self.home.join(name);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(WalletError::validation(format!(
+                    "cannot remove {}: {e}",
+                    path.display()
+                )));
+            }
+        }
+        sync_dir(&self.home)
     }
 
     /// Read-modify-write of the non-secret metadata. The crypto box must come out unchanged,
@@ -868,11 +1166,35 @@ fn to_json_bytes(file: &WalletFile) -> Result<Vec<u8>> {
 }
 
 fn temp_path(home: &Path) -> PathBuf {
+    temp_path_for(home, WALLET_FILE)
+}
+
+/// A private temp name next to `<home>/<name>`: dot-prefixed, with this process's id and a
+/// random suffix.
+fn temp_path_for(home: &Path, name: &str) -> PathBuf {
     home.join(format!(
-        ".{WALLET_FILE}.tmp-{}-{:08x}",
+        ".{name}.tmp-{}-{:08x}",
         std::process::id(),
         OsRng.next_u32()
     ))
+}
+
+/// A file name directly in the home, other than wallet.json, the lock files and the socket.
+fn check_plain_name(name: &str) -> Result<()> {
+    use crate::core::protocol::{LOCK_NAME, SOCKET_NAME, UNLOCK_LOCK_NAME};
+    let reserved = [
+        WALLET_FILE,
+        WRITE_LOCK,
+        LOCK_NAME,
+        UNLOCK_LOCK_NAME,
+        SOCKET_NAME,
+    ];
+    if name.is_empty() || name.contains('/') || name.starts_with('.') || reserved.contains(&name) {
+        return Err(WalletError::validation(format!(
+            "refusing to write '{name}' through the plain-file writer"
+        )));
+    }
+    Ok(())
 }
 
 /// fsyncs a directory so a new or renamed entry in it survives a crash.
@@ -1629,6 +1951,215 @@ mod tests {
         sync_dir(tmp.path()).unwrap();
         let err = sync_dir(&tmp.path().join("missing")).unwrap_err();
         assert!(err.message.contains("cannot sync"), "{}", err.message);
+    }
+
+    #[test]
+    fn whitelist_key_box_opens_only_as_whitelist_key() {
+        let secret = [7u8; 32];
+        let key_box = seal_whitelist_key(&secret, PW, fast_kdf()).unwrap();
+        assert_eq!(*open_whitelist_key(&key_box, PW).unwrap(), secret);
+        let again = seal_whitelist_key(&secret, PW, fast_kdf()).unwrap();
+        assert_ne!(key_box.nonce, again.nonce, "its own nonce");
+        assert_ne!(key_box.kdfparams.salt, again.kdfparams.salt, "its own salt");
+        assert_eq!(
+            key_box.kdfparams.log_n, KDF_MIN_LOG_N,
+            "the KDF it was given"
+        );
+        assert!(!key_box.ciphertext.contains(&hex::encode(secret)));
+
+        let err = open_whitelist_key(&key_box, "not the password").unwrap_err();
+        assert_eq!(err.code, ErrorCode::WrongPassword);
+        assert!(err.message.contains("whitelist.key"), "{}", err.message);
+        // Same password, same cipher and KDF: still neither box opens as the other.
+        let wallet_box = encrypt(&test_seed(), &empty(), PW, fast_kdf()).unwrap();
+        assert_eq!(
+            open_whitelist_key(&wallet_box, PW).unwrap_err().code,
+            ErrorCode::WrongPassword
+        );
+        assert_eq!(
+            decrypt(&key_box, PW).err().unwrap().code,
+            ErrorCode::WrongPassword
+        );
+        // A tampered KDF names the file it came from.
+        let mut bad = key_box.clone();
+        bad.kdfparams.log_n = 30;
+        let err = open_whitelist_key(&bad, PW).unwrap_err();
+        assert!(
+            err.message.starts_with("whitelist.key is corrupt"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn whitelist_anchor_rides_in_the_sealed_policy() {
+        assert_eq!(WhitelistAnchor::from_policy(&empty()).unwrap(), None);
+        let anchor = WhitelistAnchor {
+            public_key: [0xab; 32],
+            generation: 3,
+            digest: [0x01; 32],
+        };
+        let other = serde_json::json!({ "future": [1, 2] });
+        let policy = anchor.to_policy(&other).unwrap();
+        assert_eq!(
+            policy["future"],
+            serde_json::json!([1, 2]),
+            "other keys kept"
+        );
+        assert_eq!(policy["whitelistPub"], hex::encode([0xab; 32]));
+        assert_eq!(policy["whitelistGen"], 3);
+        assert_eq!(policy["whitelistDigest"], hex::encode([0x01; 32]));
+        assert_eq!(WhitelistAnchor::from_policy(&policy).unwrap(), Some(anchor));
+
+        // Through the seal: what the daemon reads at unlock.
+        let sealed = encrypt(&test_seed(), &policy, PW, fast_kdf()).unwrap();
+        let opened = decrypt(&sealed, PW).unwrap();
+        assert_eq!(opened.whitelist_anchor().unwrap(), Some(anchor));
+
+        // A damaged anchor never reads as "no whitelist".
+        let mut damaged = Vec::new();
+        for key in ["whitelistPub", "whitelistGen", "whitelistDigest"] {
+            let mut p = policy.clone();
+            p.as_object_mut().unwrap().remove(key);
+            damaged.push(p);
+        }
+        for (key, value) in [
+            ("whitelistPub", Value::from("AB".repeat(32))),
+            ("whitelistPub", Value::from("ab".repeat(31))),
+            ("whitelistDigest", Value::from(7)),
+            ("whitelistGen", Value::from(0)),
+            ("whitelistGen", Value::from("3")),
+            ("whitelistGen", Value::from(-1)),
+        ] {
+            let mut p = policy.clone();
+            p[key] = value;
+            damaged.push(p);
+        }
+        for p in damaged {
+            let err = WhitelistAnchor::from_policy(&p).unwrap_err();
+            assert_eq!(err.code, ErrorCode::ValidationError, "{p}");
+        }
+        assert!(anchor.to_policy(&serde_json::json!([])).is_err());
+    }
+
+    #[test]
+    fn reseal_changes_only_the_master_and_checks_what_it_opened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        create_master(home, PW, "a", fast(), &fake_derive).unwrap();
+        let lock = MetaLock::acquire(home).unwrap();
+        let opened = lock.open(PW).unwrap();
+        assert_eq!(
+            lock.open("not the password").err().unwrap().code,
+            ErrorCode::WrongPassword
+        );
+        let before = read_wallet_file(home).unwrap();
+        let policy = serde_json::json!({ "whitelistGen": 1, "x": "y" });
+        let after = lock.reseal(&opened, &policy).unwrap();
+        assert_ne!(after.crypto.ciphertext, before.crypto.ciphertext);
+        assert_ne!(after.crypto.kdfparams.salt, before.crypto.kdfparams.salt);
+        assert_eq!(after.crypto.kdfparams.log_n, before.crypto.kdfparams.log_n);
+        let on_disk = read_wallet_file(home).unwrap();
+        assert_eq!(on_disk.keys, before.keys);
+        assert_eq!(on_disk.active, before.active);
+        assert_eq!(on_disk.created_at, before.created_at);
+        assert_eq!(mode(&home.join(WALLET_FILE)), 0o600);
+        assert_eq!(
+            data_names(home),
+            vec![OsString::from(WALLET_FILE)],
+            "no temp left"
+        );
+        let reopened = decrypt(&on_disk.crypto, PW).unwrap();
+        assert_eq!(reopened.policy, policy);
+        assert_eq!(reopened.seed.phrase(), opened.unsealed().seed.phrase());
+
+        // `opened` is now stale: wallet.json holds another ciphertext. Nothing is written.
+        let bytes = fs::read(home.join(WALLET_FILE)).unwrap();
+        let err = lock.reseal(&opened, &empty()).unwrap_err();
+        assert!(err.message.contains("changed"), "{}", err.message);
+        assert_eq!(fs::read(home.join(WALLET_FILE)).unwrap(), bytes);
+        drop(lock);
+        // The metadata writers carry the new master through untouched.
+        set_active(home, "a").unwrap();
+        assert_eq!(unlock(home, PW, &fake_derive).unwrap().0.policy, policy);
+    }
+
+    #[test]
+    fn reseal_refuses_an_envelope_changed_on_disk_after_open() {
+        // M2: the default KDF (log_n 18), so a downgrade to 15 is visible.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        create_master(home, PW, "a", MasterOptions::default(), &fake_derive).unwrap();
+        let path = home.join(WALLET_FILE);
+        let original = fs::read(&path).unwrap();
+        let lock = MetaLock::acquire(home).unwrap();
+        let opened = lock.open(PW).unwrap();
+        let policy = serde_json::json!({ "whitelistGen": 1 });
+        type Tamper = fn(&mut CryptoBox);
+        let tampers: [(&str, Tamper); 5] = [
+            ("log_n 18 -> 15", |c| c.kdfparams.log_n = 15),
+            ("salt", |c| c.kdfparams.salt = "00".repeat(32)),
+            ("nonce", |c| c.nonce = "00".repeat(12)),
+            ("dklen", |c| c.kdfparams.dklen = 16),
+            ("kdf name", |c| c.kdf = "pbkdf2".into()),
+        ];
+        for (what, tamper) in tampers {
+            // Only the envelope changes; the ciphertext stays the one that was opened.
+            let mut file: WalletFile = serde_json::from_slice(&original).unwrap();
+            tamper(&mut file.crypto);
+            fs::write(&path, to_json_bytes(&file).unwrap()).unwrap();
+            let tampered = fs::read(&path).unwrap();
+            let err = lock.reseal(&opened, &policy).unwrap_err();
+            assert!(err.message.contains("changed"), "{what}: {}", err.message);
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                tampered,
+                "{what}: nothing written"
+            );
+        }
+        fs::write(&path, &original).unwrap();
+        let after = lock.reseal(&opened, &policy).unwrap();
+        assert_eq!(
+            after.crypto.kdfparams.log_n, KDF_MAX_LOG_N,
+            "the opened KDF carries over"
+        );
+        assert_eq!(decrypt(&after.crypto, PW).unwrap().policy, policy);
+    }
+
+    #[test]
+    fn plain_file_writer_replaces_atomically_and_refuses_reserved_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        create_master(home, PW, "a", fast(), &fake_derive).unwrap();
+        let wallet = fs::read(home.join(WALLET_FILE)).unwrap();
+        let lock = MetaLock::acquire(home).unwrap();
+        lock.replace_file("w.next", b"one").unwrap();
+        lock.replace_file("w.next", b"two").unwrap();
+        assert_eq!(fs::read(home.join("w.next")).unwrap(), b"two");
+        assert_eq!(mode(&home.join("w.next")), 0o600);
+        lock.replace_file("w.cur", b"two").unwrap();
+        lock.remove_file("w.next").unwrap();
+        lock.remove_file("w.next").unwrap();
+        assert_eq!(fs::read(home.join("w.cur")).unwrap(), b"two");
+        assert!(!home.join("w.next").exists());
+        for name in [
+            WALLET_FILE,
+            WRITE_LOCK,
+            "d.lock",
+            "u.lock",
+            "d.sock",
+            "",
+            "a/b",
+            ".x",
+        ] {
+            assert!(lock.replace_file(name, b"x").is_err(), "{name:?}");
+            assert!(lock.remove_file(name).is_err(), "{name:?}");
+        }
+        assert_eq!(fs::read(home.join(WALLET_FILE)).unwrap(), wallet);
+        assert_eq!(
+            data_names(home),
+            vec![OsString::from("w.cur"), OsString::from(WALLET_FILE)]
+        );
     }
 
     #[test]

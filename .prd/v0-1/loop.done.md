@@ -65,3 +65,21 @@ Distribution and the tap landed; the preview channel installs through Homebrew e
   - Its other note, the push race between sibling bump jobs, is tap-wide and predates this PR.
   - The first preview formula was rendered by hand (tap PR #9).
 - **Receipt** on fable-m5max: `brew install 2lab-ai/tap/zwallet-preview` installed 2026.10.20.1315; `zwallet --version` printed `zwallet 0.1.0 (preview 814c4aed0978)`; `brew test` returned rc=0.
+
+## R4 — closed (WU1b signed whitelist)
+
+The daemon signs only what a human-signed whitelist allows; edits land on exactly the list shown or nothing changes. Merged as PR #4.
+
+### Closed rows
+
+| WU | Repo · branch · worktree | Scope | Owner | State |
+|---|---|---|---|---|
+| WU1b | zwallet · `feat/3-whitelist` (after the PR #1 merge) | the signed whitelist per [`../04-whitelist.md`](../04-whitelist.md) (W1–W12): sealed payload v2 (pub + gen); `whitelist.key` envelope; signed `whitelist.json`; daemon enforcement and `FEE_CAP_EXCEEDED`; the edit protocol (stop daemons → staged write → re-warm); CLI `whitelist add/remove/list/fee-cap/allow-message-signing/reset`; `@nick`; dry-run pre-check; registry tokens. Must merge **before the v0.1.0 tag and before WU6 funding** | opus-coder ×3 by file ownership: A core (`core/whitelist.rs`, sealed carrier in the existing `policy` object, key envelope, canonical bytes, edit primitives, token registry, test seeding helper) on `feat/3-whitelist`, then B enforcement (`daemon/`, `chains/`, error codes; fixes every existing test it breaks) on `feat/3b-whitelist-enforce` ‖ C CLI and docs (`commands.rs`, `cli.rs`, README, 04) on `feat/3c-whitelist-cli`; dispatcher merges B+C into `feat/3-whitelist` | planned. Registry addresses come only from issuer-published sources, cross-checked (librarian research, dispatcher spot-check) |
+
+- **Build** (2026-10-20 → 21), three parts by file ownership, merged into `feat/3-whitelist`:
+  - A core (`core/whitelist.rs`, sealed anchor, key envelope, edit primitives, 19-row token registry): reviewed in two rounds (M1 lost list after two interrupted edits, M2 reseal KDF downgrade), merged 97e0e92.
+  - B enforcement (`chains/evm/policy.rs`, daemon): three review rounds. Fixed a self-transfer fee-cap bypass through a corrupted list (an untrusted list now signs nothing), list reads outside the session lock with a 2 s bound and at most 4 readers, and the typed anchor.
+  - C CLI and docs: seven review rounds. The summary before the password shows the change, both files' old values, every outcome and what happens to signing; edits leave the wallet locked unless `--unlock`; an edit lands on the fingerprinted bytes shown or nothing changes; no edit rebuilds an unverifiable or unsealed list (only `reset`, which states its cost); promotion and publish write verified bytes from memory; the action is decided before the fee; zwallet never suggests restoring an older whitelist.json (round 8: the remedy was deleted).
+- **Reviews**: gpt6 (gpt-6-astra) through round 2; from round 3 the llmux GPT engines refused ("not supported when using Codex with a ChatGPT account"), so opus (zworkflow:reviewer) and grok-4.7 reviewed, plus gpt-5.6-terra once. Final: code APPROVE (opus, terra), docs findings fixed in the last text pass (no logic change, dispatcher-verified diff).
+- **Dispatcher gate** on every round head (62fa40c, f308bbc, 51ceac9, b64bf32, f5e7670) green, with a second cli + evm_offline run; on f0745b3: fmt, clippy `-D warnings`, 215 lib + 62 cli + 54 evm_offline + 4 whitelist_daemon + 3 whitelist_seed, live 10/10 (all 19 registry rows' `symbol()`/`decimals()`). Coders' Linux Docker uid 1001: 217 + 64 + 54 + 4 + 3.
+- **Closed**: merged to main as PR #4; `.prd/04-whitelist.md` Status shipped.

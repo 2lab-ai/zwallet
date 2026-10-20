@@ -191,6 +191,8 @@ fn daemon_unlock_sign_lock_expire_wrong_password() {
         .as_str()
         .unwrap()
         .to_string();
+    // `sign-message` signs only under a signed whitelist that allows it (`.prd/04-whitelist.md`).
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
 
     let before = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -269,6 +271,11 @@ fn named_keys_create_list_change_sign() {
     let a = home.create("a", &["--unlock", "30s"]);
     assert_eq!(a["locked"], false);
     let a_addr = a["address"].as_str().unwrap().to_string();
+    // `sign-message` signs only under a signed whitelist that allows it; the edit re-seals
+    // wallet.json, which ends the session, so unlock again.
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
+    assert!(home.wait_locked(Duration::from_secs(15)));
+    home.unlock("30s");
 
     // While unlocked the agent can add keys without the password (stdin is empty).
     let b = home.run(&["create", "b", "--json"]).ok();
@@ -471,6 +478,8 @@ fn c1_fake_daemon_on_the_socket_never_receives_the_password() {
         .as_str()
         .unwrap()
         .to_string();
+    // `sign-message` signs only under a signed whitelist that allows it (`.prd/04-whitelist.md`).
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
     let fake = FakeDaemon::bind(&home.sock());
     let r = home.run_stdin(
         &["unlock", "30s", "--password-stdin", "--json"],
@@ -502,6 +511,8 @@ fn c3_concurrent_unlocks_leave_exactly_one_daemon() {
         .as_str()
         .unwrap()
         .to_string();
+    // `sign-message` signs only under a signed whitelist that allows it (`.prd/04-whitelist.md`).
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
     let runs: Vec<common::Run> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..3)
             .map(|_| {
@@ -900,6 +911,8 @@ fn k6_wrong_password_on_re_unlock_leaves_the_session_running() {
         .as_str()
         .unwrap()
         .to_string();
+    // `sign-message` signs only under a signed whitelist that allows it (`.prd/04-whitelist.md`).
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
     home.unlock("30s");
     let pid = only_daemon(&home);
     home.run_stdin(
@@ -1306,6 +1319,8 @@ fn r1_unlock_handshake_over_a_socketpair() {
         .as_str()
         .unwrap()
         .to_string();
+    // `sign-message` signs only under a signed whitelist that allows it (`.prd/04-whitelist.md`).
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
     // This test plays the unlocking CLI on the other end of the daemon's socketpair.
     let mut daemon = DaemonChild::spawn(home.path());
     assert_eq!(daemon.next()["result"]["stage"], "input");
@@ -1827,4 +1842,1217 @@ fn r4c3_status_lists_the_daemons_of_other_homes() {
     let (s, pids) = others(&a);
     assert_eq!(s["locked"], true, "{s}");
     assert!(pids.contains(&json!(pb)), "{s}");
+}
+
+// The whitelist CLI (`.prd/04-whitelist.md`): `zwallet whitelist …` and `@nickname` recipients.
+// Every mutating `whitelist` command stops every zwallet daemon of this user before it edits, so
+// the tests that run one take `common::exclusive()`.
+
+/// The EIP-55 example address.
+const PAYEE: &str = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+const BOB: &str = "0x3333333333333333333333333333333333333333";
+const ROUTER: &str = "0x2222222222222222222222222222222222222222";
+/// USDC on Ethereum, a registry token.
+const ETH_USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+const RESIDUAL: &str = "a listed contract may forward value or act on its arguments";
+
+/// `whitelist <args> --password-stdin --json` with `password` on stdin (`common::command_in`
+/// adds `--allow-ptrace-scope-0` where `--unlock` needs it).
+fn whitelist_with(home: &Home, args: &[&str], password: &str) -> common::Run {
+    let mut all = vec!["whitelist"];
+    all.extend_from_slice(args);
+    all.extend(["--password-stdin", "--json"]);
+    home.run_stdin(&all, &format!("{password}\n"))
+}
+
+/// A mutating `whitelist` command with the test password.
+fn whitelist_edit(home: &Home, args: &[&str]) -> common::Run {
+    whitelist_with(home, args, PW)
+}
+
+fn verify_list(home: &Home) -> serde_json::Value {
+    home.run_stdin(
+        &[
+            "whitelist",
+            "list",
+            "--verify",
+            "--password-stdin",
+            "--json",
+        ],
+        &format!("{PW}\n"),
+    )
+    .ok()
+}
+
+fn nicknames(entries: &serde_json::Value) -> Vec<String> {
+    entries
+        .as_array()
+        .unwrap_or_else(|| panic!("not a list: {entries}"))
+        .iter()
+        .map(|e| {
+            e.as_str()
+                .or_else(|| e["nickname"].as_str())
+                .unwrap_or_else(|| panic!("no nickname: {e}"))
+                .to_string()
+        })
+        .collect()
+}
+
+fn rfc3339_secs(v: &serde_json::Value) -> u64 {
+    let s = v.as_str().unwrap_or_else(|| panic!("not a time: {v}"));
+    zwallet::core::time::parse_rfc3339_utc(s).unwrap_or_else(|| panic!("not RFC 3339: {s}"))
+}
+
+#[test]
+fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    assert!(!home.path().join("whitelist.key").exists());
+
+    // The first add, typed at a terminal: the password is never echoed or printed.
+    let cmd = home.command(&[
+        "whitelist",
+        "add",
+        "alice",
+        PAYEE,
+        "--chains",
+        "base",
+        "--json",
+    ]);
+    let mut pty = common::PtyChild::spawn(cmd);
+    // Before the prompt, on the terminal: the change the password authorizes.
+    let mut before = String::new();
+    let start = std::time::Instant::now();
+    while !before.contains("Wallet password: ") {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "no prompt; saw {before:?}"
+        );
+        before.push_str(&common::drain_pty(&pty.master));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let summary = &before[..before.find("Wallet password: ").unwrap()];
+    for want in [
+        "add alice",
+        PAYEE,
+        "chains: base",
+        "if wallet.json seals no whitelist yet: a new list from the built-in defaults with a new \
+         key, gen 1",
+        "after the change: the wallet stays locked",
+    ] {
+        assert!(summary.contains(want), "{want:?} not in {summary:?}");
+    }
+    pty.type_line(PW);
+    let mut tty = String::new();
+    let start = std::time::Instant::now();
+    while pty.child.try_wait().unwrap().is_none() && start.elapsed() < Duration::from_secs(120) {
+        tty.push_str(&common::drain_pty(&pty.master));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    tty.push_str(&common::drain_pty(&pty.master));
+    let out = pty.finish();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    );
+    for (what, text) in [("terminal", &tty), ("stdout", &stdout), ("stderr", &stderr)] {
+        assert!(
+            !text.contains(PW),
+            "the password reached the {what}: {text:?}"
+        );
+    }
+    assert!(out.status.success(), "{stdout} / {stderr}");
+    let added: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(added["gen"], 1, "{added}");
+    assert_eq!(added["previousGen"], serde_json::Value::Null, "{added}");
+    assert_eq!(added["keyCreated"], true, "{added}");
+    assert_eq!(added["change"], "added", "{added}");
+    assert_eq!(
+        added["entry"],
+        json!({
+            "nickname": "alice",
+            "kind": "address",
+            "address": PAYEE.to_ascii_lowercase(),
+            "chains": ["base"],
+        }),
+        "{added}"
+    );
+    assert_eq!(nicknames(&added["entries"]), ["alice"], "{added}");
+    assert_eq!(added["verified"], true, "{added}");
+    // An edit leaves the wallet locked unless --unlock is given.
+    assert_eq!(added["locked"], true, "{added}");
+    assert_eq!(added["stoppedDaemons"], json!([]), "{added}");
+    assert!(added.get("expiresAt").is_none(), "{added}");
+    assert!(
+        added["hint"].as_str().unwrap_or("").contains("--unlock"),
+        "{added}"
+    );
+    for f in ["whitelist.key", "whitelist.json"] {
+        assert_eq!(mode(&home.path().join(f)), 0o600, "{f}");
+    }
+    assert!(!home.path().join("whitelist.next.json").exists());
+
+    // `list` works while locked, without the password: unverified.
+    let listed = home.run(&["whitelist", "list", "--json"]).ok();
+    assert_eq!(listed["gen"], 1, "{listed}");
+    assert_eq!(listed["verified"], false, "{listed}");
+    assert_eq!(listed["entries"][0], added["entry"], "{listed}");
+    assert_eq!(listed["policy"]["allowMessageSigning"], false, "{listed}");
+    assert_eq!(
+        listed["policy"]["maxFeeWei"]["base"], "500000000000000",
+        "{listed}"
+    );
+    let human = home.run(&["whitelist", "list"]);
+    assert!(
+        human.code == 0
+            && human.stdout.contains("alice")
+            && human.stdout.contains("zwallet whitelist list --verify"),
+        "{} / {}",
+        human.stdout,
+        human.stderr
+    );
+    // `--verify` checks the signature against wallet.json's seal with the password.
+    let verified = verify_list(&home);
+    assert_eq!(verified["verified"], true, "{verified}");
+    assert_eq!(verified["gen"], 1, "{verified}");
+    assert_eq!(verified["sealedGen"], 1, "{verified}");
+    assert_eq!(verified["source"], "whitelist.json", "{verified}");
+    assert_eq!(verified["entries"], listed["entries"], "{verified}");
+    home.run_stdin(
+        &[
+            "whitelist",
+            "list",
+            "--verify",
+            "--password-stdin",
+            "--json",
+        ],
+        "not the password\n",
+    )
+    .err("WRONG_PASSWORD");
+}
+
+#[test]
+fn whitelist_verbs_change_one_generation_each_and_refuse_before_writing() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    // Without --chains: the default chain (ethereum). "*" only when given.
+    let a = whitelist_edit(&home, &["add", "alice", PAYEE]).ok();
+    assert_eq!(
+        (&a["gen"], &a["entry"]["chains"]),
+        (&json!(1), &json!(["ethereum"])),
+        "{a}"
+    );
+    let b = whitelist_edit(&home, &["add", "bob", BOB, "--chains", "*"]).ok();
+    assert_eq!(
+        (&b["gen"], &b["entry"]["chains"]),
+        (&json!(2), &json!(["*"])),
+        "{b}"
+    );
+    assert_eq!(b["keyCreated"], false, "{b}");
+    // A contract entry: its selectors (lower-cased), and the residual it carries.
+    let r = whitelist_edit(
+        &home,
+        &[
+            "add",
+            "router",
+            ROUTER,
+            "--chains",
+            "base,arbitrum",
+            "--contract",
+            "--selectors",
+            "0x12345678,0xABCDEF01",
+        ],
+    )
+    .ok();
+    assert_eq!(r["gen"], 3, "{r}");
+    assert_eq!(
+        r["entry"],
+        json!({
+            "nickname": "router",
+            "kind": "contract",
+            "address": ROUTER,
+            "chains": ["base", "arbitrum"],
+            "selectors": ["0x12345678", "0xabcdef01"],
+        }),
+        "{r}"
+    );
+    assert!(
+        r["warning"].as_str().unwrap_or("").contains(RESIDUAL),
+        "{r}"
+    );
+    let human = home.run(&["whitelist", "list"]);
+    assert!(human.stdout.contains("router"), "{}", human.stdout);
+
+    // Refusals: nothing is written, the generation stays.
+    let refused: [(&[&str], &str); 11] = [
+        (&["add", "Alice", BOB], "VALIDATION_ERROR"),
+        (
+            &["add", "carol", "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAeD"],
+            "INVALID_ADDRESS",
+        ),
+        (
+            &["add", "carol", BOB, "--chains", "dogechain"],
+            "CHAIN_UNSUPPORTED",
+        ),
+        (
+            &[
+                "add",
+                "usdc",
+                ETH_USDC,
+                "--chains",
+                "ethereum",
+                "--contract",
+                "--selectors",
+                "0xa9059cbb",
+            ],
+            "VALIDATION_ERROR",
+        ),
+        (
+            &[
+                "add",
+                "r2",
+                "0x4444444444444444444444444444444444444444",
+                "--chains",
+                "*",
+                "--contract",
+                "--selectors",
+                "0x12345678",
+            ],
+            "VALIDATION_ERROR",
+        ),
+        (
+            &[
+                "add",
+                "r3",
+                "0x4444444444444444444444444444444444444444",
+                "--contract",
+            ],
+            "VALIDATION_ERROR",
+        ),
+        (
+            &["add", "alice", "0x4444444444444444444444444444444444444444"],
+            "VALIDATION_ERROR",
+        ),
+        (&["add", "carol", PAYEE], "VALIDATION_ERROR"),
+        (&["remove", "nobody"], "VALIDATION_ERROR"),
+        (&["fee-cap", "base", "0"], "VALIDATION_ERROR"),
+        (&["allow-message-signing", "maybe"], "VALIDATION_ERROR"),
+    ];
+    for (args, code) in refused {
+        let msg = whitelist_edit(&home, args).err(code);
+        if args[0] == "remove" {
+            assert!(msg.contains("zwallet whitelist list"), "{args:?}: {msg}");
+        }
+    }
+    whitelist_with(&home, &["add", "carol", BOB], "not the password").err("WRONG_PASSWORD");
+    assert_eq!(verify_list(&home)["gen"], 3);
+
+    // fee-cap in the chain's coin, stored in wei.
+    let f = whitelist_edit(&home, &["fee-cap", "base", "0.001"]).ok();
+    assert_eq!(f["gen"], 4, "{f}");
+    assert_eq!(f["change"], "fee-cap", "{f}");
+    assert_eq!(
+        f["feeCap"],
+        json!({ "chain": "base", "maxFeeWei": "1000000000000000", "maxFee": "0.001 ETH" }),
+        "{f}"
+    );
+    let m = whitelist_edit(&home, &["allow-message-signing", "on"]).ok();
+    assert_eq!(
+        (&m["gen"], &m["allowMessageSigning"]),
+        (&json!(5), &json!(true)),
+        "{m}"
+    );
+    let rm = whitelist_edit(&home, &["remove", "bob"]).ok();
+    assert_eq!(rm["gen"], 6, "{rm}");
+    assert_eq!(rm["entry"]["nickname"], "bob", "{rm}");
+    assert_eq!(nicknames(&rm["entries"]), ["alice", "router"], "{rm}");
+    let v = verify_list(&home);
+    assert_eq!(v["verified"], true, "{v}");
+    assert_eq!(v["gen"], 6, "{v}");
+    assert_eq!(v["policy"]["maxFeeWei"]["base"], "1000000000000000", "{v}");
+    assert_eq!(v["policy"]["allowMessageSigning"], true, "{v}");
+    assert_eq!(nicknames(&v["entries"]), ["alice", "router"], "{v}");
+
+    // reset: a new key and an empty list with the default policy, at the next generation.
+    let key_before = fs::read(home.path().join("whitelist.key")).unwrap();
+    let z = whitelist_edit(&home, &["reset"]).ok();
+    assert_eq!(z["gen"], 7, "{z}");
+    assert_eq!(z["change"], "reset", "{z}");
+    assert_eq!(z["keyCreated"], true, "{z}");
+    assert_eq!(z["entries"], json!([]), "{z}");
+    assert_eq!(nicknames(&z["dropped"]), ["alice", "router"], "{z}");
+    assert_ne!(
+        fs::read(home.path().join("whitelist.key")).unwrap(),
+        key_before
+    );
+    let v = verify_list(&home);
+    assert_eq!(
+        (&v["verified"], &v["gen"]),
+        (&json!(true), &json!(7)),
+        "{v}"
+    );
+    assert_eq!(v["entries"], json!([]), "{v}");
+    assert_eq!(v["policy"]["allowMessageSigning"], false, "{v}");
+    assert_eq!(v["policy"]["maxFeeWei"]["base"], "500000000000000", "{v}");
+}
+
+#[test]
+fn w4_a_hand_edited_list_is_shown_but_an_edit_refuses_and_only_reset_starts_over() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    let path = home.path().join("whitelist.json");
+    let mut file: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mallory = json!({
+        "nickname": "mallory",
+        "kind": "address",
+        "address": "0x6666666666666666666666666666666666666666",
+        "chains": ["*"],
+    });
+    file["entries"]
+        .as_array_mut()
+        .unwrap()
+        .push(mallory.clone());
+    fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+
+    // Shown while locked, unverified.
+    let listed = home.run(&["whitelist", "list", "--json"]).ok();
+    assert_eq!(listed["verified"], false, "{listed}");
+    assert_eq!(
+        nicknames(&listed["entries"]),
+        ["alice", "mallory"],
+        "{listed}"
+    );
+    // --verify says why it is not the signed list.
+    let v = verify_list(&home);
+    assert_eq!(v["verified"], false, "{v}");
+    assert!(
+        v["reason"].as_str().unwrap_or("").contains("signature"),
+        "{v}"
+    );
+    assert_eq!(nicknames(&v["entries"]), ["alice", "mallory"], "{v}");
+
+    // An edit never rebuilds it from empty: refused, nothing written, a running session left
+    // alone. The message points to `list --verify` and to `reset`.
+    let pid = home.unlock("10m")["daemonPid"].as_i64().unwrap() as i32;
+    let before = files_of(&home);
+    for args in [
+        &["add", "bob", BOB, "--chains", "base"][..],
+        &["remove", "alice"],
+        &["fee-cap", "base", "0.001"],
+        &["allow-message-signing", "off"],
+    ] {
+        let msg = whitelist_edit(&home, args).err("VALIDATION_ERROR");
+        for want in [
+            "signature",
+            "zwallet whitelist list --verify",
+            "zwallet whitelist reset",
+        ] {
+            assert!(msg.contains(want), "{args:?}: {want:?} not in {msg}");
+        }
+        assert_eq!(files_of(&home), before, "{args:?} wrote something");
+    }
+    assert_eq!(
+        home.daemon_pids(),
+        vec![pid],
+        "a refused edit stopped the session"
+    );
+
+    // A deleted list is refused the same way.
+    fs::remove_file(&path).unwrap();
+    let msg = whitelist_edit(&home, &["add", "bob", BOB]).err("VALIDATION_ERROR");
+    assert!(msg.contains("there is no whitelist.json"), "{msg}");
+    assert!(msg.contains("zwallet whitelist reset"), "{msg}");
+    fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+
+    // Reset starts over: a new key and an empty list, with what it dropped.
+    let z = whitelist_edit(&home, &["reset"]).ok();
+    assert_eq!(
+        (&z["gen"], &z["keyCreated"]),
+        (&json!(2), &json!(true)),
+        "{z}"
+    );
+    assert_eq!(z["entries"], json!([]), "{z}");
+    assert!(
+        z["discarded"]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("signature"),
+        "{z}"
+    );
+    assert_eq!(
+        nicknames(&z["discarded"]["entries"]),
+        ["alice", "mallory"],
+        "{z}"
+    );
+    let e = whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).ok();
+    assert_eq!(
+        (&e["gen"], &e["base"]),
+        (&json!(3), &json!("current")),
+        "{e}"
+    );
+    assert!(e.get("discarded").is_none(), "{e}");
+    let v = verify_list(&home);
+    assert_eq!(
+        (&v["verified"], &v["gen"]),
+        (&json!(true), &json!(3)),
+        "{v}"
+    );
+    assert_eq!(nicknames(&v["entries"]), ["bob"], "{v}");
+}
+
+/// wallet.json and every whitelist file of `home`, as bytes (absent: `None`).
+fn files_of(home: &Home) -> Vec<(&'static str, Option<Vec<u8>>)> {
+    [
+        "wallet.json",
+        "whitelist.json",
+        "whitelist.next.json",
+        "whitelist.key",
+    ]
+    .into_iter()
+    .map(|f| (f, fs::read(home.path().join(f)).ok()))
+    .collect()
+}
+
+#[test]
+fn w7_after_a_crash_at_any_write_the_cli_shows_and_continues_a_verified_list() {
+    use zwallet::chains::evm::registry::WHITELIST_RULES;
+    use zwallet::core::error::WalletError;
+    use zwallet::core::whitelist::{self, EditStage, Entry};
+
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    let mut sealed = 1u64;
+    let mut expected = vec!["alice".to_string()];
+    for (i, stage) in ["staged", "resealed", "published"].into_iter().enumerate() {
+        // The crash: an edit stopped right after one of its writes (in this process, through the
+        // core edit's test hook).
+        let crashed = format!("c{i}");
+        let hook = |s: EditStage<'_>| -> zwallet::core::error::Result<()> {
+            let hit = matches!(
+                (stage, s),
+                ("staged", EditStage::NextWritten(_))
+                    | ("resealed", EditStage::Resealed(_))
+                    | ("published", EditStage::Published(_))
+            );
+            if hit {
+                Err(WalletError::validation("crash"))
+            } else {
+                Ok(())
+            }
+        };
+        let address = format!("0x{:040x}", 0xc0 + i);
+        let err = whitelist::edit_with_hook(
+            home.path(),
+            PW,
+            &WHITELIST_RULES,
+            |l| l.add(Entry::new_address(&crashed, &address, &["base"])),
+            &hook,
+        )
+        .unwrap_err();
+        assert_eq!(err.message, "crash", "{stage}");
+        let (source, base) = match stage {
+            // Before the re-seal: the old generation stands.
+            "staged" => ("whitelist.json", "current"),
+            // Re-sealed but not renamed: the staged list is the sealed one.
+            "resealed" => ("whitelist.next.json", "promoted-next"),
+            _ => ("whitelist.json", "current"),
+        };
+        if stage != "staged" {
+            sealed += 1;
+            expected.push(crashed.clone());
+        }
+        let v = verify_list(&home);
+        assert_eq!(v["verified"], true, "{stage}: {v}");
+        assert_eq!(v["gen"], sealed, "{stage}: {v}");
+        assert_eq!(v["sealedGen"], sealed, "{stage}: {v}");
+        assert_eq!(v["source"], source, "{stage}: {v}");
+        assert_eq!(nicknames(&v["entries"]), expected, "{stage}: {v}");
+        // The next CLI edit continues from exactly that list.
+        let fixed = format!("d{i}");
+        let address = format!("0x{:040x}", 0xd0 + i);
+        let e = whitelist_edit(&home, &["add", &fixed, &address, "--chains", "base"]).ok();
+        sealed += 1;
+        expected.push(fixed);
+        assert_eq!(e["base"], base, "{stage}: {e}");
+        assert_eq!(e["gen"], sealed, "{stage}: {e}");
+        assert_eq!(nicknames(&e["entries"]), expected, "{stage}: {e}");
+        assert!(e.get("discarded").is_none(), "{stage}: {e}");
+        assert!(!home.path().join("whitelist.next.json").exists(), "{stage}");
+    }
+}
+
+#[test]
+fn w8_an_edit_while_unlocked_stops_every_daemon_and_unlocks_only_when_asked() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    let other = Home::new();
+    other.create("main", &[]);
+    let other_pid = other.unlock("10m")["daemonPid"].as_i64().unwrap() as i32;
+    let old_pid = home.unlock("1h")["daemonPid"].as_i64().unwrap() as i32;
+
+    // A wrong password, a refused change, or a bad --unlock duration stops nothing.
+    whitelist_with(&home, &["add", "alice", PAYEE], "not the password").err("WRONG_PASSWORD");
+    whitelist_edit(&home, &["remove", "nobody"]).err("VALIDATION_ERROR");
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--unlock", "0s"]).err("VALIDATION_ERROR");
+    assert_eq!(home.daemon_pids(), vec![old_pid]);
+    assert!(pid_alive(other_pid));
+
+    // Every daemon of this user is stopped before the edit, and the wallet stays locked.
+    let e = whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    let stopped = e["stoppedDaemons"].as_array().unwrap();
+    assert!(
+        stopped.contains(&json!(old_pid)) && stopped.contains(&json!(other_pid)),
+        "{e}"
+    );
+    assert!(
+        wait_dead(old_pid, Duration::from_secs(5)),
+        "the session survived the edit"
+    );
+    assert!(wait_dead(other_pid, Duration::from_secs(5)));
+    assert_eq!(e["locked"], true, "{e}");
+    assert!(
+        e["hint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("--unlock <duration>"),
+        "{e}"
+    );
+    for k in ["expiresAt", "daemonPid", "previousExpiresAt", "whitelist"] {
+        assert!(e.get(k).is_none(), "{k}: {e}");
+    }
+    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], true);
+    assert_eq!(other.run(&["status", "--json"]).ok()["locked"], true);
+
+    // --unlock <dur>: a fresh session for the duration typed here, signing under the new list.
+    let old_pid = home.unlock("1h")["daemonPid"].as_i64().unwrap() as i32;
+    let before = now_secs();
+    let e = whitelist_edit(
+        &home,
+        &["add", "bob", BOB, "--chains", "base", "--unlock", "10m"],
+    )
+    .ok();
+    let after = now_secs();
+    assert_eq!(e["gen"], 2, "{e}");
+    assert_eq!(e["locked"], false, "{e}");
+    assert_eq!(e["duration"], "10m", "{e}");
+    assert!(
+        e["stoppedDaemons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(old_pid)),
+        "{e}"
+    );
+    assert!(wait_dead(old_pid, Duration::from_secs(5)));
+    let expires = rfc3339_secs(&e["expiresAt"]);
+    assert!(
+        before + 600 <= expires && expires <= after + 601,
+        "{before}+600 <= {expires} <= {after}+601: {e}"
+    );
+    assert_eq!(e["whitelist"]["gen"], 2, "{e}");
+    assert_eq!(e["whitelist"]["verified"], true, "{e}");
+    assert_eq!(
+        nicknames(&e["whitelist"]["entries"]),
+        ["alice", "bob"],
+        "{e}"
+    );
+    let new_pid = e["daemonPid"].as_i64().unwrap() as i32;
+    assert_ne!(new_pid, old_pid);
+    let status = home.run(&["status", "--json"]).ok();
+    assert_eq!(status["daemonPid"], new_pid, "{status}");
+    assert_eq!(status["expiresAt"], e["expiresAt"], "{status}");
+    assert_eq!(status["whitelist"]["gen"], 2, "{status}");
+    let human = whitelist_edit(&home, &["remove", "bob"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(home.wait_locked(Duration::from_secs(5)));
+}
+
+#[test]
+fn at_nickname_recipients_resolve_through_the_list() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let transfer = |to: &str| {
+        home.run(&[
+            "transfer", "--chain", "base", "--to", to, "--amount", "0.01", "--json",
+        ])
+    };
+    let invoke = |to: &str| {
+        home.run(&[
+            "invoke",
+            "--chain",
+            "base",
+            "--to",
+            to,
+            "--data",
+            "0xd0e30db0",
+            "--json",
+        ])
+    };
+    // No whitelist yet: nobody to resolve.
+    let msg = transfer("@alice").err("VALIDATION_ERROR");
+    assert!(msg.contains("zwallet whitelist list"), "{msg}");
+    home.allow("alice", PAYEE, &["base"]);
+    home.allow_contract("router", ROUTER, &["base"], &["0xd0e30db0"]);
+    // A listed nickname resolves, and the next check (the lock) answers.
+    transfer("@alice").err("WALLET_LOCKED");
+    invoke("@router").err("WALLET_LOCKED");
+    transfer(PAYEE).err("WALLET_LOCKED");
+    // An unknown or malformed nickname is VALIDATION_ERROR naming `zwallet whitelist list`.
+    for to in ["@bob", "@Alice", "@"] {
+        let msg = transfer(to).err("VALIDATION_ERROR");
+        assert!(msg.contains("zwallet whitelist list"), "{to}: {msg}");
+        let msg = invoke(to).err("VALIDATION_ERROR");
+        assert!(msg.contains("zwallet whitelist list"), "{to}: {msg}");
+    }
+}
+
+#[test]
+fn hand_edited_values_reach_the_terminal_escaped() {
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let path = home.path().join("whitelist.json");
+    let mut file: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    // A nickname that would clear the screen, and an address with a right-to-left override.
+    file["entries"].as_array_mut().unwrap().push(json!({
+        "nickname": "mallory\u{1b}[2J",
+        "kind": "address",
+        "address": "0x6666\u{202e}6666",
+        "chains": ["base\u{7}"],
+    }));
+    fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+    let pw = format!("{PW}\n");
+    for r in [
+        home.run(&["whitelist", "list"]),
+        home.run_stdin(&["whitelist", "list", "--verify", "--password-stdin"], &pw),
+    ] {
+        assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+        for bad in ['\u{1b}', '\u{202e}', '\u{7}'] {
+            assert!(
+                !r.stdout.contains(bad) && !r.stderr.contains(bad),
+                "{bad:?} reached the terminal: {:?}",
+                r.stdout
+            );
+        }
+        assert!(r.stdout.contains("mallory"), "{}", r.stdout);
+    }
+}
+
+#[test]
+fn m1_the_change_is_shown_before_the_password_is_read() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    // Each change: what stderr shows (with --password-stdin) before the password is read.
+    let shows = |args: &[&str], password: &str, want: &[&str]| {
+        let r = whitelist_with(&home, args, password);
+        let summary = r.stderr.clone();
+        assert!(
+            summary.contains("The password authorizes this whitelist change:"),
+            "{args:?}: {summary}"
+        );
+        for w in want {
+            assert!(summary.contains(w), "{args:?}: {w:?} not in {summary}");
+        }
+        assert!(
+            !summary.contains(PW),
+            "{args:?}: the password reached stderr"
+        );
+        r
+    };
+    // Shown even when the password is then wrong.
+    shows(
+        &["add", "alice", PAYEE, "--chains", "base"],
+        "not the password",
+        &[
+            "add alice: a payee",
+            PAYEE,
+            "chains: base",
+            "whitelist.json: none yet",
+        ],
+    )
+    .err("WRONG_PASSWORD");
+    shows(
+        &[
+            "add",
+            "alice",
+            &PAYEE.to_ascii_lowercase(),
+            "--chains",
+            "base",
+        ],
+        PW,
+        &[
+            PAYEE,
+            "a new list from the built-in defaults with a new key, gen 1",
+        ],
+    )
+    .ok();
+    shows(
+        &["add", "bob", BOB, "--chains", "*"],
+        PW,
+        &[
+            "chains: every chain (*)",
+            "now: gen 1, 1 entry (alice)",
+            "if whitelist.json is the list wallet.json seals: the change lands on it, making gen 2",
+            "otherwise: nothing changes",
+        ],
+    )
+    .ok();
+    shows(
+        &[
+            "add",
+            "router",
+            ROUTER,
+            "--chains",
+            "base,arbitrum",
+            "--contract",
+            "--selectors",
+            "0x12345678,0xABCDEF01",
+        ],
+        PW,
+        &[
+            "add router: a contract",
+            RESIDUAL,
+            "chains: base, arbitrum",
+            "selectors: 0x12345678, 0xabcdef01",
+        ],
+    )
+    .ok();
+    shows(
+        &["fee-cap", "base", "0.001"],
+        PW,
+        &["fee-cap base: 0.0005 ETH (500000000000000 wei) -> 0.001 ETH (1000000000000000 wei)"],
+    )
+    .ok();
+    shows(
+        &["allow-message-signing", "on"],
+        PW,
+        &["allow-message-signing: off -> on"],
+    )
+    .ok();
+    shows(
+        &["remove", "bob"],
+        PW,
+        &[
+            "remove bob: whitelist.json lists it as a payee",
+            BOB,
+            "every chain (*)",
+        ],
+    )
+    .ok();
+    // Values from the file are escaped: a hand-edited nickname cannot drive the terminal.
+    let path = home.path().join("whitelist.json");
+    let mut file: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    file["entries"].as_array_mut().unwrap().push(json!({
+        "nickname": "mallory\u{1b}[2J",
+        "kind": "address",
+        "address": "0x6666666666666666666666666666666666666666",
+        "chains": ["*"],
+    }));
+    fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+    let r = shows(
+        &["reset"],
+        PW,
+        &[
+            "reset: a new whitelist key and an empty list",
+            "every entry is dropped: alice, router, \"mallory\\u{1b}[2J\"",
+            "not verified yet",
+        ],
+    );
+    assert!(!r.stderr.contains('\u{1b}'), "{:?}", r.stderr);
+    r.ok();
+}
+
+#[test]
+fn f2_create_unlock_shows_the_whitelist_its_session_signs_under() {
+    let home = Home::new();
+    let v = home.create("main", &["--unlock", "10m"]);
+    assert_eq!(v["locked"], false, "{v}");
+    assert_eq!(v["whitelist"]["verified"], false, "{v}");
+    assert_eq!(v["whitelist"]["gen"], serde_json::Value::Null, "{v}");
+    assert_eq!(v["whitelist"]["entries"], json!([]), "{v}");
+    assert!(
+        v["whitelist"]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("no whitelist yet"),
+        "{v}"
+    );
+}
+
+/// Runs `whitelist <args> --json` on a terminal: returns what the terminal showed before the
+/// password prompt, then lets `between` act, types the password, and returns the outcome.
+fn on_terminal(home: &Home, args: &[&str], between: impl FnOnce()) -> (String, serde_json::Value) {
+    let mut all = vec!["whitelist"];
+    all.extend_from_slice(args);
+    all.push("--json");
+    let pty = common::PtyChild::spawn(home.command(&all));
+    let mut before = String::new();
+    let start = std::time::Instant::now();
+    while !before.contains("Wallet password: ") {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "no prompt; saw {before:?}"
+        );
+        before.push_str(&common::drain_pty(&pty.master));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    between();
+    pty.type_line(PW);
+    let out = pty.finish();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let v = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout:?}"));
+    let shown = before[..before.find("Wallet password: ").unwrap()].to_string();
+    (shown, v)
+}
+
+#[test]
+fn c2_1_the_summary_says_what_happens_to_signing() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    // Without --unlock: the wallet stays locked, said before the prompt.
+    let (shown, v) = on_terminal(&home, &["add", "alice", PAYEE, "--chains", "base"], || {});
+    assert!(
+        shown.contains("after the change: the wallet stays locked"),
+        "{shown:?}"
+    );
+    assert!(!shown.contains("signing session"), "{shown:?}");
+    assert_eq!(v["locked"], true, "{v}");
+    // With --unlock: the new session and when it ends, said before the prompt. The end shown is
+    // now + 10m as of the summary: between `before` and the moment the prompt is seen.
+    let before = now_secs();
+    let seen = std::cell::Cell::new(0);
+    let (shown, v) = on_terminal(
+        &home,
+        &["add", "bob", BOB, "--chains", "base", "--unlock", "10m"],
+        || seen.set(now_secs()),
+    );
+    assert!(
+        shown.contains("after the change: a new signing session for 10m (until"),
+        "{shown:?}"
+    );
+    let at = shown
+        .find("Z)")
+        .unwrap_or_else(|| panic!("no UTC time in {shown:?}"));
+    let until = zwallet::core::time::parse_rfc3339_utc(&shown[at - 19..=at])
+        .unwrap_or_else(|| panic!("not a time: {:?}", &shown[at - 19..=at]));
+    assert!(
+        before + 600 <= until && until <= seen.get() + 600,
+        "{before}+600 <= {until} <= {}+600",
+        seen.get()
+    );
+    assert!(!shown.contains("stays locked"), "{shown:?}");
+    assert_eq!(v["locked"], false, "{v}");
+    // With --password-stdin the same lines go to stderr.
+    let r = whitelist_edit(&home, &["remove", "bob"]);
+    assert!(
+        r.stderr
+            .contains("after the change: the wallet stays locked"),
+        "{}",
+        r.stderr
+    );
+    r.ok();
+    let r = whitelist_edit(&home, &["remove", "alice", "--unlock", "1h"]);
+    assert!(
+        r.stderr
+            .contains("after the change: a new signing session for 1h (until"),
+        "{}",
+        r.stderr
+    );
+    r.ok();
+}
+
+#[test]
+fn c2_2_the_change_lands_on_exactly_the_list_shown_or_nothing_changes() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).ok();
+    let path = home.path().join("whitelist.json");
+    let genuine = fs::read(&path).unwrap();
+    // A running session: a refused change must leave it running (and so tell which check
+    // refused: only the checks before the daemons are stopped can).
+    let pid = home.unlock("10m")["daemonPid"].as_i64().unwrap() as i32;
+
+    // The list shown is rewritten while the human types (the same signed content, other bytes):
+    // the change is refused before anything is stopped or written.
+    let before = files_of(&home);
+    let compact = {
+        let v: serde_json::Value = serde_json::from_slice(&genuine).unwrap();
+        serde_json::to_vec(&v).unwrap()
+    };
+    assert_ne!(compact, genuine);
+    let (_, v) = on_terminal(&home, &["remove", "bob"], || {
+        fs::write(&path, &compact).unwrap();
+    });
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
+    let msg = v["error"].as_str().unwrap();
+    assert!(
+        msg.contains("whitelist.json changed after it was shown; nothing in the whitelist changed"),
+        "{msg}"
+    );
+    assert!(!msg.contains("stopped"), "{msg}");
+    assert_eq!(v["locked"], serde_json::Value::Null, "{v}");
+    assert_eq!(
+        home.daemon_pids(),
+        vec![pid],
+        "a swap after the summary stopped the session"
+    );
+    fs::write(&path, &genuine).unwrap();
+    assert_eq!(
+        files_of(&home),
+        before,
+        "the refused change wrote something"
+    );
+
+    // A forged list is shown (bob moved to another address), the genuine one restored before the
+    // password: the list shown does not verify, so nothing changes either.
+    let mut forged: serde_json::Value = serde_json::from_slice(&genuine).unwrap();
+    forged["entries"][1]["address"] = json!("0x6666666666666666666666666666666666666666");
+    fs::write(&path, serde_json::to_vec_pretty(&forged).unwrap()).unwrap();
+    let (shown, v) = on_terminal(&home, &["remove", "bob"], || {
+        fs::write(&path, &genuine).unwrap();
+    });
+    assert!(
+        shown.contains("0x6666666666666666666666666666666666666666"),
+        "{shown:?}"
+    );
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
+    let msg = v["error"].as_str().unwrap();
+    assert!(
+        msg.starts_with(
+            "refusing to edit the whitelist: whitelist.json: whitelist signature does not verify"
+        ),
+        "{msg}"
+    );
+    assert!(msg.contains("nothing in the whitelist changed"), "{msg}");
+    assert_eq!(
+        home.daemon_pids(),
+        vec![pid],
+        "the forged list stopped the session"
+    );
+    assert_eq!(
+        files_of(&home),
+        before,
+        "the refused change wrote something"
+    );
+
+    // An unfinished edit in whitelist.next.json is shown too (the same signed list, other bytes:
+    // a byte-identical copy is labelled as a copy of whitelist.json instead).
+    fs::write(home.path().join("whitelist.next.json"), &compact).unwrap();
+    let r = whitelist_edit(&home, &["remove", "bob"]);
+    assert!(
+        r.stderr
+            .contains("whitelist.next.json: gen 2, 2 entries (alice, bob), an unfinished edit"),
+        "{}",
+        r.stderr
+    );
+    let e = r.ok();
+    assert_eq!(e["gen"], 3, "{e}");
+    assert_eq!(nicknames(&e["entries"]), ["alice"], "{e}");
+}
+
+#[test]
+fn r3_2_a_wallet_json_from_before_the_first_edit_refuses_every_edit() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    let fresh = fs::read(home.wallet_json()).unwrap();
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    whitelist_edit(&home, &["fee-cap", "base", "0.0001"]).ok();
+    // The agent puts back the wallet.json from before the first edit: no whitelist is sealed,
+    // but the real list is still on disk.
+    fs::write(home.wallet_json(), &fresh).unwrap();
+    let before = files_of(&home);
+    for args in [
+        &["add", "bob", BOB, "--chains", "base"][..],
+        &["remove", "alice"],
+        &["fee-cap", "base", "0.05"],
+        &["allow-message-signing", "on"],
+    ] {
+        let r = whitelist_edit(&home, args);
+        assert!(
+            r.stderr.contains("otherwise: nothing changes"),
+            "{args:?}: {}",
+            r.stderr
+        );
+        let msg = r.err("VALIDATION_ERROR");
+        for want in [
+            "wallet.json seals no whitelist, but whitelist.json exists",
+            "a wallet.json restored from before the first edit, or a planted file",
+            "nothing in the whitelist changed",
+            "zwallet whitelist reset",
+            "sets every fee cap back to the built-in default",
+        ] {
+            assert!(msg.contains(want), "{args:?}: {want:?} not in {msg}");
+        }
+        assert_eq!(files_of(&home), before, "{args:?} wrote something");
+    }
+    // `list --verify` explains it the same way, instead of offering the add it refuses.
+    let v = verify_list(&home);
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("wallet.json seals no whitelist, but whitelist.json exists"),
+        "{v}"
+    );
+    assert!(!reason.contains("creates it"), "{v}");
+    // Reset still works: a new key, an empty list, the list it dropped shown.
+    let z = whitelist_edit(&home, &["reset"]).ok();
+    assert_eq!(
+        (&z["gen"], &z["keyCreated"]),
+        (&json!(1), &json!(true)),
+        "{z}"
+    );
+    assert_eq!(z["entries"], json!([]), "{z}");
+    assert_eq!(nicknames(&z["discarded"]["entries"]), ["alice"], "{z}");
+    let v = verify_list(&home);
+    assert_eq!(
+        (&v["verified"], &v["gen"]),
+        (&json!(true), &json!(1)),
+        "{v}"
+    );
+}
+
+/// The one recovery every refusal of an untrusted list gives, and nothing that suggests restoring
+/// an older whitelist.json (round 8).
+fn assert_recovery_only(text: &str) {
+    assert!(
+        text.contains(
+            "If wallet.json is an older copy, restore the current one if you have it (zwallet \
+             keeps no copy of it); otherwise `zwallet whitelist reset` starts over"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains(&["put", "back"].join(" ")), "{text}");
+    assert!(!text.contains(&["genuine", "copy"].join(" ")), "{text}");
+}
+
+#[test]
+fn r4_2_a_wallet_json_rolled_back_under_a_newer_list_is_named() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    let gen1 = fs::read(home.wallet_json()).unwrap();
+    whitelist_edit(&home, &["remove", "alice"]).ok();
+    let gen2 = fs::read(home.wallet_json()).unwrap();
+    whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).ok();
+    // wallet.json alone restored two edits back: the genuine gen-3 list can only mean a
+    // rollback.
+    fs::write(home.wallet_json(), &gen1).unwrap();
+    let rolled = "whitelist.json (gen 3) is newer than the seal (gen 1): wallet.json was rolled \
+                  back";
+    let v = verify_list(&home);
+    assert_eq!(v["verified"], false, "{v}");
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(reason.contains(rolled), "{v}");
+    assert_recovery_only(reason);
+    let before = files_of(&home);
+    let msg = whitelist_edit(&home, &["add", "carol", ROUTER, "--chains", "base"])
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains(rolled), "{msg}");
+    assert_recovery_only(&msg);
+    assert_eq!(files_of(&home), before);
+    // The daemon refuses with the same reason.
+    home.unlock("10m");
+    let r = home.run(&["sign-message", "--message", "m", "--json"]);
+    let msg = r.err("WHITELIST_INVALID");
+    assert!(msg.contains(rolled), "{msg}");
+    home.run(&["lock", "--json"]).ok();
+    // Restored one edit back: that, or an edit to gen 3 that never finished sealing. Both are
+    // named; the advice is the same one recovery.
+    fs::write(home.wallet_json(), &gen2).unwrap();
+    let v = verify_list(&home);
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains(
+            "whitelist.json (gen 3) is one edit newer than the seal (gen 2), under this wallet's \
+             whitelist key: an edit that never finished sealing, or a rolled-back wallet.json"
+        ),
+        "{v}"
+    );
+    assert_recovery_only(reason);
+}
+
+#[test]
+fn r5_1_a_rollback_across_a_reset_is_named_and_no_copy_is_offered() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    let gen1 = fs::read(home.wallet_json()).unwrap();
+    whitelist_edit(&home, &["reset"]).ok();
+    // wallet.json restored to before the reset: the list is the new key's, at gen 2.
+    fs::write(home.wallet_json(), &gen1).unwrap();
+    let why = "whitelist.json (gen 2) is newer than the seal (gen 1) but not signed by this \
+               wallet's whitelist key: a wallet.json rolled back across a reset, a reset that \
+               never finished sealing, or a foreign file";
+    let v = verify_list(&home);
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(reason.contains(why), "{v}");
+    assert_recovery_only(reason);
+    let before = files_of(&home);
+    let msg =
+        whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).err("VALIDATION_ERROR");
+    assert!(msg.contains(why), "{msg}");
+    assert_recovery_only(&msg);
+    assert_eq!(files_of(&home), before);
+    // A list at the sealed generation that does not verify: the same one recovery.
+    fs::write(home.wallet_json(), &gen1).unwrap();
+    fs::write(home.path().join("whitelist.json"), b"{ not a list").unwrap();
+    let v = verify_list(&home);
+    assert_recovery_only(v["reason"].as_str().unwrap_or(""));
+}
+
+#[test]
+fn r5_a_first_edit_cut_off_before_its_seal_is_named_by_list_and_list_verify() {
+    use zwallet::chains::evm::registry::WHITELIST_RULES;
+    use zwallet::core::error::WalletError;
+    use zwallet::core::whitelist::{self, EditStage, Entry};
+
+    let home = Home::new();
+    home.create("main", &[]);
+    // The first edit, stopped right after staging (in this process, through the core edit's
+    // test hook): only whitelist.next.json, at gen 1, and no seal.
+    let crash = |s: EditStage<'_>| -> zwallet::core::error::Result<()> {
+        match s {
+            EditStage::NextWritten(_) => Err(WalletError::validation("crash")),
+            _ => Ok(()),
+        }
+    };
+    whitelist::edit_with_hook(
+        home.path(),
+        common::PW,
+        &WHITELIST_RULES,
+        |l| l.add(Entry::new_address("alice", PAYEE, &["base"])),
+        &crash,
+    )
+    .unwrap_err();
+    assert!(!home.path().join("whitelist.json").exists());
+    assert!(home.path().join("whitelist.next.json").exists());
+    let v = verify_list(&home);
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains(
+            "wallet.json seals no whitelist, but whitelist.next.json exists (a first edit \
+             interrupted before it was sealed"
+        ),
+        "{v}"
+    );
+    assert!(!reason.contains("creates it"), "{v}");
+    let plain = home.run(&["whitelist", "list", "--json"]).ok();
+    let reason = plain["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("there is no whitelist.json, but whitelist.next.json exists"),
+        "{plain}"
+    );
+    assert!(!reason.contains("creates it"), "{plain}");
 }
