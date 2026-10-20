@@ -323,13 +323,17 @@ pub struct WhitelistListArgs {
     pub password_stdin: bool,
 }
 
-/// What every whitelist change takes.
+/// What every whitelist change takes. A change stops every zwallet daemon of this user first and
+/// leaves the wallet locked, unless --unlock starts a new session.
 #[derive(Debug, Args)]
 pub struct WhitelistEditArgs {
     #[command(flatten)]
     pub password: PasswordStdin,
-    /// When the change re-unlocks a running session: see `unlock --allow-ptrace-scope-0`.
-    #[arg(long)]
+    /// After the change, unlock for this duration (e.g. 24h) with the password just typed.
+    #[arg(long, value_name = "DURATION")]
+    pub unlock: Option<String>,
+    /// With --unlock: see `unlock --allow-ptrace-scope-0`.
+    #[arg(long, requires = "unlock")]
     pub allow_ptrace_scope_0: bool,
 }
 
@@ -817,8 +821,16 @@ mod tests {
             parse(&["list", "--verify", "--password-stdin"]).unwrap(),
             Command::Whitelist(WhitelistCommand::List(a)) if a.verify && a.password_stdin
         ));
+        match parse(&["reset", "--unlock", "24h", "--allow-ptrace-scope-0"]).unwrap() {
+            Command::Whitelist(WhitelistCommand::Reset(a)) => {
+                assert_eq!(a.unlock.as_deref(), Some("24h"));
+                assert!(a.allow_ptrace_scope_0);
+            }
+            other => panic!("{other:?}"),
+        }
         for bad in [
-            &["add", "r", "0xab", "--contract"][..],
+            &["reset", "--allow-ptrace-scope-0"][..],
+            &["add", "r", "0xab", "--contract"],
             &["add", "r", "0xab", "--selectors", "0x12345678"],
             &["allow-message-signing", "yes"],
             &["list", "--password-stdin"],
