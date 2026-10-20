@@ -243,7 +243,7 @@ From part C (CLI):
 | W5b | restore an older `wallet.json`, `whitelist.json` and `whitelist.key` together | accepted, as documented. `unlock` prints the older gen and entries, so the human can see it |
 | W6 | `approve(spender, 1)`; `transferFrom`; `invoke` of an unlisted contract or an unlisted selector; a token transfer to a token-contract address | each `WHITELIST_DENIED`; `approve(spender, 0)` is allowed |
 | W7 | test-hook crash after each of the edit's three writes | the list is either the old gen or the promoted new gen; never invalid-and-signed; the next CLI edit continues from it |
-| W8 | edit while the daemon is signing (concurrent) | the edit stops the daemon first; no signature lands after the edit starts; the session is re-warmed to the old `expiresAt` (plus the new daemon's start-up) |
+| W8 | edit while unlocked (tested). A signature racing the edit is not run as a test: it relies on step 1 returning only once no daemon is left | a wrong password or a refused change stops nothing; otherwise every daemon is stopped first (other homes' too); the session is re-warmed to the old `expiresAt` (plus the new daemon's start-up); a session that ran out stays locked |
 | W9 | fees above `maxFeeWei` (hostile RPC fixture, or a large `--max-fee-gwei`) | `FEE_CAP_EXCEEDED` from the daemon |
 | W10 | `sign-message` with `allowMessageSigning` off, then on | refused, then signed |
 | W11 | 0-value self-transfer dry-run and live (A7), no list | allowed |
