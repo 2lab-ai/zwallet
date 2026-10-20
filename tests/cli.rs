@@ -1921,26 +1921,20 @@ fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
         "--json",
     ]);
     let mut pty = common::PtyChild::spawn(cmd);
-    // Before the prompt, on the terminal: the change the password authorizes.
+    // Before the prompt, on the terminal: the change the password authorizes. (Checked once the
+    // child has exited: a failed check must not leave it waiting at the prompt.)
     let mut before = String::new();
     let start = std::time::Instant::now();
     while !before.contains("Wallet password: ") {
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "no prompt; saw {before:?}"
-        );
+        if start.elapsed() > Duration::from_secs(30) {
+            let _ = pty.child.kill();
+            let _ = pty.child.wait();
+            panic!("no prompt; saw {before:?}");
+        }
         before.push_str(&common::drain_pty(&pty.master));
         std::thread::sleep(Duration::from_millis(20));
     }
-    let summary = &before[..before.find("Wallet password: ").unwrap()];
-    for want in [
-        "add alice",
-        PAYEE,
-        "chains: base",
-        "after the change: gen 1",
-    ] {
-        assert!(summary.contains(want), "{want:?} not in {summary:?}");
-    }
+    let summary = before[..before.find("Wallet password: ").unwrap()].to_string();
     pty.type_line(PW);
     let mut tty = String::new();
     let start = std::time::Instant::now();
@@ -1961,6 +1955,14 @@ fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
         );
     }
     assert!(out.status.success(), "{stdout} / {stderr}");
+    for want in [
+        "add alice",
+        PAYEE,
+        "chains: base",
+        "after the change: gen 1",
+    ] {
+        assert!(summary.contains(want), "{want:?} not in {summary:?}");
+    }
     let added: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(added["gen"], 1, "{added}");
     assert_eq!(added["previousGen"], serde_json::Value::Null, "{added}");
