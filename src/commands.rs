@@ -734,18 +734,25 @@ async fn sign_and_send<F: ChainFamily>(
         out.insert("recoveredFrom".into(), json!(signed.signer));
         return Ok(Out::json(Value::Object(out)));
     }
-    let outcome = fam.broadcast(net, &signed).await?;
+    let outcome = fam.broadcast(net, &signed, send.nonce.is_some()).await?;
     out.insert(
         "explorerUrl".into(),
         json!(net.chain.explorer_tx_url(&signed.tx_hash)),
     );
-    if let Broadcast::KnownDespite(why) = outcome {
+    if let Broadcast::KnownDespite {
+        warning,
+        rpc_tx_hash,
+    } = outcome
+    {
         out.insert(
             "broadcastWarning".into(),
             json!(format!(
-                "{why}; the node reports the transaction, so it was sent"
+                "{warning}; the node reports the transaction by its own hash, so it was sent"
             )),
         );
+        if let Some(h) = rpc_tx_hash {
+            out.insert("rpcTxHash".into(), json!(h));
+        }
     }
     if send.wait {
         let receipt = fam

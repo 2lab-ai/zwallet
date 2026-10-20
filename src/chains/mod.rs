@@ -381,8 +381,13 @@ pub struct SignedTx {
 pub enum Broadcast {
     /// The node accepted it and answered with the transaction's own hash.
     Accepted,
-    /// The send call failed (the text), but the node reports the transaction by its hash.
-    KnownDespite(String),
+    /// The send call failed or answered another hash (`warning` says how), but the node reports
+    /// the transaction by its own hash, so it was sent. `rpc_tx_hash` is the other hash, if the
+    /// node answered one.
+    KnownDespite {
+        warning: String,
+        rpc_tx_hash: Option<String>,
+    },
 }
 
 /// The error for a transaction that may have reached the network: it carries `txHash`, `from`
@@ -408,15 +413,74 @@ pub fn after_send_error(
     with_tx_details(WalletError::new(code, message), signed)
 }
 
+/// What to do about a retry once a transaction is signed: reuse its nonce, so that the retry can
+/// only replace this transaction, never add a second one.
+fn retry_hint(signed: &SignedTx) -> String {
+    match signed.nonce {
+        Some(n) => {
+            format!("If you retry, pass --nonce {n} so that the retry cannot become a second send")
+        }
+        None => "Look the transaction up before you retry".to_string(),
+    }
+}
+
 /// The error for a transaction the node refused outright (`why` is its answer): nothing was
 /// broadcast. It carries the same `txHash`, `from` and `nonce` fields as [`after_send_error`].
 pub fn rejected_send_error(signed: &SignedTx, why: &str) -> WalletError {
     with_tx_details(
         WalletError::rpc(format!(
-            "the node rejected the transaction; nothing was broadcast ({why})"
+            "the node rejected the transaction; nothing was broadcast ({why}). {}",
+            retry_hint(signed)
         )),
         signed,
     )
+}
+
+/// `e` (code kept) for a failure after signing but before the send request went out: nothing
+/// was broadcast, but the signed transaction exists, so a retry still reuses its nonce.
+pub fn before_send_error(signed: &SignedTx, e: WalletError) -> WalletError {
+    with_tx_details(
+        WalletError::new(
+            e.code,
+            format!(
+                "{}; nothing was broadcast. {}",
+                e.message,
+                retry_hint(signed)
+            ),
+        ),
+        signed,
+    )
+}
+
+/// The node says the transaction's nonce is already used (`why` is its answer) and does not
+/// report this transaction by its hash: another transaction, pending or mined, holds the nonce.
+/// That one may be an earlier send of this same payment, so the message never invites a plain
+/// resend. `BROADCAST_UNCERTAIN` when this send was a `--nonce` retry (`explicit_nonce`), else
+/// `RPC_ERROR`. `hint` is a family-specific addition.
+pub fn nonce_taken_error(
+    signed: &SignedTx,
+    why: &str,
+    explicit_nonce: bool,
+    hint: Option<&str>,
+) -> WalletError {
+    let nonce = signed
+        .nonce
+        .map_or_else(|| "its nonce".to_string(), |n| format!("nonce {n}"));
+    let code = if explicit_nonce {
+        ErrorCode::BroadcastUncertain
+    } else {
+        ErrorCode::RpcError
+    };
+    let mut message = format!(
+        "{nonce} is taken by another transaction (pending or mined), so the node did not take \
+         this one ({why}); if this was a retry of an earlier send, look that txHash up before \
+         sending again; otherwise re-run to take the next nonce"
+    );
+    if let Some(h) = hint {
+        message.push_str(". ");
+        message.push_str(h);
+    }
+    with_tx_details(WalletError::new(code, message), signed)
 }
 
 fn with_tx_details(e: WalletError, signed: &SignedTx) -> WalletError {
@@ -463,11 +527,18 @@ pub trait ChainFamily: FamilyKeys {
     /// Builds an unsigned transfer from live chain state. Outside dry-run this fails with
     /// `INSUFFICIENT_FUNDS` instead of returning a transaction that cannot pay for itself.
     async fn prepare_transfer(&self, net: &Net, req: &TransferRequest) -> Result<PreparedTx>;
-    /// Hands `signed` to the node. A failure before the send is an ordinary error whose message
-    /// says nothing was broadcast, and so is the node refusing the transaction itself
-    /// ([`rejected_send_error`]). Once the request has gone out, any other failure whose outcome
-    /// the node cannot confirm is `BROADCAST_UNCERTAIN` (see [`after_send_error`]).
-    async fn broadcast(&self, net: &Net, signed: &SignedTx) -> Result<Broadcast>;
+    /// Hands `signed` to the node. A failure before the send is [`before_send_error`], and the
+    /// node refusing the transaction itself is [`rejected_send_error`]; both say nothing was
+    /// broadcast. A used nonce that is not this transaction's is [`nonce_taken_error`]
+    /// (`explicit_nonce` = the send was a `--nonce` retry). Once the request has gone out, any
+    /// other failure whose outcome the node cannot confirm is `BROADCAST_UNCERTAIN` (see
+    /// [`after_send_error`]).
+    async fn broadcast(
+        &self,
+        net: &Net,
+        signed: &SignedTx,
+        explicit_nonce: bool,
+    ) -> Result<Broadcast>;
     /// `Ok(None)` when no receipt appeared within `timeout`.
     async fn wait_for_receipt(
         &self,
@@ -654,7 +725,50 @@ mod tests {
             "{}",
             e.message
         );
+        assert!(e.message.contains("pass --nonce 4"), "{}", e.message);
         assert!(!e.message.contains("may have reached"), "{}", e.message);
+
+        let before = before_send_error(&signed, WalletError::rpc("connect failed"));
+        assert_eq!(before.to_json()["errorCode"], "RPC_ERROR");
+        assert_eq!(before.to_json()["nonce"], 4);
+        assert!(
+            before
+                .message
+                .starts_with("connect failed; nothing was broadcast")
+        );
+        assert!(
+            before.message.contains("pass --nonce 4"),
+            "{}",
+            before.message
+        );
+    }
+
+    #[test]
+    fn nonce_taken_is_uncertain_only_for_a_nonce_retry() {
+        let signed = SignedTx {
+            raw: "0x02".into(),
+            tx_hash: "0xabc".into(),
+            signer: "0xF00".into(),
+            nonce: Some(4),
+        };
+        let fresh = nonce_taken_error(&signed, "nonce too low", false, None);
+        assert_eq!(fresh.code, ErrorCode::RpcError);
+        assert!(
+            fresh
+                .message
+                .starts_with("nonce 4 is taken by another transaction (pending or mined)"),
+            "{}",
+            fresh.message
+        );
+        assert!(
+            fresh
+                .message
+                .contains("look that txHash up before sending again")
+        );
+        let retry = nonce_taken_error(&signed, "nonce too low", true, Some("Hint"));
+        assert_eq!(retry.code, ErrorCode::BroadcastUncertain);
+        assert!(retry.message.ends_with(". Hint"), "{}", retry.message);
+        assert_eq!(retry.to_json()["txHash"], "0xabc");
     }
 
     #[test]

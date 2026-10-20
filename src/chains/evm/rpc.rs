@@ -46,13 +46,14 @@ const REPLACEMENT_BUMP: &str = "1.25x";
 /// txpool wording, which most clients share), matched case-insensitively: it never entered the
 /// node's pool, so nothing was broadcast.
 const SEND_REJECTIONS: &[&str] = &[
-    "replacement transaction underpriced",
-    "nonce too low",
     "insufficient funds",
     "intrinsic gas too low",
     "exceeds block gas limit",
     "max fee per gas less than block base fee",
 ];
+/// `eth_sendRawTransaction` errors meaning the nonce is already used, by another transaction or
+/// by this very one (resent after it went in); only the lookup by hash can tell which.
+const SEND_NONCE_TAKEN: &[&str] = &["nonce too low", "replacement transaction underpriced"];
 /// `eth_sendRawTransaction` errors meaning the node already holds this transaction.
 const SEND_KNOWN: &[&str] = &["already known", "known transaction"];
 
@@ -553,18 +554,26 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
 /// An explicit `--nonce n` must reuse a nonce that is still pending (`mined <= n < pending`, the
 /// replacement case) or be the next free one (`n == pending`). Below `mined` it is already spent;
 /// above `pending` the transaction would wait forever for the gap to fill.
+///
+/// `--nonce` is how a retry is made safe, so neither message names another nonce to use: an
+/// agent that took one would turn its retry into a second send.
 fn check_nonce(n: u64, mined: u64, pending: u64) -> Result<u64> {
     if n < mined {
         return Err(WalletError::validation(format!(
-            "--nonce {n} is already used: this account has {mined} mined transaction(s); the \
-             next free nonce is {pending}"
-        )));
+            "nonce {n} is already mined; nothing was signed. If you are retrying an earlier send \
+             with this nonce, that send (or its replacement) went through: look up its txHash \
+             before sending anything new"
+        ))
+        .with_detail("nonce", n));
     }
     if n > pending {
         return Err(WalletError::validation(format!(
-            "--nonce {n} would leave a gap: the next free nonce is {pending}, and a later nonce \
-             is not mined until every earlier one is"
-        )));
+            "--nonce {n} would leave a gap: it is past this account's next unused nonce on this \
+             node, and a nonce is not mined until every earlier one is; nothing was signed. If \
+             you are retrying a send that used nonce {n}, do not send it again under another \
+             nonce: look up its txHash first (this node may be behind)"
+        ))
+        .with_detail("nonce", n));
     }
     Ok(n)
 }
@@ -674,13 +683,19 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
 pub enum SendOutcome {
     /// The node answered with the transaction's own hash.
     Accepted,
-    /// The node answered with some other hash: a broken or dishonest endpoint.
+    /// The call failed, timed out, or answered another hash (`rpc_hash`), but the node reports
+    /// the transaction by its own hash: it was sent. `why` says what went wrong.
+    KnownDespite { why: String, rpc_hash: Option<B256> },
+    /// The node answered with some other hash (a broken or dishonest endpoint), and does not
+    /// report the transaction by its own hash.
     HashMismatch(B256),
-    /// The call failed or timed out (the text), but the node reports the transaction.
-    KnownDespite(String),
     /// The call failed or timed out (the text), and the node does not report the transaction.
     Unknown(String),
-    /// The node refused the transaction itself (the text; see `SEND_REJECTIONS`): nothing was
+    /// The node says the nonce is already used (the text; see [`SEND_NONCE_TAKEN`]) and does not
+    /// report this transaction: another transaction, pending or mined, holds the nonce. It may be
+    /// an earlier send of the same payment.
+    NonceTaken(String),
+    /// The node refused the transaction itself (the text; see [`SEND_REJECTIONS`]): nothing was
     /// broadcast.
     Rejected(String),
 }
@@ -690,6 +705,8 @@ pub enum SendOutcome {
 enum SendError {
     /// The node refused the transaction ([`SEND_REJECTIONS`]): nothing was broadcast.
     Rejected,
+    /// The nonce is used ([`SEND_NONCE_TAKEN`]), perhaps by this very transaction.
+    NonceTaken,
     /// The node already holds it ([`SEND_KNOWN`]): the lookup by hash then reports it as sent.
     Known,
     /// Anything else: only the lookup by hash can tell.
@@ -701,6 +718,8 @@ fn classify_send_error(message: &str) -> SendError {
     let has = |list: &[&str]| list.iter().any(|s| m.contains(s));
     if has(SEND_KNOWN) {
         SendError::Known
+    } else if has(SEND_NONCE_TAKEN) {
+        SendError::NonceTaken
     } else if has(SEND_REJECTIONS) {
         SendError::Rejected
     } else {
@@ -710,33 +729,45 @@ fn classify_send_error(message: &str) -> SendError {
 
 /// Sends `raw`, whose hash the caller computed from the bytes. The node's reply is only checked
 /// against that hash, never used in its place. A JSON-RPC error that refuses the transaction
-/// itself is [`SendOutcome::Rejected`]. Any other failure after the request may have gone out
-/// (including "already known", a timeout, or a transport error) asks the node for the
-/// transaction by `hash` before giving up.
+/// itself is [`SendOutcome::Rejected`]. Every other outcome short of the node answering that
+/// hash (a used nonce, another hash, "already known", a timeout, a transport error) asks the
+/// node for the transaction by `hash` before giving up.
 pub async fn send_raw(p: &EvmProvider, raw: &[u8], hash: B256) -> SendOutcome {
     const WHAT: &str = "eth_sendRawTransaction";
     let call = p
         .client()
         .request::<_, B256>(WHAT, (alloy::hex::encode_prefixed(raw),));
+    let found = |why: String, rpc_hash: Option<B256>| SendOutcome::KnownDespite { why, rpc_hash };
     let why = match tokio::time::timeout(RPC_TIMEOUT, call.into_future()).await {
         Ok(Ok(h)) if h == hash => return SendOutcome::Accepted,
-        Ok(Ok(h)) => return SendOutcome::HashMismatch(h),
+        Ok(Ok(h)) => {
+            return if node_has_tx(p, hash).await {
+                let why = format!(
+                    "the RPC answered {WHAT} with hash {h}, not the transaction's own hash"
+                );
+                found(why, Some(h))
+            } else {
+                SendOutcome::HashMismatch(h)
+            };
+        }
         Ok(Err(e)) => {
             let why = p.failed(WHAT, &e).message;
             // Only a JSON-RPC error object (HTTP 200, or a 4xx carrying one) is the node's
             // answer; a bare transport error says nothing about the transaction.
-            let kind = e
+            match e
                 .as_error_resp()
-                .map_or(SendError::Other, |r| classify_send_error(&r.message));
-            if kind == SendError::Rejected {
-                return SendOutcome::Rejected(why);
+                .map_or(SendError::Other, |r| classify_send_error(&r.message))
+            {
+                SendError::Rejected => return SendOutcome::Rejected(why),
+                SendError::NonceTaken if node_has_tx(p, hash).await => return found(why, None),
+                SendError::NonceTaken => return SendOutcome::NonceTaken(why),
+                SendError::Known | SendError::Other => why,
             }
-            why
         }
         Err(_) => timed_out(WHAT).message,
     };
     if node_has_tx(p, hash).await {
-        SendOutcome::KnownDespite(why)
+        found(why, None)
     } else {
         SendOutcome::Unknown(why)
     }
@@ -875,12 +906,12 @@ mod tests {
         for n in [5, 6, 7] {
             assert_eq!(check_nonce(n, 5, 7).unwrap(), n);
         }
-        assert!(
-            check_nonce(4, 5, 7)
-                .unwrap_err()
-                .message
-                .contains("already used")
-        );
+        let mined = check_nonce(4, 5, 7).unwrap_err().message;
+        assert!(mined.starts_with("nonce 4 is already mined"), "{mined}");
+        for e in [mined, check_nonce(8, 5, 7).unwrap_err().message] {
+            // Neither names a nonce to use instead.
+            assert!(!e.contains('5') && !e.contains('7'), "{e}");
+        }
         assert!(check_nonce(8, 5, 7).unwrap_err().message.contains("gap"));
     }
 
@@ -938,14 +969,18 @@ mod tests {
     #[test]
     fn send_errors_are_classified_case_insensitively() {
         for m in [
-            "replacement transaction underpriced",
-            "Nonce too low: address 0xabc, tx: 1 state: 2",
             "INSUFFICIENT FUNDS for gas * price + value",
             "intrinsic gas too low",
             "tx exceeds block gas limit",
             "max fee per gas less than block base fee: address 0xabc",
         ] {
             assert_eq!(classify_send_error(m), SendError::Rejected, "{m}");
+        }
+        for m in [
+            "replacement transaction underpriced",
+            "Nonce too low: address 0xabc, tx: 1 state: 2",
+        ] {
+            assert_eq!(classify_send_error(m), SendError::NonceTaken, "{m}");
         }
         for m in ["already known", "Known transaction: 0xabc"] {
             assert_eq!(classify_send_error(m), SendError::Known, "{m}");
