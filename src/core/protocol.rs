@@ -13,8 +13,8 @@
 //!
 //! Which daemons exist is never read from `d.sock` or `d.lock` (any same-user process can rename
 //! or replace those): they are found by argv in the OS process table and stopped by signal.
-//! `lock` stops every daemon of this user ([`stop_all_daemons`]), `unlock` the ones for its home
-//! ([`stop_daemons`]).
+//! `lock` stops every daemon of this user ([`stop_all_daemons`]) without reading any home, so no
+//! path there can stall or fail it; `unlock` stops the ones for its home ([`stop_daemons`]).
 
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::password::{MAX_SECRET, read_exact_secret};
@@ -258,21 +258,8 @@ pub async fn status(home: &Path) -> Result<Option<Value>> {
     send(home, &Request::Status, QUICK).await
 }
 
-/// `zwallet lock`, the panic button: ends every signing session of this user. First, politely,
-/// asks whatever answers on `home`'s `d.sock` to lock (the request carries nothing; errors and
-/// lies there are ignored); then stops every zwallet daemon of this user found in the process
-/// table, whatever home it serves, so a home moved or re-linked since its unlock cannot hide one
-/// ([`stop_all_daemons`]). Succeeds only when none is left; returns the pids that were running.
-pub async fn lock(home: &Path) -> Result<Vec<i32>> {
-    let mut stopped = all_daemon_pids()?;
-    polite_lock(home).await;
-    stopped.extend(stop_all_daemons()?);
-    stopped.sort_unstable();
-    stopped.dedup();
-    Ok(stopped)
-}
-
-/// Asks whatever answers on `d.sock` to lock; the answer decides nothing.
+/// Asks whatever answers on `d.sock` to lock; the answer decides nothing. Only `unlock` does
+/// this (it reads the home anyway); `zwallet lock` touches no home ([`stop_all_daemons`]).
 async fn polite_lock(home: &Path) {
     let _ = send(home, &Request::Lock, QUICK).await;
 }
@@ -1010,6 +997,20 @@ fn home_daemons(wanted: &HomeMatch, keep: Option<i32>) -> Result<Vec<i32>> {
     Ok(sorted(wanted.select(&daemon_processes(keep)?)))
 }
 
+/// Pids of this user's zwallet daemons for any home but `home` (`zwallet lock` stops them too):
+/// one look at the process table, split by the same match as [`daemon_pids`], so a daemon of
+/// this home is never counted as another's.
+pub fn other_daemon_pids(home: &Path) -> Result<Vec<i32>> {
+    let all = daemon_processes(None)?;
+    let this_home = HomeMatch::new(home).select(&all);
+    Ok(sorted(
+        all.into_iter()
+            .map(|(pid, _)| pid)
+            .filter(|pid| !this_home.contains(pid))
+            .collect(),
+    ))
+}
+
 /// Stops every daemon for `home` except `keep` (`unlock` replacing a session); see
 /// [`stop_until_gone`].
 pub fn stop_daemons(home: &Path, keep: Option<i32>) -> Result<Vec<i32>> {
@@ -1116,14 +1117,8 @@ fn process_argvs() -> Result<Vec<(i32, Vec<OsString>)>> {
         return Err(WalletError::validation("cannot list processes"));
     }
     // Room for processes started in between.
-    let mut pids = vec![0 as libc::pid_t; n as usize + 256];
-    let bytes = (pids.len() * size_of::<libc::pid_t>()) as libc::c_int;
-    // SAFETY: the buffer holds `bytes` bytes of pid_t.
-    let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
-    if n <= 0 {
-        return Err(WalletError::validation("cannot list processes"));
-    }
-    pids.truncate(n as usize);
+    let first = n as usize + 256;
+    let pids = list_pids(&[first, first * 2])?;
     let mut argmax: libc::c_int = 0;
     let mut len = size_of::<libc::c_int>();
     let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
@@ -1164,6 +1159,39 @@ fn process_argvs() -> Result<Vec<(i32, Vec<OsString>)>> {
         }
     }
     Ok(out)
+}
+
+/// Every pid, from `proc_listallpids` into a buffer of each of `capacities` pids in turn. The
+/// kernel fills at most the buffer and says how many it wrote, so a buffer filled to its last
+/// slot may have been cut short (as `OpenFds` treats a full fd list): it is tried again with the
+/// next capacity, and a list that fills even the last one is an error, never a shorter list (a
+/// daemon missing from it would survive `lock`).
+#[cfg(target_os = "macos")]
+fn list_pids(capacities: &[usize]) -> Result<Vec<libc::pid_t>> {
+    let fail = || WalletError::validation("cannot list processes");
+    for &cap in capacities {
+        let mut pids = vec![0 as libc::pid_t; cap];
+        let bytes = cap
+            .checked_mul(std::mem::size_of::<libc::pid_t>())
+            .and_then(|b| libc::c_int::try_from(b).ok())
+            .ok_or_else(fail)?;
+        // SAFETY: the buffer holds `bytes` bytes of pid_t.
+        let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+        let Ok(n) = usize::try_from(n) else {
+            return Err(fail());
+        };
+        if n == 0 {
+            return Err(fail());
+        }
+        if n < cap {
+            pids.truncate(n);
+            return Ok(pids);
+        }
+    }
+    Err(WalletError::validation(
+        "the process list filled every buffer it was read into and may be incomplete; not \
+         trusting a partial list of key daemons",
+    ))
 }
 
 /// argv of `pid` from `KERN_PROCARGS2`: `argc` (c_int), the exec path, NUL padding, then argc
@@ -1317,6 +1345,22 @@ mod tests {
         assert!(!mine.1.is_empty(), "own argv read");
         // ...but never as a daemon of any home.
         assert!(daemon_pids(Path::new("/"), None).unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_full_pid_buffer_is_retried_then_refused_never_cut_short() {
+        // There is always more than one process, so a one-slot buffer always fills: a list that
+        // fills its buffer may be cut short and must never be used as it is.
+        let err = list_pids(&[1]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError);
+        assert!(err.message.contains("process list"), "{}", err.message);
+        let err = list_pids(&[1, 2]).unwrap_err();
+        assert!(err.message.contains("process list"), "{}", err.message);
+        // Retried with room, it lists every process, this one included.
+        let pids = list_pids(&[1, 1 << 16]).unwrap();
+        assert!(pids.contains(&(std::process::id() as libc::pid_t)));
+        assert!(pids.len() > 1);
     }
 
     #[test]

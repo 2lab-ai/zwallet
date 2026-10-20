@@ -287,6 +287,21 @@ pub fn command_in(home: &Path, args: &[&str]) -> Command {
 
 pub fn run_in(home: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Run {
     let mut cmd = command_in(home, args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    run_command(cmd, stdin)
+}
+
+/// The binary with `args` and an empty environment: no `ZWALLET_HOME`, no `HOME`.
+pub fn command_without_home(args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_zwallet"));
+    cmd.env_clear().args(args);
+    cmd
+}
+
+/// Runs `cmd` to its exit with stdout and stderr piped, and `stdin` (or /dev/null) as input.
+pub fn run_command(mut cmd: Command, stdin: Option<&str>) -> Run {
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if stdin.is_some() {
@@ -294,9 +309,6 @@ pub fn run_in(home: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &st
         } else {
             Stdio::null()
         });
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
     let mut child = cmd.spawn().expect("spawn zwallet");
     if let Some(input) = stdin {
         // A command may refuse and exit before reading stdin (e.g. `backup` without a terminal).

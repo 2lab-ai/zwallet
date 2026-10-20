@@ -1674,3 +1674,157 @@ fn r8_daemon_wipes_and_exits_when_its_cli_dies_after_the_go_byte() {
     assert!(!home.sock().exists(), "it left its socket behind");
     assert!(home.daemon_pids().is_empty());
 }
+
+// ---- Custody (review round 4: C1-C3) ----
+
+/// Gives a directory back its permissions when dropped, so its temp home can be removed.
+struct Reopen(std::path::PathBuf);
+
+impl Drop for Reopen {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[test]
+fn r4c1_lock_reads_no_home_and_stops_every_daemon() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    // The home `lock` is given serves no daemon. A listener on its d.sock stands for anything
+    // there that could answer slowly or never (a path on a stalled mount): lock must not touch it.
+    let elsewhere = Home::new();
+    let fake = FakeDaemon::bind(&elsewhere.sock());
+    let closed = elsewhere.path().join("closed");
+    fs::create_dir(&closed).unwrap();
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+    let _reopen = Reopen(closed.clone());
+    let cases = [
+        ("HOME and ZWALLET_HOME unset", None),
+        (
+            "a missing ZWALLET_HOME",
+            Some(elsewhere.path().join("missing").join("home")),
+        ),
+        ("an unreadable ZWALLET_HOME", Some(closed.join("home"))),
+        (
+            "a ZWALLET_HOME with a listener on d.sock",
+            Some(elsewhere.path().to_path_buf()),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (what, zwallet_home) in &cases {
+        let pid = home.unlock("30s")["daemonPid"].as_i64().unwrap() as i32;
+        let mut cmd = common::command_without_home(&["lock", "--json"]);
+        if let Some(h) = zwallet_home {
+            cmd.env("ZWALLET_HOME", h);
+        }
+        let r = common::run_command(cmd, None);
+        let v: serde_json::Value = serde_json::from_str(&r.stdout).unwrap_or_default();
+        let stopped = v["stopped"]
+            .as_array()
+            .is_some_and(|s| s.contains(&json!(pid)));
+        if r.code != 0 || v["wasUnlocked"] != true || !stopped {
+            failures.push(format!(
+                "{what}: lock said {:?} / {:?}",
+                r.stdout.trim(),
+                r.stderr.trim()
+            ));
+        }
+        if !wait_dead(pid, Duration::from_secs(3)) {
+            failures.push(format!("{what}: the daemon {pid} of another home survived"));
+        }
+    }
+    assert!(!elsewhere.path().join("missing").exists());
+    let contacts = fake.received.lock().unwrap().len();
+    if contacts > 0 {
+        failures.push(format!(
+            "lock connected {contacts} time(s) to the d.sock of the home it was given"
+        ));
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn r4c2_unlock_shows_the_index_and_the_verify_warning() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let pw = format!("{PW}\n");
+    let clean = home.unlock("30s");
+    assert_eq!(clean["index"], 0, "{clean}");
+    assert!(clean.get("warning").is_none(), "{clean}");
+    // Key 'main' moved to index 5 with that index's real addresses (as in r5): what unlock shows
+    // is the seed's address at index 5, so it must say so, with the warning `--verify` gives.
+    let seed = store::unlock(home.path(), PW, &chains::derive_addresses)
+        .unwrap()
+        .0
+        .seed;
+    let five = chains::derive_addresses(&seed, 5).unwrap();
+    home.edit_wallet(|v| {
+        v["keys"][0]["index"] = json!(5);
+        v["keys"][0]["addresses"] = json!(five);
+    });
+    let verify = home
+        .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
+        .ok();
+    assert!(verify["warning"].is_string(), "{verify}");
+    let unlocked = home.unlock("30s");
+    assert_eq!(
+        (
+            &unlocked["index"],
+            &unlocked["address"],
+            &unlocked["verified"]
+        ),
+        (&json!(5), &json!(five["ethereum"]), &json!(true)),
+        "{unlocked}"
+    );
+    assert_eq!(unlocked["warning"], verify["warning"], "{unlocked}");
+    let human = home.run_stdin(&["unlock", "30s", "--password-stdin"], &pw);
+    assert!(
+        human.code == 0 && human.stdout.contains("index: 5") && human.stdout.contains("warning: "),
+        "{} / {}",
+        human.stdout,
+        human.stderr
+    );
+}
+
+#[test]
+fn r4c3_status_lists_the_daemons_of_other_homes() {
+    let a = Home::new();
+    let b = Home::new();
+    a.create("main", &[]);
+    b.create("main", &[]);
+    a.unlock("30s");
+    b.unlock("30s");
+    let (pa, pb) = (only_daemon(&a), only_daemon(&b));
+    let others = |home: &Home| {
+        let s = home.run(&["status", "--json"]).ok();
+        let pids = s["otherDaemonPids"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no otherDaemonPids: {s}"))
+            .clone();
+        (s, pids)
+    };
+    let (s, pids) = others(&a);
+    assert_eq!(s["daemonPids"], json!([pa]), "{s}");
+    assert!(
+        pids.contains(&json!(pb)) && !pids.contains(&json!(pa)),
+        "{s}"
+    );
+    let (s, pids) = others(&b);
+    assert!(
+        pids.contains(&json!(pa)) && !pids.contains(&json!(pb)),
+        "{s}"
+    );
+    let human = a.run(&["status"]);
+    assert!(
+        human.stdout.contains(&pb.to_string())
+            && human.stdout.contains("`zwallet lock` stops them too"),
+        "{}",
+        human.stdout
+    );
+    // A locked home still lists them: `zwallet lock` stops them too.
+    a.stop_daemons();
+    let (s, pids) = others(&a);
+    assert_eq!(s["locked"], true, "{s}");
+    assert!(pids.contains(&json!(pb)), "{s}");
+}

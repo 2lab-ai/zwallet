@@ -39,13 +39,13 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `change <name>` | `{ active, address, verified }` | works |
 | `address [--chain <key>] [--verify [--password-stdin]]` | `{ chain, key, address, verified }` (EIP-55; `--verify` adds `index` and `warning?`) | works |
 | `addresses` | `{ key, addresses: [{ chainId: <key>, address }], verified }` | works |
-| `status` | `{ wallet, locked, home, daemonPids?, daemonPid?, expiresAt?, active?, address?, verified? }` | works |
+| `status` | `{ wallet, locked, home, daemonPids?, otherDaemonPids, daemonPid?, expiresAt?, active?, address?, verified? }` | works |
 | `balance --chain <key> [--token <erc20>] [--rpc <url>]` | `{ chain, key, address, symbol, decimals, balance, raw, verified: false, token? }` | works |
 | `call --chain <key> --to <contract> --sig "<fn>" [ARGS...] [--rpc <url>]` | `{ chain, from, to, sig, args, result, raw }` | works |
 | `invoke --chain <key> --to <contract> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw }` | `WALLET_LOCKED` |
 | `transfer --chain <key> --to <0x> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
 | `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191) | `WALLET_LOCKED` |
-| `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0]` | `{ locked: false, duration, expiresAt, active, address, daemonPid, verified: true }` | - |
+| `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, warning? }` | - |
 | `lock` | `{ locked: true, wasUnlocked, stopped: [<pid>] }` | - |
 | `backup` | prints the recovery phrase; interactive terminal only | asks for the password |
 
@@ -72,7 +72,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
     `wallet.json` was edited. Such an address is still this seed's, but a wallet restored from
     the phrase lists accounts in index order and may not show it.
   - `unlock` and `create --unlock`: the address the CLI's own daemon child derived from the seed
-    the password opened, reported on that child's channel (both also add `daemonPid`).
+    the password opened, reported on that child's channel (both also add `daemonPid`). `unlock`
+    also shows that key's derivation `index`, and the same `warning` as `--verify` when the index
+    is one zwallet never assigns (checked against the key list it read before the prompt).
   - `create`: the first key, derived from the seed generated in the same process, and a later
     key when the password was asked for (see above).
 
@@ -318,18 +320,23 @@ data).
   on `d.sock` gets only requests that carry nothing and is replaced; a process holding `d.lock`
   makes `unlock` fail visibly. Neither ever receives the password.
 - **`lock`** is the panic button: it ends every zwallet session of this user, not only this
-  home's, so a home moved or re-linked since its unlock cannot hide a daemon. It asks whatever
-  answers on `d.sock` to lock (the request carries nothing), then finds every process of this
-  user whose arguments are `daemon --home <absolute path>` in the OS process table (macOS
-  `KERN_PROCARGS2`, Linux `/proc/<pid>/cmdline`), sends it SIGTERM (with SIGCONT, so a stopped
-  daemon still wipes its seed), and SIGKILL after 2 s. It reports `locked: true` with the pids
-  in `stopped` only when none is left; otherwise it fails naming the pids. `unlock` stops the old
-  daemons of its own home the same way (the home matched by path first, then by inode, with
-  each stat of another process's path bounded to 1 s so a hanging mount cannot stall it).
+  home's, so a home moved or re-linked since its unlock cannot hide a daemon. It reads no wallet
+  home at all (it works with `ZWALLET_HOME` and `HOME` unset, and nothing at a home path, such as
+  a stalled mount, can hold it up): it finds every process of this user whose arguments are
+  `daemon --home <absolute path>` in the OS process table (macOS `KERN_PROCARGS2`, Linux
+  `/proc/<pid>/cmdline`), sends it SIGTERM (with SIGCONT, so a stopped daemon still wipes its
+  seed), and SIGKILL after 2 s. It reports `locked: true` with the pids in `stopped` only when
+  none is left; otherwise it fails naming the pids. `unlock` stops the old daemons of its own
+  home the same way (the home matched by path first, then by inode, with each stat of another
+  process's path bounded to 1 s so a hanging mount cannot stall it).
   `status` reads the same table: any daemon process for this home means `locked: false` (with
   `daemonPids`), whatever answers on `d.sock`; `daemonPid` and `expiresAt` come from `d.sock`'s
-  reply only when that reply is from one of those processes. File names (`d.sock`, `d.lock`)
-  never decide which daemons exist, since any same-user process can rename or replace them.
+  reply only when that reply is from one of those processes. `otherDaemonPids` (always present)
+  lists this user's daemons for other homes, which `zwallet lock` stops too; human output says so
+  when there are any. On macOS a process list that fills its buffer is read again with more
+  room, and one that still fills it is an error, never a shorter list. File names (`d.sock`,
+  `d.lock`) never decide which daemons exist, since any same-user process can rename or replace
+  them.
 - **Daemon duties**: the daemon keeps only the master seed in memory, and does nothing but derive
   addresses and sign; it makes no network request. For a transaction it receives only the
   unsigned signing payload bytes and decodes them itself: type, chain id, recipient, value, and
@@ -368,6 +375,10 @@ things a same-user process can still do, and what to do about them:
   cannot write (e.g. a root-owned directory), or run the agent as a different OS user.
 - **Read the human's terminal** while the password is typed: a same-user process can open the
   terminal device the prompt reads.
+- **Read a piped password** (`--password-stdin` from a pipe, Linux): the process writing into the
+  pipe, and zwallet itself until its first step makes it non-dumpable, are dumpable, so a
+  same-user process can open the pipe through `/proc/<pid>/fd` and race zwallet to read the
+  password. This is the same class as reading the terminal; prefer the terminal prompt.
 - **Log keystrokes under X11**, where any client can read another's input.
 - **Attach a debugger on macOS**: a same-user debugger (where the system allows one) can read a
   zwallet process's memory.

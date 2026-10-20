@@ -51,7 +51,7 @@ pub async fn run(cli: Cli) -> Result<Out> {
         Command::Status => status(&home()?).await,
         Command::Backup => backup(&home()?),
         Command::Unlock(a) => unlock(&home()?, a).await,
-        Command::Lock => lock(&home()?).await,
+        Command::Lock => lock(),
         Command::Daemon { home } => {
             daemon::run(home).await?;
             Ok(Out::silent())
@@ -350,7 +350,7 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
                 a.name,
                 address.as_deref().unwrap_or("-")
             );
-            return Err(relocked(mismatch, protocol::lock(home).await));
+            return Err(relocked(mismatch, protocol::stop_all_daemons()));
         }
         out["locked"] = json!(false);
         out["expiresAt"] = session["expiresAt"].clone();
@@ -991,6 +991,7 @@ async fn status(home: &Path) -> Result<Out> {
         Err(e) => return Err(e),
     };
     let (pids, serving) = live_daemons(home).await?;
+    let others = protocol::other_daemon_pids(home)?;
     let locked = pids.is_empty();
     let mut out = json!({
         "wallet": if file.is_some() { "configured" } else { "not configured" },
@@ -1000,6 +1001,7 @@ async fn status(home: &Path) -> Result<Out> {
     if !locked {
         out["daemonPids"] = json!(pids);
     }
+    out["otherDaemonPids"] = json!(others);
     if let Some(d) = &serving {
         out["daemonPid"] = d["pid"].clone();
         out["expiresAt"] = d["expiresAt"].clone();
@@ -1026,7 +1028,17 @@ async fn status(home: &Path) -> Result<Out> {
             shows_address = true;
         }
     }
-    Ok(with_note(out, !shows_address))
+    let mut shown = with_note(out, !shows_address);
+    if !others.is_empty()
+        && let Some(text) = shown.text.as_mut()
+    {
+        text.push_str(&format!(
+            "\nnote: {} zwallet daemon(s) of this user serve other homes (otherDaemonPids); \
+             `zwallet lock` stops them too",
+            others.len()
+        ));
+    }
+    Ok(shown)
 }
 
 /// How long `status` waits for a daemon that does not confirm its session (it may be exiting) to
@@ -1070,31 +1082,53 @@ async fn live_daemons(home: &Path) -> Result<(Vec<i32>, Option<Value>)> {
 async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
     let ttl = parse_duration(&a.duration)?;
     protocol::socket_path(home)?;
-    // Fail before prompting when there is nothing to unlock. Nothing from this read is reported:
-    // the human is shown what the daemon derived from the decrypted seed.
-    store::read_wallet_file(home)?;
+    // Fail before prompting when there is nothing to unlock. Of this read only the key list's
+    // indices are used, for the index warning; the key, index and address shown are the ones the
+    // daemon derived from the decrypted seed.
+    let file = store::read_wallet_file(home)?;
     protocol::check_ptrace_scope(a.allow_ptrace_scope_0)?;
     // Pinned before the prompt, so a binary swapped in while the human types is never started.
     let exe = DaemonExe::resolve()?;
     let pw = read_password(a.password.password_stdin, "Wallet password: ", false)?;
     let session = start_session(home, &exe, &pw, ttl).await?;
     drop(pw);
-    Ok(Out::json(json!({
+    let mut out = json!({
         "locked": false,
         "duration": a.duration.trim(),
         "expiresAt": session["expiresAt"],
         "active": session["active"],
+        "index": session["index"],
         "address": session["address"],
         "daemonPid": session["pid"],
         // Derived by this process's own daemon child from the seed this password opened.
         "verified": true,
-    })))
+    });
+    if let Some(w) = session_index_warning(&file, &session) {
+        out["warning"] = json!(w);
+    }
+    Ok(Out::json(out))
 }
 
-/// The panic button: every zwallet daemon of this user, not only this home's (see
-/// [`protocol::lock`]).
-async fn lock(home: &Path) -> Result<Out> {
-    let stopped = protocol::lock(home).await?;
+/// [`index_warning`] (as `address --verify` gives it) for the key a new session reports: its
+/// name and index as the daemon derived them, against `file`'s key list and `nextIndex`.
+fn session_index_warning(file: &WalletFile, session: &Value) -> Option<String> {
+    let index = session["index"]
+        .as_u64()
+        .and_then(|i| u32::try_from(i).ok())?;
+    let shown = KeyEntry {
+        name: session["active"].as_str().unwrap_or_default().to_string(),
+        index,
+        created_at: String::new(),
+        addresses: BTreeMap::new(),
+    };
+    index_warning(file, &[&shown])
+}
+
+/// The panic button: stops every zwallet daemon of this user by the process table, not only one
+/// home's ([`protocol::stop_all_daemons`]). It reads no home, not even `ZWALLET_HOME` or `HOME`,
+/// so nothing at a home path (a stalled mount, a listener that never answers) can hold it up.
+fn lock() -> Result<Out> {
+    let stopped = protocol::stop_all_daemons()?;
     Ok(Out::json(json!({
         "locked": true,
         "wasUnlocked": !stopped.is_empty(),
