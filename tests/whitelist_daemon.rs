@@ -90,3 +90,76 @@ fn without_a_list_unlock_says_so_and_message_signing_is_refused() {
         "zwallet whitelist allow-message-signing on"
     );
 }
+
+/// Runs `args` like [`Home::run`], but fails the test instead of hanging if the command has not
+/// finished within 30 seconds.
+fn run_bounded(home: &Home, args: &[&str]) -> common::Run {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = home
+        .command(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(30) {
+            let _ = child.kill();
+            panic!("{args:?} still running after 30s: the daemon stalled");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let (mut stdout, mut stderr) = (String::new(), String::new());
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    common::Run {
+        code: status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+    }
+}
+
+#[test]
+fn a_fifo_in_place_of_whitelist_json_does_not_stall_the_daemon() {
+    // The daemon reads whitelist.json on every request while it holds the session: a FIFO there
+    // must be refused at once, not read (which would block every request, `lock` included).
+    let home = Home::new();
+    home.create("main", &[]);
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
+    home.unlock("30s");
+    let path = home.path().join("whitelist.json");
+    std::fs::remove_file(&path).unwrap();
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: mkfifo with a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let status = run_bounded(&home, &["status", "--json"]).ok();
+    let w = &status["whitelist"];
+    assert_eq!(w["verified"], false, "{status:#}");
+    assert!(
+        w["reason"].as_str().unwrap().contains("not a regular file"),
+        "{status:#}"
+    );
+    let r = run_bounded(&home, &["sign-message", "--message", "m", "--json"]);
+    let msg = r.err("WHITELIST_INVALID");
+    assert!(msg.contains("not a regular file"), "{msg}");
+    // Still serving: the session was never stuck.
+    assert_eq!(
+        run_bounded(&home, &["status", "--json"]).ok()["locked"],
+        false
+    );
+}
