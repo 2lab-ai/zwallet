@@ -56,7 +56,8 @@ pub enum Command {
     Backup,
     /// Unlock signing for a duration: 30m, 24h, 365d, 1y (units s m h d w y).
     Unlock(UnlockArgs),
-    /// Lock now: the key daemon wipes the key and exits.
+    /// Lock now: stops every zwallet key daemon of this user, whatever home it serves. Reads no
+    /// home.
     Lock,
     /// The key-holding daemon (started by `unlock`).
     #[command(hide = true)]

@@ -1074,36 +1074,90 @@ fn stop_until_gone(mut alive: impl FnMut() -> Result<Vec<i32>>, scope: &str) -> 
 /// `(pid, argv)` of every process of this effective uid whose argv can be read.
 #[cfg(target_os = "linux")]
 fn process_argvs() -> Result<Vec<(i32, Vec<OsString>)>> {
-    let uid = current_uid();
-    let dir = std::fs::read_dir("/proc").map_err(io_err("cannot list /proc"))?;
+    let proc = Path::new("/proc");
+    let dir = std::fs::read_dir(proc).map_err(io_err("cannot list /proc"))?;
+    proc_argvs(
+        proc,
+        dir.map(|entry| entry.map(|e| e.file_name())),
+        current_uid(),
+        |path: &Path| std::fs::read(path),
+    )
+}
+
+/// [`process_argvs`] over the entry `names` of a `/proc` at `root`, reading its files with
+/// `read`. An error from the listing itself fails the whole lookup, as a full pid buffer does on
+/// macOS (`list_pids`): a listing cut short may miss a daemon, which `lock` would then leave
+/// running and `status` would not report. A pid whose files cannot be read because it exited
+/// (ENOENT, ESRCH) or belongs to another user (EACCES; EPERM where `/proc` is mounted with
+/// `hidepid`) is skipped; any other error reading them fails the lookup too.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_argvs(
+    root: &Path,
+    names: impl Iterator<Item = std::io::Result<OsString>>,
+    uid: u32,
+    read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+) -> Result<Vec<(i32, Vec<OsString>)>> {
+    let read_pid_file = |name: &OsStr, file: &str| -> Result<Option<Vec<u8>>> {
+        let path = root.join(name).join(file);
+        match read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if pid_gone_or_foreign(&e) => Ok(None),
+            Err(e) => Err(WalletError::validation(format!(
+                "cannot read {}: {e}; not trusting a partial list of key daemons",
+                path.display()
+            ))),
+        }
+    };
     let mut out = Vec::new();
-    for entry in dir.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<i32>().ok())
-        else {
+    for name in names {
+        let name = name.map_err(|e| {
+            WalletError::validation(format!(
+                "cannot list {}: {e}; not trusting a partial list of key daemons",
+                root.display()
+            ))
+        })?;
+        let Some(pid) = name.to_str().and_then(|n| n.parse::<i32>().ok()) else {
             continue;
         };
-        // `Uid:` real, effective, saved, fs. /proc/<pid>/status and cmdline stay readable for
-        // a non-dumpable process (its fd directory and memory do not).
-        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+        // /proc/<pid>/status and cmdline stay readable for a non-dumpable process (its fd
+        // directory and memory do not).
+        let Some(status) = read_pid_file(&name, "status")? else {
             continue;
         };
-        let euid = status
-            .lines()
-            .find_map(|l| l.strip_prefix("Uid:"))
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|u| u.parse::<u32>().ok());
-        if euid != Some(uid) {
+        if status_euid(&status) != Some(uid) {
             continue;
         }
-        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+        let Some(cmdline) = read_pid_file(&name, "cmdline")? else {
             continue;
         };
         out.push((pid, split_nul(&cmdline, usize::MAX)));
     }
     Ok(out)
+}
+
+/// Whether reading a `/proc/<pid>` file failed because the process is gone or is another user's,
+/// rather than because the listing cannot be trusted.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn pid_gone_or_foreign(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::ENOENT | libc::ESRCH | libc::EACCES | libc::EPERM)
+    )
+}
+
+/// The effective uid in a `/proc/<pid>/status` (`Uid:` real, effective, saved, fs). Read as
+/// bytes: the `Name:` line above it is the process's own comm, which need not be UTF-8.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn status_euid(status: &[u8]) -> Option<u32> {
+    let line = status
+        .split(|b| *b == b'\n')
+        .find_map(|l| l.strip_prefix(b"Uid:"))?;
+    std::str::from_utf8(line)
+        .ok()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 /// `(pid, argv)` of every process of this effective uid whose argv can be read.
@@ -1361,6 +1415,149 @@ mod tests {
         let pids = list_pids(&[1, 1 << 16]).unwrap();
         assert!(pids.contains(&(std::process::id() as libc::pid_t)));
         assert!(pids.len() > 1);
+    }
+
+    const FAKE_PROC: &str = "/fake-proc";
+    const ME: u32 = 1001;
+    const DAEMON_A: &[u8] = b"/usr/bin/zwallet\0daemon\0--home\0/h/a\0";
+
+    /// A `/proc` for [`proc_argvs`]: `<pid>/<file>` to its bytes or an errno. Any other path is
+    /// ENOENT, as for a pid that exited after it was listed.
+    fn fake_proc(
+        files: Vec<(&str, std::result::Result<Vec<u8>, i32>)>,
+    ) -> impl Fn(&Path) -> std::io::Result<Vec<u8>> {
+        let files: BTreeMap<PathBuf, std::result::Result<Vec<u8>, i32>> = files
+            .into_iter()
+            .map(|(rel, content)| (Path::new(FAKE_PROC).join(rel), content))
+            .collect();
+        move |path: &Path| match files.get(path) {
+            Some(Ok(bytes)) => Ok(bytes.clone()),
+            Some(Err(errno)) => Err(std::io::Error::from_raw_os_error(*errno)),
+            None => Err(std::io::Error::from_raw_os_error(libc::ENOENT)),
+        }
+    }
+
+    fn proc_status(uid: u32) -> Vec<u8> {
+        format!("Name:\tzwallet\nState:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t9\n")
+            .into_bytes()
+    }
+
+    fn listing(names: &[&str]) -> std::vec::IntoIter<std::io::Result<OsString>> {
+        names
+            .iter()
+            .map(|n| Ok(OsString::from(n)))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn a_proc_listing_yields_every_process_of_this_uid() {
+        let mut odd_name = b"Name:\t\xff\xfe\n".to_vec();
+        odd_name.extend_from_slice(&proc_status(ME)[b"Name:\tzwallet\n".len()..]);
+        let read = fake_proc(vec![
+            ("1/status", Ok(proc_status(0))),
+            ("1/cmdline", Ok(b"/sbin/init\0".to_vec())),
+            ("40/status", Ok(proc_status(ME))),
+            ("40/cmdline", Ok(DAEMON_A.to_vec())),
+            // A comm that is not UTF-8 does not hide the process.
+            ("41/status", Ok(odd_name)),
+            ("41/cmdline", Ok(b"bash\0-l\0".to_vec())),
+            // A zombie: no argv.
+            ("42/status", Ok(proc_status(ME))),
+            ("42/cmdline", Ok(Vec::new())),
+            // Another user's daemon (the effective uid counts, not the real one).
+            ("50/status", Ok(b"Uid:\t1001\t2000\t2000\t2000\n".to_vec())),
+            (
+                "50/cmdline",
+                Ok(b"/usr/bin/zwallet\0daemon\0--home\0/h/b\0".to_vec()),
+            ),
+        ]);
+        let names = listing(&["self", "1", "40", "acpi", "41", "42", "50", "thread-self"]);
+        let got = proc_argvs(Path::new(FAKE_PROC), names, ME, read).unwrap();
+        let argv = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            vec![
+                (40, argv(&["/usr/bin/zwallet", "daemon", "--home", "/h/a"])),
+                (41, argv(&["bash", "-l"])),
+                (42, argv(&[])),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pid_that_exited_or_is_another_users_is_skipped() {
+        let read = fake_proc(vec![
+            // 60 exited before its status was read: it has no files (ENOENT).
+            // 61 exited between its status and its cmdline.
+            ("61/status", Ok(proc_status(ME))),
+            ("62/status", Err(libc::ESRCH)),
+            ("63/status", Ok(proc_status(ME))),
+            ("63/cmdline", Err(libc::ESRCH)),
+            // Another user's, closed to this one (EPERM is what `hidepid` answers).
+            ("64/status", Err(libc::EACCES)),
+            ("65/status", Err(libc::EPERM)),
+            ("70/status", Ok(proc_status(ME))),
+            ("70/cmdline", Ok(DAEMON_A.to_vec())),
+        ]);
+        let names = listing(&["60", "61", "62", "63", "64", "65", "70"]);
+        let got = proc_argvs(Path::new(FAKE_PROC), names, ME, read).unwrap();
+        assert_eq!(got, vec![(70, split_nul(DAEMON_A, usize::MAX))]);
+    }
+
+    #[test]
+    fn a_proc_listing_error_fails_the_lookup_never_cuts_it_short() {
+        let read = fake_proc(vec![
+            ("70/status", Ok(proc_status(ME))),
+            ("70/cmdline", Ok(DAEMON_A.to_vec())),
+            ("71/status", Ok(proc_status(ME))),
+            ("71/cmdline", Ok(DAEMON_A.to_vec())),
+        ]);
+        // First, between two daemons, and after both.
+        for at in 0..=2 {
+            let mut names: Vec<std::io::Result<OsString>> = listing(&["70", "71"]).collect();
+            names.insert(at, Err(std::io::Error::from_raw_os_error(libc::EIO)));
+            let err = proc_argvs(Path::new(FAKE_PROC), names.into_iter(), ME, &read).unwrap_err();
+            assert_eq!(err.code, ErrorCode::ValidationError);
+            assert!(
+                err.message.contains("cannot list /fake-proc")
+                    && err.message.contains("not trusting a partial list"),
+                "{at}: {}",
+                err.message
+            );
+        }
+        assert_eq!(
+            proc_argvs(Path::new(FAKE_PROC), listing(&["70", "71"]), ME, &read)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn an_unexpected_error_reading_a_pid_fails_the_lookup() {
+        for (rel, errno) in [
+            ("70/status", libc::EIO),
+            ("70/cmdline", libc::EIO),
+            ("70/cmdline", libc::ENOMEM),
+        ] {
+            let mut files = vec![
+                ("70/status", Ok(proc_status(ME))),
+                ("70/cmdline", Ok(DAEMON_A.to_vec())),
+            ];
+            files.retain(|(r, _)| *r != rel);
+            files.push((rel, Err(errno)));
+            let names = listing(&["70"]);
+            let err = proc_argvs(Path::new(FAKE_PROC), names, ME, fake_proc(files)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::ValidationError);
+            assert!(
+                err.message
+                    .contains(&format!("cannot read /fake-proc/{rel}"))
+                    && err.message.contains("not trusting a partial list"),
+                "{}",
+                err.message
+            );
+        }
     }
 
     #[test]
