@@ -6,7 +6,7 @@ use super::tx::{
     gas_with_margin,
 };
 use super::{config, parse_address};
-use crate::chains::{Net, PreparedTx, TransferRequest, redact_url};
+use crate::chains::{Net, PreparedTx, TransferRequest, redact_url, url_origin};
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use alloy::eips::BlockNumberOrTag;
@@ -15,8 +15,8 @@ use alloy::primitives::{Address, B256, Bytes, U128, U256, address};
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::TransactionRequest;
 use alloy::sol_types::SolCall;
+use alloy::transports::{RpcError, TransportError, TransportResult};
 use serde_json::{Map, Value, json};
-use std::fmt::Display;
 use std::future::IntoFuture;
 use std::ops::Deref;
 use std::time::{Duration, Instant};
@@ -85,10 +85,10 @@ impl EvmProvider {
         })
     }
 
-    async fn rpc<T, E: Display>(
+    async fn rpc<T>(
         &self,
         what: &str,
-        call: impl IntoFuture<Output = std::result::Result<T, E>>,
+        call: impl IntoFuture<Output = TransportResult<T>>,
     ) -> Result<T> {
         match tokio::time::timeout(RPC_TIMEOUT, call.into_future()).await {
             Ok(Ok(v)) => Ok(v),
@@ -97,10 +97,26 @@ impl EvmProvider {
         }
     }
 
-    /// Transport errors quote the request URL, and an HTTP error body or a node's error message
-    /// can quote the API key on its own; both are scrubbed.
-    fn failed(&self, what: &str, e: &dyn Display) -> WalletError {
-        WalletError::rpc(self.net.redact(&format!("{what} failed: {e}")))
+    /// A non-2xx answer is printed as its status and the endpoint's origin only: its body is a
+    /// gateway's text, which can quote the API key in any encoding. So is a 2xx answer that is
+    /// not JSON-RPC (its text is dropped). Transport errors quote the request URL, and a node's
+    /// JSON-RPC error message can quote the key on its own; both are scrubbed ([`Net::redact`]).
+    fn failed(&self, what: &str, e: &TransportError) -> WalletError {
+        let why = match e {
+            RpcError::Transport(kind) => match kind.as_http_error() {
+                Some(http) => format!(
+                    "HTTP {} from {}",
+                    http.status,
+                    url_origin(&self.net.rpc_url)
+                ),
+                None => self.net.redact(&kind.to_string()),
+            },
+            RpcError::DeserError { err, .. } => self.net.redact(&format!(
+                "the endpoint's answer is not valid JSON-RPC ({err})"
+            )),
+            other => self.net.redact(&other.to_string()),
+        };
+        WalletError::rpc(format!("{what} failed: {why}"))
     }
 }
 
@@ -992,28 +1008,56 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn rpc_error_text_never_prints_the_endpoint_key() {
+        use alloy::transports::{RpcError, TransportError, TransportErrorKind};
         let net = Net {
             chain: crate::chains::find("ethereum").unwrap(),
             rpc_url: "https://eth.example.com/v3/0123456789abcdef?apikey=SECRETKEY99&chain=1"
                 .into(),
         };
         let p = EvmProvider::new(&net).unwrap();
-        // An HTTP error body that quotes the key bare, inside the path and query, and the URL.
-        let body = "HTTP error 401 with body: {\"error\":\"invalid project id 0123456789abcdef\",\
-                    \"path\":\"/v3/0123456789abcdef?apikey=SECRETKEY99&chain=1\",\"url\":\
-                    \"https://eth.example.com/v3/0123456789abcdef\"} (apikey SECRETKEY99)";
+        // A non-2xx body: only the status and the endpoint's origin are printed.
+        let body = "{\"error\":\"invalid project id 0123456789abcdef\",\"path\":\
+                    \"/v3/0123456789abcdef?apikey=SECRETKEY99&chain=1\"} (apikey SECRETKEY99)";
         let e = p
-            .rpc("eth_call", std::future::ready(Err::<(), _>(body)))
+            .rpc(
+                "eth_call",
+                std::future::ready(Err::<(), _>(TransportErrorKind::http_error(
+                    401,
+                    body.into(),
+                ))),
+            )
             .await
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::RpcError);
-        for key in ["0123456789abcdef", "SECRETKEY99", "apikey=", "/v3/"] {
+        assert_eq!(
+            e.message,
+            "eth_call failed: HTTP 401 from https://eth.example.com"
+        );
+        // A JSON-RPC error that quotes the key, URL-decoded or not.
+        let err: TransportError = RpcError::ErrorResp(
+            serde_json::from_str(
+                r#"{"code":-32000,"message":"key 0123456789abcdef or SECRETKEY99 rejected at block 1"}"#,
+            )
+            .unwrap(),
+        );
+        let e = p
+            .rpc("eth_call", std::future::ready(Err::<(), _>(err)))
+            .await
+            .unwrap_err();
+        for key in ["0123456789abcdef", "SECRETKEY99"] {
             assert!(!e.message.contains(key), "{key}: {}", e.message);
         }
-        assert!(
-            e.message.starts_with("eth_call failed: HTTP error 401"),
-            "{}",
-            e.message
-        );
+        assert!(e.message.contains("error code -32000"), "{}", e.message);
+        // A 200 answer that is not JSON-RPC: its text is the endpoint's, so it is dropped.
+        let err: TransportError = RpcError::DeserError {
+            err: serde_json::from_str::<u64>("x").unwrap_err(),
+            text: "<html>gateway for key SECRETKEY99</html>".into(),
+        };
+        let e = p
+            .rpc("eth_call", std::future::ready(Err::<(), _>(err)))
+            .await
+            .unwrap_err();
+        assert!(!e.message.contains("SECRETKEY99"), "{}", e.message);
+        assert!(!e.message.contains("html"), "{}", e.message);
     }
 }

@@ -788,6 +788,9 @@ fn rpc_url_path_and_query_are_never_printed() {
         "balance", "--chain", "ethereum", "--rpc", &echo.url, "--json",
     ]);
     let msg = r.err("RPC_ERROR");
-    assert!(msg.contains("401"), "{msg}");
+    // Only the status and the origin: none of the body, whatever it quotes.
+    let origin = echo.url.split("/v3").next().unwrap();
+    assert!(msg.ends_with(&format!("HTTP 401 from {origin}")), "{msg}");
+    assert!(!msg.contains("invalid project id"), "{msg}");
     assert!(!leaks(&r), "{}", r.stdout);
 }

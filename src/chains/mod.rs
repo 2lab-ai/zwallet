@@ -9,6 +9,7 @@ pub mod evm;
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
 use alloy::primitives::U256;
+use alloy::transports::http::reqwest::Url;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -236,80 +237,198 @@ impl fmt::Debug for Net {
 }
 
 impl Net {
-    /// Text from or about this endpoint (a transport error, an HTTP error body, a JSON-RPC error
-    /// message) as it may be printed: every URL through [`redact_url`], then every
-    /// [`url_secrets`] fragment of the configured URL replaced with `<redacted>`, because an
-    /// error body can echo the key without the URL around it.
+    /// Text from or about this endpoint (a transport error, a JSON-RPC error message) as it may
+    /// be printed: every URL through [`redact_url`], then every [`url_secrets`] part of the
+    /// configured URL replaced with `<redacted>`, because the endpoint can echo the key without
+    /// the URL around it. A part of 8 or more characters is replaced wherever it occurs; a
+    /// shorter one (a short query value or userinfo part) only as a whole word, so that a value
+    /// like `1` does not shred every number in the text.
     pub fn redact(&self, text: &str) -> String {
         let mut out = redact_urls(text);
         for secret in url_secrets(&self.rpc_url) {
-            out = out.replace(&secret, "<redacted>");
+            out = if secret.chars().count() >= SECRET_MIN_LEN {
+                out.replace(&secret, REDACTED)
+            } else {
+                replace_word(&out, &secret, REDACTED)
+            };
         }
         out
     }
 }
 
-/// Shortest URL component [`url_secrets`] treats as a possible key on its own.
+const REDACTED: &str = "<redacted>";
+
+/// Shortest path segment or fragment [`url_secrets`] treats as a possible key on its own.
 const SECRET_MIN_LEN: usize = 8;
 
-/// The parts of an RPC URL that may carry an API key, longest first: the path (unless empty or
-/// `/`), the query string, the fragment and the userinfo, each whole; and each path segment,
-/// query parameter value and userinfo part of 8 or more characters. Text that is not
-/// `scheme://...` is one secret as a whole (as in [`redact_url`]).
+/// `text` with every occurrence of `needle` that is a whole word (not preceded or followed by a
+/// letter, digit or `_` where `needle` itself begins or ends with one) replaced by `with`.
+fn replace_word(text: &str, needle: &str, with: &str) -> String {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let (Some(first), Some(last)) = (needle.chars().next(), needle.chars().last()) else {
+        return text.to_string();
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut prev: Option<char> = None;
+    while let Some(i) = rest.find(needle) {
+        let before = rest[..i]
+            .chars()
+            .last()
+            .or(if i == 0 { prev } else { None });
+        let after = rest[i + needle.len()..].chars().next();
+        let starts = !word(first) || !before.is_some_and(word);
+        let ends = !word(last) || !after.is_some_and(word);
+        let (take, keep) = if starts && ends {
+            (i + needle.len(), Some(with))
+        } else {
+            (i + first.len_utf8(), None)
+        };
+        match keep {
+            Some(w) => {
+                out.push_str(&rest[..i]);
+                out.push_str(w);
+            }
+            None => out.push_str(&rest[..take]),
+        }
+        prev = rest[..take].chars().last();
+        rest = &rest[take..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `%XX` escapes decoded (and `+` as a space when `plus`), as a server would read them;
+/// invalid escapes and non-UTF-8 results are kept as they are.
+fn percent_decode(s: &str, plus: bool) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    let hex = |c: u8| (c as char).to_digit(16);
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => match (hex(b[i + 1]), hex(b[i + 2])) {
+                (Some(h), Some(l)) => {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                    continue;
+                }
+                _ => out.push(b'%'),
+            },
+            b'+' if plus => out.push(b' '),
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// The parts of an RPC URL that may carry an API key, longest first, each as written in the URL
+/// and percent-decoded (`+` also as a space in the query), parsed the way the HTTP client parses
+/// the URL:
+/// - credential slots, at any length: the userinfo whole and each of its parts, the query string
+///   whole and each parameter value;
+/// - the path whole (unless empty or `/`), and each path segment of 8 or more characters;
+/// - the fragment, at 8 or more characters (it is never sent, so a short one is noise).
+///
+/// Text that does not parse as a URL is one secret as a whole (as in [`redact_url`]).
 pub fn url_secrets(url: &str) -> Vec<String> {
-    let url = url.trim();
-    let Some((_, rest)) = url.split_once("://") else {
-        return if url.is_empty() {
+    let raw = url.trim();
+    let Ok(u) = Url::parse(raw) else {
+        return if raw.is_empty() {
             Vec::new()
         } else {
-            vec![url.to_string()]
+            vec![raw.to_string()]
         };
     };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(end);
-    let userinfo = authority.rsplit_once('@').map_or("", |(u, _)| u);
-    let (tail, fragment) = tail.split_once('#').unwrap_or((tail, ""));
-    let (path, query) = tail.split_once('?').unwrap_or((tail, ""));
-    let path_whole = if path == "/" { "" } else { path };
-    let parts = path
-        .split('/')
-        .chain(
-            query
-                .split('&')
-                .map(|kv| kv.split_once('=').map_or(kv, |(_, v)| v)),
-        )
-        .chain(userinfo.split(':'))
-        .filter(|p| p.chars().count() >= SECRET_MIN_LEN);
-    let mut secrets: Vec<String> = [path_whole, query, fragment, userinfo]
+    let mut any: Vec<String> = Vec::new();
+    let mut long: Vec<String> = Vec::new();
+    let both = |list: &mut Vec<String>, s: &str, plus: bool| {
+        list.push(s.to_string());
+        list.push(percent_decode(s, false));
+        if plus {
+            list.push(percent_decode(s, true));
+        }
+    };
+    let (user, pass) = (u.username(), u.password());
+    if !user.is_empty() || pass.is_some() {
+        both(&mut any, user, false);
+        if let Some(pass) = pass {
+            both(&mut any, pass, false);
+            any.push(format!("{user}:{pass}"));
+        }
+    }
+    if let Some(query) = u.query() {
+        any.push(query.to_string());
+        for pair in query.split('&') {
+            let value = pair.split_once('=').map_or(pair, |(_, v)| v);
+            both(&mut any, value, true);
+        }
+    }
+    if u.path() != "/" {
+        both(&mut any, u.path(), false);
+    }
+    for segment in u.path_segments().into_iter().flatten() {
+        both(&mut long, segment, false);
+    }
+    if let Some(fragment) = u.fragment() {
+        both(&mut long, fragment, false);
+    }
+    long.retain(|s| s.chars().count() >= SECRET_MIN_LEN);
+    let mut secrets: Vec<String> = any
         .into_iter()
+        .chain(long)
         .filter(|s| !s.is_empty())
-        .chain(parts)
-        .map(str::to_string)
         .collect();
     secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     secrets.dedup();
     secrets
 }
 
-/// An RPC URL as it may be printed: scheme and host (with port) only. Providers put API keys in
-/// the path, the query or the userinfo (`https://eth-mainnet.g.alchemy.com/v2/<key>`), so
-/// anything after the host becomes `/<redacted>`. `https://host` and `https://host/` print as
-/// they are. Text that is not `scheme://...` is redacted whole.
+/// `scheme://host[:port]` of an RPC URL as the HTTP client parses it, or `None` if it does not
+/// parse or has no host.
+fn origin(u: &Url) -> Option<String> {
+    let host = u.host_str()?;
+    Some(match u.port() {
+        Some(port) => format!("{}://{host}:{port}", u.scheme()),
+        None => format!("{}://{host}", u.scheme()),
+    })
+}
+
+/// `scheme://host[:port]` of an RPC URL (as the HTTP client parses it), or `<redacted>` if it has
+/// none: what an error about the endpoint itself may name.
+pub fn url_origin(url: &str) -> String {
+    Url::parse(url.trim())
+        .ok()
+        .as_ref()
+        .and_then(origin)
+        .unwrap_or_else(|| REDACTED.to_string())
+}
+
+/// An RPC URL as it may be printed: scheme and host (with port) only, parsed the way the HTTP
+/// client parses it. Providers put API keys in the path, the query or the userinfo
+/// (`https://eth-mainnet.g.alchemy.com/v2/<key>`), so anything after the host becomes
+/// `/<redacted>`. `https://host` and `https://host/` print as they are. Text that is not a URL
+/// with a host is redacted whole.
 pub fn redact_url(url: &str) -> String {
-    let url = url.trim();
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return "<redacted>".to_string();
+    let raw = url.trim();
+    let Ok(u) = Url::parse(raw) else {
+        return REDACTED.to_string();
     };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(end);
-    let (host, userinfo) = match authority.rsplit_once('@') {
-        Some((_, host)) => (host, true),
-        None => (authority, false),
+    let Some(shown) = origin(&u) else {
+        return REDACTED.to_string();
     };
-    if userinfo || !(tail.is_empty() || tail == "/") {
-        format!("{scheme}://{host}/<redacted>")
+    let extra = !u.username().is_empty()
+        || u.password().is_some()
+        || u.query().is_some()
+        || u.fragment().is_some()
+        || u.path() != "/";
+    if extra {
+        format!("{shown}/{REDACTED}")
+    } else if raw.ends_with('/') {
+        format!("{shown}/")
     } else {
-        format!("{scheme}://{host}{tail}")
+        shown
     }
 }
 
@@ -635,6 +754,15 @@ mod tests {
                 "https://host.example:8545/<redacted>",
             ),
             ("not a url KEY", "<redacted>"),
+            // The HTTP client reads a backslash as a path separator.
+            (
+                "https://h.example\\v2\\KEYKEYKEY",
+                "https://h.example/<redacted>",
+            ),
+            (
+                "https://u%40x:KEY@h.example",
+                "https://h.example/<redacted>",
+            ),
         ] {
             assert_eq!(redact_url(url), shown, "{url}");
         }
@@ -665,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn url_secrets_cover_path_query_and_long_parts() {
+    fn url_secrets_cover_credentials_query_values_and_long_path_segments() {
         assert_eq!(
             url_secrets("https://u:PASSWORD1@h.example/v2/KEY12345?apikey=QKEY5678&x=1#frag"),
             vec![
@@ -675,14 +803,59 @@ mod tests {
                 "PASSWORD1",
                 "KEY12345",
                 "QKEY5678",
-                "frag",
+                "1",
+                "u",
             ]
         );
-        // Nothing after the host: nothing to scrub. Short parts only inside the whole path.
+        // Nothing after the host: nothing to scrub. Short path segments only inside the whole
+        // path; short credential slots (userinfo, query values) on their own.
         assert!(url_secrets("https://ethereum-rpc.publicnode.com").is_empty());
         assert!(url_secrets("http://127.0.0.1:8545/").is_empty());
         assert_eq!(url_secrets("https://h.example/v2/short"), vec!["/v2/short"]);
+        assert_eq!(
+            url_secrets("https://h.example/?apikey=abc123"),
+            vec!["apikey=abc123", "abc123"]
+        );
         assert_eq!(url_secrets(" not a url KEY "), vec!["not a url KEY"]);
+        // Percent-encoded slots also count in decoded form ('+' in a query is a space too).
+        let s = url_secrets("https://us%40r:p%3Ass@h.example/v3/abc%2Fdef01?k=a%26b+c");
+        for want in [
+            "us%40r",
+            "us@r",
+            "p%3Ass",
+            "p:ss",
+            "abc%2Fdef01",
+            "abc/def01",
+            "a&b c",
+        ] {
+            assert!(s.iter().any(|x| x == want), "{want} missing from {s:?}");
+        }
+    }
+
+    #[test]
+    fn net_redact_scrubs_decoded_and_short_credentials_only_as_whole_words() {
+        let net = |url: &str| Net {
+            chain: find("ethereum").unwrap(),
+            rpc_url: url.into(),
+        };
+        // A percent-encoded key the endpoint echoes decoded.
+        let n = net("https://h.example/v3/abc%2Bdef0123456");
+        assert_eq!(
+            n.redact("invalid key abc+def0123456 for project"),
+            "invalid key <redacted> for project"
+        );
+        // A short query value echoed bare.
+        let n = net("https://h.example/?apikey=abc123&chain=1");
+        assert_eq!(
+            n.redact("key abc123 is not valid at block 1234 (chain 1)"),
+            "key <redacted> is not valid at block 1234 (chain <redacted>)"
+        );
+        // A userinfo password with a percent escape.
+        let n = net("https://user:p%40ss@h.example");
+        assert_eq!(n.redact("bad password p@ss"), "bad password <redacted>");
+        // A short fragment is never sent, so it scrubs nothing.
+        let n = net("https://h.example/#a");
+        assert_eq!(n.redact("a bad answer"), "a bad answer");
     }
 
     #[test]
