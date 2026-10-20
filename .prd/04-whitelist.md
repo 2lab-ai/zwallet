@@ -24,8 +24,9 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
 - **Contract calls** go only to **contract entries**, and only with a listed selector; never to a
   registry token.
 - **Approvals** are revoke-only.
-- **Fees** stay under a per-chain cap on every signature, a self-transfer included: the list's
-  cap, or the built-in default when there is no usable list.
+- **Fees** stay under a per-chain cap on every signature, a self-transfer included: the verified
+  list's cap, or the built-in default while the wallet has no whitelist yet. A list that cannot
+  be trusted refuses every signature, so it never relaxes a stricter signed cap.
 
 **Not guaranteed:**
 - **Amounts.** There are no amount caps, so an agent can send the whole balance to any listed
@@ -34,6 +35,10 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
   a contract entry delegates that authority.
 - **A total fee budget.** The fee cap bounds each transaction, not a sum: repeated transactions
   can each spend up to the cap.
+- **Signing availability.** The daemon reads the list on at most 4 readers at a time, within 2 s;
+  a slow file or too many requests at once make it "could not be read in time", and that
+  signature is refused (`WHITELIST_INVALID`). An agent can deny signing this way, never widen
+  it.
 - **The L1 data fee** on the OP-stack chains (Base, Optimism) is outside `gasLimit × maxFee`, and
   calldata can be up to about 512 KB.
 - **Joint rollback.** The seal is authenticated (AES-GCM) but not fresh: an older `wallet.json`
@@ -41,9 +46,9 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
   `whitelist.key` together therefore resurrects revoked entries. No same-user storage can stop
   that; a counter outside the home, such as the Secure Enclave, would be needed. The mitigation
   is visibility: `unlock`, `status` and `whitelist list` print the generation and the entries.
-  Rolling back `wallet.json` alone fails closed: an older anchor does not match the current list
-  (`WHITELIST_INVALID`), and a `wallet.json` from before the first `add` seals `{}`, no
-  whitelist, so every value-moving signature is refused.
+  Rolling back `wallet.json` alone fails closed: an older anchor does not match the current list,
+  so every signature is `WHITELIST_INVALID`; a `wallet.json` from before the first `add` seals
+  `{}`, no whitelist, so everything but a self-transfer under the built-in fee cap is refused.
 - **Independence from the password.** The separate key adds no second factor in v0.1: it is
   encrypted under the same password. What it buys is that the daemon never holds policy-signing
   authority, and that the key can later move to the Secure Enclave or to hardware.
@@ -107,7 +112,7 @@ on its chain. Trust in their behavior is trust in the issuer, not something the 
 Only registry tokens can be transferred. There is no user-added token kind in v0.1.
 
 **Daemon enforcement.** At unlock the daemon keeps the anchor from the unsealed policy. No
-anchor, or one that does not parse, does not stop the unlock: the session's list is unusable.
+anchor, or one that does not parse, does not stop the unlock.
 `unlock`, `create --unlock` and `status` show the session's view as `whitelist: {gen, verified:
 true, entries: [nicknames]}`, or `{gen (null without an anchor), verified: false, entries: [],
 reason}`; `status` reads the list again on every call. On every `sign_tx`, after
@@ -115,26 +120,34 @@ reason}`; `status` reads the list again on every call. On every `sign_tx`, after
 1. Load the list: `whitelist.json` through the safe reader, verified against the anchor; if it
    does not verify, `whitelist.next.json` if that verifies at the sealed generation and digest
    (an edit that re-sealed and died before its rename). The read runs outside the session's
-   lock, within a time limit (a stalled read is `WHITELIST_INVALID`), and the session is checked
-   again afterwards: a read that finishes after `lock`, expiry or a re-seal signs nothing.
-2. Without a usable list, everything but a native self-transfer is **`WHITELIST_INVALID`**, in
-   two cases:
-   - the list does not verify or cannot be read: the message gives the reason and points to
-     `zwallet whitelist list --verify`, with **no** add command (the address in the refused
-     transaction is one an agent chose; adding it would hand the agent the list);
-   - there is no anchor yet (a fresh wallet): the message carries the first-add command
-     `zwallet whitelist add <nick> <addr> --chains <chain>`.
+   lock, on at most 4 readers at a time, and must finish within 2 s: a slower read, or no free
+   reader, is "could not be read in time" and the list cannot be trusted. Before signing, the
+   session, its expiry and `wallet.json`'s ciphertext are checked again: a read that finishes
+   after `lock`, expiry or a re-seal signs nothing.
+2. The list's state decides what can be signed at all:
+   - **verified** (`Usable`): steps 3 and 4;
+   - **no whitelist yet** (`NoList`: wallet.json seals no anchor): only a native self-transfer,
+     under the built-in default fee cap for the chain (`registry::DEFAULT_FEE_CAPS_WEI`; a chain
+     without one is refused with the `fee-cap` command). Anything else is
+     **`WHITELIST_INVALID`**, and its message and `command` carry the edit that would allow it,
+     which creates the list: `zwallet whitelist add <nick> <addr> --chains <chain>`;
+   - **cannot be trusted** (`Unusable`: it does not verify, cannot be read or not in time, or
+     the sealed anchor is malformed): **every** signature, a native self-transfer included, is
+     **`WHITELIST_INVALID`**. The message gives the reason and points to `zwallet whitelist list
+     --verify`, with **no** `command` (an edit suggested from the refused transaction would name
+     an address an agent chose, and rebuild the list around it). A broken list never relaxes a
+     stricter signed fee cap.
 3. Check the fee, on every signature: `gasLimit × (maxFeePerGas | gasPrice)`, in U256, against
-   the list's `maxFeeWei[chain]`, or, without a usable list (a native self-transfer is all that
-   gets here then), against the built-in default cap for the chain. Above the cap, or no
-   readable cap, is **`FEE_CAP_EXCEEDED`** naming `zwallet whitelist fee-cap <chain> <this
-   transaction's fee in whole units>`, with `feeWei` (and `capWei` when there is a cap). Fee caps
-   are never skipped, so a self-transfer cannot burn the balance in fees.
+   the verified list's `maxFeeWei[chain]` (or, with no whitelist yet, the built-in default).
+   Above the cap, or no readable cap, is **`FEE_CAP_EXCEEDED`** naming `zwallet whitelist
+   fee-cap <chain> <this transaction's fee in whole units>`, with `feeWei` (and `capWei` when
+   there is a cap). Fee caps are never skipped, so a self-transfer cannot burn the balance in
+   fees.
 4. Decide by the decoded action:
 
 | Decoded action | Allowed only if |
 |---|---|
-| `native-transfer` | `to` is the signing key's own address (any value, any list state, under the fee cap), **or** an address entry valid on this chain |
+| `native-transfer` | `to` is the signing key's own address (any value, under the fee cap; with a verified list or no whitelist yet), **or** an address entry valid on this chain |
 | `transfer-call` | the token is a registry token on this chain, value is 0, `to` is an address entry valid on this chain (the key's own address included), and `to` is not a registry token on any chain |
 | `approve-call` | the token is a registry token on this chain, value is 0, and **amount == 0** (revoke). The spender doesn't matter |
 | `transfer-from-call` | never |
@@ -150,8 +163,11 @@ is not a registry token; any other call on a registry token; a token transfer to
 contract; an address listed as the other kind. It is left out too when an entry exists but does
 not cover the chain or the selector: the message names the entry and what it is missing, since
 `whitelist add` refuses a listed nickname or address and the fix is a remove and an add, two
-password-backed edits. `sign-message` is **`WHITELIST_DENIED`** naming `zwallet whitelist
-allow-message-signing on` unless the verified list allows it. `Response.details` is an optional
+password-backed edits. `sign-message` is refused unless the verified list allows it:
+**`WHITELIST_DENIED`** with `command: zwallet whitelist allow-message-signing on` while the
+verified list has it off; **`WHITELIST_INVALID`** with that command while there is no whitelist;
+**`WHITELIST_INVALID`** pointing to `list --verify`, with no command, while the list cannot be
+trusted. `Response.details` is an optional
 field of the daemon protocol, with no `PROTOCOL_VERSION` bump (the daemon and the CLI are always
 the same binary).
 
@@ -214,13 +230,18 @@ if the new session could not start).
 - `transfer --to` and `invoke --to` also accept `@nickname`, resolved through `whitelist.json`
   as it is on disk (unverified; it only saves typing, the daemon decides). An unknown nickname
   is `VALIDATION_ERROR` naming `zwallet whitelist list`. The output adds `toNickname`.
-- A dry-run (`transfer` or `invoke --dry-run`) first runs the daemon's own `check_tx` on the
-  unsigned transaction against `whitelist.json` as it is on disk (unusable when it is missing or
-  unreadable). If that refuses, the dry-run reports `whitelist: {allowed: false, reason, code,
-  command?, counterparty, chain, …}` and **does not ask the daemon to sign**, so there is no
-  `txHash` and no `recoveredFrom`. Otherwise the daemon checks against the list the seal names
-  and signs, and the output adds `whitelist: {allowed: true}`. The daemon check stays
-  unconditional for live sends.
+- A dry-run (`transfer` or `invoke --dry-run`) checks the unverified list when there is one: it
+  runs the daemon's own `check_tx` on the unsigned transaction against `whitelist.json` as it is
+  on disk (`Usable` if it parses, `Unusable` with the reason if it cannot be read). If that
+  refuses, the dry-run reports `whitelist: {allowed: false, reason, code, command?, counterparty,
+  chain, …}` and **does not ask the daemon to sign**, so there is no `txHash` and no
+  `recoveredFrom`. If it allows, the daemon checks against the list the seal names and signs, and
+  the output adds `whitelist: {allowed: true}`. Without a `whitelist.json` the CLI checks nothing
+  and the daemon decides, as for a live send: the CLI cannot tell a wallet with no whitelist yet
+  from one whose list was deleted (the anchor is sealed), and a `NoList` refusal would suggest
+  adding an address the caller chose. Its refusal is the usual error, and there is no
+  `whitelist` field. The CLI never builds `NoList`. The daemon check stays unconditional for
+  live sends.
 
 **Invariants, pinned by tests.** zwallet never signs a raw hash, EIP-712 typed data, or an EIP-7702
 authorization (type 4). Any of these would bypass the whitelist entirely. `decode_unsigned` accepts
@@ -251,14 +272,18 @@ From part B (daemon), dispatcher decisions, with review round 1:
    outside the registry is denied; a token transfer to the key's own address needs a payee entry
    (only a native transfer to itself is exempt).
 3. A missing or unreadable fee cap is `FEE_CAP_EXCEEDED`. Fee caps are never skipped: a native
-   self-transfer is checked against the list's cap, or the built-in default when there is no
-   usable list (the plan's "no list, no cap check" was a fund-loss path through fees).
-4. `WHITELIST_INVALID` names no add command when the list does not verify; only a wallet with no
-   whitelist yet gets the first-add command.
+   self-transfer is checked against the verified list's cap, or, while the wallet has no
+   whitelist yet, the built-in default (the plan's "no list, no cap check" was a fund-loss path
+   through fees). A list that cannot be trusted refuses every signature, self-transfers included
+   (review round 2: a broken list must not relax a stricter signed cap).
+4. `ListView` has three states: `Usable`, `NoList` (no anchor sealed) and `Unusable(reason)`.
+   `WHITELIST_INVALID` names no edit and points to `zwallet whitelist list --verify` when the
+   list cannot be trusted; only a wallet with no whitelist yet gets the first-add command.
 5. An entry that does not cover the chain or the selector gets no `command` (the plan's
    `remove && add` was two edits, and a failed add would leave the entry gone).
-6. The list is read outside the session's lock with a time limit, and the session is checked
-   again before signing.
+6. The list is read outside the session's lock, on at most 4 readers at a time, within 2 s
+   (slower, or no free reader, is "could not be read in time"), and the session, its expiry and
+   the ciphertext are checked again before signing.
 7. `Response.details` carries the refusal details; no protocol version bump.
 
 From part C (CLI), with review round 1:
@@ -275,6 +300,8 @@ From part C (CLI), with review round 1:
 6. Human output escapes values read from `whitelist.json` (a hand-edited file could otherwise
    put terminal control sequences on the screen).
 7. `create --unlock` shows the `whitelist` field as `unlock` does.
+8. The dry-run checks the unverified list only when there is a `whitelist.json`; without one the
+   daemon decides (the CLI cannot tell "no whitelist yet" from "deleted").
 
 ## Acceptance
 
@@ -291,9 +318,9 @@ From part C (CLI), with review round 1:
 | W8 | edit while unlocked (tested). A signature racing the edit is not run as a test: it relies on step 1 returning only once no daemon is left | a wrong password or a refused change stops nothing; otherwise every daemon is stopped first (other homes' too) and the wallet stays locked; with `--unlock 10m` a new session runs until now + 10 min and reports the new generation |
 | W9 | fees above `maxFeeWei` (hostile RPC fixture, or a large `--max-fee-gwei`) | `FEE_CAP_EXCEEDED` from the daemon |
 | W10 | `sign-message` with `allowMessageSigning` off, then on | refused, then signed |
-| W11 | 0-value self-transfer dry-run and live (A7), no list | allowed (under the built-in default fee cap) |
+| W11 | 0-value self-transfer dry-run and live (A7), no list | allowed (under the built-in default fee cap); with a list that cannot be trusted, refused (`WHITELIST_INVALID`) |
 | W12 | invariant tests | type-4, typed-data and raw-hash requests have no protocol path and are refused |
-| W13 | `transfer --dry-run` to an address the list refuses | `whitelist: {allowed: false, …}` with the add command, and no signature request reaches the daemon; an allowed dry-run is signed and shows `allowed: true` |
+| W13 | `transfer --dry-run` to an address the list refuses | `whitelist: {allowed: false, …}` with the add command, and no signature request reaches the daemon; an allowed dry-run is signed and shows `allowed: true`; without a `whitelist.json` the daemon is asked and the output has no `whitelist` field |
 
 ## Not in v0.1 (stays planned)
 

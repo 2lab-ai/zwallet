@@ -172,8 +172,8 @@ for, and an EOA cannot sweep ERC-20 and ETH atomically.
 built 2026-10-20):
 - the daemon checks every value-moving signature against a list signed with a separate ed25519
   key, and holds only the sealed anchor (public key, generation, digest of the signed list);
-  anything that does not verify refuses every value-moving signature (`WHITELIST_INVALID`) but a
-  native self-transfer under the built-in fee cap;
+  a list that cannot be trusted refuses every signature (`WHITELIST_INVALID`), and a wallet
+  with no whitelist yet signs only a native self-transfer under the built-in fee cap;
 - native coin and the built-in registry tokens go only to listed payees on the listed chains
   (`WHITELIST_DENIED` otherwise, naming the `zwallet whitelist add` command that would allow it);
 - approvals are revoke-only;
@@ -185,7 +185,7 @@ The list and its key are edited only by the one-shot CLI with the typed password
 whitelist …`, never the daemon). An edit shows the change before the password is read, stops
 every daemon, signs the next generation, re-seals the anchor into wallet.json, and leaves the
 wallet locked unless `--unlock <duration>` starts a new session. A dry-run runs the daemon's
-check on the list on disk first and asks for no signature when it refuses. Amount caps stay
+check on the list on disk first, when there is one, and asks for no signature when it refuses. Amount caps stay
 planned; README §Known limits lists what the whitelist does not stop.
 
 The original WU1b plan below is superseded except for the amount caps, which stay planned. It is
