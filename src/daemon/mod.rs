@@ -79,10 +79,11 @@ struct Session {
 #[derive(Debug, Clone)]
 enum Anchor {
     Sealed(WhitelistAnchor),
-    /// wallet.json seals no whitelist yet: the session signs only self-transfers.
+    /// wallet.json seals no whitelist yet (`ListView::NoList`): the session signs only native
+    /// transfers to the key's own address, under the built-in fee cap.
     None,
-    /// The sealed anchor is malformed (the reason): the session still serves, and signs only
-    /// self-transfers.
+    /// The sealed anchor is malformed (the reason): the session still serves (status, address,
+    /// lock) but the list is untrusted (`ListView::Unusable`), so it signs nothing at all.
     Malformed(String),
 }
 
@@ -100,8 +101,10 @@ impl Anchor {
 enum Loaded {
     /// `whitelist.json` (or a staged `whitelist.next.json`) verified against the sealed anchor.
     Verified(Whitelist),
+    /// No anchor is sealed yet.
     NoList,
-    /// There is a list, or an anchor, but nothing that can be trusted: the reason.
+    /// There is a list, or an anchor, but nothing that can be trusted (the reason): nothing is
+    /// signed.
     Untrusted(String),
 }
 

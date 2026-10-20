@@ -176,7 +176,7 @@ fn invoke_from_an_empty_wallet_is_insufficient_funds_before_signing() {
 #[ignore = "live: public RPC"]
 fn token_transfer_dry_run_from_empty_wallet() {
     // A token transfer to the key's own address needs it listed as a payee (only a native
-    // self-transfer is allowed without one).
+    // self-transfer is allowed without one, and only while there is no whitelist yet).
     let (home, me) =
         unlocked_wallet_with(|me, l| l.add(Entry::new_address("me", me, &["ethereum"])).unwrap());
     let v = home

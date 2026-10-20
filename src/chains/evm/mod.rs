@@ -513,7 +513,7 @@ mod tests {
             .sign_tx(&seed(), 1, chain, &other, &allowed)
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::WhitelistDenied, "{}", err.message);
-        // No usable list: only the key's own address may be paid.
+        // No list yet: only the key's own address may be paid (an untrusted list pays nobody).
         let none = ListView::NoList;
         let call = tx(ROUTER, "0xd0e30db0");
         let err = Evm.sign_tx(&seed(), 1, chain, &call, &none).unwrap_err();
