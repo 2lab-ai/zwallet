@@ -568,10 +568,10 @@ fn reset_lines(
             .to_string()
     });
     // A rolled-back wallet.json accepts the copy its seal names, so the copy is only for a
-    // generation the human knows is the latest.
+    // generation the human knows is the highest.
     lines.push(
         "  if whitelist.json was only damaged or replaced, put back a genuine copy of it at the \
-         sealed generation instead, but only if that is the latest generation you remember \
+         sealed generation instead, but only if that is the highest generation you remember \
          seeing (unlock, status and `zwallet whitelist list` print it): it verifies again \
          without a reset, because the seal pins its digest; if you remember a higher one, \
          wallet.json was rolled back: restore the current wallet.json instead"
@@ -1654,7 +1654,7 @@ mod tests {
             "the reset allows nothing else (no payee, no contract); set `zwallet whitelist \
              fee-cap` again before `--unlock`",
             "if whitelist.json was only damaged or replaced, put back a genuine copy of it at the \
-             sealed generation instead, but only if that is the latest generation you remember \
+             sealed generation instead, but only if that is the highest generation you remember \
              seeing (unlock, status and `zwallet whitelist list` print it): it verifies again \
              without a reset, because the seal pins its digest; if you remember a higher one, \
              wallet.json was rolled back: restore the current wallet.json instead",

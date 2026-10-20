@@ -2953,22 +2953,24 @@ fn r4_2_a_wallet_json_rolled_back_under_a_newer_list_is_named() {
     assert!(msg.contains(rolled), "{msg}");
     home.run(&["lock", "--json"]).ok();
     // Put back one edit: that, or an edit to gen 3 that never finished sealing; the human tells
-    // them apart by the last generation an edit reported.
+    // them apart by the highest generation they remember (gen 3 here: the rollback).
     fs::write(home.wallet_json(), &gen2).unwrap();
     let v = verify_list(&home);
     let reason = v["reason"].as_str().unwrap_or("");
     for want in [
         "whitelist.json (gen 3) is one edit newer than the seal (gen 2)",
-        "an edit to gen 3 that never finished sealing, or wallet.json rolled back by one edit",
-        "Did the last edit you ran report gen 3?",
+        "an edit to gen 3 that never finished sealing, or a rolled-back wallet.json",
+        "If gen 2 is the highest generation you remember seeing (the edit to gen 3 never \
+         reported), put back whitelist.json at gen 2; if you remember gen 3 or higher, \
+         wallet.json was rolled back: restore the current wallet.json",
     ] {
         assert!(reason.contains(want), "{want:?} not in {v}");
     }
-    assert!(!reason.contains("wallet.json was rolled back"), "{v}");
+    assert!(!reason.contains("Did the last edit"), "{v}");
 }
 
 #[test]
-fn r5_1_a_rollback_across_a_reset_is_named_and_no_copy_is_offered() {
+fn r5_1_a_rollback_across_a_reset_is_named_and_the_copy_is_only_behind_the_gate() {
     let _alone = common::exclusive();
     let home = Home::new();
     home.create("main", &[]);
@@ -2978,17 +2980,21 @@ fn r5_1_a_rollback_across_a_reset_is_named_and_no_copy_is_offered() {
     // wallet.json put back to before the reset: the list is the new key's, at gen 2.
     fs::write(home.wallet_json(), &gen1).unwrap();
     let why = "whitelist.json (gen 2) is newer than the seal (gen 1) but not signed by this \
-               wallet's whitelist key: wallet.json may have been rolled back across a reset, or \
-               this file is foreign";
+               wallet's whitelist key: a wallet.json rolled back across a reset, or a foreign file";
+    // The copy only behind the gate: the reset reported gen 2, so the human is sent to the
+    // current wallet.json.
+    let gate = "If gen 1 is the highest generation you remember seeing, the file is foreign: put \
+                back a genuine copy of whitelist.json at gen 1; if you remember a higher one, \
+                wallet.json was rolled back across a reset: restore the current wallet.json";
     let v = verify_list(&home);
     let reason = v["reason"].as_str().unwrap_or("");
-    assert!(reason.contains(why), "{v}");
-    assert!(!reason.contains("genuine copy"), "{v}");
+    assert!(reason.contains(why) && reason.contains(gate), "{v}");
+    assert_eq!(reason.matches("put back").count(), 1, "{v}");
     let before = files_of(&home);
     let msg =
         whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).err("VALIDATION_ERROR");
-    assert!(msg.contains(why), "{msg}");
-    assert!(!msg.contains("genuine copy"), "{msg}");
+    assert!(msg.contains(why) && msg.contains(gate), "{msg}");
+    assert_eq!(msg.matches("put back").count(), 1, "{msg}");
     assert_eq!(files_of(&home), before);
     // A list at the sealed generation that does not verify: the copy is offered, conditionally.
     fs::write(home.wallet_json(), &gen1).unwrap();
@@ -2997,7 +3003,7 @@ fn r5_1_a_rollback_across_a_reset_is_named_and_no_copy_is_offered() {
     let reason = v["reason"].as_str().unwrap_or("");
     assert!(
         reason.contains(
-            "put back a genuine copy of whitelist.json at gen 1 only if gen 1 is the latest \
+            "put back a genuine copy of whitelist.json at gen 1 only if gen 1 is the highest \
              generation you remember seeing"
         ),
         "{v}"
