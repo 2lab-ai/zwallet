@@ -150,28 +150,36 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - **Fees.** Each signature, a native self-transfer included, must pass the execution-fee cap
     for its chain: its fee limit (`gasLimit × maxFeePerGas`, or `× gasPrice`) against the
     verified list's cap, or the built-in default before any whitelist exists (no anchor
-    sealed); otherwise `FEE_CAP_EXCEEDED`. A list with no readable cap for the chain, or a chain
-    with no default, is refused with the `whitelist fee-cap` command. The cap bounds each
-    transaction, not a total: repeated transactions can each spend up to it. On the OP-stack
-    chains (Base, Optimism) the L1 data fee is charged on top of it. The defaults are ethereum
-    0.003 ETH; base, arbitrum and optimism 0.0005 ETH; polygon 2 POL; bsc 0.003 BNB; avalanche
-    0.05 AVAX; sepolia 0.01 ETH, changed with `whitelist fee-cap <chain> <amount>`.
+    sealed); otherwise `FEE_CAP_EXCEEDED`. With a verified list the action is decided first, so
+    an action the list refuses is `WHITELIST_DENIED` whatever its fee, and a fee refusal only
+    ever concerns a transaction the list would otherwise sign. A list with no readable cap for
+    the chain, or a chain with no default, is refused with the `whitelist fee-cap` command. The
+    cap bounds each transaction, not a total: repeated transactions can each spend up to it. On
+    the OP-stack chains (Base, Optimism) the L1 data fee is charged on top of it. The defaults
+    are ethereum 0.003 ETH; base, arbitrum and optimism 0.0005 ETH; polygon 2 POL; bsc 0.003
+    BNB; avalanche 0.05 AVAX; sepolia 0.01 ETH, changed with `whitelist fee-cap <chain>
+    <amount>`.
   - **A list that cannot be trusted** (it does not verify: edited by hand, an older copy; it
     cannot be read, or not within the 2 s deadline; or the sealed anchor is malformed) refuses
     **every** transaction with `WHITELIST_INVALID`, a native self-transfer included: a broken
     list never relaxes a stricter signed fee cap. The message gives the reason and points to
     `zwallet whitelist list --verify`, with no `command`: an edit suggested from the refused
-    transaction would name an address an agent chose. A wallet with **no whitelist yet** signs
+    transaction would name an address an agent chose. A `whitelist.json` newer than the seal
+    says so: "wallet.json was rolled back; restore the current wallet.json, never an older
+    whitelist.json" (see **Joint rollback** below). A wallet with **no whitelist yet** signs
     only a native self-transfer under the built-in cap; a self-transfer above it, or on a chain
     with no built-in cap, is `FEE_CAP_EXCEEDED` with the `whitelist fee-cap` command, and
     anything else is `WHITELIST_INVALID`.
   - **What a refusal says.**
     - A transaction refusal (`WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED`)
       carries `counterparty` and `chain`, and `command` with the exact command when one edit of
-      the list would allow it: `zwallet whitelist add <nick> <addr> --chains <chain>` for an
-      address not in the list (for a contract, with `--contract --selectors <selector>`), or
-      `zwallet whitelist fee-cap <chain> <this transaction's fee>`. A fee refusal also carries
-      `feeWei`, and `capWei` when there is a cap.
+      the list would allow what was refused: `zwallet whitelist add <nick> <addr> --chains
+      <chain>` for an address not in the list (for a contract, with `--contract --selectors
+      <selector>`), or `zwallet whitelist fee-cap <chain> <this transaction's fee>`. A fee
+      refusal also carries `feeWei`, and `capWei` when there is a cap. A `fee-cap` command
+      comes only with an action the list allows, so it is the one edit that lets the request
+      through; after an add, a request over the cap too is refused next with its own `fee-cap`
+      command.
     - `command` is left out when no edit can allow it (`transferFrom`, an approve of more than 0
       or on a token outside the registry, another call on a registry token, a token transfer to
       a token contract, an address listed as the other kind); when an entry exists but does not
@@ -186,8 +194,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false` (human
     output shows a value from the file as is only when it is short printable ASCII, else quoted
     with escapes). `--verify` (password) checks it against the seal: `verified: true` with
-    `source` and `sealedGen`, or `verified: false` with the `reason`. `unlock`, `create --unlock`
-    and `status` show what the daemon trusts, read again on every `status`:
+    `source` and `sealedGen`, or `verified: false` with the `reason` (with no whitelist sealed
+    but a list file there, why every edit refuses and what to do, not the first `add`).
+    `unlock`, `create --unlock` and `status` show what the daemon trusts, read again on every
+    `status`:
     `whitelist: { gen, verified: true, entries: [nicknames] }`, or `{ gen (null without a
     whitelist), verified: false, entries: [], reason }`.
   - **Changes** (`add`, `remove`, `fee-cap`, `allow-message-signing on|off`, `reset`) ask for the
@@ -197,10 +207,14 @@ Commands that act on a key take `--key <name>` (default: the active key).
     full address, payee or contract, the chains (`*` as "every chain"), the selectors, a policy
     change's old and new value (from both files when an unfinished edit is in
     `whitelist.next.json`), what a `reset` drops and every fee cap it sets back, both files as
-    they are (name lists cut at 20), every outcome that can still happen (the change lands on
-    `whitelist.json` if it is the sealed list, on the unfinished edit if that is, on a first list
-    from the defaults if there is no list file and no whitelist yet; otherwise nothing changes),
-    that every zwallet daemon of this user is stopped, and what happens to signing: "after the
+    they are (name lists cut at 20; a file that exists but cannot be read is "there but cannot
+    be read: its entries are unknown, and a reset drops them", never "none"), every outcome
+    that can still happen (for an edit: the change lands on `whitelist.json` if it is the sealed
+    list, on the unfinished edit if that is, on a first list from the defaults if there is no
+    list file and no whitelist yet, otherwise nothing changes; for a `reset`: the generation it
+    makes in each of those cases, the sealed generation + 1 when neither file is the sealed
+    list, and gen 1 with no whitelist sealed), that every zwallet daemon of this user is
+    stopped, and what happens to signing: "after the
     change: the wallet stays locked", or with `--unlock <duration>` "after the change: a new
     signing session for <duration> (until about <local time>, <UTC>)". The last line, right above
     the prompt, repeats the change and what happens to signing. **The change is applied to
@@ -208,14 +222,20 @@ Commands that act on a key take `--key <name>` (default: the active key).
     anything is stopped, and read again once under `w.lock`; if they are not those bytes, the
     change is refused ("<file> changed after it was shown; nothing in the whitelist changed").
     An edit builds only on the list `wallet.json` seals: if the list shown does not verify
-    (edited by hand, an older copy, deleted), or `wallet.json` seals no whitelist but a list file
-    exists (a `wallet.json` put back from before the first edit, or a planted file), nothing
-    changes, and the message points to `zwallet whitelist list --verify`. Put the genuine file
-    back first: a genuine copy of `whitelist.json` verifies again without a reset, because the
-    seal pins its digest. `zwallet whitelist reset` starts over, at a cost the summary and the
-    message spell out: every fee cap goes back to the built-in default and nothing else is
-    allowed, so set `whitelist fee-cap` again before `--unlock`. A wrong password, a list an edit
-    cannot build on, or a change the list refuses stops nothing (an edit; a `reset` goes ahead).
+    (edited by hand, an older copy, deleted, or newer than a rolled-back `wallet.json`), or
+    `wallet.json` seals no whitelist but a list file exists (a `wallet.json` put back from
+    before the first edit, a planted file, or a first edit interrupted before its re-seal, which
+    leaves only `whitelist.next.json` at gen 1), nothing in the whitelist changes, and the
+    message points to `zwallet whitelist list --verify`. Put the genuine file back first: a
+    genuine copy of `whitelist.json` **at the sealed generation** verifies again without a
+    reset, because the seal pins its digest. If `whitelist.json` is newer than the seal,
+    `wallet.json` was rolled back: restore the current `wallet.json`, never an older
+    `whitelist.json` (that would complete a joint rollback). `zwallet whitelist reset` starts
+    over, at a cost the summary and the message spell out: every fee cap goes back to the
+    built-in default, and no payee and no contract is listed (native self-transfers under the
+    default caps and approve-0 revokes still sign), so set `whitelist fee-cap` again before
+    `--unlock`. A wrong password stops nothing; neither does a list an edit cannot build on (an
+    edit; a `reset` goes ahead), or a change the list refuses.
     Otherwise the change stops every zwallet daemon of this user (as `lock` does), signs the next
     generation and re-seals it into `wallet.json`, and the wallet stays locked unless `--unlock
     <duration>` starts a new session for that duration with the password just typed (with
@@ -226,7 +246,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
     `whitelist.key` (`keyCreated: true`). `reset` makes a new key and an empty list with the
     default caps, for a lost or damaged `whitelist.key` or a list that cannot be recovered; when
     the list it replaces did not verify (or `wallet.json` sealed none), `discarded` shows it (the
-    reason and its unverified entries, as JSON). An edit never has `discarded`: it refuses
+    reason and its unverified entries, as JSON, `null` when the file is missing or cannot be
+    read). An edit never has `discarded`: it refuses
     instead.
   - **`--dry-run`**, when there is a `whitelist.json`, first runs the daemon's own check on it as
     it is on disk (unverified; one that cannot be read counts as untrusted). If that refuses, the
@@ -636,23 +657,30 @@ signs for such an agent. What it does not do:
   arguments and native value, and the contract may forward value or act on those arguments. List
   only contracts and selectors whose effects you accept from any caller.
 - **Joint rollback.** The seal is authenticated but not fresh: an older `wallet.json` still opens
-  with the password. Restoring an older `wallet.json`, `whitelist.json` and `whitelist.key`
-  together brings back the older list, revoked entries included; nothing stored in the home can
-  tell. `unlock`, `status` and `whitelist list` show the generation and the entries: check them.
-  Restoring `wallet.json` alone to an older edit fails closed: its anchor does not match the
-  list, and every signature is refused.
+  with the password. Restoring an older `wallet.json` and `whitelist.json` together brings back
+  the older list, revoked entries included; nothing stored in the home can tell. (The daemon
+  never reads `whitelist.key`; an older key matters only to later edits.) `unlock`, `status` and
+  `whitelist list` show the generation and the entries: check them. Restoring `wallet.json`
+  alone to an older edit fails closed: its anchor does not match the list, every signature is
+  refused, and the reason says "whitelist.json (gen N) is newer than the seal (gen M):
+  wallet.json was rolled back". Restore the current `wallet.json` then, never an older
+  `whitelist.json`. zwallet keeps no copy of `wallet.json` (`zwallet backup` prints only the
+  recovery phrase): keep your own copy after each whitelist change, or `whitelist reset` and
+  set the list up again.
 - **Rollback to before the first edit.** A `wallet.json` from before the first `whitelist add`
   seals no whitelist, so the daemon sees "no whitelist yet": it signs no payee send and no
   contract call, but it does sign native self-transfers under the **built-in default caps**,
   which may be looser than the caps you signed. `unlock` and `status` show it (`whitelist:
   { gen: null, verified: false }`), and every whitelist edit refuses while a list file exists;
-  put the current `wallet.json` back.
+  put the current `wallet.json` back (your own copy from after the last change), or `whitelist
+  reset`.
 - **Same password.** `whitelist.key` is encrypted under the wallet password, so the whitelist
   adds no second factor: whoever has the password can change the list. What it buys is that the
   daemon never holds the key that signs the list.
-- **The staged list.** A change cut off between its re-seal and its rename leaves the new list in
-  `whitelist.next.json`. The daemon and `whitelist list --verify` use it, since it is exactly the
-  list the seal names (generation and digest), and the next change moves it into place.
+- **The staged list.** A change cut off between its re-seal and writing `whitelist.json` leaves
+  the new list in `whitelist.next.json`. The daemon and `whitelist list --verify` use it, since
+  it is exactly the list the seal names (generation and digest), and the next change moves it
+  into place.
 - **A change ends every session.** Like `lock`, a whitelist change stops every zwallet daemon of
   this user, for every home, and leaves them locked; `--unlock <duration>` starts a new session
   for this home only.

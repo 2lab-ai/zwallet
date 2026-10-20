@@ -175,18 +175,21 @@ built 2026-10-20):
   a list that cannot be trusted refuses every signature (`WHITELIST_INVALID`), and a wallet
   with no whitelist yet signs only a native self-transfer under the built-in fee cap;
 - native coin and the built-in registry tokens go only to listed payees on the listed chains
-  (`WHITELIST_DENIED` otherwise, naming the `zwallet whitelist add` command that would allow it);
+  (`WHITELIST_DENIED` otherwise, naming the `zwallet whitelist add` command only when one add
+  would allow the action);
 - approvals are revoke-only;
 - contract entries need explicit selectors, and a registry token is never one;
-- there is a per-chain fee cap on every signature, self-transfers included (`FEE_CAP_EXCEEDED`);
+- there is a per-chain fee cap on every signature, self-transfers included (`FEE_CAP_EXCEEDED`,
+  checked after the action, so its `fee-cap` command never comes with an action the list
+  refuses);
 - `sign-message` is gated (off by default).
 
 The list and its key are edited only by the one-shot CLI with the typed password (`zwallet
 whitelist …`, never the daemon). An edit shows the change and what happens to signing before
 the password is read, applies it to exactly the list shown or changes nothing, and builds only
 on the list the seal names (an unverifiable list, or a list file without a sealed whitelist, is
-refused; only `reset` starts over, with every fee cap back to the default). It
-stops every daemon, signs the next generation, re-seals the anchor into wallet.json, and leaves
+refused; only `reset` starts over, with every fee cap back to the default and no payee and no
+contract). It stops every daemon, signs the next generation, re-seals the anchor into wallet.json, and leaves
 the wallet locked unless `--unlock <duration>` starts a new session. A dry-run runs the
 daemon's check on the list on disk first, when there is one, and asks for no signature when it
 refuses. Amount caps stay planned; README §Known limits lists what the whitelist does not stop.
