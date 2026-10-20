@@ -1,11 +1,12 @@
 # zwallet — Signed whitelist (spend policy)
 
-Status: **in-progress** (WU1b, built 2026-10-20 in three parts: A core, B daemon enforcement, C
-CLI and docs; this page is the as-built contract of all three). Planned after two spec reviews
-(gpt6 and zhuge, both "change before implementing"). It **ships in v0.1, before the v0.1.0 tag
-and before the wallet is funded.** The v0.1 SSOT already fixed a daemon-enforced signing policy
-as v0.1 scope (v0-1/ssot.md §Fixed scope), and this is that policy, shaped by the user's
-whitelist request (v0-2-tui/ssot.md). The TUI's whitelist screen is v0.2 ([`03-tui.md`](03-tui.md)).
+Status: **shipped** (WU1b, 2026-10-21, PR #4; built 2026-10-20 in three parts: A core, B daemon
+enforcement, C CLI and docs). This page is the as-built contract of all three, not a future
+target. Planned after two spec reviews (gpt6 and zhuge, both "change before implementing"); it
+ships in v0.1, before the v0.1.0 tag and before the wallet is funded. The v0.1 SSOT fixed a
+daemon-enforced signing policy as v0.1 scope (v0-1/ssot.md §Fixed scope), and this is that
+policy, shaped by the user's whitelist request (v0-2-tui/ssot.md). The TUI's whitelist screen is
+v0.2 ([`03-tui.md`](03-tui.md)). Receipt: [`v0-1/loop.done.md`](v0-1/loop.done.md) R4.
 
 ## Problem
 
