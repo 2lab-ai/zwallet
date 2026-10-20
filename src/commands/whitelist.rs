@@ -315,8 +315,9 @@ async fn edit(home: &Path, change: Change, opts: &WhitelistEditArgs) -> Result<O
 
 /// Steps 2 to 5 once the daemons are stopped: the change (`land`, the core edit under `w.lock`),
 /// then the session `--unlock` asked for (`start`, given what `unlock` carries). A change that
-/// landed is final, a `warning` included, so the session starts all the same; a change that
-/// failed starts none.
+/// returns, a `warning` included, starts the session all the same. A change that returns an error
+/// starts none, including one that fails after the re-seal (publishing or reading back): the
+/// wallet then stays locked, which fails closed.
 async fn land_then_unlock<E, F>(
     land: impl FnOnce() -> Result<Edited>,
     unlock: Option<(String, Duration, E)>,
@@ -470,7 +471,7 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
             gen_entries(l)
         )),
         FileView::Absent if leftover => lines.push(
-            "  whitelist.next.json: the same list as whitelist.json (left after a change)"
+            "  whitelist.next.json: a copy of whitelist.json (e.g. left after a change)"
                 .to_string(),
         ),
         FileView::Absent => {}
@@ -603,14 +604,14 @@ fn reset_lines(
     });
     // A rolled-back wallet.json accepts the copy its seal names, so the copy is only for a
     // generation the human knows is the highest.
-    lines.push(
+    lines.push(format!(
         "  if whitelist.json was only damaged or replaced, put back a genuine copy of it at the \
          sealed generation instead, but only if that is the highest generation you remember \
-         seeing (unlock, status and `zwallet whitelist list` print it): it verifies again \
-         without a reset, because the seal pins its digest; if you remember a higher one, \
-         wallet.json was rolled back: restore the current wallet.json instead"
-            .to_string(),
-    );
+         seeing {}: it verifies again without a reset, because the seal pins its digest; if you \
+         remember a higher one, wallet.json was rolled back: restore the current wallet.json \
+         instead",
+        whitelist::SEEN_SINCE
+    ));
 }
 
 /// Every outcome that can still happen, decided once the password opens wallet.json.
@@ -1038,10 +1039,15 @@ fn edit_text(out: &Value) -> String {
             }
         ));
     }
-    if !out["discardedNext"]["entries"].is_null() {
+    if out["discardedNext"].is_object() {
+        let entries = &out["discardedNext"]["entries"];
         lines.push(format!(
-            "discarded whitelist.next.json (not the sealed list); its unverified entries: {}",
-            ascii_json(&out["discardedNext"]["entries"])
+            "discarded whitelist.next.json (not the sealed list); {}",
+            if entries.is_null() {
+                "its entries unknown (it cannot be read or has no entries)".to_string()
+            } else {
+                format!("its unverified entries: {}", ascii_json(entries))
+            }
         ));
     }
     if out["keyCreated"] == json!(true) {
@@ -1560,7 +1566,7 @@ mod tests {
             let text = summary(&files, &change, None);
             assert!(
                 text.contains(
-                    "  whitelist.next.json: the same list as whitelist.json (left after a change)"
+                    "  whitelist.next.json: a copy of whitelist.json (e.g. left after a change)"
                 ),
                 "{text}"
             );
@@ -1647,6 +1653,14 @@ mod tests {
             edit_text(&out).lines().next().unwrap().ends_with(
                 "dropped: no verified entry; whitelist.next.json's entries unknown (it cannot be \
                  read or has no entries)"
+            ),
+            "{out}"
+        );
+        // And on its own line, as the readable case has one.
+        assert!(
+            edit_text(&out).contains(
+                "discarded whitelist.next.json (not the sealed list); its entries unknown (it \
+                 cannot be read or has no entries)"
             ),
             "{out}"
         );
@@ -1883,9 +1897,10 @@ mod tests {
              fee-cap` again before `--unlock`",
             "if whitelist.json was only damaged or replaced, put back a genuine copy of it at the \
              sealed generation instead, but only if that is the highest generation you remember \
-             seeing (unlock, status and `zwallet whitelist list` print it): it verifies again \
-             without a reset, because the seal pins its digest; if you remember a higher one, \
-             wallet.json was rolled back: restore the current wallet.json instead",
+             seeing since the last start at gen 1 (an edit's report, or unlock, status or \
+             `zwallet whitelist list --verify`): it verifies again without a reset, because the \
+             seal pins its digest; if you remember a higher one, wallet.json was rolled back: \
+             restore the current wallet.json instead",
             "the reset makes a new key and an empty list, decided once the password opens \
              wallet.json:",
             "    gen 2 if whitelist.json is the list wallet.json seals",
