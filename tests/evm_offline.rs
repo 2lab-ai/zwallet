@@ -278,6 +278,8 @@ fn dry_run_prints_no_broadcastable_raw_tx() {
     assert!(v["txHash"].as_str().unwrap().starts_with("0x"));
     assert_eq!(v["signerDecoded"]["action"]["kind"], "native-transfer");
     assert_eq!(v["pendingNonces"], json!([]));
+    assert_eq!(v["pendingRange"], Value::Null);
+    assert_eq!(v["pendingCount"], 0);
     // Nothing broadcast, nothing journaled.
     assert!(!journal_path(&home, &me).exists());
     let inv = home
@@ -1159,6 +1161,8 @@ fn a_fresh_send_while_one_is_pending_is_refused_unless_allow_pending() {
     assert!(msg.contains(&first_hash), "{msg}");
     let v = r.json();
     assert_eq!(v["pendingNonces"], json!([7]));
+    assert_eq!(v["pendingRange"], json!([7, 7]));
+    assert_eq!(v["pendingCount"], 1);
     assert_eq!(v["pendingSends"][0]["txHash"], first_hash.as_str());
     assert_eq!(
         v["journal"],
@@ -1168,6 +1172,8 @@ fn a_fresh_send_while_one_is_pending_is_refused_unless_allow_pending() {
     // A dry-run reports the pending nonces instead of refusing.
     let dry = home.run(&transfer(&rpc.url, &["--dry-run"])).ok();
     assert_eq!(dry["pendingNonces"], json!([7]));
+    assert_eq!(dry["pendingRange"], json!([7, 7]));
+    assert_eq!(dry["pendingCount"], 1);
     assert_eq!(dry["duplicateSends"][0]["txHash"], first_hash.as_str());
     // --allow-pending alone: the same recipient and amount as the pending send is still a
     // likely repeat.
@@ -1678,4 +1684,39 @@ fn a_token_repeat_is_refused_even_when_symbol_fails_the_second_time() {
     assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v:#}");
     assert_eq!(v["duplicateSends"][0]["txHash"], first["txHash"], "{v:#}");
     assert_eq!(rpc.sent().len(), 1, "the repeat was broadcast");
+}
+
+#[test]
+fn a_bogus_pending_count_is_reported_bounded_not_enumerated() {
+    let (home, _) = unlocked();
+    // A broken or hostile node: nothing mined, but half of u64 pending.
+    let pending = u64::MAX / 2;
+    let rpc = MockRpc::start(move |m, p| match m {
+        "eth_getTransactionCount" if p[1] == "latest" => Reply::Result(hex(0)),
+        "eth_getTransactionCount" => Reply::Result(hex(pending.into())),
+        _ => healthy(m, p),
+    });
+    let check = |v: &Value| {
+        let listed = v["pendingNonces"].as_array().unwrap();
+        assert_eq!(listed.len(), 64, "{v:#}");
+        assert_eq!(listed[0], 0);
+        assert_eq!(listed[63], 63);
+        assert_eq!(v["pendingCount"], pending, "{v:#}");
+        assert_eq!(v["pendingRange"], json!([0, pending - 1]), "{v:#}");
+    };
+    let dry = home.run(&transfer(&rpc.url, &["--dry-run"])).ok();
+    check(&dry);
+    // Without --allow-pending the guard refuses, listing the same bounded fields.
+    let r = home.run(&transfer(&rpc.url, &[]));
+    let msg = r.err("VALIDATION_ERROR");
+    assert!(
+        msg.contains(&format!("at nonces 0 to {}", pending - 1)),
+        "{msg}"
+    );
+    check(&r.json());
+    // With it, the send goes out at the node's pending nonce.
+    let v = home.run(&transfer(&rpc.url, &["--allow-pending"])).ok();
+    check(&v);
+    assert_eq!(v["nonce"], pending);
+    assert_eq!(rpc.sent().len(), 1);
 }

@@ -720,8 +720,9 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     let mut fields = Map::new();
     fields.insert("chainId".into(), json!(unsigned.chain_id));
     fields.insert("nonce".into(), json!(nonce));
-    let pending_nonces: Vec<u64> = in_flight.map(|r| r.collect()).unwrap_or_default();
-    fields.insert("pendingNonces".into(), json!(pending_nonces));
+    for (k, v) in pending_fields(in_flight.as_ref()) {
+        fields.insert(k.into(), v);
+    }
     if intent.nonce.is_some() {
         fields.insert("replacesPending".into(), json!(replacing));
         let bump = outbid.map(|o| bump_label(o.bump));
@@ -777,8 +778,29 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     })
 }
 
-/// Most pending nonces a guard error lists in its `pendingNonces` field.
+/// Most pending nonces `pendingNonces` lists.
 const PENDING_LISTED: usize = 64;
+
+/// The nonces pending between the mined count and the next free nonce (`in_flight`), as output
+/// fields: `pendingNonces` (the first [`PENDING_LISTED`]), `pendingRange` (`[first, last]`, or
+/// null) and `pendingCount`. Both counts come from the node, which can claim any range, so the
+/// range is never enumerated past the listed few.
+fn pending_fields(in_flight: Option<&std::ops::RangeInclusive<u64>>) -> [(&'static str, Value); 3] {
+    let Some(r) = in_flight else {
+        return [
+            ("pendingNonces", json!([])),
+            ("pendingRange", Value::Null),
+            ("pendingCount", json!(0)),
+        ];
+    };
+    let listed: Vec<u64> = r.clone().take(PENDING_LISTED).collect();
+    let count = (r.end() - r.start()).saturating_add(1);
+    [
+        ("pendingNonces", json!(listed)),
+        ("pendingRange", json!([r.start(), r.end()])),
+        ("pendingCount", json!(count)),
+    ]
+}
 
 /// A send without `--nonce` while transactions from this key are pending at `nonces`: refused,
 /// because the usual reason is a re-run of a send that was cut off (the harness killed it, the
@@ -801,7 +823,6 @@ fn pending_guard_error(
     } else {
         "<its nonce>".to_string()
     };
-    let listed: Vec<u64> = nonces.clone().take(PENDING_LISTED).collect();
     let mut e = WalletError::validation(format!(
         "a transaction from this key is still pending on {} at {at}; nothing was \
          signed.{pointer} If this command repeats a payment sent earlier (for example a run that \
@@ -810,8 +831,10 @@ fn pending_guard_error(
          --allow-pending to send it after the pending one",
         net.chain.key
     ))
-    .with_detail("pendingNonces", json!(listed))
     .with_detail("pendingSends", Value::Array(entries));
+    for (k, v) in pending_fields(Some(&nonces)) {
+        e = e.with_detail(k, v);
+    }
     if let Some(j) = journal {
         e = e.with_detail("journal", j.display());
     }
