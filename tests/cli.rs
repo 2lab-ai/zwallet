@@ -2608,3 +2608,20 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
     assert!(!r.stderr.contains('\u{1b}'), "{:?}", r.stderr);
     r.ok();
 }
+
+#[test]
+fn f2_create_unlock_shows_the_whitelist_its_session_signs_under() {
+    let home = Home::new();
+    let v = home.create("main", &["--unlock", "10m"]);
+    assert_eq!(v["locked"], false, "{v}");
+    assert_eq!(v["whitelist"]["verified"], false, "{v}");
+    assert_eq!(v["whitelist"]["gen"], serde_json::Value::Null, "{v}");
+    assert_eq!(v["whitelist"]["entries"], json!([]), "{v}");
+    assert!(
+        v["whitelist"]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("no whitelist yet"),
+        "{v}"
+    );
+}

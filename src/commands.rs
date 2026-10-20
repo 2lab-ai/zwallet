@@ -360,6 +360,8 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
         out["locked"] = json!(false);
         out["expiresAt"] = session["expiresAt"].clone();
         out["daemonPid"] = session["pid"].clone();
+        // The whitelist this session signs under, as `unlock` shows it.
+        out["whitelist"] = session["whitelist"].clone();
     }
     if master == "created" && std::io::stderr().is_terminal() {
         eprintln!(
