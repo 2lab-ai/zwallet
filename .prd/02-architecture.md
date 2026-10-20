@@ -189,10 +189,11 @@ whitelist …`, never the daemon). An edit shows the change and what happens to 
 the password is read, applies it to exactly the list shown or changes nothing, and builds only
 on the list the seal names (an unverifiable list, or a list file without a sealed whitelist, is
 refused; only `reset` starts over, with every fee cap back to the default and no payee and no
-contract). It stops every daemon, signs the next generation, re-seals the anchor into wallet.json, and leaves
-the wallet locked unless `--unlock <duration>` starts a new session. A dry-run runs the
-daemon's check on the list on disk first, when there is one, and asks for no signature when it
-refuses. Amount caps stay planned; README §Known limits lists what the whitelist does not stop.
+contract). It stops every daemon, signs the next generation, re-seals the anchor into
+wallet.json, and leaves the wallet locked unless `--unlock <duration>` starts a new session. A
+dry-run runs the daemon's check on the list on disk first, when there is one, and asks for no
+signature when it refuses. Amount caps stay planned; README §Known limits lists what the
+whitelist does not stop.
 
 The original WU1b plan below is superseded except for the amount caps, which stay planned. It is
 kept for reference:
