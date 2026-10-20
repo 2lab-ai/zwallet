@@ -283,35 +283,57 @@ async fn edit(home: &Path, change: Change, opts: &WhitelistEditArgs) -> Result<O
     // nothing (the edit checks again under `w.lock`).
     whitelist::check_unchanged(home, &fingerprint)?;
     let stopped = protocol::stop_all_daemons()?;
-    // 2. to 4.
-    let edited = match &change {
-        Change::Reset => whitelist::reset_as_shown(home, &password, &WHITELIST_RULES, &fingerprint),
-        _ => whitelist::edit_as_shown(home, &password, &WHITELIST_RULES, &fingerprint, |list| {
-            change.apply(list)
-        }),
-    }
-    .map_err(|e| {
-        WalletError::new(
-            e.code,
-            format!(
-                "{}; the daemons were already stopped, so the wallet is locked",
-                e.message
-            ),
-        )
-        .with_detail("locked", true)
-    })?;
-    // 5.
+    // 2. to 4., then 5.
+    let pw: &str = &password;
+    let land = || {
+        match &change {
+            Change::Reset => whitelist::reset_as_shown(home, pw, &WHITELIST_RULES, &fingerprint),
+            _ => whitelist::edit_as_shown(home, pw, &WHITELIST_RULES, &fingerprint, |list| {
+                change.apply(list)
+            }),
+        }
+        .map_err(|e| {
+            WalletError::new(
+                e.code,
+                format!(
+                    "{}; the daemons were already stopped, so the wallet is locked",
+                    e.message
+                ),
+            )
+            .with_detail("locked", true)
+        })
+    };
+    let (edited, session) = land_then_unlock(land, unlock, |exe: DaemonExe, ttl| async move {
+        start_session(home, &exe, pw, ttl).await
+    })
+    .await?;
+    drop(password);
+    let out = edit_output(&change, &base, &files, &edited, &stopped, &session);
+    let text = edit_text(&out);
+    Ok(Out::with_text(out, text))
+}
+
+/// Steps 2 to 5 once the daemons are stopped: the change (`land`, the core edit under `w.lock`),
+/// then the session `--unlock` asked for (`start`, given what `unlock` carries). A change that
+/// landed is final, a `warning` included, so the session starts all the same; a change that
+/// failed starts none.
+async fn land_then_unlock<E, F>(
+    land: impl FnOnce() -> Result<Edited>,
+    unlock: Option<(String, Duration, E)>,
+    start: impl FnOnce(E, Duration) -> F,
+) -> Result<(Edited, Session)>
+where
+    F: std::future::Future<Output = Result<Value>>,
+{
+    let edited = land()?;
     let session = match unlock {
         None => Session::Locked,
-        Some((duration, ttl, exe)) => match start_session(home, &exe, &password, ttl).await {
+        Some((duration, ttl, with)) => match start(with, ttl).await {
             Ok(ready) => Session::Unlocked { duration, ready },
             Err(e) => Session::Failed(e),
         },
     };
-    drop(password);
-    let out = edit_output(&change, &base, &edited, &stopped, &session);
-    let text = edit_text(&out);
-    Ok(Out::with_text(out, text))
+    Ok((edited, session))
 }
 
 /// One list file as the summary shows it.
@@ -376,7 +398,15 @@ fn old_values(
 /// [`printable`]) and name lists are cut ([`list_names`]).
 fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>) -> String {
     let (current_read, next_read) = (files.current.parsed(), files.next.parsed());
-    let (current, next) = (FileView::of(&current_read), FileView::of(&next_read));
+    // A whitelist.next.json with whitelist.json's very bytes is a staged copy left after a change
+    // that landed: the same list, so every value and outcome comes from whitelist.json alone.
+    let leftover = files.next.same_bytes(&files.current);
+    let current = FileView::of(&current_read);
+    let next = if leftover {
+        FileView::Absent
+    } else {
+        FileView::of(&next_read)
+    };
     let fresh = Whitelist::empty(&WHITELIST_RULES);
     let mut lines = vec!["The password authorizes this whitelist change:".to_string()];
     match change {
@@ -439,6 +469,10 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
             "  whitelist.next.json: {}, an unfinished edit, not verified yet",
             gen_entries(l)
         )),
+        FileView::Absent if leftover => lines.push(
+            "  whitelist.next.json: the same list as whitelist.json (left after a change)"
+                .to_string(),
+        ),
         FileView::Absent => {}
         FileView::Unreadable(why) => lines.push(unreadable_line(NEXT_FILE, why)),
     }
@@ -844,6 +878,7 @@ fn nicknames(list: &Whitelist) -> Vec<&str> {
 fn edit_output(
     change: &Change,
     base: &Base,
+    files: &ListFiles,
     edited: &Edited,
     stopped: &[i32],
     session: &Session,
@@ -884,6 +919,16 @@ fn edit_output(
     // was any whitelist; an edit with an anchor never builds on an unverified list.
     if let Some(d) = &edited.discarded {
         out["discarded"] = json!({ "reason": d.reason, "entries": d.entries });
+    }
+    // A reset also drops a whitelist.next.json that was not the sealed list (an unfinished or
+    // planted edit; not a copy of whitelist.json): its unverified entries as found, `null` if it
+    // cannot be read or has none.
+    if matches!(change, Change::Reset)
+        && files.next.exists()
+        && base.source != BaseSource::PromotedNext
+        && !files.next.same_bytes(&files.current)
+    {
+        out["discardedNext"] = json!({ "entries": files.next.raw_entries() });
     }
     // What the edit could not tidy up after the change landed, after a contract's residual.
     if let Some(w) = &edited.warning {
@@ -933,22 +978,37 @@ fn edit_text(out: &Value) -> String {
         ),
         _ => format!("reset: a new key and an empty list; dropped: {}", {
             let d = join(&out["dropped"]);
-            let discarded = &out["discarded"];
-            match (
-                d.is_empty(),
-                discarded.is_object(),
-                discarded["entries"].is_null(),
-            ) {
-                (false, _, _) => d,
-                // No entries: whitelist.json is missing or cannot be read (the reason says
-                // which), so what it held is unknown, never "none".
-                (true, true, true) => "no verified entry; whitelist.json's entries unknown (it is \
-                                       missing or cannot be read)"
-                    .into(),
-                (true, true, false) => {
-                    "no verified entry; whitelist.json's unverified entries are below".into()
-                }
-                (true, false, _) => "nothing".into(),
+            // No entries: the file is missing, cannot be read or lists none (the reason says
+            // which), so what it held is unknown, never "none".
+            let unverified = |key: &str, file: &str, why: &str| {
+                let found = &out[key];
+                (found.is_object()).then(|| {
+                    if found["entries"].is_null() {
+                        format!("{file}'s entries unknown ({why})")
+                    } else {
+                        format!("{file}'s unverified entries are below")
+                    }
+                })
+            };
+            let others: Vec<String> = [
+                unverified(
+                    "discarded",
+                    WHITELIST_FILE,
+                    "it is missing, cannot be read, or has no entries",
+                ),
+                unverified(
+                    "discardedNext",
+                    NEXT_FILE,
+                    "it cannot be read or has no entries",
+                ),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            match (d.is_empty(), others.is_empty()) {
+                (true, true) => "nothing".to_string(),
+                (true, false) => format!("no verified entry; {}", others.join("; ")),
+                (false, _) => d,
             }
         }),
     };
@@ -976,6 +1036,12 @@ fn edit_text(out: &Value) -> String {
             } else {
                 format!("; its unverified entries: {}", ascii_json(entries))
             }
+        ));
+    }
+    if !out["discardedNext"]["entries"].is_null() {
+        lines.push(format!(
+            "discarded whitelist.next.json (not the sealed list); its unverified entries: {}",
+            ascii_json(&out["discardedNext"]["entries"])
         ));
     }
     if out["keyCreated"] == json!(true) {
@@ -1409,7 +1475,16 @@ mod tests {
             discarded: None,
         };
         let entry = list.by_nickname("router").unwrap().clone();
-        let out = edit_output(&Change::Add(entry), &base, &edited, &[], &Session::Locked);
+        let empty = tempfile::tempdir().unwrap();
+        let files = ListFiles::read(empty.path());
+        let out = edit_output(
+            &Change::Add(entry),
+            &base,
+            &files,
+            &edited,
+            &[],
+            &Session::Locked,
+        );
         // After a contract's residual, and the change is still reported as made.
         assert_eq!(out["warning"], format!("{RESIDUAL}; {left}"), "{out}");
         assert_eq!((&out["gen"], &out["verified"]), (&json!(2), &json!(true)));
@@ -1417,11 +1492,164 @@ mod tests {
         let out = edit_output(
             &Change::MessageSigning(true),
             &base,
+            &files,
             &edited,
             &[],
             &Session::Locked,
         );
         assert_eq!(out["warning"], left, "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn r6_a_change_that_landed_with_a_warning_still_starts_the_session() {
+        let mut list = Whitelist::empty(&WHITELIST_RULES);
+        list.generation = 2;
+        let warned = Edited {
+            list,
+            previous_generation: Some(1),
+            base: BaseSource::Current,
+            discarded: None,
+            key_created: false,
+            warning: Some("the change landed, but zwallet could not remove it".into()),
+        };
+        let ready = json!({ "pid": 7, "expiresAt": "later", "whitelist": { "gen": 2 } });
+        let unlock = Some(("10m".to_string(), Duration::from_secs(600), "exe"));
+        let (edited, session) = land_then_unlock(
+            || Ok(warned.clone()),
+            unlock.clone(),
+            |exe, ttl| {
+                assert_eq!((exe, ttl), ("exe", Duration::from_secs(600)));
+                let ready = ready.clone();
+                async move { Ok(ready) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(edited.warning, warned.warning);
+        let mut out = json!({});
+        session.report(&mut out);
+        assert_eq!(
+            (&out["locked"], &out["daemonPid"], &out["duration"]),
+            (&json!(false), &json!(7), &json!("10m")),
+            "{out}"
+        );
+        // A change that failed starts no session.
+        let started = std::cell::Cell::new(false);
+        let failed = land_then_unlock(
+            || Err(WalletError::validation("crash")),
+            unlock,
+            |_, _| {
+                started.set(true);
+                async { Ok(json!({})) }
+            },
+        )
+        .await;
+        assert!(failed.is_err() && !started.get());
+    }
+
+    #[test]
+    fn r6_a_staged_copy_left_after_a_change_is_labelled_as_such() {
+        let tmp = home_with(&[Entry::new_address(
+            "bob",
+            "0x3333333333333333333333333333333333333333",
+            &["base"],
+        )]);
+        std::fs::copy(tmp.path().join(WHITELIST_FILE), tmp.path().join(NEXT_FILE)).unwrap();
+        let files = ListFiles::read(tmp.path());
+        for change in [Change::MessageSigning(true), Change::Reset] {
+            let text = summary(&files, &change, None);
+            assert!(
+                text.contains(
+                    "  whitelist.next.json: the same list as whitelist.json (left after a change)"
+                ),
+                "{text}"
+            );
+            assert!(!text.contains("an unfinished edit"), "{text}");
+            assert!(!text.contains("whitelist.next.json says"), "{text}");
+        }
+        // A reset over it reports no dropped whitelist.next.json: it was whitelist.json's copy.
+        let base = whitelist::pick_base_from(&files, None, &WHITELIST_RULES);
+        let edited = Edited {
+            list: Whitelist::empty(&WHITELIST_RULES),
+            previous_generation: None,
+            base: BaseSource::Empty,
+            discarded: None,
+            key_created: true,
+            warning: None,
+        };
+        let out = edit_output(
+            &Change::Reset,
+            &base,
+            &files,
+            &edited,
+            &[],
+            &Session::Locked,
+        );
+        assert!(out.get("discardedNext").is_none(), "{out}");
+    }
+
+    #[test]
+    fn r6_a_reset_names_the_unverified_staged_entries_it_drops() {
+        // A first edit cut off before its seal: only whitelist.next.json, which the reset drops.
+        let tmp = home_with(&[Entry::new_address(
+            "bob",
+            "0x3333333333333333333333333333333333333333",
+            &["base"],
+        )]);
+        std::fs::rename(tmp.path().join(WHITELIST_FILE), tmp.path().join(NEXT_FILE)).unwrap();
+        let files = ListFiles::read(tmp.path());
+        let base = whitelist::pick_base_from(&files, None, &WHITELIST_RULES);
+        let edited = Edited {
+            list: Whitelist::empty(&WHITELIST_RULES),
+            previous_generation: None,
+            base: BaseSource::Empty,
+            discarded: None,
+            key_created: true,
+            warning: None,
+        };
+        let out = edit_output(
+            &Change::Reset,
+            &base,
+            &files,
+            &edited,
+            &[],
+            &Session::Locked,
+        );
+        assert_eq!(
+            out["discardedNext"]["entries"][0]["nickname"], "bob",
+            "{out}"
+        );
+        let text = edit_text(&out);
+        assert!(
+            text.lines().next().unwrap().ends_with(
+                "dropped: no verified entry; whitelist.next.json's unverified entries are below"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "discarded whitelist.next.json (not the sealed list); its unverified entries: [{"
+            ),
+            "{text}"
+        );
+        // One that cannot be read: its entries are unknown.
+        std::fs::write(tmp.path().join(NEXT_FILE), "{ not a list").unwrap();
+        let files = ListFiles::read(tmp.path());
+        let out = edit_output(
+            &Change::Reset,
+            &base,
+            &files,
+            &edited,
+            &[],
+            &Session::Locked,
+        );
+        assert!(
+            edit_text(&out).lines().next().unwrap().ends_with(
+                "dropped: no verified entry; whitelist.next.json's entries unknown (it cannot be \
+                 read or has no entries)"
+            ),
+            "{out}"
+        );
     }
 
     #[test]
@@ -1771,8 +1999,8 @@ mod tests {
         // Both on the line that says what was dropped.
         assert!(
             text.lines().next().unwrap().ends_with(
-                "dropped: no verified entry; whitelist.json's entries unknown (it is missing or \
-                 cannot be read)"
+                "dropped: no verified entry; whitelist.json's entries unknown (it is missing, \
+                 cannot be read, or has no entries)"
             ),
             "{text}"
         );
