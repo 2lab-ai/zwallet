@@ -341,15 +341,18 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     fields.insert("sufficientFunds".into(), json!(shortfall.is_empty()));
     fields.insert("shortfall".into(), Value::Array(shortfall));
     Ok(PreparedTx {
-        unsigned: serde_json::to_value(&unsigned)
-            .map_err(|e| WalletError::validation(format!("cannot encode tx: {e}")))?,
+        // The daemon gets the signing payload bytes only and decodes them itself.
+        unsigned: json!(format!(
+            "0x{}",
+            alloy::hex::encode(encoded_for_signing(&unsigned))
+        )),
         fields,
     })
 }
 
 async fn op_l1_fee(p: &EvmProvider, tx: &UnsignedEvmTx) -> Result<U256> {
     let data = IGasPriceOracle::getL1FeeCall {
-        data: encoded_for_signing(tx)?.into(),
+        data: encoded_for_signing(tx).into(),
     }
     .abi_encode();
     let raw = eth_call(p, None, GAS_PRICE_ORACLE, data.into()).await?;

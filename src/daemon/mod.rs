@@ -201,9 +201,9 @@ fn handle(state: &mut State, req: &Request) -> Result<Value> {
                 .flatten()
                 .ok_or_else(|| WalletError::validation("invalid unlock duration"))?;
             match store::unlock(&state.home, password, &chains::derive_addresses) {
-                Ok((seed, file)) => {
+                Ok((unsealed, file)) => {
                     state.session = Some(Session {
-                        seed,
+                        seed: unsealed.seed,
                         expires_at,
                         sealed: file.crypto.ciphertext.clone(),
                     });

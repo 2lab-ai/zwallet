@@ -60,8 +60,9 @@ goes to stderr, exit 1. Commands that act on a key take `--key <name>` (default:
   Mainnet, the L1 data fee. Without `--dry-run` a shortfall is `INSUFFICIENT_FUNDS` before anything
   is signed. `--dry-run` signs but does not broadcast and returns `{ dryRun: true, chain, key, from,
   to, amount, nonce, gasLimit, type, maxFeePerGas, maxPriorityFeePerGas, gasPrice, maxGasCost,
-  l1Fee, sufficientFunds, shortfall, rawTx, txHash, recoveredFrom }`; `recoveredFrom` is recovered
-  from the signed raw bytes, and an empty wallet can be dry-run. Live: `{ ..., txHash, explorerUrl }`
+  l1Fee, sufficientFunds, shortfall, signerDecoded, rawTx, txHash, recoveredFrom }`;
+  `recoveredFrom` is recovered from the signed raw bytes, `signerDecoded` is what the key daemon
+  decoded from the bytes it signed, and an empty wallet can be dry-run. Live: `{ ..., txHash, explorerUrl }`
   plus `{ status, blockNumber, gasUsed }` with `--wait` (`status: "pending"` if not mined within 5
   minutes; a receipt problem never turns a broadcast into an error).
 - **Amounts** are decimal strings converted exactly (no floats); more fractional digits than the
@@ -89,10 +90,14 @@ default. zwallet checks the endpoint's `eth_chainId` before using it.
 ## Custody model
 
 - **Home**: `$ZWALLET_HOME` or `~/.zwallet`, mode 0700.
-- **`wallet.json`** (0600, written atomically): one BIP39 English mnemonic (no BIP39 passphrase),
-  encrypted with AES-256-GCM under a scrypt key (N=2^15, r=8, p=1; parameters, salt and nonce are
-  stored in the file, versioned), plus non-secret metadata: `createdAt`, `active`, `nextIndex`, and
-  `keys: [{ name, index, createdAt, addresses: { <chain>: <address> } }]`.
+- **`wallet.json`** (0600, written atomically): a sealed section encrypted with AES-256-GCM under a
+  scrypt key (N=2^15, r=8, p=1; parameters, salt and nonce stored in the file), plus non-secret
+  metadata: `createdAt`, `active`, `nextIndex`, and
+  `keys: [{ name, index, createdAt, addresses: { <chain>: <address> } }]`. The sealed plaintext is
+  a versioned object `{ version, mnemonic, policy }`: one BIP39 English mnemonic (no BIP39
+  passphrase) and a `policy` object reserved for a future signing policy (empty for now, carried
+  through intact). The policy lives under the password because anything outside it can be edited
+  by the same OS user without the password.
 - **Password**: held by the human only. There is no password file and no password env variable;
   it is typed at a terminal prompt (no echo) or piped with `--password-stdin`. Nothing on disk
   decrypts the wallet by itself. `create` reads `wallet.json` back from disk, decrypts it and checks
@@ -103,7 +108,11 @@ default. zwallet checks the endpoint's `eth_chainId` before using it.
 - **Daemon**: `unlock` starts `zwallet daemon` detached (own session) and sends it the password
   over `$ZWALLET_HOME/d.sock` (0600; peer uid checked on both ends). The daemon decrypts the wallet
   itself, keeps only the master seed in memory, and does nothing but derive addresses and sign; it
-  makes no network request. On `lock`, at expiry (wall clock), or on SIGTERM it wipes the seed and
+  makes no network request. For a transaction it receives only the unsigned signing payload bytes,
+  decodes them itself (type, chain id, recipient, value, and ERC-20 `transfer` / `approve` /
+  `transferFrom` from the calldata), refuses anything zwallet does not produce (other tx types,
+  access lists, contract creation, non-canonical encodings), and signs exactly the bytes it decoded.
+  It never trusts intent fields from the CLI, which is the agent-controlled side. On `lock`, at expiry (wall clock), or on SIGTERM it wipes the seed and
   exits. A reboot or a dead daemon means locked. Everything else (RPC, ABI, tx building, broadcast)
   runs in the one-shot CLI process, which checks every signature it gets back by recovering the
   signer.

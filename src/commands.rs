@@ -225,7 +225,7 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
                 (derive_via_daemon(home, index).await?, None)
             } else {
                 let pw = read_password(a.password.password_stdin, "Wallet password: ", false)?;
-                let (seed, _) = store::unlock(home, &pw, &chains::derive_addresses)?;
+                let seed = store::unlock(home, &pw, &chains::derive_addresses)?.0.seed;
                 (chains::derive_addresses(&seed, index)?, Some(pw))
             };
             let file = store::add_key(home, &a.name, index, addresses)?;
@@ -534,6 +534,10 @@ async fn sign_and_send<F: ChainFamily>(
         out.entry(k).or_insert(v);
     }
     out.insert("dryRun".into(), json!(dry_run));
+    // What the key holder decoded from the bytes it signed (not what this process intended).
+    if let Some(view) = signed_value.get("decoded") {
+        out.insert("signerDecoded".into(), view.clone());
+    }
     if dry_run {
         out.insert("rawTx".into(), json!(signed.raw));
         out.insert("txHash".into(), json!(signed.tx_hash));
@@ -678,7 +682,7 @@ fn backup(home: &Path) -> Result<Out> {
     }
     store::read_wallet_file(home)?;
     let pw = read_password(false, "Wallet password: ", false)?;
-    let (seed, _) = store::unlock(home, &pw, &chains::derive_addresses)?;
+    let seed = store::unlock(home, &pw, &chains::derive_addresses)?.0.seed;
     let words: Vec<String> = seed
         .phrase()
         .split(' ')

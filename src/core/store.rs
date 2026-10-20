@@ -13,6 +13,7 @@ use alloy::hex;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, OpenOptions};
@@ -176,8 +177,40 @@ fn derive_key(password: &str, salt: &[u8], kdf: &KdfParams) -> Result<Zeroizing<
     Ok(key)
 }
 
-/// Encrypts the mnemonic phrase with a fresh salt and nonce.
-pub fn encrypt(seed: &Seed, password: &str, kdf: KdfParams) -> Result<CryptoBox> {
+/// Version of the plaintext sealed under the password-derived key.
+pub const SEALED_VERSION: u32 = 1;
+
+/// The plaintext under the password-derived key (authenticated by AES-GCM). Anything a signing
+/// policy depends on must live here: everything outside it can be edited by the same OS user
+/// without the password. Deliberately not `Debug`.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SealedPayload {
+    version: u32,
+    mnemonic: Zeroizing<String>,
+    /// Reserved for a future signing policy; `{}` for now and carried through intact.
+    policy: Value,
+}
+
+/// A decrypted wallet: the master seed and the sealed policy object.
+pub struct Unsealed {
+    pub seed: Seed,
+    pub policy: Value,
+}
+
+/// Seals the mnemonic and `policy` (a JSON object) with a fresh salt and nonce.
+pub fn encrypt(seed: &Seed, policy: &Value, password: &str, kdf: KdfParams) -> Result<CryptoBox> {
+    if !policy.is_object() {
+        return Err(WalletError::validation("policy must be a JSON object"));
+    }
+    let plaintext = Zeroizing::new(
+        serde_json::to_vec(&SealedPayload {
+            version: SEALED_VERSION,
+            mnemonic: Zeroizing::new(seed.phrase().to_string()),
+            policy: policy.clone(),
+        })
+        .map_err(|_| WalletError::validation("cannot serialize the sealed payload"))?,
+    );
     let mut salt = [0u8; SALT_LEN];
     let mut nonce = [0u8; NONCE_LEN];
     OsRng
@@ -190,7 +223,7 @@ pub fn encrypt(seed: &Seed, password: &str, kdf: KdfParams) -> Result<CryptoBox>
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
-                msg: seed.phrase().as_bytes(),
+                msg: plaintext.as_slice(),
                 aad: AAD,
             },
         )
@@ -210,8 +243,8 @@ pub fn encrypt(seed: &Seed, password: &str, kdf: KdfParams) -> Result<CryptoBox>
     })
 }
 
-/// Decrypts the mnemonic. A failed GCM tag check is reported as `WRONG_PASSWORD`.
-pub fn decrypt(sealed: &CryptoBox, password: &str) -> Result<Seed> {
+/// Decrypts the sealed payload. A failed GCM tag check is reported as `WRONG_PASSWORD`.
+pub fn decrypt(sealed: &CryptoBox, password: &str) -> Result<Unsealed> {
     let corrupt = |what: &str| WalletError::validation(format!("wallet.json is corrupt: {what}"));
     if sealed.cipher != CIPHER || sealed.kdf != KDF {
         return Err(corrupt("unsupported cipher or kdf"));
@@ -258,8 +291,18 @@ pub fn decrypt(sealed: &CryptoBox, password: &str) -> Result<Seed> {
                 )
             })?,
     );
-    let phrase = std::str::from_utf8(&plain).map_err(|_| corrupt("plaintext is not UTF-8"))?;
-    Seed::from_phrase(Zeroizing::new(phrase.to_string()))
+    let payload: SealedPayload =
+        serde_json::from_slice(&plain).map_err(|_| corrupt("sealed payload is malformed"))?;
+    if payload.version != SEALED_VERSION {
+        return Err(corrupt("unsupported sealed payload version"));
+    }
+    if !payload.policy.is_object() {
+        return Err(corrupt("sealed policy is not an object"));
+    }
+    Ok(Unsealed {
+        seed: Seed::from_phrase(payload.mnemonic)?,
+        policy: payload.policy,
+    })
 }
 
 /// Derives one key's address cache (chain key → address) at a derivation index. Supplied by the
@@ -303,11 +346,11 @@ pub fn unlock(
     home: &Path,
     password: &str,
     derive: AddressDeriver<'_>,
-) -> Result<(Seed, WalletFile)> {
+) -> Result<(Unsealed, WalletFile)> {
     let file = read_wallet_file(home)?;
-    let seed = decrypt(&file.crypto, password)?;
-    verify_key_cache(&file, &seed, derive)?;
-    Ok((seed, file))
+    let unsealed = decrypt(&file.crypto, password)?;
+    verify_key_cache(&file, &unsealed.seed, derive)?;
+    Ok((unsealed, file))
 }
 
 fn verify_key_cache(file: &WalletFile, seed: &Seed, derive: AddressDeriver<'_>) -> Result<()> {
@@ -431,7 +474,12 @@ fn create_steps(
             created_at,
             addresses: derive(&seed, 0)?,
         }],
-        crypto: encrypt(&seed, password, opts.kdf)?,
+        crypto: encrypt(
+            &seed,
+            &Value::Object(Default::default()),
+            password,
+            opts.kdf,
+        )?,
     };
     drop(seed);
     publish_new_file(home, &wallet_path, &to_json_bytes(&file)?, journal)?;
@@ -439,7 +487,7 @@ fn create_steps(
 
     // Verify exactly what a later process will see: the file as read back from disk.
     let verify = || -> Result<()> {
-        let (seed, on_disk) = unlock(home, password, derive)?;
+        let (Unsealed { seed, .. }, on_disk) = unlock(home, password, derive)?;
         if on_disk.keys != file.keys || seed.word_count() != opts.words {
             return Err(WalletError::validation("read-back mismatch"));
         }
@@ -683,11 +731,17 @@ mod tests {
         v
     }
 
+    fn empty() -> Value {
+        Value::Object(Default::default())
+    }
+
     #[test]
     fn encrypt_decrypt_round_trip() {
-        let sealed = encrypt(&test_seed(), PW, KdfParams::default()).unwrap();
-        assert_eq!(decrypt(&sealed, PW).unwrap().phrase(), TEST_MNEMONIC);
-        let again = encrypt(&test_seed(), PW, KdfParams::default()).unwrap();
+        let sealed = encrypt(&test_seed(), &empty(), PW, KdfParams::default()).unwrap();
+        let opened = decrypt(&sealed, PW).unwrap();
+        assert_eq!(opened.seed.phrase(), TEST_MNEMONIC);
+        assert_eq!(opened.policy, empty());
+        let again = encrypt(&test_seed(), &empty(), PW, KdfParams::default()).unwrap();
         assert_ne!(sealed.nonce, again.nonce);
         assert_ne!(sealed.kdfparams.salt, again.kdfparams.salt);
         assert!(!sealed.ciphertext.contains(&hex::encode("test test")));
@@ -695,7 +749,7 @@ mod tests {
 
     #[test]
     fn wrong_password_is_wrong_password_error() {
-        let sealed = encrypt(&test_seed(), PW, KdfParams::default()).unwrap();
+        let sealed = encrypt(&test_seed(), &empty(), PW, KdfParams::default()).unwrap();
         let err = decrypt(&sealed, "wrong password").err().unwrap();
         assert_eq!(err.code, ErrorCode::WrongPassword);
         assert_eq!(
@@ -709,7 +763,7 @@ mod tests {
 
     #[test]
     fn tampered_file_fails_closed() {
-        let mut sealed = encrypt(&test_seed(), PW, KdfParams::default()).unwrap();
+        let mut sealed = encrypt(&test_seed(), &empty(), PW, KdfParams::default()).unwrap();
         let mut ct = hex::decode(&sealed.ciphertext).unwrap();
         ct[0] ^= 1;
         sealed.ciphertext = hex::encode(ct);
@@ -739,7 +793,8 @@ mod tests {
         assert_eq!(file.keys[0].index, 0);
 
         // Default master is 24 words; counted from the decrypted store, never printed.
-        let (seed, on_disk) = unlock(&home, PW, &fake_derive).unwrap();
+        let (Unsealed { seed, policy }, on_disk) = unlock(&home, PW, &fake_derive).unwrap();
+        assert_eq!(policy, empty(), "policy slot starts empty");
         assert_eq!(seed.word_count(), 24);
         assert_eq!(on_disk.keys, file.keys);
         assert_eq!(
@@ -760,7 +815,11 @@ mod tests {
         };
         create_master(tmp.path(), PW, "a", opts, &fake_derive).unwrap();
         assert_eq!(
-            unlock(tmp.path(), PW, &fake_derive).unwrap().0.word_count(),
+            unlock(tmp.path(), PW, &fake_derive)
+                .unwrap()
+                .0
+                .seed
+                .word_count(),
             12
         );
         let bad = MasterOptions {
@@ -791,7 +850,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         create_master(home, PW, "a", MasterOptions::default(), &fake_derive).unwrap();
-        let (seed, file) = unlock(home, PW, &fake_derive).unwrap();
+        let (Unsealed { seed, .. }, file) = unlock(home, PW, &fake_derive).unwrap();
         let crypto_before = serde_json::to_value(&file.crypto).unwrap();
 
         let idx = plan_new_key(&file, "b").unwrap();
@@ -827,6 +886,29 @@ mod tests {
         );
         // The metadata rewrite kept the master decryptable and the caches consistent.
         unlock(home, PW, &fake_derive).unwrap();
+    }
+
+    #[test]
+    fn sealed_policy_survives_metadata_rewrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        create_master(home, PW, "a", MasterOptions::default(), &fake_derive).unwrap();
+        // Re-seal with a non-empty policy (as a future `policy set` would, with the password).
+        let path = home.join(WALLET_FILE);
+        let mut file = read_wallet_file(home).unwrap();
+        let seed = decrypt(&file.crypto, PW).unwrap().seed;
+        let policy = serde_json::json!({ "v": 1, "rules": [{ "maxPerTx": "0.1" }] });
+        file.crypto = encrypt(&seed, &policy, PW, KdfParams::default()).unwrap();
+        fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+
+        let idx = plan_new_key(&file, "b").unwrap();
+        add_key(home, "b", idx, fake_derive(&seed, idx).unwrap()).unwrap();
+        set_active(home, "a").unwrap();
+        let (opened, _) = unlock(home, PW, &fake_derive).unwrap();
+        assert_eq!(opened.policy, policy);
+
+        // Not a JSON object: refused when sealing.
+        assert!(encrypt(&seed, &serde_json::json!([1]), PW, KdfParams::default()).is_err());
     }
 
     #[test]

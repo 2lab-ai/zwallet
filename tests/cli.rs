@@ -16,7 +16,10 @@ fn mode(p: &std::path::Path) -> u32 {
 
 fn words_on_disk(home: &Home) -> usize {
     // Decrypt inside the test process; the phrase itself is never printed.
-    let (seed, _) = store::unlock(home.path(), PW, &chains::derive_addresses).unwrap();
+    let seed = store::unlock(home.path(), PW, &chains::derive_addresses)
+        .unwrap()
+        .0
+        .seed;
     seed.word_count()
 }
 
@@ -162,7 +165,10 @@ fn backup_refuses_without_a_terminal() {
     let v = r.json();
     assert_eq!(v.as_object().unwrap().len(), 2);
     assert!(r.stderr.is_empty());
-    let (seed, _) = store::unlock(home.path(), PW, &chains::derive_addresses).unwrap();
+    let seed = store::unlock(home.path(), PW, &chains::derive_addresses)
+        .unwrap()
+        .0
+        .seed;
     let first_three: Vec<&str> = seed.phrase().split(' ').take(3).collect();
     assert!(!r.stdout.contains(&first_three.join(" ")));
     let human = home.run_stdin(&["backup"], &format!("{PW}\n"));
@@ -262,7 +268,10 @@ fn named_keys_create_list_change_sign() {
     assert_eq!(b["master"], "existing");
     let b_addr = b["address"].as_str().unwrap().to_string();
     assert_ne!(a_addr, b_addr);
-    let (seed, _) = store::unlock(home.path(), PW, &chains::derive_addresses).unwrap();
+    let seed = store::unlock(home.path(), PW, &chains::derive_addresses)
+        .unwrap()
+        .0
+        .seed;
     assert_eq!(
         chains::derive_addresses(&seed, 1).unwrap()["ethereum"],
         b_addr

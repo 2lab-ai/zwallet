@@ -117,18 +117,31 @@ impl FamilyKeys for Evm {
         }))
     }
 
+    /// `unsigned` is the hex signing payload and nothing else. The daemon decodes it itself
+    /// (`tx::decode_unsigned`), never trusting intent fields from the CLI; a future signing
+    /// policy checks that decoded view right before `tx::sign_decoded`.
     fn sign_tx(&self, seed: &Seed, index: u32, chain: &Chain, unsigned: &Value) -> Result<Value> {
-        let tx: tx::UnsignedEvmTx = serde_json::from_value(unsigned.clone())
-            .map_err(|e| WalletError::validation(format!("malformed EVM transaction: {e}")))?;
+        let payload = unsigned
+            .as_str()
+            .and_then(|s| s.strip_prefix("0x"))
+            .and_then(|h| hex::decode(h).ok())
+            .ok_or_else(|| {
+                WalletError::validation("sign_tx expects the 0x-hex unsigned signing payload")
+            })?;
+        let decoded = tx::decode_unsigned(&payload)?;
         let want = config(chain).chain_id;
-        if tx.chain_id != want {
+        if decoded.chain_id != want {
             return Err(WalletError::validation(format!(
                 "refusing to sign: tx chainId {} is not {} ({want})",
-                tx.chain_id, chain.key
+                decoded.chain_id, chain.key
             )));
         }
-        let signed = tx::sign(&signer_at(seed, index)?, &tx)?;
-        Ok(json!({ "rawTx": hex0x(&signed.raw), "txHash": hex0x(signed.hash) }))
+        let signed = tx::sign_decoded(&signer_at(seed, index)?, &decoded)?;
+        Ok(json!({
+            "rawTx": hex0x(&signed.raw),
+            "txHash": hex0x(signed.hash),
+            "decoded": decoded.to_json(),
+        }))
     }
 }
 
@@ -290,20 +303,23 @@ mod tests {
             value: alloy::primitives::U256::from(1234u64),
             input: abi::parse_calldata("0xd0e30db0").unwrap(),
         };
-        let signed = Evm
-            .sign_tx(&seed(), 1, chain, &serde_json::to_value(&unsigned).unwrap())
-            .unwrap();
+        let payload = serde_json::json!(hex0x(tx::encoded_for_signing(&unsigned)));
+        let signed = Evm.sign_tx(&seed(), 1, chain, &payload).unwrap();
         let inspected = Evm.inspect_signed(chain, &signed).unwrap();
         assert_eq!(
             inspected.signer,
             "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
         );
         assert_eq!(inspected.tx_hash, signed["txHash"].as_str().unwrap());
+        assert_eq!(signed["decoded"]["action"]["kind"], "contract-call");
+        assert_eq!(signed["decoded"]["value"], "1234");
         // Wrong chain: refused at signing and at inspection.
         let eth = find("ethereum").unwrap();
-        let unsigned_value = serde_json::to_value(&unsigned).unwrap();
-        assert!(Evm.sign_tx(&seed(), 1, eth, &unsigned_value).is_err());
+        assert!(Evm.sign_tx(&seed(), 1, eth, &payload).is_err());
         assert!(Evm.inspect_signed(eth, &signed).is_err());
+        // Structured "intent" JSON is not accepted; only the bytes are.
+        let intent = serde_json::json!({ "to": "0x4200000000000000000000000000000000000006" });
+        assert!(Evm.sign_tx(&seed(), 1, chain, &intent).is_err());
     }
 
     #[test]

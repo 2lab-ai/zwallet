@@ -129,6 +129,12 @@ fn token_transfer_dry_run_from_empty_wallet() {
     assert_eq!(v["recoveredFrom"], me.as_str());
     assert_eq!(v["symbol"], "USDC");
     assert_eq!(v["amountRaw"], "1500000");
+    // The daemon's own ABI decoding of the calldata it signed.
+    let action = &v["signerDecoded"]["action"];
+    assert_eq!(action["kind"], "erc20-transfer");
+    assert_eq!(action["token"], USDC);
+    assert_eq!(action["recipient"], me.as_str());
+    assert_eq!(action["amount"], "1500000");
     assert_eq!(v["sufficientFunds"], false);
     assert!(!v["shortfall"].as_array().unwrap().is_empty());
     home.run(&[
