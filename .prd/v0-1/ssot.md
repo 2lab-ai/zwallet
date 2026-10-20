@@ -37,7 +37,10 @@ Status: **in-progress**, 2026-10-20. This is the fixed target; do not reinterpre
 - **Quantum / AI resistance** (18): use it from the start if it is usable under the no-login,
   public-RPC constraint. Decided 2026-10-20 in 02-architecture §Resistance: PQ is not usable on any
   target chain today, so zwallet is PQ-ready; AI resistance (a signing policy enforced by the
-  daemon) is usable and ships in v0.1.
+  daemon) is usable and ships in v0.1. Since 2026-10-20 that policy is the **signed whitelist**
+  the user specified ([`../04-whitelist.md`](../04-whitelist.md); user text in
+  [`../v0-2-tui/ssot.md`](../v0-2-tui/ssot.md)). It lands as WU1b before the v0.1.0 tag and
+  before funding.
 - **Chains** (10): EVM only in v0.1. The architecture leaves room for Solana and TON.
 - **No Trust Wallet anything** (5, 6, 7): no Trust API, packages, keychain, or telemetry. twak's
   source is not public, so "fork" = re-implement its wallet surface (see 01-spec §Problem).

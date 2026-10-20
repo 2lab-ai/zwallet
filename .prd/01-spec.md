@@ -46,6 +46,11 @@ no API key, no telemetry and no OS keychain.
   else runs in a one-shot CLI process.
 - **G6 Chain families.** EVM is implemented. Solana and TON slot in later behind the same family
   boundary without changing the wallet file or the daemon protocol.
+- **G8 Signed whitelist (v0.1, WU1b).** Funds leave only to entries of a list signed with a key
+  separate from the seed, enforced by the daemon. Approvals are revoke-only, there is a per-chain
+  fee cap, and `sign-message` is gated ([`04-whitelist.md`](04-whitelist.md)).
+- **G9 TUI (v0.2).** `zwallet tui`: keys, warm-up, balance + last 10 tx, tx detail, assets →
+  transfer to whitelisted recipients ([`03-tui.md`](03-tui.md)).
 - **G7 Distribution.** The llmux/harn pattern: CI, preview prereleases on every `main` push, stable
   releases on `v*` tags, Homebrew formulae `2lab-ai/tap/zwallet` and `2lab-ai/tap/zwallet-preview`,
   and an `xbrew install zwallet` recipe.
@@ -70,7 +75,7 @@ and Solana/TON implementations in v0.1.
 | A7 | `transfer --dry-run` on ethereum mainnet (0-value self-transfer) | `recoveredFrom == from`; nonce and fees come from the live chain |
 | A8 | `call` USDC `decimals()(uint8)` on ethereum; `invoke --dry-run` | `6`; `recoveredFrom == from` |
 | A9 | `backup` from a non-TTY shell | refused; the mnemonic is never printed to an agent |
-| A9b | with the default policy: a transfer over the rolling-24h cap, `invoke` of `approve(…)` to a spender not on the allowlist, a transfer of an unknown ERC-20; then editing the policy without the password, or editing wallet.json by hand | each signing request is refused by the daemon (`POLICY_DENIED`); edits without the password fail; a hand-edited store fails authentication |
+| A9b | the signed whitelist ([`04-whitelist.md`](04-whitelist.md) W1–W12): a send to an unlisted payee, a non-zero approve, an unlisted contract or selector, a hand-edited list, a fee over the cap | the daemon refuses with `WHITELIST_DENIED` / `WHITELIST_INVALID` / `FEE_CAP_EXCEEDED`; editing the list needs the password. (Amount caps were deferred on 2026-10-20: 04 §Not in v0.1.) |
 | A10 | `brew install 2lab-ai/tap/zwallet` and `…/zwallet-preview` | `zwallet --version` shows the release version and the preview channel respectively |
 | A11 | `xbrew install zwallet` | installs it (macOS through the tap formula; Arch through the verified release binary) |
 | A12 | the user creates and unlocks the real wallet on fable-m5max | the agent reads the address and balance without the human present, and after funding broadcasts a transfer with a receipt |

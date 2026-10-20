@@ -164,7 +164,17 @@ PQ-readiness in v0.1:
 Spend-once addresses are **not** the default. They break the stable deposit address the user asked
 for, and an EOA cannot sweep ERC-20 and ETH atomically.
 
-**AI resistance: usable, in v0.1, as a signing policy enforced by the daemon (WU1b).**
+**AI resistance = the signed whitelist, in v0.1 as WU1b, before funding**
+([`04-whitelist.md`](04-whitelist.md), revised 2026-10-20 after the gpt6 and zhuge spec reviews):
+- the daemon checks every value-moving signature against a list signed with a separate ed25519
+  key, and holds only the public key and the generation;
+- approvals are revoke-only;
+- contract entries need explicit selectors;
+- there is a per-chain fee cap;
+- `sign-message` is gated.
+
+The original WU1b plan below is superseded except for the amount caps, which stay planned. It is
+kept for reference:
 - The policy lives inside the encrypted, authenticated part of wallet.json, under the
   password-derived key. Viewing it works while locked; changing it needs the password, which only
   the human holds.
