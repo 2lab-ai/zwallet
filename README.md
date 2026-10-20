@@ -527,21 +527,21 @@ data).
 - **Daemon duties**: the daemon keeps only the master seed and the whitelist's sealed anchor in
   memory, and does nothing but derive addresses and sign; it makes no network request. Before it
   signs a transaction it reads `whitelist.json` and checks it against the anchor (see **The
-  whitelist**). That read runs outside the session's lock, on at most 4 readers at a time, and must
-  finish within 2 s (slower, or no free reader, is "could not be read in time":
-  `WHITELIST_INVALID`), so a stalled file cannot hold up `lock` or expiry; the session, its expiry
-  and `wallet.json`'s ciphertext are checked again before signing, so a read that finishes after
-  `lock`, expiry or a re-seal signs nothing. For a transaction it receives only the unsigned signing
-  payload bytes and decodes them itself: type, chain id, recipient, value, and the ABI method the
-  calldata calls (`transfer-call` / `approve-call` / `transfer-from-call`, each `assetType:
-  "unverified"`, else `contract-call`; see **`signerDecoded.action`**). It refuses anything zwallet
-  does not produce (other tx types, access lists, contract creation, non-canonical encodings,
-  calldata for those three methods that is not their canonical ABI encoding or that also sends
-  native value) and signs exactly the bytes it decoded. It never trusts intent fields from the CLI,
-  which is the agent-controlled side. On `lock`, at expiry (wall clock), or on SIGTERM it wipes the
-  seed and exits. A reboot or a dead daemon means locked. Everything else (RPC, ABI, tx building,
-  broadcast) runs in the one-shot CLI process, which checks every signature it gets back by
-  recovering the signer.
+  whitelist**). That read runs outside the session's lock, with at most 4 reads in flight; a request
+  waits at most 2 s in all, for a free slot and for its read, and past that the list "could not be
+  read in time" (`WHITELIST_INVALID`), so a stalled file cannot hold up `lock` or expiry. The
+  session, `wallet.json`'s ciphertext and, last, the expiry are checked again before signing, so a
+  read that finishes after `lock`, expiry or a re-seal signs nothing. For a transaction it receives
+  only the unsigned signing payload bytes and decodes them itself: type, chain id, recipient, value,
+  and the ABI method the calldata calls (`transfer-call` / `approve-call` / `transfer-from-call`,
+  each `assetType: "unverified"`, else `contract-call`; see **`signerDecoded.action`**). It refuses
+  anything zwallet does not produce (other tx types, access lists, contract creation, non-canonical
+  encodings, calldata for those three methods that is not their canonical ABI encoding or that also
+  sends native value) and signs exactly the bytes it decoded. It never trusts intent fields from the
+  CLI, which is the agent-controlled side. On `lock`, at expiry (wall clock), or on SIGTERM it wipes
+  the seed and exits. A reboot or a dead daemon means locked. Everything else (RPC, ABI, tx
+  building, broadcast) runs in the one-shot CLI process, which checks every signature it gets back
+  by recovering the signer.
 - **Daemon lifetime**: each connection is served in its own task with a 10 s I/O budget, so a
   silent client never delays expiry. Every second and on every request (including `status`) the
   daemon also checks that `wallet.json`'s ciphertext is still the one it decrypted and that

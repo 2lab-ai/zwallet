@@ -35,10 +35,10 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
   a contract entry delegates that authority.
 - **A total fee budget.** The fee cap bounds each transaction, not a sum: repeated transactions
   can each spend up to the cap.
-- **Signing availability.** The daemon reads the list on at most 4 readers at a time, within 2 s;
-  a slow file or too many requests at once make it "could not be read in time", and that
-  signature is refused (`WHITELIST_INVALID`). An agent can deny signing this way, never widen
-  it.
+- **Signing availability.** The daemon has at most 4 list reads in flight, and a request waits
+  at most 2 s in all, for a free slot and for its read. A stalled file or too many requests at
+  once make it "could not be read in time (2000 ms)", and every request meanwhile is refused
+  (`WHITELIST_INVALID`). An agent can deny signing this way, never widen it.
 - **The L1 data fee** on the OP-stack chains (Base, Optimism) is outside `gasLimit × maxFee`, and
   calldata can be up to about 512 KB.
 - **Joint rollback.** The seal is authenticated (AES-GCM) but not fresh: an older `wallet.json`
@@ -120,10 +120,10 @@ reason}`; `status` reads the list again on every call. On every `sign_tx`, after
 1. Load the list: `whitelist.json` through the safe reader, verified against the anchor; if it
    does not verify, `whitelist.next.json` if that verifies at the sealed generation and digest
    (an edit that re-sealed and died before its rename). The read runs outside the session's
-   lock, on at most 4 readers at a time, and must finish within 2 s: a slower read, or no free
-   reader, is "could not be read in time" and the list cannot be trusted. Before signing, the
-   session, its expiry and `wallet.json`'s ciphertext are checked again: a read that finishes
-   after `lock`, expiry or a re-seal signs nothing.
+   lock, with at most 4 reads in flight; a request waits at most 2 s in all, for a free slot and
+   for its read, and past that the list "could not be read in time (2000 ms)" and cannot be
+   trusted. Before signing, the session, `wallet.json`'s ciphertext and, last, the expiry are
+   checked again: a read that finishes after `lock`, expiry or a re-seal signs nothing.
 2. The list's state decides what can be signed at all:
    - **verified** (`Usable`): steps 3 and 4;
    - **no whitelist yet** (`NoList`: wallet.json seals no anchor): only a native self-transfer,
@@ -281,9 +281,9 @@ From part B (daemon), dispatcher decisions, with review round 1:
    list cannot be trusted; only a wallet with no whitelist yet gets the first-add command.
 5. An entry that does not cover the chain or the selector gets no `command` (the plan's
    `remove && add` was two edits, and a failed add would leave the entry gone).
-6. The list is read outside the session's lock, on at most 4 readers at a time, within 2 s
-   (slower, or no free reader, is "could not be read in time"), and the session, its expiry and
-   the ciphertext are checked again before signing.
+6. The list is read outside the session's lock with at most 4 reads in flight and a 2 s wait in
+   all (a free slot included; past it, "could not be read in time"), and the session, the
+   ciphertext and, last, the expiry are checked again before signing.
 7. `Response.details` carries the refusal details; no protocol version bump.
 
 From part C (CLI), with review round 1:
