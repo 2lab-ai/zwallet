@@ -10,13 +10,22 @@
 //! - `whitelist.key`: the ed25519 secret, sealed under the wallet password with its own salt,
 //!   nonce and associated data. Read by the editor only, never by the daemon.
 //!
+//! What each part guarantees:
+//! - The **signature** (ed25519, by a key kept in `whitelist.key` apart from the seed) says the
+//!   list was made by whoever holds that key: the editor, with the wallet password. The daemon
+//!   only ever holds the public key, so it can check lists but never make one.
+//! - The sealed **digest** says this is the one list committed at the sealed generation, so a
+//!   list the key signed for an edit that never committed is not accepted in its place.
+//! - The sealed **generation** names that commit for humans (`unlock` and `whitelist list` show
+//!   it) and makes an older copy fail with a plain reason.
+//!
 //! An edit ([`edit`], [`reset`]) is linearized under `w.lock`: pick the base ([`pick_base`]:
 //! the current list if it verifies, else a staged list the seal already names, else empty — an
-//! unverified list is never signed), apply the change at generation + 1, sign, write
-//! `whitelist.next.json`, re-seal wallet.json with the new anchor, rename `next` over
-//! `whitelist.json`. A crash at any point leaves the old generation standing or the staged one
-//! promotable. The caller stops every daemon first (a re-seal ends a running session anyway: the
-//! daemon notices wallet.json's ciphertext changed).
+//! unverified list is never signed), promote a staged sealed list to `whitelist.json`, apply the
+//! change at generation + 1, sign, write `whitelist.next.json`, re-seal wallet.json with the new
+//! anchor, rename `next` over `whitelist.json`. A crash at any point leaves the old generation
+//! standing or the staged one promotable. The caller stops every daemon first (a re-seal ends a
+//! running session anyway: the daemon notices wallet.json's ciphertext changed).
 //!
 //! The format is EVM-shaped (20-byte addresses, 4-byte selectors); which chain keys exist and
 //! which addresses are registry tokens come from the chains layer through [`ChainRules`].
@@ -614,6 +623,10 @@ impl WhitelistKey {
 /// ([`Whitelist::check_format`]), at the sealed generation, signed (strict ed25519) by the sealed
 /// public key, and the very list sealed at that generation (its digest). `VALIDATION_ERROR` with
 /// the reason otherwise; the daemon reports it as `WHITELIST_INVALID`.
+///
+/// It checks the format, not [`Whitelist::validate`]'s chain rules: a list signed before the
+/// registry gained a token stays valid as a whole, and the signer instead refuses any contract
+/// call to a registry token at sign time.
 pub fn verify(signed: &SignedList, anchor: &WhitelistAnchor) -> Result<()> {
     let list = &signed.list;
     list.check_format()?;
@@ -893,26 +906,25 @@ fn transact(
     let previous_generation = anchor.map(|a| a.generation);
 
     // Everything that can fail on its own happens before the first write.
-    let (key, key_created, base) = match (&mutate, &anchor) {
-        (Some(_), Some(a)) => (
-            load_key(home, password, a)?,
-            false,
-            pick_base(home, Some(a), rules),
-        ),
-        (Some(_), None) => (
-            WhitelistKey::generate()?,
-            true,
-            pick_base(home, None, rules),
-        ),
-        (None, _) => {
-            let mut list = Whitelist::empty(rules);
-            list.generation = previous_generation.unwrap_or(0);
-            let base = Base {
-                list,
-                source: BaseSource::Empty,
-                discarded: None,
-            };
-            (WhitelistKey::generate()?, true, base)
+    let (key, key_created) = match (&mutate, &anchor) {
+        (Some(_), Some(a)) => (load_key(home, password, a)?, false),
+        _ => (WhitelistKey::generate()?, true),
+    };
+    let picked = pick_base(home, anchor.as_ref(), rules);
+    // The sealed list may still sit in `whitelist.next.json` (an edit that re-sealed and died
+    // before its rename, or an agent's copy). Staging this edit overwrites that file, so it is
+    // made `whitelist.json` first, by reset too; otherwise a crash after staging would leave no
+    // file the seal names, and the committed list would be lost.
+    let promote = picked.source == BaseSource::PromotedNext;
+    let base = if mutate.is_some() {
+        picked
+    } else {
+        let mut list = Whitelist::empty(rules);
+        list.generation = previous_generation.unwrap_or(0);
+        Base {
+            list,
+            source: BaseSource::Empty,
+            discarded: None,
         }
     };
     let mut list = base.list.clone();
@@ -928,6 +940,15 @@ fn transact(
     let new_anchor = key.anchor_for(&signed);
     let policy = new_anchor.to_policy(&opened.unsealed().policy)?;
 
+    if let (true, Some(sealed)) = (promote, &anchor) {
+        lock.rename_file(NEXT_FILE, WHITELIST_FILE)?;
+        read_verified(&home.join(WHITELIST_FILE), sealed).map_err(|e| {
+            WalletError::validation(format!(
+                "the staged whitelist changed while it was promoted; nothing else was written: {}",
+                e.message
+            ))
+        })?;
+    }
     if key_created {
         // The KDF parameters that opened wallet.json, never a re-read.
         let kdf = opened.file().crypto.kdf_params()?;
@@ -978,6 +999,7 @@ mod tests {
     const BOB: &str = "0x3333333333333333333333333333333333333333";
     const CAROL: &str = "0x4444444444444444444444444444444444444444";
     const ROUTER: &str = "0x2222222222222222222222222222222222222222";
+    const DAN: &str = "0x5555555555555555555555555555555555555555";
 
     fn known(key: &str) -> bool {
         ["base", "ethereum", "polygon", "sepolia"].contains(&key)
@@ -1677,6 +1699,101 @@ mod tests {
         )
         .unwrap();
         assert_eq!(retry.list.generation, 3);
+    }
+
+    fn crash_at_next_written(stage: EditStage) -> Result<()> {
+        match stage {
+            EditStage::NextWritten(_) => Err(WalletError::validation("crash")),
+            _ => Ok(()),
+        }
+    }
+
+    /// The "re-sealed, not renamed" state left by a crash: the seal names [alice, bob] at
+    /// generation 2, held in `whitelist.next.json`; `whitelist.json` is still [alice] at 1.
+    fn promoted_by_a_crash() -> (tempfile::TempDir, Whitelist) {
+        let (tmp, _, committed) = crash_after(|s| matches!(s, EditStage::Resealed(_)));
+        (tmp, committed)
+    }
+
+    /// The same state made by hand, no crash needed: an agent copies the current list to
+    /// `whitelist.next.json` and puts an older signed copy in its place.
+    fn promoted_by_hand() -> (tempfile::TempDir, Whitelist) {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        let gen1 = fs::read(home.join(WHITELIST_FILE)).unwrap();
+        let committed = edit(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("bob", BOB, &["base"])),
+        )
+        .unwrap()
+        .list;
+        fs::copy(home.join(WHITELIST_FILE), home.join(NEXT_FILE)).unwrap();
+        fs::write(home.join(WHITELIST_FILE), &gen1).unwrap();
+        (tmp, committed)
+    }
+
+    #[test]
+    fn m1_a_second_crash_after_a_promotable_edit_keeps_the_sealed_list() {
+        for (how, (tmp, committed)) in [
+            ("crash", promoted_by_a_crash()),
+            ("by hand", promoted_by_hand()),
+        ] {
+            let home = tmp.path();
+            let anchor = sealed(home).unwrap();
+            let base = pick_base(home, Some(&anchor), &RULES);
+            assert_eq!(base.source, BaseSource::PromotedNext, "{how}");
+
+            // The next edit dies after staging its own list.
+            let carol = Entry::new_address("carol", CAROL, &["base"]);
+            let err =
+                edit_with_hook(home, PW, &RULES, add(carol), &crash_at_next_written).unwrap_err();
+            assert_eq!(err.message, "crash");
+            let anchor = sealed(home).unwrap();
+            assert_eq!(anchor.generation, 2, "{how}: not re-sealed");
+            let trusted = load_verified(home, &anchor)
+                .unwrap_or_else(|e| panic!("{how}: the committed list was lost: {}", e.message));
+            assert_eq!(trusted, committed, "{how}");
+            let base = pick_base(home, Some(&anchor), &RULES);
+            assert_eq!(
+                (base.source, &base.list),
+                (BaseSource::Current, &committed),
+                "{how}"
+            );
+
+            let edited = edit(
+                home,
+                PW,
+                &RULES,
+                add(Entry::new_address("dan", DAN, &["base"])),
+            );
+            let edited = edited.unwrap();
+            assert_eq!(edited.list.generation, 3, "{how}");
+            assert_eq!(nicknames(&edited.list), ["alice", "bob", "dan"], "{how}");
+        }
+    }
+
+    #[test]
+    fn m1_a_reset_that_crashes_from_a_promotable_state_keeps_the_sealed_list() {
+        for (how, (tmp, committed)) in [
+            ("crash", promoted_by_a_crash()),
+            ("by hand", promoted_by_hand()),
+        ] {
+            let home = tmp.path();
+            let err = reset_with_hook(home, PW, &RULES, &crash_at_next_written).unwrap_err();
+            assert_eq!(err.message, "crash");
+            let anchor = sealed(home).unwrap();
+            assert_eq!(anchor.generation, 2, "{how}: not re-sealed");
+            let trusted = load_verified(home, &anchor)
+                .unwrap_or_else(|e| panic!("{how}: the committed list was lost: {}", e.message));
+            assert_eq!(trusted, committed, "{how}");
+            // Run again, the reset completes.
+            let done = reset(home, PW, &RULES).unwrap();
+            assert_eq!(done.list.generation, 3, "{how}");
+            load_verified(home, &sealed(home).unwrap()).unwrap();
+        }
     }
 
     #[test]
