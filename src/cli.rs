@@ -148,16 +148,31 @@ pub struct InvokeArgs {
     /// Native value to send, in whole units (e.g. 0.01).
     #[arg(long)]
     pub value: Option<String>,
+    #[command(flatten)]
+    pub send: SendArgs,
+    #[arg(long)]
+    pub rpc: Option<String>,
+    #[command(flatten)]
+    pub key: KeyArg,
+}
+
+/// Options shared by the commands that sign and broadcast a transaction.
+#[derive(Debug, Args)]
+pub struct SendArgs {
     /// Build and sign from live chain state, but do not broadcast.
     #[arg(long)]
     pub dry_run: bool,
     /// Wait for the receipt after broadcasting.
     #[arg(long)]
     pub wait: bool,
-    #[arg(long)]
-    pub rpc: Option<String>,
-    #[command(flatten)]
-    pub key: KeyArg,
+    /// Use this nonce instead of the next free one. Reusing the nonce of a pending transaction
+    /// replaces it, so a retry after BROADCAST_UNCERTAIN cannot become a second send.
+    #[arg(long, value_name = "N")]
+    pub nonce: Option<u64>,
+    /// Allow a price per gas up to this many gwei, replacing the automatic ceiling on fees the
+    /// RPC suggests (raise it only when fees really are that high).
+    #[arg(long, value_name = "GWEI")]
+    pub max_fee_gwei: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -173,12 +188,12 @@ pub struct TransferArgs {
     /// ERC-20 token contract. Omit for the native coin.
     #[arg(long)]
     pub token: Option<String>,
-    /// Build and sign from live chain state, but do not broadcast.
+    /// Allow a recipient that is almost always a mistake: the zero address, or the token
+    /// contract itself.
     #[arg(long)]
-    pub dry_run: bool,
-    /// Wait for the receipt after broadcasting.
-    #[arg(long)]
-    pub wait: bool,
+    pub force: bool,
+    #[command(flatten)]
+    pub send: SendArgs,
     #[arg(long)]
     pub rpc: Option<String>,
     #[command(flatten)]
@@ -373,6 +388,66 @@ mod tests {
         let mut data = base.to_vec();
         data.extend(["--data", "0xd0e30db0", "--value", "0.1"]);
         assert!(Cli::try_parse_from(data).is_ok());
+    }
+
+    #[test]
+    fn send_flags_parse_on_transfer_and_invoke() {
+        let cli = Cli::try_parse_from([
+            "zwallet",
+            "transfer",
+            "--chain",
+            "base",
+            "--to",
+            "0x00",
+            "--amount",
+            "1",
+            "--nonce",
+            "12",
+            "--max-fee-gwei",
+            "0.5",
+            "--force",
+            "--wait",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Transfer(a) => {
+                assert_eq!(a.send.nonce, Some(12));
+                assert_eq!(a.send.max_fee_gwei.as_deref(), Some("0.5"));
+                assert!(a.force && a.send.wait && !a.send.dry_run);
+            }
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "zwallet",
+            "invoke",
+            "--chain",
+            "base",
+            "--to",
+            "0x00",
+            "--data",
+            "0x",
+            "--nonce",
+            "3",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Invoke(a) => assert_eq!((a.send.nonce, a.send.dry_run), (Some(3), true)),
+            other => panic!("{other:?}"),
+        }
+        // A negative or fractional nonce is a parse error; --force is transfer-only.
+        let bad = [
+            "zwallet", "invoke", "--chain", "base", "--to", "0x00", "--data", "0x",
+        ];
+        for extra in [
+            ["--nonce", "-1"],
+            ["--nonce", "1.5"],
+            ["--force", "--dry-run"],
+        ] {
+            let mut args = bad.to_vec();
+            args.extend(extra);
+            assert!(Cli::try_parse_from(args).is_err(), "{extra:?}");
+        }
     }
 
     #[test]

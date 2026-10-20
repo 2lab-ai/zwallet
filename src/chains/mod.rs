@@ -220,7 +220,53 @@ pub trait FamilyKeys: Sync {
 #[derive(Debug, Clone)]
 pub struct Net {
     pub chain: &'static Chain,
+    /// May carry an API key; print it only through [`redact_url`].
     pub rpc_url: String,
+}
+
+/// An RPC URL as it may be printed: scheme and host (with port) only. Providers put API keys in
+/// the path, the query or the userinfo (`https://eth-mainnet.g.alchemy.com/v2/<key>`), so
+/// anything after the host becomes `/<redacted>`. `https://host` and `https://host/` print as
+/// they are. Text that is not `scheme://...` is redacted whole.
+pub fn redact_url(url: &str) -> String {
+    let url = url.trim();
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<redacted>".to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let (host, userinfo) = match authority.rsplit_once('@') {
+        Some((_, host)) => (host, true),
+        None => (authority, false),
+    };
+    if userinfo || !(tail.is_empty() || tail == "/") {
+        format!("{scheme}://{host}/<redacted>")
+    } else {
+        format!("{scheme}://{host}{tail}")
+    }
+}
+
+/// Applies [`redact_url`] to every `http://` / `https://` URL inside free text, such as a
+/// transport error (reqwest quotes the full request URL). A URL ends at whitespace, a quote, `)`
+/// or `>`.
+pub fn redact_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = [rest.find("http://"), rest.find("https://")]
+        .into_iter()
+        .flatten()
+        .min()
+    {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | '`'))
+            .unwrap_or(tail.len());
+        out.push_str(&redact_url(&tail[..end]));
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +283,12 @@ pub struct TransferRequest {
     pub amount: String,
     pub token: Option<String>,
     pub dry_run: bool,
+    /// Use this account sequence number instead of the next free one (to replace a pending tx).
+    pub nonce: Option<u64>,
+    /// Explicit ceiling on the price per gas unit, in base units, replacing the automatic one.
+    pub max_fee_per_gas: Option<u128>,
+    /// Allow recipients that are almost certainly mistakes (zero address, the token itself).
+    pub force: bool,
 }
 
 /// An unsigned transaction plus the output fields describing it (nonce, fees, shortfall, ...).
@@ -250,8 +302,65 @@ pub struct PreparedTx {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedTx {
     pub raw: String,
+    /// Computed from `raw`; never taken from the node.
     pub tx_hash: String,
     pub signer: String,
+    /// The account sequence number the transaction consumes, where the family has one (EVM).
+    pub nonce: Option<u64>,
+}
+
+/// A broadcast that reached a node which holds the transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Broadcast {
+    /// The node accepted it and answered with the transaction's own hash.
+    Accepted,
+    /// The send call failed (the text), but the node reports the transaction by its hash.
+    KnownDespite(String),
+}
+
+/// The error for a transaction that may have reached the network: it carries `txHash`, `from`
+/// and `nonce` so the caller can look the transaction up, or retry with the same nonce so that
+/// the retry replaces it instead of becoming a second send.
+pub fn after_send_error(
+    code: ErrorCode,
+    chain: &Chain,
+    signed: &SignedTx,
+    what: &str,
+) -> WalletError {
+    let mut message = format!(
+        "{what}. The transaction {} may have reached the network ({}); do not resend blindly: \
+         look it up first",
+        signed.tx_hash,
+        chain.explorer_tx_url(&signed.tx_hash)
+    );
+    if let Some(n) = signed.nonce {
+        message.push_str(&format!(
+            ", or retry with --nonce {n} so that the retry replaces it instead of sending twice"
+        ));
+    }
+    let mut e = WalletError::new(code, message)
+        .with_detail("txHash", signed.tx_hash.as_str())
+        .with_detail("from", signed.signer.as_str());
+    if let Some(n) = signed.nonce {
+        e = e.with_detail("nonce", n);
+    }
+    e
+}
+
+/// Adds a `--wait` result to a broadcast's output. The transaction is already sent, so a receipt
+/// problem never becomes a failure (a retry would send again): no receipt in time is
+/// `status: "pending"`, an RPC error is `status: "unknown"` with `receiptError`.
+pub fn record_receipt(out: &mut Map<String, Value>, receipt: Result<Option<Value>>) {
+    match receipt {
+        Ok(Some(Value::Object(r))) => out.extend(r),
+        Ok(Some(_)) | Ok(None) => {
+            out.insert("status".into(), Value::from("pending"));
+        }
+        Err(e) => {
+            out.insert("status".into(), Value::from("unknown"));
+            out.insert("receiptError".into(), Value::from(e.message));
+        }
+    }
 }
 
 /// Network-side operations, run by the one-shot CLI process (no key access).
@@ -272,7 +381,10 @@ pub trait ChainFamily: FamilyKeys {
     /// Builds an unsigned transfer from live chain state. Outside dry-run this fails with
     /// `INSUFFICIENT_FUNDS` instead of returning a transaction that cannot pay for itself.
     async fn prepare_transfer(&self, net: &Net, req: &TransferRequest) -> Result<PreparedTx>;
-    async fn broadcast(&self, net: &Net, signed: &SignedTx) -> Result<String>;
+    /// Hands `signed` to the node. A failure before the send is an ordinary error whose message
+    /// says nothing was broadcast. Once the request has gone out, a failure whose outcome the
+    /// node cannot confirm is `BROADCAST_UNCERTAIN` (see [`after_send_error`]).
+    async fn broadcast(&self, net: &Net, signed: &SignedTx) -> Result<Broadcast>;
     /// `Ok(None)` when no receipt appeared within `timeout`.
     async fn wait_for_receipt(
         &self,
@@ -341,6 +453,91 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), CHAINS.len());
+    }
+
+    #[test]
+    fn rpc_urls_print_scheme_and_host_only() {
+        for (url, shown) in [
+            (
+                "https://ethereum-rpc.publicnode.com",
+                "https://ethereum-rpc.publicnode.com",
+            ),
+            ("http://127.0.0.1:8545", "http://127.0.0.1:8545"),
+            ("https://host.example/", "https://host.example/"),
+            (
+                "https://eth-mainnet.g.alchemy.com/v2/KEY",
+                "https://eth-mainnet.g.alchemy.com/<redacted>",
+            ),
+            (
+                "https://host.example?apikey=KEY",
+                "https://host.example/<redacted>",
+            ),
+            (
+                "https://host.example/#KEY",
+                "https://host.example/<redacted>",
+            ),
+            (
+                "https://user:KEY@host.example:8545",
+                "https://host.example:8545/<redacted>",
+            ),
+            ("not a url KEY", "<redacted>"),
+        ] {
+            assert_eq!(redact_url(url), shown, "{url}");
+        }
+        let text = "error sending request for url (https://h.example/v3/KEY?x=KEY2): refused; \
+                    retry http://127.0.0.1:1/KEY3 or \"https://a.example\"";
+        let clean = redact_urls(text);
+        assert!(!clean.contains("KEY"), "{clean}");
+        assert_eq!(
+            clean,
+            "error sending request for url (https://h.example/<redacted>): refused; retry \
+             http://127.0.0.1:1/<redacted> or \"https://a.example\""
+        );
+        assert_eq!(redact_urls("no urls here"), "no urls here");
+    }
+
+    #[test]
+    fn receipt_outcomes_never_fail_a_sent_transaction() {
+        let sent = || {
+            let mut m = Map::new();
+            m.insert("txHash".into(), Value::from("0xab"));
+            m.insert("nonce".into(), Value::from(7));
+            m
+        };
+        let mut timed_out = sent();
+        record_receipt(&mut timed_out, Ok(None));
+        assert_eq!(timed_out["status"], "pending");
+        assert_eq!(timed_out["nonce"], 7);
+        let mut failed = sent();
+        record_receipt(&mut failed, Err(WalletError::rpc("boom")));
+        assert_eq!(failed["status"], "unknown");
+        assert_eq!(failed["receiptError"], "boom");
+        assert_eq!(failed["nonce"], 7);
+        let mut mined = sent();
+        let receipt = serde_json::json!({ "status": "success", "blockNumber": 9 });
+        record_receipt(&mut mined, Ok(Some(receipt)));
+        assert_eq!(mined["status"], "success");
+        assert_eq!(mined["nonce"], 7);
+    }
+
+    #[test]
+    fn after_send_error_carries_hash_nonce_and_from() {
+        let chain = find("base").unwrap();
+        let signed = SignedTx {
+            raw: "0x02".into(),
+            tx_hash: "0xabc".into(),
+            signer: "0xF00".into(),
+            nonce: Some(4),
+        };
+        let e = after_send_error(ErrorCode::BroadcastUncertain, chain, &signed, "timed out");
+        let v = e.to_json();
+        assert_eq!(v["errorCode"], "BROADCAST_UNCERTAIN");
+        assert_eq!(v["txHash"], "0xabc");
+        assert_eq!(v["nonce"], 4);
+        assert_eq!(v["from"], "0xF00");
+        assert!(e.message.starts_with("timed out."), "{}", e.message);
+        assert!(e.message.contains("--nonce 4"), "{}", e.message);
+        assert!(e.message.contains("https://basescan.org/tx/0xabc"));
     }
 
     #[test]

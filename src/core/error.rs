@@ -2,6 +2,7 @@
 //! output exposes as `errorCode`; the message is human text and must never contain secrets.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +20,8 @@ pub enum ErrorCode {
     InvalidAddress,
     RpcError,
     InsufficientFunds,
+    /// The signed transaction was handed to the node but whether it was accepted is unknown.
+    BroadcastUncertain,
 }
 
 impl ErrorCode {
@@ -36,6 +39,7 @@ impl ErrorCode {
             Self::InvalidAddress => "INVALID_ADDRESS",
             Self::RpcError => "RPC_ERROR",
             Self::InsufficientFunds => "INSUFFICIENT_FUNDS",
+            Self::BroadcastUncertain => "BROADCAST_UNCERTAIN",
         }
     }
 }
@@ -51,6 +55,9 @@ impl fmt::Display for ErrorCode {
 pub struct WalletError {
     pub code: ErrorCode,
     pub message: String,
+    /// Extra machine-readable fields for the `--json` error object (e.g. `txHash` after a send
+    /// whose outcome is unknown). Never secrets.
+    pub details: Map<String, Value>,
 }
 
 impl WalletError {
@@ -58,7 +65,14 @@ impl WalletError {
         Self {
             code,
             message: message.into(),
+            details: Map::new(),
         }
+    }
+
+    /// Adds a field to the `--json` error object (`error` and `errorCode` cannot be replaced).
+    pub fn with_detail(mut self, key: &str, value: impl Into<Value>) -> Self {
+        self.details.insert(key.to_string(), value.into());
+        self
     }
 
     pub fn validation(message: impl Into<String>) -> Self {
@@ -81,10 +95,35 @@ impl WalletError {
         )
     }
 
-    /// JSON body printed on stdout for `--json` failures.
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "error": self.message, "errorCode": self.code.as_str() })
+    /// JSON body printed on stdout for `--json` failures: `{ error, errorCode, ...details }`.
+    pub fn to_json(&self) -> Value {
+        let mut out = self.details.clone();
+        out.insert("error".into(), Value::from(self.message.as_str()));
+        out.insert("errorCode".into(), Value::from(self.code.as_str()));
+        Value::Object(out)
     }
 }
 
 pub type Result<T> = std::result::Result<T, WalletError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_carries_details_but_never_replaces_error_or_code() {
+        let e = WalletError::new(ErrorCode::BroadcastUncertain, "maybe sent")
+            .with_detail("txHash", "0xab")
+            .with_detail("nonce", 7)
+            .with_detail("errorCode", "SPOOFED");
+        let v = e.to_json();
+        assert_eq!(v["errorCode"], "BROADCAST_UNCERTAIN");
+        assert_eq!(v["error"], "maybe sent");
+        assert_eq!(v["txHash"], "0xab");
+        assert_eq!(v["nonce"], 7);
+        assert_eq!(
+            WalletError::validation("x").to_json(),
+            serde_json::json!({ "error": "x", "errorCode": "VALIDATION_ERROR" })
+        );
+    }
+}

@@ -6,9 +6,10 @@ pub mod rpc;
 pub mod tx;
 
 use crate::chains::{
-    Balance, Chain, ChainFamily, Family, FamilyKeys, Net, PreparedTx, SignedTx, TransferRequest,
+    Balance, Broadcast, Chain, ChainFamily, Family, FamilyKeys, Net, PreparedTx, SignedTx,
+    TransferRequest, after_send_error,
 };
-use crate::core::error::{Result, WalletError};
+use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
 use alloy::hex;
 use alloy::primitives::{Address, B256, Signature};
@@ -130,10 +131,11 @@ impl FamilyKeys for Evm {
             })?;
         let decoded = tx::decode_unsigned(&payload)?;
         let want = config(chain).chain_id;
-        if decoded.chain_id != want {
+        if decoded.chain_id() != want {
             return Err(WalletError::validation(format!(
                 "refusing to sign: tx chainId {} is not {} ({want})",
-                decoded.chain_id, chain.key
+                decoded.chain_id(),
+                chain.key
             )));
         }
         let signed = tx::sign_decoded(&signer_at(seed, index)?, &decoded)?;
@@ -186,6 +188,7 @@ impl ChainFamily for Evm {
             raw: hex0x(&raw),
             tx_hash: hex0x(decoded.hash),
             signer: decoded.signer.to_checksum(None),
+            nonce: Some(decoded.nonce),
         })
     }
 
@@ -219,11 +222,41 @@ impl ChainFamily for Evm {
         rpc::prepare_transfer(net, req).await
     }
 
-    async fn broadcast(&self, net: &Net, signed: &SignedTx) -> Result<String> {
+    async fn broadcast(&self, net: &Net, signed: &SignedTx) -> Result<Broadcast> {
+        let nothing_sent = |e: WalletError| {
+            WalletError::new(
+                e.code,
+                format!("{}; nothing was broadcast, so a retry is safe", e.message),
+            )
+        };
         let raw = hex::decode(signed.raw.trim_start_matches("0x"))
-            .map_err(|_| WalletError::validation("malformed raw transaction"))?;
-        let p = rpc::connect(net).await?;
-        Ok(hex0x(rpc::broadcast(&p, &raw).await?))
+            .map_err(|_| nothing_sent(WalletError::validation("malformed raw transaction")))?;
+        let hash: B256 = signed
+            .tx_hash
+            .parse()
+            .map_err(|_| nothing_sent(WalletError::validation("malformed tx hash")))?;
+        let p = rpc::connect(net).await.map_err(nothing_sent)?;
+        match rpc::send_raw(&p, &raw, hash).await {
+            rpc::SendOutcome::Accepted => Ok(Broadcast::Accepted),
+            rpc::SendOutcome::KnownDespite(why) => Ok(Broadcast::KnownDespite(why)),
+            rpc::SendOutcome::HashMismatch(other) => Err(after_send_error(
+                ErrorCode::RpcError,
+                net.chain,
+                signed,
+                &format!(
+                    "the RPC answered eth_sendRawTransaction with hash {}, not the transaction's \
+                     own hash",
+                    hex0x(other)
+                ),
+            )
+            .with_detail("rpcTxHash", hex0x(other))),
+            rpc::SendOutcome::Unknown(why) => Err(after_send_error(
+                ErrorCode::BroadcastUncertain,
+                net.chain,
+                signed,
+                &format!("{why}, and the node does not report the transaction"),
+            )),
+        }
     }
 
     async fn wait_for_receipt(
