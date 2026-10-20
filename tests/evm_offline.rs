@@ -2888,6 +2888,44 @@ fn f1_a_dry_run_the_list_denies_is_explained_and_never_reaches_the_signer() {
 }
 
 #[test]
+#[ignore = "needs part B's b044cda and 24b2bae (an untrusted list suggests no edit and refuses \
+            self-transfers); un-ignore when B and C are merged"]
+fn f1_a_dry_run_with_an_untrusted_list_names_no_edit_and_refuses_even_a_self_transfer() {
+    let home = Home::new();
+    let me = home.create("t", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    home.allow("alice", ALICE, &["ethereum"]);
+    std::fs::write(home.path().join("whitelist.json"), b"{ not a list").unwrap();
+    let fake = common::FakeDaemon::answering(
+        &home.sock(),
+        json!({ "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z" }),
+    );
+    let rpc = MockRpc::start(healthy);
+    let mut zero = pay("ethereum", &me, &rpc.url, &["--dry-run"]);
+    zero[6] = "0";
+    for args in [pay("ethereum", OTHER, &rpc.url, &["--dry-run"]), zero] {
+        let v = home.run(&args).ok();
+        let w = &v["whitelist"];
+        assert_eq!(w["allowed"], false, "{v:#}");
+        assert_eq!(w["code"], "WHITELIST_INVALID", "{v:#}");
+        // No edit is suggested from a list that cannot be trusted.
+        assert!(w.get("command").is_none(), "{v:#}");
+        assert!(
+            w["reason"]
+                .as_str()
+                .unwrap()
+                .contains("zwallet whitelist list --verify"),
+            "{v:#}"
+        );
+    }
+    let ops = daemon_ops(&fake);
+    assert!(!ops.iter().any(|op| op == "sign_tx"), "{ops:?}");
+    assert!(rpc.sent().is_empty());
+}
+
+#[test]
 fn f1_a_dry_run_without_a_whitelist_file_is_left_to_the_daemon() {
     // Without whitelist.json this process cannot tell a fresh wallet from a deleted list (the
     // anchor is sealed): it checks nothing and asks the daemon, as a live send would.
