@@ -47,3 +47,22 @@ jobs:
 
       - name: cargo test
         run: cargo test --locked
+
+      # The build env reaches `zwallet --version` exactly (src/lib.rs version_line):
+      # channel verbatim, build id cut to 12 chars. After `cargo test`, so the tests
+      # above still see an unset channel.
+      - name: Version line smoke test
+        shell: bash
+        env:
+          ZWALLET_BUILD_CHANNEL: preview
+          ZWALLET_BUILD_ID: 0123456789abcdef0123
+        run: |
+          set -euo pipefail
+          version="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          expected="zwallet $version (preview 0123456789ab)"
+          actual="$(cargo run --locked -q -- --version)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::version line mismatch: expected '$expected', got '$actual'"
+            exit 1
+          fi
+          echo "$actual"

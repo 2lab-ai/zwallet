@@ -74,6 +74,26 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      # Exact version line of the shipped binary, expected from sources independent of
+      # the build env: channel literal, Cargo.toml version, checked-out commit. Every
+      # target runs on its own runner except x86_64-apple-darwin (cross-built on arm64).
+      - name: Smoke-test version line
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          commit="$(git rev-parse HEAD)"
+          expected="zwallet $version (release ${commit:0:12})"
+          actual="$("target/$TARGET/release/zwallet" --version)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::version line mismatch: expected '$expected', got '$actual'"
+            exit 1
+          fi
+          echo "$actual"
+
       - name: Package artifact
         shell: bash
         run: |
