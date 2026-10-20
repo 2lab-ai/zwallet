@@ -100,6 +100,9 @@ seed, so the wallet file and the daemon protocol do not change.
     run on helper threads, bounded to 1 s and cached, so a FUSE path in another process's argv
     cannot hang it.
   - `status.locked` comes from the process table (`daemonPids`), not from the socket's answer.
+    `status` also lists `otherDaemonPids` (daemons of other homes), and `lock` reads no home at
+    all, so a stalled or repointed home path cannot hang it. A process listing that cannot be
+    read completely is an error, never "no daemons".
 
   A fake process that copies that argv gets killed too, which is harmless.
 - **The daemon holds the seed in memory**, zeroizes it on `lock` or expiry, and exits at expiry.
@@ -217,17 +220,30 @@ the same payment.
 - **One send per key and chain at a time.** A send holds `nonce-<chainId>-<addr>.lock` from before
   `prepare` until the command returns, including `--wait` (`--wait-timeout`, default 90 s). A
   second send while the lock is held fails at once with nothing signed.
-- **Send journal** (round 3). Right before `eth_sendRawTransaction`, one line is appended and
+- **Send journal** (rounds 3–4). Right before `eth_sendRawTransaction`, one line is appended and
   fsynced to `sends-<chainId>-<addr>.jsonl` (0600): `{ts, chain, from, nonce, txHash, to, value,
-  kind, token?}`. The same fields go to stderr as "broadcasting …". If the journal write fails,
-  nothing is broadcast. A process killed after the broadcast therefore still leaves a record.
-- **Fresh-send guards** (round 3; a send without `--nonce`, live only; a dry-run reports instead):
+  amountRaw, kind, token?}`.
+  - The same fields go to stderr as "broadcasting …".
+  - If the journal write fails, nothing is broadcast, so a process killed after the broadcast
+    still leaves a record.
+  - The journal is opened `O_NOFOLLOW|O_NONBLOCK`, and must be a regular file owned by our uid. A
+    FIFO, a directory or a symlink fails closed.
+  - Before appending, a cut-off last line is terminated, so it cannot swallow the next record.
+  - Reads cover the last 1 MiB. If the journal cannot be read, a send without `--nonce` is
+    refused before signing.
+- **Fresh-send guards** (rounds 3–4; a send without `--nonce`, live only; a dry-run reports
+  instead):
   - **Pending guard:** refused if the account's pending nonce exceeds its mined nonce, i.e. a tx
-    from this key is still in the pool. The error names the pending nonces and their journal
-    entries. `--allow-pending` overrides.
-  - **Duplicate guard:** refused if the journal has the same chain, kind, `to`, value (and token)
-    from the last 10 minutes. This catches "my first attempt was killed, re-run" even when that
-    attempt has already been mined. `--allow-duplicate` overrides.
+    from this key is still in the pool. The error names the pending nonces (`pendingNonces` holds
+    the first 64, plus `pendingRange` and `pendingCount`, so a bogus count is never enumerated)
+    and their journal entries. `--allow-pending` overrides.
+  - **Duplicate guard:** refused if the journal has the same chain, kind, `to` and **base-unit
+    amount** (and token contract) from the last 10 minutes. It never compares the display string,
+    so a failed `symbol()` call cannot defeat it. This catches "my first attempt was killed,
+    re-run" even when that attempt has already been mined. `--allow-duplicate` overrides.
+- **Lookup:** `zwallet tx --chain <c> <txHash>` reports mined / pending / not found from the chain,
+  works without a wallet, and treats a node that answers for a different hash as `RPC_ERROR`.
+  Every "look it up" message prints this command and the explorer URL.
 - **Before the send:** an error is `RPC_ERROR` "nothing was broadcast — if you retry, pass
   `--nonce N`".
 - **After the send:** the computed hash is polled.
