@@ -889,7 +889,7 @@ fn transact(
     store::read_wallet_file(home)?;
     let lock = MetaLock::acquire(home)?;
     let opened = lock.open(password)?;
-    let anchor = opened.unsealed.whitelist_anchor()?;
+    let anchor = opened.unsealed().whitelist_anchor()?;
     let previous_generation = anchor.map(|a| a.generation);
 
     // Everything that can fail on its own happens before the first write.
@@ -926,10 +926,11 @@ fn transact(
     list.validate(rules)?;
     let signed = key.sign(&list);
     let new_anchor = key.anchor_for(&signed);
-    let policy = new_anchor.to_policy(&opened.unsealed.policy)?;
+    let policy = new_anchor.to_policy(&opened.unsealed().policy)?;
 
     if key_created {
-        let kdf = opened.file.crypto.kdf_params()?;
+        // The KDF parameters that opened wallet.json, never a re-read.
+        let kdf = opened.file().crypto.kdf_params()?;
         let file = KeyFile {
             version: KEY_FILE_VERSION,
             crypto: store::seal_whitelist_key(&Zeroizing::new(key.0.to_bytes()), password, kdf)?,

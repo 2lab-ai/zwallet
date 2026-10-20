@@ -396,9 +396,14 @@ pub fn open_whitelist_key(sealed: &CryptoBox, password: &str) -> Result<Zeroizin
 /// there is no whitelist yet.
 ///
 /// The digest binds the generation to exactly one list: an edit that died after signing
-/// `whitelist.next.json` but before re-sealing leaves a signed list at generation + 1 behind, and the
-/// next edit signs a different list at that same generation. Without the digest, a copy of the
-/// abandoned one would verify too.
+/// `whitelist.next.json` but before re-sealing leaves a signed list at generation + 1 behind, and
+/// the next edit signs a different list at that same generation. Without the digest, a copy of
+/// the abandoned one would verify too.
+///
+/// AES-GCM authenticates the anchor but gives it no freshness: an authentic older wallet.json can
+/// be put back by anyone who can write the home. One sealed with `{}` reads as "no whitelist",
+/// which refuses every value-moving signature (fails closed); one with an older anchor, restored
+/// together with its list and key, is the documented joint rollback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WhitelistAnchor {
     pub public_key: [u8; 32],
@@ -838,14 +843,26 @@ pub struct MetaLock {
 }
 
 /// wallet.json as [`MetaLock::open`] decrypted it: the file, its sealed contents, and the
-/// password that opened them (zeroized on drop). Deliberately not `Debug`.
+/// password that opened them (zeroized on drop). Read-only, so what [`MetaLock::reseal`] seals is
+/// exactly what was opened. Deliberately not `Debug`.
 pub struct Opened {
-    pub file: WalletFile,
-    pub unsealed: Unsealed,
+    file: WalletFile,
+    unsealed: Unsealed,
     password: Zeroizing<String>,
 }
 
 impl Opened {
+    /// wallet.json as it was when opened. Its crypto envelope is authenticated: these KDF
+    /// parameters, salt and nonce are the ones that decrypted it.
+    pub fn file(&self) -> &WalletFile {
+        &self.file
+    }
+
+    /// The seed and the sealed policy.
+    pub fn unsealed(&self) -> &Unsealed {
+        &self.unsealed
+    }
+
     /// The password that opened this wallet.json (for sealing `whitelist.key` alongside it).
     pub fn password(&self) -> &str {
         &self.password
@@ -925,9 +942,16 @@ impl MetaLock {
     }
 
     /// Re-seals the master in wallet.json with `policy` under the password that opened it (the
-    /// whitelist editor's commit point). If wallet.json no longer holds the ciphertext `opened`
-    /// came from, nothing is written. The mnemonic, the password and the KDF parameters carry
-    /// over, the salt and nonce are fresh, the metadata is untouched.
+    /// whitelist editor's commit point). If wallet.json's crypto envelope is no longer exactly
+    /// the one `opened` came from (cipher, KDF and every KDF parameter, salt, nonce,
+    /// ciphertext), nothing is written. The mnemonic, the password and the KDF parameters carry
+    /// over from `opened`, never from a re-read: a file can be edited on disk without the
+    /// password, so a re-read could downgrade the KDF. The salt and nonce are fresh; the metadata
+    /// is untouched.
+    ///
+    /// That comparison is a snapshot check among writers that take `w.lock`, not an atomic
+    /// compare-and-swap: a same-user process that ignores the lock can still race the rename
+    /// (the same-user limits in README §Known limits).
     ///
     /// The new file is written to a temp file, read back from disk and decrypted (the phrase and
     /// the policy must come out as sealed, the metadata as it was), and only then renamed over
@@ -936,14 +960,17 @@ impl MetaLock {
     pub fn reseal(&self, opened: &Opened, policy: &Value) -> Result<WalletFile> {
         let home = &self.home;
         let before = read_wallet_file(home)?;
-        if before.crypto.ciphertext != opened.file.crypto.ciphertext {
+        if serde_json::to_value(&before.crypto).ok()
+            != serde_json::to_value(&opened.file.crypto).ok()
+        {
             return Err(WalletError::validation(
                 "wallet.json's master changed while the password was checked; retry",
             ));
         }
         let (seed, password) = (&opened.unsealed.seed, opened.password.as_str());
+        let kdf = opened.file.crypto.kdf_params()?;
         let mut file = before.clone();
-        file.crypto = encrypt(seed, policy, password, before.crypto.kdf_params()?)?;
+        file.crypto = encrypt(seed, policy, password, kdf)?;
         let bytes = to_json_bytes(&file)?;
         let path = home.join(WALLET_FILE);
         let tmp = temp_path(home);
@@ -2042,7 +2069,7 @@ mod tests {
         );
         let reopened = decrypt(&on_disk.crypto, PW).unwrap();
         assert_eq!(reopened.policy, policy);
-        assert_eq!(reopened.seed.phrase(), opened.unsealed.seed.phrase());
+        assert_eq!(reopened.seed.phrase(), opened.unsealed().seed.phrase());
 
         // `opened` is now stale: wallet.json holds another ciphertext. Nothing is written.
         let bytes = fs::read(home.join(WALLET_FILE)).unwrap();
@@ -2053,6 +2080,48 @@ mod tests {
         // The metadata writers carry the new master through untouched.
         set_active(home, "a").unwrap();
         assert_eq!(unlock(home, PW, &fake_derive).unwrap().0.policy, policy);
+    }
+
+    #[test]
+    fn reseal_refuses_an_envelope_changed_on_disk_after_open() {
+        // M2: the default KDF (log_n 18), so a downgrade to 15 is visible.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        create_master(home, PW, "a", MasterOptions::default(), &fake_derive).unwrap();
+        let path = home.join(WALLET_FILE);
+        let original = fs::read(&path).unwrap();
+        let lock = MetaLock::acquire(home).unwrap();
+        let opened = lock.open(PW).unwrap();
+        let policy = serde_json::json!({ "whitelistGen": 1 });
+        type Tamper = fn(&mut CryptoBox);
+        let tampers: [(&str, Tamper); 5] = [
+            ("log_n 18 -> 15", |c| c.kdfparams.log_n = 15),
+            ("salt", |c| c.kdfparams.salt = "00".repeat(32)),
+            ("nonce", |c| c.nonce = "00".repeat(12)),
+            ("dklen", |c| c.kdfparams.dklen = 16),
+            ("kdf name", |c| c.kdf = "pbkdf2".into()),
+        ];
+        for (what, tamper) in tampers {
+            // Only the envelope changes; the ciphertext stays the one that was opened.
+            let mut file: WalletFile = serde_json::from_slice(&original).unwrap();
+            tamper(&mut file.crypto);
+            fs::write(&path, to_json_bytes(&file).unwrap()).unwrap();
+            let tampered = fs::read(&path).unwrap();
+            let err = lock.reseal(&opened, &policy).unwrap_err();
+            assert!(err.message.contains("changed"), "{what}: {}", err.message);
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                tampered,
+                "{what}: nothing written"
+            );
+        }
+        fs::write(&path, &original).unwrap();
+        let after = lock.reseal(&opened, &policy).unwrap();
+        assert_eq!(
+            after.crypto.kdfparams.log_n, KDF_MAX_LOG_N,
+            "the opened KDF carries over"
+        );
+        assert_eq!(decrypt(&after.crypto, PW).unwrap().policy, policy);
     }
 
     #[test]
