@@ -2,6 +2,7 @@
 //! EIP-155 transactions, ERC-20, and arbitrary contract calls.
 
 pub mod abi;
+pub mod registry;
 pub mod rpc;
 pub mod tx;
 
