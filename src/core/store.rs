@@ -1041,17 +1041,21 @@ impl MetaLock {
 
     /// Renames `<home>/<from>` over `<home>/<to>` and fsyncs the directory. Same refusals as
     /// [`MetaLock::replace_file`].
-    pub(crate) fn rename_file(&self, from: &str, to: &str) -> Result<()> {
-        check_plain_name(from)?;
-        check_plain_name(to)?;
-        let (src, dst) = (self.home.join(from), self.home.join(to));
-        fs::rename(&src, &dst).map_err(|e| {
-            WalletError::validation(format!(
-                "cannot rename {} to {}: {e}",
-                src.display(),
-                dst.display()
-            ))
-        })?;
+    /// Removes the plain file `name` from the home (gone already is fine), then syncs the
+    /// directory.
+    pub(crate) fn remove_file(&self, name: &str) -> Result<()> {
+        check_plain_name(name)?;
+        let path = self.home.join(name);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(WalletError::validation(format!(
+                    "cannot remove {}: {e}",
+                    path.display()
+                )));
+            }
+        }
         sync_dir(&self.home)
     }
 
@@ -2135,7 +2139,9 @@ mod tests {
         lock.replace_file("w.next", b"two").unwrap();
         assert_eq!(fs::read(home.join("w.next")).unwrap(), b"two");
         assert_eq!(mode(&home.join("w.next")), 0o600);
-        lock.rename_file("w.next", "w.cur").unwrap();
+        lock.replace_file("w.cur", b"two").unwrap();
+        lock.remove_file("w.next").unwrap();
+        lock.remove_file("w.next").unwrap();
         assert_eq!(fs::read(home.join("w.cur")).unwrap(), b"two");
         assert!(!home.join("w.next").exists());
         for name in [
@@ -2149,7 +2155,7 @@ mod tests {
             ".x",
         ] {
             assert!(lock.replace_file(name, b"x").is_err(), "{name:?}");
-            assert!(lock.rename_file("w.cur", name).is_err(), "{name:?}");
+            assert!(lock.remove_file(name).is_err(), "{name:?}");
         }
         assert_eq!(fs::read(home.join(WALLET_FILE)).unwrap(), wallet);
         assert_eq!(

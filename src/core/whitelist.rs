@@ -740,14 +740,13 @@ pub fn verify(signed: &SignedList, anchor: &WhitelistAnchor) -> Result<()> {
         .ok_or_else(|| {
             WalletError::validation("wallet.json's sealed whitelist key is not a valid ed25519 key")
         })?;
+    if !signed_by(signed, &key) {
+        return Err(WalletError::validation(
+            "whitelist signature does not verify against this wallet's whitelist key (edited by \
+             hand, or signed by another key)",
+        ));
+    }
     let message = signed_message(list);
-    key.verify_strict(&message, &Signature::from_bytes(&signed.sig))
-        .map_err(|_| {
-            WalletError::validation(
-                "whitelist signature does not verify against this wallet's whitelist key (edited \
-                 by hand, or signed by another key)",
-            )
-        })?;
     if keccak256(&message).0 != anchor.digest {
         return Err(WalletError::validation(format!(
             "whitelist is not the list sealed at generation {} (an abandoned edit's copy)",
@@ -755,6 +754,34 @@ pub fn verify(signed: &SignedList, anchor: &WhitelistAnchor) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Whether `signed`'s signature verifies (strict ed25519) under `key`.
+fn signed_by(signed: &SignedList, key: &VerifyingKey) -> bool {
+    key.verify_strict(
+        &signed_message(&signed.list),
+        &Signature::from_bytes(&signed.sig),
+    )
+    .is_ok()
+}
+
+/// Whether `signed` is a list the sealed key signed at a generation above the seal's. Lists are
+/// published (renamed into place) only after the re-seal that names them, so a `whitelist.json`
+/// like that means wallet.json was put back to an older copy.
+fn newer_than_seal(signed: &SignedList, anchor: &WhitelistAnchor) -> bool {
+    signed.list.generation > anchor.generation
+        && VerifyingKey::from_bytes(&anchor.public_key)
+            .is_ok_and(|key| !key.is_weak() && signed_by(signed, &key))
+}
+
+/// The reason for a `whitelist.json` newer than the seal ([`newer_than_seal`]).
+fn rolled_back(signed: &SignedList, anchor: &WhitelistAnchor) -> String {
+    format!(
+        "{WHITELIST_FILE} (gen {}) is newer than the seal (gen {}): wallet.json was rolled back; \
+         restore the current wallet.json (zwallet keeps no copy of it), never an older \
+         {WHITELIST_FILE}",
+        signed.list.generation, anchor.generation
+    )
 }
 
 /// Reads a list file through the wallet's safe reader (no symlink, no FIFO, a regular file of
@@ -833,13 +860,25 @@ impl ListFileRead {
 
     /// The list in this file if it verifies against `anchor`.
     fn verified(&self, anchor: &WhitelistAnchor) -> Result<Whitelist> {
-        let name = self.path.file_name().unwrap_or_default().to_string_lossy();
+        let name = self.name();
         let signed = self
             .parsed()?
             .ok_or_else(|| WalletError::validation(format!("there is no {name}")))?;
-        verify(&signed, anchor)
-            .map_err(|e| WalletError::validation(format!("{name}: {}", e.message)))?;
+        verify(&signed, anchor).map_err(|e| {
+            // whitelist.json is published only after the re-seal that names it: one newer than
+            // the seal means the seal was rolled back, not the list.
+            if name == WHITELIST_FILE && newer_than_seal(&signed, anchor) {
+                WalletError::validation(rolled_back(&signed, anchor))
+            } else {
+                WalletError::validation(format!("{name}: {}", e.message))
+            }
+        })?;
         Ok(signed.list)
+    }
+
+    /// Whether this file holds a list newer than the seal ([`newer_than_seal`]).
+    fn newer_than(&self, anchor: &WhitelistAnchor) -> bool {
+        matches!(self.parsed(), Ok(Some(s)) if newer_than_seal(&s, anchor))
     }
 
     /// The bytes read, if the file was there and readable.
@@ -1028,8 +1067,8 @@ pub fn pick_base_from(
 /// What `whitelist reset` does, for a message that offers it: it is no free recovery.
 pub const RESET_CAVEAT: &str = "`zwallet whitelist reset` starts over with a new key and an empty \
                                 list: it sets every fee cap back to the built-in default and \
-                                allows nothing else, so set `zwallet whitelist fee-cap` again \
-                                before `--unlock`";
+                                lists no payee and no contract, so set `zwallet whitelist \
+                                fee-cap` again before `--unlock`";
 
 /// The base an edit (not a reset) builds on: [`pick_base_from`], refusing (`VALIDATION_ERROR`,
 /// nothing written) when that would mean building on anything but the list wallet.json seals:
@@ -1049,40 +1088,71 @@ pub fn base_for_edit(
     rules: &ChainRules,
 ) -> Result<Base> {
     if anchor.is_none()
-        && let Some(found) = [&files.current, &files.next]
-            .into_iter()
-            .find(|f| f.exists())
+        && let Some(note) = unsealed_files_note(files)
     {
-        let interrupted = if found.name() == NEXT_FILE {
-            "a first edit interrupted before it was sealed, "
-        } else {
-            ""
-        };
         return Err(WalletError::validation(format!(
-            "refusing to edit the whitelist: wallet.json seals no whitelist, but {} exists \
-             ({interrupted}a wallet.json restored from before the first edit, or a planted file); \
-             nothing changed. Check it with `zwallet whitelist list --verify`; if wallet.json was \
-             put back from an older copy, restore the current one instead. {RESET_CAVEAT}",
-            found.name()
+            "refusing to edit the whitelist: {note}"
         )));
     }
     let base = pick_base_from(files, anchor, rules);
-    if anchor.is_some() && base.source == BaseSource::Empty {
+    if let (Some(a), BaseSource::Empty) = (anchor, base.source) {
         let reason = base.discarded.map(|d| d.reason).unwrap_or_default();
+        // A list newer than the seal: the remedy is the current wallet.json (the reason says
+        // so); putting back the copy the old seal names would complete a rollback.
+        let remedy = if files.current.newer_than(a) {
+            String::new()
+        } else {
+            format!(
+                " If whitelist.json was only damaged or replaced, put back a genuine copy of \
+                 whitelist.json at the sealed generation (gen {}): it verifies again without a \
+                 reset, because the seal pins its digest.",
+                a.generation
+            )
+        };
         return Err(WalletError::validation(format!(
             "refusing to edit the whitelist: {reason}. An edit builds only on the list wallet.json \
-             seals, so nothing changed. Check it with `zwallet whitelist list --verify`; if \
-             whitelist.json was only damaged or replaced, put back a genuine copy of \
-             whitelist.json: it verifies again without a reset, because the seal pins its \
-             digest. {RESET_CAVEAT}"
+             seals, so nothing in the whitelist changed. Check it with `zwallet whitelist list \
+             --verify`.{remedy} {RESET_CAVEAT}"
         )));
     }
     Ok(base)
 }
 
+/// When wallet.json seals no whitelist but a list file exists, why that is so and what the human
+/// can do (`None` otherwise, e.g. a fresh wallet): the refusal of every edit
+/// ([`base_for_edit`]), and what `whitelist list --verify` explains. A first edit interrupted
+/// between staging and re-seal leaves only `whitelist.next.json`, at generation 1, signed by the
+/// key in `whitelist.key`.
+pub fn unsealed_files_note(files: &ListFiles) -> Option<String> {
+    let found: Vec<String> = [&files.current, &files.next]
+        .into_iter()
+        .filter(|f| f.exists())
+        .map(ListFileRead::name)
+        .collect();
+    if found.is_empty() {
+        return None;
+    }
+    let interrupted = if files.current.exists() {
+        ""
+    } else {
+        "a first edit interrupted before it was sealed, "
+    };
+    Some(format!(
+        "wallet.json seals no whitelist, but {} {} ({interrupted}a wallet.json restored from \
+         before the first edit, or a planted file); nothing in the whitelist changed. Check it \
+         with `zwallet whitelist list --verify`; if wallet.json was put back from an older copy, \
+         restore the current one instead (zwallet keeps no copy of it). {RESET_CAVEAT}",
+        found.join(" and "),
+        if found.len() == 1 { "exists" } else { "exist" }
+    ))
+}
+
 /// Points in an edit where a test can stop it as a crash would: after each write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditStage<'a> {
+    /// The list files are read under `w.lock` and the base is picked; nothing is written yet (the
+    /// path is the home).
+    FilesRead(&'a Path),
     /// A staged list the seal names is in place as `whitelist.json` (see [`BaseSource::PromotedNext`]).
     Promoted(&'a Path),
     /// A new `whitelist.key` is in place (first edit, or [`reset`]).
@@ -1091,7 +1161,8 @@ pub enum EditStage<'a> {
     NextWritten(&'a Path),
     /// wallet.json is re-sealed with the new anchor.
     Resealed(&'a Path),
-    /// `whitelist.next.json` is renamed to `whitelist.json`.
+    /// The new list is in place as `whitelist.json`, written from the signed bytes after the
+    /// re-seal (the staged `whitelist.next.json` is removed right after).
     Renamed(&'a Path),
 }
 
@@ -1122,7 +1193,7 @@ struct KeyFile {
 /// Decrypts `whitelist.key` with the password that opened wallet.json and checks it is the key
 /// the seal names.
 fn load_key(home: &Path, password: &str, anchor: &WhitelistAnchor) -> Result<WhitelistKey> {
-    let reset_hint = "`zwallet whitelist reset` makes a new key and an empty list";
+    let reset_hint = RESET_CAVEAT;
     let path = home.join(KEY_FILE);
     let bytes = store::read_wallet_bytes(&path).map_err(|e| {
         WalletError::validation(format!(
@@ -1264,6 +1335,7 @@ fn transact(
         Some(_) => base_for_edit(&files, anchor.as_ref(), rules)?,
         None => pick_base_from(&files, anchor.as_ref(), rules),
     };
+    hook(EditStage::FilesRead(home))?;
     // The sealed list may still sit in `whitelist.next.json` (an edit that re-sealed and died
     // before its rename, or an agent's copy). Staging this edit overwrites that file, so its
     // verified bytes are first written as `whitelist.json`, by reset too; otherwise a crash
@@ -1316,12 +1388,17 @@ fn transact(
         lock.replace_file(KEY_FILE, &bytes)?;
         hook(EditStage::KeyWritten(&home.join(KEY_FILE)))?;
     }
-    lock.replace_file(NEXT_FILE, &signed.to_file_bytes()?)?;
+    let staged = signed.to_file_bytes()?;
+    lock.replace_file(NEXT_FILE, &staged)?;
     hook(EditStage::NextWritten(&home.join(NEXT_FILE)))?;
     lock.reseal(&opened, &policy)?;
     hook(EditStage::Resealed(&home.join(store::WALLET_FILE)))?;
-    lock.rename_file(NEXT_FILE, WHITELIST_FILE)?;
+    // Published from memory, as a promotion is: never whatever the staged path holds by now.
+    // The staged copy is then removed (a crash before that leaves the same verified bytes in
+    // both files; the next staging overwrites it).
+    lock.replace_file(WHITELIST_FILE, &staged)?;
     hook(EditStage::Renamed(&home.join(WHITELIST_FILE)))?;
+    lock.remove_file(NEXT_FILE)?;
 
     let list = read_verified(&home.join(WHITELIST_FILE), &new_anchor).map_err(|e| {
         WalletError::validation(format!(
@@ -1872,9 +1949,10 @@ mod tests {
         for want in [
             "does not verify",
             "zwallet whitelist list --verify",
-            "put back a genuine copy of whitelist.json",
+            "put back a genuine copy of whitelist.json at the sealed generation (gen 1)",
+            "nothing in the whitelist changed",
             "zwallet whitelist reset",
-            "sets every fee cap back to the built-in default",
+            "sets every fee cap back to the built-in default and lists no payee and no contract",
         ] {
             assert!(err.message.contains(want), "{want}: {}", err.message);
         }
@@ -2394,7 +2472,7 @@ mod tests {
             for want in [
                 &format!("wallet.json seals no whitelist, but {file} exists") as &str,
                 "a wallet.json restored from before the first edit, or a planted file",
-                "nothing changed",
+                "nothing in the whitelist changed",
                 "zwallet whitelist list --verify",
                 "zwallet whitelist reset",
                 "sets every fee cap back to the built-in default",
@@ -2427,6 +2505,117 @@ mod tests {
         let fresh = wallet();
         let first = edit(fresh.path(), PW, &RULES, add(alice())).unwrap();
         assert_eq!((first.list.generation, first.discarded), (1, None));
+    }
+
+    #[test]
+    fn r4_2_a_list_newer_than_the_seal_names_the_rollback() {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        let gen1_wallet = fs::read(home.join(store::WALLET_FILE)).unwrap();
+        edit(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("bob", BOB, &["base"])),
+        )
+        .unwrap();
+        // wallet.json alone put back to generation 1, under the current (gen 2) list.
+        fs::write(home.join(store::WALLET_FILE), &gen1_wallet).unwrap();
+        let anchor = sealed(home).unwrap();
+        let rolled = "whitelist.json (gen 2) is newer than the seal (gen 1): wallet.json was rolled \
+                      back; restore the current wallet.json (zwallet keeps no copy of it), never \
+                      an older whitelist.json";
+        // The daemon's reason, list --verify's and the edit's all say it.
+        assert_eq!(load_verified(home, &anchor).unwrap_err().message, rolled);
+        let base = pick_base(home, Some(&anchor), &RULES);
+        assert_eq!(base.discarded.unwrap().reason, rolled);
+        let before = snapshot(home);
+        let err = edit(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("carol", CAROL, &["base"])),
+        )
+        .unwrap_err();
+        assert!(err.message.contains(rolled), "{}", err.message);
+        assert!(!err.message.contains("genuine copy"), "{}", err.message);
+        assert_eq!(snapshot(home), before);
+        // An older copy, or another key's list, is still "an older or a foreign copy".
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        let gen1 = fs::read(home.join(WHITELIST_FILE)).unwrap();
+        edit(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("bob", BOB, &["base"])),
+        )
+        .unwrap();
+        fs::write(home.join(WHITELIST_FILE), &gen1).unwrap();
+        let err = load_verified(home, &sealed(home).unwrap()).unwrap_err();
+        assert!(
+            err.message.contains("an older or a foreign copy"),
+            "{}",
+            err.message
+        );
+        assert!(!err.message.contains("rolled back"), "{}", err.message);
+    }
+
+    #[test]
+    fn n_e_the_new_list_is_written_from_memory_after_the_reseal() {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        // Between the re-seal and the publish, something else is put at whitelist.next.json.
+        let swap = |s: EditStage| {
+            if let EditStage::Resealed(_) = s {
+                fs::write(home.join(NEXT_FILE), b"{ planted }").unwrap();
+            }
+            Ok(())
+        };
+        let edited = edit_with_hook(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("bob", BOB, &["base"])),
+            &swap,
+        )
+        .unwrap();
+        assert_eq!(nicknames(&edited.list), ["alice", "bob"]);
+        assert_eq!(
+            load_verified(home, &sealed(home).unwrap()).unwrap(),
+            edited.list
+        );
+        assert!(!home.join(NEXT_FILE).exists(), "the staged file was left");
+    }
+
+    #[test]
+    fn n_g_a_staged_list_swapped_after_the_read_is_not_what_is_promoted() {
+        let (tmp, committed) = promoted_by_hand();
+        let home = tmp.path();
+        let staged = fs::read(home.join(NEXT_FILE)).unwrap();
+        let hook = |s: EditStage| match s {
+            EditStage::FilesRead(_) => {
+                fs::write(home.join(NEXT_FILE), b"{ swapped }").unwrap();
+                Ok(())
+            }
+            EditStage::Promoted(_) => Err(WalletError::validation("crash")),
+            _ => Ok(()),
+        };
+        let carol = Entry::new_address("carol", CAROL, &["base"]);
+        assert_eq!(
+            edit_with_hook(home, PW, &RULES, add(carol), &hook)
+                .unwrap_err()
+                .message,
+            "crash"
+        );
+        assert_eq!(fs::read(home.join(WHITELIST_FILE)).unwrap(), staged);
+        assert_eq!(
+            load_verified(home, &sealed(home).unwrap()).unwrap(),
+            committed
+        );
     }
 
     #[test]
@@ -2522,6 +2711,7 @@ mod tests {
                     EditStage::Resealed(_) => 2,
                     EditStage::Renamed(_) => 3,
                     EditStage::Promoted(_) => 4,
+                    EditStage::FilesRead(_) => 5,
                 };
                 if at == stage {
                     Err(WalletError::validation("crash"))
@@ -2596,6 +2786,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.message.contains("whitelist reset"), "{}", err.message);
+        assert!(err.message.contains(RESET_CAVEAT), "{}", err.message);
 
         // Another wallet's key file, sealed under the same password.
         let other = wallet();
