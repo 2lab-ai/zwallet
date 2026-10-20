@@ -23,12 +23,14 @@
 //! and signs on request, and nothing else: it makes no network request and writes no file. Every
 //! signature first passes the signing policy (`chains::evm::policy`): on each signing request the
 //! daemon reads `whitelist.json` (or a staged `whitelist.next.json`) through the safe reader and
-//! trusts it only if it verifies against that anchor (`.prd/04-whitelist.md`). Each connection is
-//! served in its own task with I/O timeouts, while the main loop keeps the clock: on `lock`, on
-//! expiry (wall clock, so system sleep counts), on SIGTERM/SIGINT, or as soon as wallet.json's
-//! ciphertext changes or `d.sock` is no longer its socket (checked every tick and on every
-//! request), it drops the seed (zeroized) and exits, even while connections are open. A daemon
-//! process exists only while the wallet is unlocked.
+//! trusts it only if it verifies against that anchor (`.prd/04-whitelist.md`). That read runs on a
+//! thread of its own with the session unlocked and a bounded wait (`LIST_WAIT`); the session is
+//! checked again after it, and a read that ends after lock, expiry or a re-seal signs nothing.
+//! Each connection is served in its own task with I/O timeouts, while the main loop keeps the
+//! clock: on `lock`, on expiry (wall clock, so system sleep counts), on SIGTERM/SIGINT, or as soon
+//! as wallet.json's ciphertext changes or `d.sock` is no longer its socket (checked every tick and
+//! on every request), it drops the seed (zeroized) and exits, even while connections are open. A
+//! daemon process exists only while the wallet is unlocked.
 
 use crate::chains;
 use crate::chains::evm::policy::{self, ListView};
@@ -68,65 +70,74 @@ struct Session {
     expires_at: SystemTime,
     /// Ciphertext of the wallet.json this seed came from.
     sealed: String,
-    /// The whitelist anchor sealed with the seed, or why there is none to trust (no whitelist
-    /// yet, or a malformed anchor: the session still serves, and signs only self-transfers).
-    anchor: std::result::Result<WhitelistAnchor, String>,
+    /// The whitelist anchor sealed with the seed.
+    anchor: Anchor,
 }
 
-impl Session {
-    /// The list signatures are checked against right now: read on every call, never cached.
-    fn list(&self, home: &Path) -> std::result::Result<Whitelist, String> {
-        load_list(home, &self.anchor)
+/// The whitelist anchor sealed with the seed, as the session keeps it.
+#[derive(Debug, Clone)]
+enum Anchor {
+    Sealed(WhitelistAnchor),
+    /// wallet.json seals no whitelist yet: the session signs only self-transfers.
+    None,
+    /// The sealed anchor is malformed (the reason): the session still serves, and signs only
+    /// self-transfers.
+    Malformed(String),
+}
+
+impl Anchor {
+    fn of(unsealed: &store::Unsealed) -> Self {
+        match unsealed.whitelist_anchor() {
+            Ok(Some(anchor)) => Self::Sealed(anchor),
+            Ok(None) => Self::None,
+            Err(e) => Self::Malformed(e.message),
+        }
     }
 }
 
-/// The sealed anchor as the session keeps it.
-fn session_anchor(unsealed: &store::Unsealed) -> std::result::Result<WhitelistAnchor, String> {
-    match unsealed.whitelist_anchor() {
-        Ok(Some(anchor)) => Ok(anchor),
-        Ok(None) => Err(policy::NO_WHITELIST.to_string()),
-        Err(e) => Err(e.message),
+/// The list one request is decided against.
+enum Loaded {
+    /// `whitelist.json` (or a staged `whitelist.next.json`) verified against the sealed anchor.
+    Verified(Whitelist),
+    NoList,
+    /// There is a list, or an anchor, but nothing that can be trusted: the reason.
+    Untrusted(String),
+}
+
+impl Loaded {
+    fn view(&self) -> ListView<'_> {
+        match self {
+            Self::Verified(list) => ListView::Usable(list),
+            Self::NoList => ListView::NoList,
+            Self::Untrusted(reason) => ListView::Unusable(reason.clone()),
+        }
+    }
+
+    /// What `unlock` and `status` show of the list: `{ gen, verified, entries: [nicknames] }`,
+    /// or `{ gen (the sealed one, if any), verified: false, entries: [], reason }`.
+    fn summary(&self, anchor: &Anchor) -> Value {
+        let sealed_gen = match anchor {
+            Anchor::Sealed(a) => Some(a.generation),
+            _ => None,
+        };
+        let unverified = |reason: &str| json!({ "gen": sealed_gen, "verified": false, "entries": [], "reason": reason });
+        match self {
+            Self::Verified(list) => json!({
+                "gen": list.generation,
+                "verified": true,
+                "entries": list.entries.iter().map(|e| e.nickname.as_str()).collect::<Vec<_>>(),
+            }),
+            Self::NoList => unverified(policy::NO_WHITELIST),
+            Self::Untrusted(reason) => unverified(reason),
+        }
     }
 }
 
-/// `whitelist.json`, else a staged `whitelist.next.json`, that verifies against `anchor`.
-fn load_list(
-    home: &Path,
-    anchor: &std::result::Result<WhitelistAnchor, String>,
-) -> std::result::Result<Whitelist, String> {
-    let anchor = anchor.as_ref().map_err(Clone::clone)?;
-    whitelist::load_verified(home, anchor).map_err(|e| e.message)
-}
+/// Reads the list a sealed anchor names (`whitelist::load_verified`; a seam for tests).
+type ListReader = Arc<dyn Fn(&Path, &WhitelistAnchor) -> Result<Whitelist> + Send + Sync>;
 
-fn view(list: &std::result::Result<Whitelist, String>) -> ListView<'_> {
-    match list {
-        Ok(list) => ListView::Usable(list),
-        // No anchor sealed yet: `session_anchor` gives exactly this reason.
-        Err(reason) if reason == policy::NO_WHITELIST => ListView::NoList,
-        Err(reason) => ListView::Unusable(reason.clone()),
-    }
-}
-
-/// What `unlock` and `status` show of the list: `{ gen, verified, entries: [nicknames] }`, or
-/// `{ gen (the sealed one, if any), verified: false, entries: [], reason }`.
-fn list_summary(
-    anchor: &std::result::Result<WhitelistAnchor, String>,
-    list: &std::result::Result<Whitelist, String>,
-) -> Value {
-    match list {
-        Ok(list) => json!({
-            "gen": list.generation,
-            "verified": true,
-            "entries": list.entries.iter().map(|e| e.nickname.as_str()).collect::<Vec<_>>(),
-        }),
-        Err(reason) => json!({
-            "gen": anchor.as_ref().ok().map(|a| a.generation),
-            "verified": false,
-            "entries": [],
-            "reason": reason,
-        }),
-    }
-}
+/// How long a request waits for the list to be read before deciding without it.
+const LIST_WAIT: Duration = Duration::from_secs(2);
 
 /// What the main loop and the connection tasks share.
 struct Shared {
@@ -137,6 +148,9 @@ struct Shared {
     session: Mutex<Option<Session>>,
     /// A connection task asks the main loop to stop (after `lock`, or after it saw tampering).
     stop: Notify,
+    reader: ListReader,
+    /// [`LIST_WAIT`] (shorter in tests).
+    list_wait: Duration,
 }
 
 impl Shared {
@@ -168,6 +182,38 @@ impl Shared {
 
     fn session(&self) -> std::sync::MutexGuard<'_, Option<Session>> {
         self.session.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The list `anchor` names, read on a thread of its own and waited for at most
+    /// `list_wait`. Never called with the session locked: a stalled read must not hold up
+    /// `lock`, expiry or the tamper checks. A read still running after the wait is abandoned; it
+    /// holds no lock and no secret, and being detached (not tokio's blocking pool, which the
+    /// runtime waits for on drop) it cannot keep the daemon from exiting.
+    async fn load(&self, anchor: &Anchor) -> Loaded {
+        let anchor = match anchor {
+            Anchor::Sealed(a) => *a,
+            Anchor::None => return Loaded::NoList,
+            Anchor::Malformed(reason) => return Loaded::Untrusted(reason.clone()),
+        };
+        let (home, reader) = (self.home.clone(), self.reader.clone());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("whitelist-read".into())
+            .spawn(move || {
+                let _ = tx.send(reader(&home, &anchor));
+            });
+        if spawned.is_err() {
+            return Loaded::Untrusted("the whitelist could not be read (no thread)".into());
+        }
+        match tokio::time::timeout(self.list_wait, rx).await {
+            Ok(Ok(Ok(list))) => Loaded::Verified(list),
+            Ok(Ok(Err(e))) => Loaded::Untrusted(e.message),
+            Ok(Err(_)) => Loaded::Untrusted("the whitelist could not be read".into()),
+            Err(_) => Loaded::Untrusted(format!(
+                "the whitelist could not be read in time ({} ms)",
+                self.list_wait.as_millis()
+            )),
+        }
     }
 }
 
@@ -270,16 +316,7 @@ async fn start(home: &Path) -> Result<Started> {
     fs::set_permissions(&sock, fs::Permissions::from_mode(FILE_MODE))
         .map_err(fail("cannot restrict daemon socket"))?;
     let meta = fs::symlink_metadata(&sock).map_err(fail("cannot inspect daemon socket"))?;
-    let anchor = session_anchor(&unsealed);
-    let ready = json!({
-        "locked": false,
-        "expiresAt": rfc3339_utc(unix_secs(expires_at)),
-        "active": file.active,
-        "index": key.index,
-        "address": address,
-        "pid": std::process::id(),
-        "whitelist": list_summary(&anchor, &load_list(home, &anchor)),
-    });
+    let anchor = Anchor::of(&unsealed);
     let shared = Arc::new(Shared {
         home: home.to_path_buf(),
         sock,
@@ -288,9 +325,20 @@ async fn start(home: &Path) -> Result<Started> {
             seed: unsealed.seed,
             expires_at,
             sealed: file.crypto.ciphertext.clone(),
-            anchor,
+            anchor: anchor.clone(),
         })),
         stop: Notify::new(),
+        reader: Arc::new(whitelist::load_verified),
+        list_wait: LIST_WAIT,
+    });
+    let ready = json!({
+        "locked": false,
+        "expiresAt": rfc3339_utc(unix_secs(expires_at)),
+        "active": file.active,
+        "index": key.index,
+        "address": address,
+        "pid": std::process::id(),
+        "whitelist": shared.load(&anchor).await.summary(&anchor),
     });
     // wallet.json may have changed while this daemon waited for the go byte.
     if let Some(reason) = shared.check(&mut shared.session()) {
@@ -422,7 +470,7 @@ async fn serve(shared: Arc<Shared>, stream: UnixStream, uid: u32) {
         Ok(Ok(bytes)) if !bytes.is_empty() => bytes,
         _ => return,
     };
-    let (response, stop) = handle(&shared, &request);
+    let (response, stop) = handle(&shared, &request).await;
     let mut out = serde_json::to_vec(&response).unwrap_or_default();
     out.push(b'\n');
     let _ = tokio::time::timeout(IO_TIMEOUT, async {
@@ -456,30 +504,70 @@ async fn read_request(reader: &mut OwnedReadHalf) -> std::io::Result<Vec<u8>> {
 }
 
 /// Answers one request; the flag says the daemon must stop afterwards.
-fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
+///
+/// `status` and the signing requests need the whitelist. It is read with the session unlocked
+/// (only the anchor and the ciphertext marker are copied out, never the seed); then the session
+/// is checked again (lock, expiry, socket, wallet.json) and must be the one the read started
+/// from, so a read that ends after any of those signs nothing.
+async fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
     let Ok(req) = serde_json::from_slice::<Request>(bytes) else {
         let e = WalletError::validation("malformed daemon request");
         return (Response::err(&e), false);
     };
-    let pid = std::process::id();
+    let snapshot = {
+        let mut session = shared.session();
+        if let Some(reason) = shared.check(&mut session) {
+            return ended(&req, reason);
+        }
+        match (&req, session.as_ref()) {
+            (Request::Status | Request::SignMessage { .. } | Request::SignTx { .. }, Some(s)) => {
+                (s.anchor.clone(), s.sealed.clone())
+            }
+            _ => return respond(&mut session, &req, None),
+        }
+    };
+    let (anchor, sealed) = snapshot;
+    let loaded = shared.load(&anchor).await;
     let mut session = shared.session();
     if let Some(reason) = shared.check(&mut session) {
-        let resp = match req {
-            Request::Status => {
-                Response::ok(json!({ "locked": true, "pid": pid, "reason": reason }))
-            }
-            Request::Lock => Response::ok(json!({ "locked": true, "wasUnlocked": false })),
-            _ => Response::err(&WalletError::new(
-                ErrorCode::WalletLocked,
-                format!("{reason}; locked. A human must run `zwallet unlock 24h` (any duration)"),
-            )),
-        };
-        return (resp, true);
+        return ended(&req, reason);
     }
+    if session.as_ref().is_none_or(|s| s.sealed != sealed) {
+        *session = None;
+        return ended(&req, "the session changed while the whitelist was read");
+    }
+    respond(&mut session, &req, Some(&loaded))
+}
+
+/// The answer once the session has ended (`reason`): the daemon stops.
+fn ended(req: &Request, reason: &str) -> (Response, bool) {
+    let resp = match req {
+        Request::Status => {
+            Response::ok(json!({ "locked": true, "pid": std::process::id(), "reason": reason }))
+        }
+        Request::Lock => Response::ok(json!({ "locked": true, "wasUnlocked": false })),
+        _ => Response::err(&WalletError::new(
+            ErrorCode::WalletLocked,
+            format!("{reason}; locked. A human must run `zwallet unlock 24h` (any duration)"),
+        )),
+    };
+    (resp, true)
+}
+
+/// Answers `req` from a session that just passed [`Shared::check`], with the list read for it
+/// (`None` for the requests that need none).
+fn respond(
+    session: &mut Option<Session>,
+    req: &Request,
+    loaded: Option<&Loaded>,
+) -> (Response, bool) {
     let Some(s) = session.as_ref() else {
         return (Response::err(&WalletError::locked()), true);
     };
-    let result = match &req {
+    let list = || {
+        loaded.ok_or_else(|| WalletError::validation("the whitelist was not read for this request"))
+    };
+    let result = match req {
         Request::Lock => {
             *session = None;
             return (
@@ -487,12 +575,14 @@ fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
                 true,
             );
         }
-        Request::Status => Ok(json!({
-            "locked": false,
-            "expiresAt": rfc3339_utc(unix_secs(s.expires_at)),
-            "pid": pid,
-            "whitelist": list_summary(&s.anchor, &s.list(&shared.home)),
-        })),
+        Request::Status => list().map(|list| {
+            json!({
+                "locked": false,
+                "expiresAt": rfc3339_utc(unix_secs(s.expires_at)),
+                "pid": std::process::id(),
+                "whitelist": list.summary(&s.anchor),
+            })
+        }),
         Request::Address { chain, index } => chains::find(chain).and_then(|chain| {
             let address = chain.family.keys().derive_address(&s.seed, *index)?;
             Ok(json!({ "chain": chain.key, "index": index, "address": address }))
@@ -504,18 +594,16 @@ fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
         } => chains::find(chain).and_then(|chain| {
             let message = hex::decode(message_hex)
                 .map_err(|_| WalletError::validation("message_hex is not hex"))?;
-            let list = s.list(&shared.home);
             chain
                 .family
                 .keys()
-                .sign_message(&s.seed, *index, chain, &message, &view(&list))
+                .sign_message(&s.seed, *index, chain, &message, &list()?.view())
         }),
         Request::SignTx { chain, index, tx } => chains::find(chain).and_then(|chain| {
-            let list = s.list(&shared.home);
             chain
                 .family
                 .keys()
-                .sign_tx(&s.seed, *index, chain, tx, &view(&list))
+                .sign_tx(&s.seed, *index, chain, tx, &list()?.view())
         }),
     };
     let resp = match result {
@@ -523,4 +611,289 @@ fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
         Err(e) => Response::err(&e),
     };
     (resp, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chains::evm::registry::WHITELIST_RULES;
+    use crate::chains::evm::tx::{self, EvmFees, UnsignedEvmTx};
+    use crate::core::store::{KDF_MIN_LOG_N, KdfParams, MasterOptions, MetaLock};
+    use crate::core::whitelist::Entry;
+    use alloy::primitives::{U128, U256};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    const PW: &str = "correct horse battery staple";
+    const BOB: &str = "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359";
+
+    /// A daemon's shared state as `start` builds it, in-process: a real wallet.json in a temp
+    /// home, its socket bound, a session for key 0, and `reader` as the list reader.
+    struct Fixture {
+        shared: Arc<Shared>,
+        me: String,
+        _listener: std::os::unix::net::UnixListener,
+        _dir: tempfile::TempDir,
+    }
+
+    fn fixture(reader: ListReader, list_wait: Duration, ttl: Duration) -> Fixture {
+        let dir = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let home = dir.path();
+        let opts = MasterOptions {
+            kdf: KdfParams {
+                log_n: KDF_MIN_LOG_N,
+                ..KdfParams::default()
+            },
+            ..MasterOptions::default()
+        };
+        store::create_master(home, PW, "main", opts, &chains::derive_addresses).unwrap();
+        let (unsealed, file) = store::unlock(home, PW, &chains::derive_addresses).unwrap();
+        let me = chains::find("ethereum")
+            .unwrap()
+            .family
+            .keys()
+            .derive_address(&unsealed.seed, 0)
+            .unwrap();
+        let sock = protocol::socket_path(home).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let meta = fs::symlink_metadata(&sock).unwrap();
+        let shared = Arc::new(Shared {
+            home: home.to_path_buf(),
+            sock,
+            sock_id: (meta.dev(), meta.ino()),
+            session: Mutex::new(Some(Session {
+                seed: unsealed.seed,
+                expires_at: SystemTime::now() + ttl,
+                sealed: file.crypto.ciphertext.clone(),
+                // The reader ignores it: these tests decide what the read returns.
+                anchor: Anchor::Sealed(WhitelistAnchor {
+                    public_key: [7; 32],
+                    generation: 1,
+                    digest: [7; 32],
+                }),
+            })),
+            stop: Notify::new(),
+            reader,
+            list_wait,
+        });
+        Fixture {
+            shared,
+            me,
+            _listener: listener,
+            _dir: dir,
+        }
+    }
+
+    /// A verified-looking list that pays BOB, with the default policy.
+    fn list() -> Whitelist {
+        let mut l = Whitelist::empty(&WHITELIST_RULES);
+        l.generation = 1;
+        l.entries.push(Entry::new_address("bob", BOB, &["*"]));
+        l
+    }
+
+    /// A `sign_tx` request on Ethereum paying `to`, cheap enough for any cap.
+    fn sign_tx(to: &str) -> Vec<u8> {
+        let t = UnsignedEvmTx {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 21_000,
+            fees: EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(1_000_000_000u64),
+                max_priority_fee_per_gas: U128::from(1u64),
+            },
+            to: to.parse().unwrap(),
+            value: U256::from(1u64),
+            input: Default::default(),
+        };
+        let payload = format!("0x{}", hex::encode(tx::encoded_for_signing(&t)));
+        serde_json::to_vec(&Request::SignTx {
+            chain: "ethereum".into(),
+            index: 0,
+            tx: json!(payload),
+        })
+        .unwrap()
+    }
+
+    fn lock_request() -> Vec<u8> {
+        serde_json::to_vec(&Request::Lock).unwrap()
+    }
+
+    /// A reader that returns [`list`] once released (or after 5 s), and says when it started.
+    struct Gate {
+        entered: AtomicBool,
+        release: Mutex<mpsc::Sender<()>>,
+    }
+
+    fn gated() -> (ListReader, Arc<Gate>) {
+        let (tx, rx) = mpsc::channel::<()>();
+        let gate = Arc::new(Gate {
+            entered: AtomicBool::new(false),
+            release: Mutex::new(tx),
+        });
+        let (g, rx) = (gate.clone(), Mutex::new(rx));
+        let reader: ListReader = Arc::new(move |_, _| {
+            g.entered.store(true, Ordering::SeqCst);
+            let _ = rx.lock().unwrap().recv_timeout(Duration::from_secs(5));
+            Ok(list())
+        });
+        (reader, gate)
+    }
+
+    impl Gate {
+        /// Waits (bounded) until the reader has started, yielding to the runtime meanwhile.
+        async fn wait_entered(&self) {
+            let start = Instant::now();
+            while !self.entered.load(Ordering::SeqCst) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "reader never ran"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        fn release(&self) {
+            let _ = self.release.lock().unwrap().send(());
+        }
+    }
+
+    fn spawn_handle(shared: &Arc<Shared>, bytes: Vec<u8>) -> tokio::task::JoinHandle<Response> {
+        let shared = shared.clone();
+        tokio::spawn(async move { handle(&shared, &bytes).await.0 })
+    }
+
+    fn assert_locked(resp: &Response) {
+        assert!(!resp.ok, "signed: {resp:?}");
+        assert_eq!(resp.error_code, Some(ErrorCode::WalletLocked), "{resp:?}");
+        assert!(resp.result.is_none(), "{resp:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn control_a_released_read_signs() {
+        let (reader, gate) = gated();
+        let f = fixture(reader, Duration::from_secs(10), Duration::from_secs(60));
+        let sign = spawn_handle(&f.shared, sign_tx(BOB));
+        gate.wait_entered().await;
+        gate.release();
+        let resp = sign.await.unwrap();
+        assert!(resp.ok, "{resp:?}");
+        assert!(resp.result.unwrap()["rawTx"].is_string());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lock_is_answered_while_a_list_read_is_stalled_and_the_late_read_signs_nothing() {
+        let (reader, gate) = gated();
+        let f = fixture(reader, Duration::from_secs(10), Duration::from_secs(60));
+        let start = Instant::now();
+        let sign = spawn_handle(&f.shared, sign_tx(BOB));
+        gate.wait_entered().await;
+        let (resp, stop) = handle(&f.shared, &lock_request()).await;
+        let locked_after = start.elapsed();
+        assert!(resp.ok && stop, "{resp:?}");
+        assert_eq!(resp.result.unwrap()["wasUnlocked"], true);
+        assert!(
+            locked_after < Duration::from_secs(2),
+            "lock waited {locked_after:?} for the stalled read"
+        );
+        assert!(f.shared.session().is_none(), "the seed outlived lock");
+        gate.release();
+        assert_locked(&sign.await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_read_that_ends_after_expiry_signs_nothing() {
+        let (reader, gate) = gated();
+        let f = fixture(reader, Duration::from_secs(10), Duration::from_millis(400));
+        let start = Instant::now();
+        let sign = spawn_handle(&f.shared, sign_tx(BOB));
+        gate.wait_entered().await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "the stalled read held the runtime: {:?}",
+            start.elapsed()
+        );
+        gate.release();
+        assert_locked(&sign.await.unwrap());
+        assert!(f.shared.session().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_read_during_which_wallet_json_is_resealed_signs_nothing() {
+        // The reader itself re-seals wallet.json (what a whitelist edit does) before answering.
+        let reader: ListReader = Arc::new(|home, _| {
+            let lock = MetaLock::acquire(home).unwrap();
+            let opened = lock.open(PW).unwrap();
+            lock.reseal(&opened, &opened.unsealed().policy.clone())
+                .unwrap();
+            Ok(list())
+        });
+        let f = fixture(reader, Duration::from_secs(10), Duration::from_secs(60));
+        let (resp, stop) = handle(&f.shared, &sign_tx(BOB)).await;
+        assert_locked(&resp);
+        assert!(stop);
+        assert!(resp.error.unwrap().contains("wallet.json changed"));
+    }
+
+    #[test]
+    fn a_read_still_stalled_does_not_keep_the_daemon_from_exiting() {
+        // After `lock` or expiry the daemon's runtime is dropped as the process ends; an
+        // abandoned read must not hold that up (tokio waits for its blocking pool on drop).
+        let reader: ListReader = Arc::new(|_, _| {
+            std::thread::sleep(Duration::from_secs(3));
+            Ok(list())
+        });
+        let f = fixture(reader, Duration::from_millis(100), Duration::from_secs(60));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (resp, _) = rt.block_on(handle(&f.shared, &sign_tx(BOB)));
+        assert_eq!(
+            resp.error_code,
+            Some(ErrorCode::WhitelistInvalid),
+            "{resp:?}"
+        );
+        let start = Instant::now();
+        drop(rt);
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "the runtime waited {:?} for the abandoned read",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_read_past_the_wait_is_an_untrusted_list() {
+        let reader: ListReader = Arc::new(|_, _| {
+            std::thread::sleep(Duration::from_millis(1500));
+            Ok(list())
+        });
+        let f = fixture(reader, Duration::from_millis(200), Duration::from_secs(60));
+        let start = Instant::now();
+        let (resp, stop) = handle(&f.shared, &sign_tx(BOB)).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(1200),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(!stop && !resp.ok, "{resp:?}");
+        assert_eq!(
+            resp.error_code,
+            Some(ErrorCode::WhitelistInvalid),
+            "{resp:?}"
+        );
+        assert!(
+            resp.error.as_deref().unwrap().contains("could not be read"),
+            "{resp:?}"
+        );
+        // The session is untouched: the key's own address is still payable.
+        let (resp, _) = handle(&f.shared, &sign_tx(&f.me)).await;
+        assert!(resp.ok, "{resp:?}");
+    }
 }
