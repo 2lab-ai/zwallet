@@ -2356,3 +2356,42 @@ fn w8_an_edit_while_unlocked_stops_every_daemon_first_and_rewarms_to_the_old_exp
     assert!(e.get("daemonPid").is_none(), "{e}");
     assert!(home.wait_locked(Duration::from_secs(5)));
 }
+
+#[test]
+fn at_nickname_recipients_resolve_through_the_list() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let transfer = |to: &str| {
+        home.run(&[
+            "transfer", "--chain", "base", "--to", to, "--amount", "0.01", "--json",
+        ])
+    };
+    let invoke = |to: &str| {
+        home.run(&[
+            "invoke",
+            "--chain",
+            "base",
+            "--to",
+            to,
+            "--data",
+            "0xd0e30db0",
+            "--json",
+        ])
+    };
+    // No whitelist yet: nobody to resolve.
+    let msg = transfer("@alice").err("VALIDATION_ERROR");
+    assert!(msg.contains("zwallet whitelist list"), "{msg}");
+    home.allow("alice", PAYEE, &["base"]);
+    home.allow_contract("router", ROUTER, &["base"], &["0xd0e30db0"]);
+    // A listed nickname resolves, and the next check (the lock) answers.
+    transfer("@alice").err("WALLET_LOCKED");
+    invoke("@router").err("WALLET_LOCKED");
+    transfer(PAYEE).err("WALLET_LOCKED");
+    // An unknown or malformed nickname is VALIDATION_ERROR naming `zwallet whitelist list`.
+    for to in ["@bob", "@Alice", "@"] {
+        let msg = transfer(to).err("VALIDATION_ERROR");
+        assert!(msg.contains("zwallet whitelist list"), "{to}: {msg}");
+        let msg = invoke(to).err("VALIDATION_ERROR");
+        assert!(msg.contains("zwallet whitelist list"), "{to}: {msg}");
+    }
+}

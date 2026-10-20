@@ -171,7 +171,7 @@ pub struct CallArgs {
 pub struct InvokeArgs {
     #[arg(long)]
     pub chain: String,
-    /// Contract address.
+    /// Contract address, or @NICKNAME from the whitelist.
     #[arg(long)]
     pub to: String,
     /// Function signature, e.g. "approve(address,uint256)".
@@ -240,7 +240,7 @@ pub struct SendArgs {
 pub struct TransferArgs {
     #[arg(long)]
     pub chain: String,
-    /// Recipient 0x address (ENS names are not supported).
+    /// Recipient: a 0x address, or @NICKNAME from the whitelist (ENS names are not supported).
     #[arg(long)]
     pub to: String,
     /// Amount in whole units (e.g. 0.5); exact, no floating point.

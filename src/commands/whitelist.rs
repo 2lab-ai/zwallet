@@ -1,4 +1,4 @@
-//! `zwallet whitelist …` (`.prd/04-whitelist.md` §Edits, §CLI).
+//! `zwallet whitelist …` and `@nickname` recipients (`.prd/04-whitelist.md` §Edits, §CLI).
 //!
 //! A change runs only with a typed password, and in this order:
 //! 1. remember the running session's `expiresAt`, then stop every zwallet daemon of this user
@@ -72,6 +72,27 @@ pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
         }
         WhitelistCommand::Reset(a) => edit(home, Change::Reset, &a).await,
     }
+}
+
+/// `--to` of `transfer` and `invoke`: an address as given, or `@nickname` looked up in
+/// whitelist.json as it is on disk. Unverified on purpose: it only saves typing the address; the
+/// key daemon decides whether a send there is allowed.
+pub(super) fn recipient(home: &Path, to: &str) -> Result<(String, Option<String>)> {
+    let Some(nickname) = to.trim().strip_prefix('@') else {
+        return Ok((to.to_string(), None));
+    };
+    let unresolved = |why: &str| {
+        WalletError::validation(format!("cannot resolve '@{nickname}': {why}; {LIST_HINT}"))
+    };
+    whitelist::validate_nickname(nickname).map_err(|e| unresolved(&e.message))?;
+    let signed = whitelist::read_list(&home.join(WHITELIST_FILE))
+        .map_err(|e| unresolved(&e.message))?
+        .ok_or_else(|| unresolved("there is no whitelist yet"))?;
+    let entry = signed
+        .list
+        .by_nickname(nickname)
+        .ok_or_else(|| unresolved("the whitelist has no entry by that name"))?;
+    Ok((entry.address.clone(), Some(nickname.to_string())))
 }
 
 /// One password-backed change.
@@ -631,6 +652,58 @@ fn list_text(out: &Value, verify: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::whitelist::WhitelistKey;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fn home_with(entries: &[Entry]) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut list = Whitelist::empty(&WHITELIST_RULES);
+        list.generation = 1;
+        for e in entries {
+            list.add(e.clone()).unwrap();
+        }
+        let signed = WhitelistKey::generate().unwrap().sign(&list);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(tmp.path().join(WHITELIST_FILE))
+            .unwrap();
+        std::io::Write::write_all(&mut f, &signed.to_file_bytes().unwrap()).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn at_nickname_resolves_to_the_entry_address_and_addresses_pass_through() {
+        let alice = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed";
+        let router = "0x2222222222222222222222222222222222222222";
+        let tmp = home_with(&[
+            Entry::new_address("alice", alice, &["base"]),
+            Entry::new_contract("router", router, &["base"], &["0xd0e30db0"]),
+        ]);
+        let home = tmp.path();
+        assert_eq!(
+            recipient(home, "@alice").unwrap(),
+            (alice.to_string(), Some("alice".to_string()))
+        );
+        assert_eq!(
+            recipient(home, " @router").unwrap(),
+            (router.to_string(), Some("router".to_string()))
+        );
+        // Anything without '@' is left for the address parser.
+        assert_eq!(
+            recipient(home, "0xAbC").unwrap(),
+            ("0xAbC".to_string(), None)
+        );
+        for to in ["@bob", "@Alice", "@", "@a b"] {
+            let e = recipient(home, to).unwrap_err();
+            assert_eq!(e.code, crate::core::error::ErrorCode::ValidationError);
+            assert!(e.message.contains("zwallet whitelist list"), "{to}: {e}");
+        }
+        let empty = tempfile::tempdir().unwrap();
+        let e = recipient(empty.path(), "@alice").unwrap_err();
+        assert!(e.message.contains("no whitelist yet"), "{e}");
+    }
 
     #[test]
     fn a_change_the_current_list_refuses_says_where_the_edit_would_start() {
