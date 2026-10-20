@@ -1164,32 +1164,51 @@ fn process_argvs() -> Result<Vec<(i32, Vec<OsString>)>> {
         dir.map(|entry| entry.map(|e| e.file_name())),
         current_uid(),
         |path: &Path| std::fs::read(path),
+        may_signal,
     )
+}
+
+/// `kill(pid, 0)`: `Ok` when this process may signal `pid` (the same user, or root), EPERM when
+/// it is another user's, ESRCH when it is gone. Sends nothing.
+#[cfg(target_os = "linux")]
+fn may_signal(pid: i32) -> std::io::Result<()> {
+    // SAFETY: kill(2) with signal 0 only checks that `pid` exists and may be signalled; `pid` is
+    // a /proc entry, so it is > 0 (never a process group).
+    match unsafe { libc::kill(pid, 0) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
 }
 
 /// [`process_argvs`] over the entry `names` of a `/proc` at `root`, reading its files with
 /// `read`. An error from the listing itself fails the whole lookup, as a full pid buffer does on
 /// macOS (`list_pids`): a listing cut short may miss a daemon, which `lock` would then leave
-/// running and `status` would not report. A pid whose files cannot be read because it exited
-/// (ENOENT, ESRCH) or belongs to another user (EACCES; EPERM where `/proc` is mounted with
-/// `hidepid`) is skipped; any other error reading them fails the lookup too.
+/// running and `status` would not report. A pid whose files are gone (ENOENT, ESRCH) exited and
+/// is skipped. A denied read (EACCES, EPERM) is not proof the process is another user's: where
+/// `status` is denied, `signal` (`kill(pid, 0)`) tells them apart, and a process this user may
+/// signal (its own, or any as root) fails the lookup, while EPERM (another user's) or ESRCH (gone)
+/// skips it. A denied `cmdline` of a process whose `status` shows this user fails it too. Any
+/// other error reading them fails the lookup as well.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn proc_argvs(
     root: &Path,
     names: impl Iterator<Item = std::io::Result<OsString>>,
     uid: u32,
     read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+    signal: impl Fn(i32) -> std::io::Result<()>,
 ) -> Result<Vec<(i32, Vec<OsString>)>> {
-    let read_pid_file = |name: &OsStr, file: &str| -> Result<Option<Vec<u8>>> {
-        let path = root.join(name).join(file);
-        match read(&path) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if pid_gone_or_foreign(&e) => Ok(None),
-            Err(e) => Err(WalletError::validation(format!(
-                "cannot read {}: {e}; not trusting a partial list of key daemons",
-                path.display()
-            ))),
-        }
+    let unreadable = |path: &Path, e: &std::io::Error| {
+        WalletError::validation(format!(
+            "cannot read {}: {e}; not trusting a partial list of key daemons",
+            path.display()
+        ))
+    };
+    let owned_unreadable = |path: &Path, e: &std::io::Error| {
+        WalletError::validation(format!(
+            "cannot read {} of a process this user owns ({e}); refusing to trust a partial \
+             daemon list",
+            path.display()
+        ))
     };
     let mut out = Vec::new();
     for name in names {
@@ -1204,28 +1223,49 @@ fn proc_argvs(
         };
         // /proc/<pid>/status and cmdline stay readable for a non-dumpable process (its fd
         // directory and memory do not).
-        let Some(status) = read_pid_file(&name, "status")? else {
-            continue;
+        let status_path = root.join(&name).join("status");
+        let status = match read(&status_path) {
+            Ok(bytes) => bytes,
+            Err(e) if pid_gone(&e) => continue,
+            Err(e) if access_denied(&e) => match signal(pid) {
+                Ok(()) => return Err(owned_unreadable(&status_path, &e)),
+                Err(k) if matches!(k.raw_os_error(), Some(libc::EPERM | libc::ESRCH)) => continue,
+                Err(k) => {
+                    return Err(WalletError::validation(format!(
+                        "cannot read {} ({e}) and cannot tell whose process {pid} is (kill: \
+                         {k}); refusing to trust a partial daemon list",
+                        status_path.display()
+                    )));
+                }
+            },
+            Err(e) => return Err(unreadable(&status_path, &e)),
         };
         if status_euid(&status) != Some(uid) {
             continue;
         }
-        let Some(cmdline) = read_pid_file(&name, "cmdline")? else {
-            continue;
+        let cmdline_path = root.join(&name).join("cmdline");
+        let cmdline = match read(&cmdline_path) {
+            Ok(bytes) => bytes,
+            Err(e) if pid_gone(&e) => continue,
+            Err(e) if access_denied(&e) => return Err(owned_unreadable(&cmdline_path, &e)),
+            Err(e) => return Err(unreadable(&cmdline_path, &e)),
         };
         out.push((pid, split_nul(&cmdline, usize::MAX)));
     }
     Ok(out)
 }
 
-/// Whether reading a `/proc/<pid>` file failed because the process is gone or is another user's,
-/// rather than because the listing cannot be trusted.
+/// Whether reading a `/proc/<pid>` file failed because the process is gone.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn pid_gone_or_foreign(e: &std::io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        Some(libc::ENOENT | libc::ESRCH | libc::EACCES | libc::EPERM)
-    )
+fn pid_gone(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ESRCH))
+}
+
+/// Whether reading a `/proc/<pid>` file was denied: another user's process, or one of this user's
+/// that `/proc` will not show (see [`proc_argvs`]).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn access_denied(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::EACCES | libc::EPERM))
 }
 
 /// The effective uid in a `/proc/<pid>/status` (`Uid:` real, effective, saved, fs). Read as
@@ -1520,6 +1560,22 @@ mod tests {
         }
     }
 
+    /// A `kill(pid, 0)` for [`proc_argvs`]: `pid` to `Ok` (`None`: this user may signal it) or an
+    /// errno. Any other pid is another user's (EPERM).
+    fn fake_kill(answers: Vec<(i32, Option<i32>)>) -> impl Fn(i32) -> std::io::Result<()> {
+        let answers: BTreeMap<i32, Option<i32>> = answers.into_iter().collect();
+        move |pid| match answers.get(&pid) {
+            Some(None) => Ok(()),
+            Some(Some(errno)) => Err(std::io::Error::from_raw_os_error(*errno)),
+            None => Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+        }
+    }
+
+    /// A `kill(pid, 0)` that must not be called: every status in the test is readable or gone.
+    fn no_kill(pid: i32) -> std::io::Result<()> {
+        panic!("kill({pid}, 0) called, but only a denied status read needs it")
+    }
+
     fn proc_status(uid: u32) -> Vec<u8> {
         format!("Name:\tzwallet\nState:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t9\n")
             .into_bytes()
@@ -1556,7 +1612,8 @@ mod tests {
             ),
         ]);
         let names = listing(&["self", "1", "40", "acpi", "41", "42", "50", "thread-self"]);
-        let got = proc_argvs(Path::new(FAKE_PROC), names, ME, read).unwrap();
+        // A host where every status is readable never asks kill(2).
+        let got = proc_argvs(Path::new(FAKE_PROC), names, ME, read, no_kill).unwrap();
         let argv = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
         assert_eq!(
             got,
@@ -1577,15 +1634,81 @@ mod tests {
             ("62/status", Err(libc::ESRCH)),
             ("63/status", Ok(proc_status(ME))),
             ("63/cmdline", Err(libc::ESRCH)),
-            // Another user's, closed to this one (EPERM is what `hidepid` answers).
+            // Closed to this user, and kill(2) says another user's (EPERM is what `hidepid`
+            // answers)...
             ("64/status", Err(libc::EACCES)),
             ("65/status", Err(libc::EPERM)),
+            // ...or that it exited in between.
+            ("66/status", Err(libc::EACCES)),
             ("70/status", Ok(proc_status(ME))),
             ("70/cmdline", Ok(DAEMON_A.to_vec())),
         ]);
-        let names = listing(&["60", "61", "62", "63", "64", "65", "70"]);
-        let got = proc_argvs(Path::new(FAKE_PROC), names, ME, read).unwrap();
+        let kill = fake_kill(vec![(64, Some(libc::EPERM)), (66, Some(libc::ESRCH))]);
+        let names = listing(&["60", "61", "62", "63", "64", "65", "66", "70"]);
+        let got = proc_argvs(Path::new(FAKE_PROC), names, ME, read, kill).unwrap();
         assert_eq!(got, vec![(70, split_nul(DAEMON_A, usize::MAX))]);
+    }
+
+    #[test]
+    fn a_denied_read_of_this_users_process_fails_the_lookup() {
+        let daemon = |files: Vec<(&'static str, std::result::Result<Vec<u8>, i32>)>| {
+            let mut all = vec![
+                ("70/status", Ok(proc_status(ME))),
+                ("70/cmdline", Ok(DAEMON_A.to_vec())),
+            ];
+            all.retain(|(rel, _)| files.iter().all(|(r, _)| r != rel));
+            all.extend(files);
+            fake_proc(all)
+        };
+        let lookup =
+            |read, kill| proc_argvs(Path::new(FAKE_PROC), listing(&["70"]), ME, read, kill);
+        let refused = |err: WalletError, rel: &str| {
+            assert_eq!(err.code, ErrorCode::ValidationError);
+            assert!(
+                err.message.starts_with(&format!(
+                    "cannot read /fake-proc/{rel} of a process this user owns"
+                )) && err
+                    .message
+                    .ends_with("; refusing to trust a partial daemon list"),
+                "{}",
+                err.message
+            );
+        };
+        for errno in [libc::EACCES, libc::EPERM] {
+            // Its status shows this user, but its argv is closed: it may be a daemon.
+            let read = daemon(vec![("70/cmdline", Err(errno))]);
+            refused(lookup(read, fake_kill(vec![])).unwrap_err(), "70/cmdline");
+            // Its status is closed, but kill(2) says this user may signal it: its own (or any,
+            // as root), so it may be a daemon too.
+            let read = daemon(vec![("70/status", Err(errno))]);
+            refused(
+                lookup(read, fake_kill(vec![(70, None)])).unwrap_err(),
+                "70/status",
+            );
+            // kill(2) failing in an unexpected way cannot tell whose it is either.
+            let read = daemon(vec![("70/status", Err(errno))]);
+            let err = lookup(read, fake_kill(vec![(70, Some(libc::EINVAL))])).unwrap_err();
+            assert!(
+                err.message.contains("cannot read /fake-proc/70/status")
+                    && err
+                        .message
+                        .ends_with("refusing to trust a partial daemon list"),
+                "{}",
+                err.message
+            );
+            // Closed and another user's: skipped.
+            let read = daemon(vec![("70/status", Err(errno))]);
+            assert!(lookup(read, fake_kill(vec![])).unwrap().is_empty());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn may_signal_tells_this_users_processes_from_gone_ones() {
+        assert!(may_signal(std::process::id() as i32).is_ok());
+        // Above any pid_max (at most 2^22): no such process.
+        let gone = may_signal(i32::MAX).unwrap_err();
+        assert_eq!(gone.raw_os_error(), Some(libc::ESRCH), "{gone}");
     }
 
     #[test]
@@ -1600,7 +1723,8 @@ mod tests {
         for at in 0..=2 {
             let mut names: Vec<std::io::Result<OsString>> = listing(&["70", "71"]).collect();
             names.insert(at, Err(std::io::Error::from_raw_os_error(libc::EIO)));
-            let err = proc_argvs(Path::new(FAKE_PROC), names.into_iter(), ME, &read).unwrap_err();
+            let err = proc_argvs(Path::new(FAKE_PROC), names.into_iter(), ME, &read, no_kill)
+                .unwrap_err();
             assert_eq!(err.code, ErrorCode::ValidationError);
             assert!(
                 err.message.contains("cannot list /fake-proc")
@@ -1610,9 +1734,15 @@ mod tests {
             );
         }
         assert_eq!(
-            proc_argvs(Path::new(FAKE_PROC), listing(&["70", "71"]), ME, &read)
-                .unwrap()
-                .len(),
+            proc_argvs(
+                Path::new(FAKE_PROC),
+                listing(&["70", "71"]),
+                ME,
+                &read,
+                no_kill
+            )
+            .unwrap()
+            .len(),
             2
         );
     }
@@ -1631,7 +1761,8 @@ mod tests {
             files.retain(|(r, _)| *r != rel);
             files.push((rel, Err(errno)));
             let names = listing(&["70"]);
-            let err = proc_argvs(Path::new(FAKE_PROC), names, ME, fake_proc(files)).unwrap_err();
+            let err =
+                proc_argvs(Path::new(FAKE_PROC), names, ME, fake_proc(files), no_kill).unwrap_err();
             assert_eq!(err.code, ErrorCode::ValidationError);
             assert!(
                 err.message

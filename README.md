@@ -440,7 +440,10 @@ things a same-user process can still do, and what to do about them:
   process such as the key daemon even from its own user, so `lock` could not find a daemon to
   stop. `unlock` and `create --unlock` refuse to start one before the password prompt (there is
   no flag to accept this), and `lock` and `status` fail instead of reporting the wallet locked.
-  The same holds when `/proc/self/mountinfo` cannot be read. `subset=pid` is fine.
+  The same holds when `/proc/self/mountinfo` cannot be read. `subset=pid` is fine. Elsewhere,
+  a `/proc/<pid>` file that cannot be read is skipped only when the process is gone or is
+  another user's (`kill(pid, 0)` answers EPERM); one this user owns or may signal makes `lock`
+  and `status` fail ("refusing to trust a partial daemon list").
 - **Root** defeats all of this.
 
 ## Development
