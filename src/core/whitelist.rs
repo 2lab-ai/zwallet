@@ -771,14 +771,16 @@ fn signed_by(signed: &SignedList, key: &VerifyingKey) -> bool {
 /// (`None` at or below the seal, or with a sealed key that is not a valid key). A list is
 /// published as `whitelist.json` only after the re-seal that names it, so the seal is the first
 /// suspect: an older `whitelist.json` would verify under a rolled-back seal and complete a joint
-/// rollback, so it is offered only behind the highest generation the human remembers. The seal
-/// only moves forward, so with no rollback that is the sealed generation; after any rollback it
-/// is higher.
+/// rollback, so it is offered only behind the highest generation the human remembers. Within one
+/// seal lineage the seal only moves forward, so with no rollback that is the sealed generation;
+/// after any rollback it is higher. A reset or first edit made while wallet.json sealed no
+/// whitelist starts again at gen 1, so only generations seen since then count.
 /// - two or more edits above the seal, under the sealed key: only a rolled-back wallet.json
 ///   explains it, and no copy is offered;
 /// - one edit above, under the sealed key: that, or an edit that never finished sealing (its
 ///   staged copy put in place of `whitelist.json`);
-/// - under another key: wallet.json rolled back across a reset, or a foreign file.
+/// - under another key: wallet.json rolled back across a reset, a reset that never finished
+///   sealing, or a foreign file.
 fn above_seal(signed: &SignedList, anchor: &WhitelistAnchor) -> Option<String> {
     let (n, m) = (signed.list.generation, anchor.generation);
     if n <= m {
@@ -791,21 +793,22 @@ fn above_seal(signed: &SignedList, anchor: &WhitelistAnchor) -> Option<String> {
         "restore the current wallet.json (zwallet keeps no copy of it), never an older \
          {WHITELIST_FILE}"
     );
+    let highest = format!("the highest generation you remember seeing {SEEN_SINCE}");
     Some(if !signed_by(signed, &key) {
         format!(
             "{WHITELIST_FILE} (gen {n}) is newer than the seal (gen {m}) but not signed by this \
-             wallet's whitelist key: a wallet.json rolled back across a reset, or a foreign file. \
-             If gen {m} is the highest generation you remember seeing, the file is foreign: put \
-             back a genuine copy of {WHITELIST_FILE} at gen {m}; if you remember a higher one, \
-             wallet.json was rolled back across a reset: {restore}"
+             wallet's whitelist key: a wallet.json rolled back across a reset, a reset that never \
+             finished sealing, or a foreign file. If gen {m} is {highest}, it is one of the last \
+             two: put back a genuine copy of {WHITELIST_FILE} at gen {m}; if you remember a \
+             higher one, wallet.json was rolled back across a reset: {restore}"
         )
     } else if n == m.saturating_add(1) {
         format!(
             "{WHITELIST_FILE} (gen {n}) is one edit newer than the seal (gen {m}), under this \
              wallet's whitelist key: an edit to gen {n} that never finished sealing, or a \
-             rolled-back wallet.json. If gen {m} is the highest generation you remember seeing \
-             (the edit to gen {n} never reported), put back {WHITELIST_FILE} at gen {m}; if you \
-             remember gen {n} or higher, wallet.json was rolled back: {restore}"
+             rolled-back wallet.json. If gen {m} is {highest}, the edit to gen {n} never \
+             reported: put back a genuine copy of {WHITELIST_FILE} at gen {m}; if you remember \
+             gen {n} or higher, wallet.json was rolled back: {restore}"
         )
     } else {
         format!(
@@ -816,18 +819,25 @@ fn above_seal(signed: &SignedList, anchor: &WhitelistAnchor) -> Option<String> {
     })
 }
 
+/// Which generations the human's memory counts, and where they saw them: generations restart at
+/// 1 with a reset or first edit made while wallet.json sealed no whitelist, and plain `whitelist
+/// list` prints the unverified generation, so it is no source.
+pub const SEEN_SINCE: &str = "since the last start at gen 1 (an edit's report, or unlock, status \
+                              or `zwallet whitelist list --verify`)";
+
 /// What the human can do about a `whitelist.json` that does not verify and is not above the seal
 /// ([`above_seal`] says what to do then): a genuine copy at the sealed generation, which a
 /// rolled-back wallet.json would also accept, so only when that is the highest generation the
-/// human remembers. zwallet keeps no counter outside the home to check it against.
+/// human remembers ([`SEEN_SINCE`]). zwallet keeps no counter outside the home to check it
+/// against.
 pub fn genuine_copy_remedy(sealed_generation: u64) -> String {
     let m = sealed_generation;
     format!(
         "put back a genuine copy of {WHITELIST_FILE} at gen {m} only if gen {m} is the highest \
-         generation you remember seeing (unlock, status and `zwallet whitelist list` print it): \
-         it verifies again without a reset, because the seal pins its digest; if you remember a \
-         higher one, wallet.json was rolled back: restore the current wallet.json instead \
-         (zwallet keeps no copy of it), never an older {WHITELIST_FILE}"
+         generation you remember seeing {SEEN_SINCE}: it verifies again without a reset, \
+         because the seal pins its digest; if you remember a higher one, wallet.json was rolled \
+         back: restore the current wallet.json instead (zwallet keeps no copy of it), never an \
+         older {WHITELIST_FILE}"
     )
 }
 
@@ -1458,16 +1468,17 @@ fn transact(
     hook(EditStage::Resealed(&home.join(store::WALLET_FILE)))?;
     // Published from memory, as a promotion is: never whatever the staged path holds by now.
     // The change has landed here. The staged copy is then removed, best-effort: left in place
-    // (a crash, or a removal that fails) it is the same verified bytes, and the next staging
-    // overwrites it.
+    // by a crash it is the same verified bytes, which the next staging replaces; a removal that
+    // fails is a warning (something else may sit at the path, and a later staging replaces only
+    // a plain file).
     lock.replace_file(WHITELIST_FILE, &staged)?;
     hook(EditStage::Published(&home.join(WHITELIST_FILE)))?;
     let warning = lock.remove_file(NEXT_FILE).err().map(|e| {
         format!(
             "the change landed, but zwallet could not remove {NEXT_FILE}, or could not sync its \
-             directory after removing it ({}). If {NEXT_FILE} is still there it is not needed: \
-             {WHITELIST_FILE} holds the list just signed, and a later change stages its own list \
-             at that path",
+             directory after removing it ({}). If {NEXT_FILE} is still there it is not needed \
+             ({WHITELIST_FILE} holds the list just signed): remove it; a later change can stage \
+             its list only where there is a plain file or nothing",
             e.message
         )
     });
@@ -2664,13 +2675,15 @@ mod tests {
         fs::write(home.join(store::WALLET_FILE), &gen1_wallet).unwrap();
         let anchor = sealed(home).unwrap();
         let why = "whitelist.json (gen 3) is newer than the seal (gen 1) but not signed by this \
-                   wallet's whitelist key: a wallet.json rolled back across a reset, or a foreign \
-                   file";
+                   wallet's whitelist key: a wallet.json rolled back across a reset, a reset that \
+                   never finished sealing, or a foreign file";
         // The copy only behind the highest-generation gate: the reset reported gen 2.
-        let gate = "If gen 1 is the highest generation you remember seeing, the file is foreign: \
-                    put back a genuine copy of whitelist.json at gen 1; if you remember a higher \
-                    one, wallet.json was rolled back across a reset: restore the current \
-                    wallet.json (zwallet keeps no copy of it), never an older whitelist.json";
+        let gate = "If gen 1 is the highest generation you remember seeing since the last start \
+                    at gen 1 (an edit's report, or unlock, status or `zwallet whitelist list \
+                    --verify`), it is one of the last two: put back a genuine copy of \
+                    whitelist.json at gen 1; if you remember a higher one, wallet.json was rolled \
+                    back across a reset: restore the current wallet.json (zwallet keeps no copy \
+                    of it), never an older whitelist.json";
         let reason = load_verified(home, &anchor).unwrap_err().message;
         assert!(reason.contains(why), "{reason}");
         assert!(reason.contains(gate), "{reason}");
@@ -2720,9 +2733,11 @@ mod tests {
         for want in [
             "whitelist.json (gen 2) is one edit newer than the seal (gen 1)",
             "an edit to gen 2 that never finished sealing, or a rolled-back wallet.json",
-            "If gen 1 is the highest generation you remember seeing (the edit to gen 2 never \
-             reported), put back whitelist.json at gen 1; if you remember gen 2 or higher, \
-             wallet.json was rolled back: restore the current wallet.json",
+            "If gen 1 is the highest generation you remember seeing since the last start at gen 1 \
+             (an edit's report, or unlock, status or `zwallet whitelist list --verify`), the edit \
+             to gen 2 never reported: put back a genuine copy of whitelist.json at gen 1; if you \
+             remember gen 2 or higher, wallet.json was rolled back: restore the current \
+             wallet.json",
         ] {
             assert!(reason.contains(want), "{want:?} not in {reason}");
         }
@@ -2820,6 +2835,9 @@ mod tests {
             warning.contains(
                 "the change landed, but zwallet could not remove whitelist.next.json, or could \
                  not sync its directory after removing it"
+            ) && warning.ends_with(
+                "remove it; a later change can stage its list only where there is a plain file \
+                 or nothing"
             ),
             "{warning}"
         );

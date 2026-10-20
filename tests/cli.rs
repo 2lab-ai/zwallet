@@ -2846,7 +2846,7 @@ fn c2_2_the_change_lands_on_exactly_the_list_shown_or_nothing_changes() {
     );
 
     // An unfinished edit in whitelist.next.json is shown too (the same signed list, other bytes:
-    // a byte-identical copy is labelled as left after a change instead).
+    // a byte-identical copy is labelled as a copy of whitelist.json instead).
     fs::write(home.path().join("whitelist.next.json"), &compact).unwrap();
     let r = whitelist_edit(&home, &["remove", "bob"]);
     assert!(
@@ -2961,9 +2961,10 @@ fn r4_2_a_wallet_json_rolled_back_under_a_newer_list_is_named() {
     for want in [
         "whitelist.json (gen 3) is one edit newer than the seal (gen 2)",
         "an edit to gen 3 that never finished sealing, or a rolled-back wallet.json",
-        "If gen 2 is the highest generation you remember seeing (the edit to gen 3 never \
-         reported), put back whitelist.json at gen 2; if you remember gen 3 or higher, \
-         wallet.json was rolled back: restore the current wallet.json",
+        "If gen 2 is the highest generation you remember seeing since the last start at gen 1 \
+         (an edit's report, or unlock, status or `zwallet whitelist list --verify`), the edit to \
+         gen 3 never reported: put back a genuine copy of whitelist.json at gen 2; if you \
+         remember gen 3 or higher, wallet.json was rolled back: restore the current wallet.json",
     ] {
         assert!(reason.contains(want), "{want:?} not in {v}");
     }
@@ -2981,12 +2982,15 @@ fn r5_1_a_rollback_across_a_reset_is_named_and_the_copy_is_only_behind_the_gate(
     // wallet.json put back to before the reset: the list is the new key's, at gen 2.
     fs::write(home.wallet_json(), &gen1).unwrap();
     let why = "whitelist.json (gen 2) is newer than the seal (gen 1) but not signed by this \
-               wallet's whitelist key: a wallet.json rolled back across a reset, or a foreign file";
+               wallet's whitelist key: a wallet.json rolled back across a reset, a reset that \
+               never finished sealing, or a foreign file";
     // The copy only behind the gate: the reset reported gen 2, so the human is sent to the
     // current wallet.json.
-    let gate = "If gen 1 is the highest generation you remember seeing, the file is foreign: put \
-                back a genuine copy of whitelist.json at gen 1; if you remember a higher one, \
-                wallet.json was rolled back across a reset: restore the current wallet.json";
+    let gate = "If gen 1 is the highest generation you remember seeing since the last start at \
+                gen 1 (an edit's report, or unlock, status or `zwallet whitelist list --verify`), \
+                it is one of the last two: put back a genuine copy of whitelist.json at gen 1; if \
+                you remember a higher one, wallet.json was rolled back across a reset: restore \
+                the current wallet.json";
     let v = verify_list(&home);
     let reason = v["reason"].as_str().unwrap_or("");
     assert!(reason.contains(why) && reason.contains(gate), "{v}");
