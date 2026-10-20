@@ -40,3 +40,28 @@ WU1 (EVM wallet core) went through six external review rounds and merged as PR #
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
 | G1 | A1–A9 | closed: code merged as PR #1 (offline tests + `#[ignore]` live tests cover A1–A9, A2b) | WU1 | ✅ |
+
+## R3 — closed (WU2 distribution, WU3 tap)
+
+Distribution and the tap landed; the preview channel installs through Homebrew end to end.
+
+### Closed rows
+
+| WU | Repo · branch · worktree | Scope | Owner | State |
+|---|---|---|---|---|
+| WU2 | zwallet · `feat/2-distribution` · `.worktrees/feat-2-distribution` | `ci.yml`/`preview.yml`/`release.yml` from harn's, version line `zwallet <ver> (<channel> <rev12>)` (the preview formula test greps `preview`), MIT `LICENSE` file | opus-coder; dispatcher rebased onto main 2026-10-20 (dropped 6abd466: main's process-table lookup already finds the Linux daemon) | in review: PR open, CI is the merge gate |
+| WU3 | homebrew-tap · `feat/zwallet-formulae` · `.worktrees/feat-zwallet-formulae` | `Formula/zwallet.rb.tmpl` and `zwallet-preview.rb.tmpl`, `bump-zwallet` and `bump-zwallet-preview` jobs, README rows (mirror of harn commit 2a3af89) | opus-coder | committed 5468a0a + ed9150e (desc ≤80). The diff is name-only against the harn jobs; tap `scripts/test-*.sh` pass 8/8; actionlint clean. The hold "until zwallet is public" is void: zwallet has been public since it was created (GitHub PublicEvent 2026-10-20T04:04:01Z, same second as creation). Merge after WU2 so the preview job has releases to read |
+
+- **WU2** merged as PR #2 (814c4ae).
+  - It was rebased onto main, and 6abd466 was dropped: main's process-table lookup already finds the Linux daemon.
+  - External review (gpt6) APPROVE with no blockers. Its two notes were fixed before the merge:
+    - every action is pinned to a full commit sha, on Node 24 majors (checkout v7.0.1, upload-artifact v7.0.2, download-artifact v8.0.2, action-gh-release v3.0.3, rust-cache v2.9.2, rust-toolchain stable); the dispatcher re-resolved every sha;
+    - an exact version-line smoke runs in ci/preview/release.
+  - CI passed on macos-latest and ubuntu-latest: the first hosted Linux build.
+- **First preview:** `preview-2026-10-20-1315-814c4aed0978`. All 4 builds and publish succeeded; the assets match `SHA256SUMS`; the macOS arm64 binary prints `zwallet 0.1.0 (preview 814c4aed0978)`.
+- **WU3** merged as tap PR #8.
+  - It was rebased onto the tap master; the tap tests passed 8/8 and actionlint was clean.
+  - External review (gpt6) APPROVE. Its note on formula tests was fixed: they now assert the channel, `zwallet <version> (release ` and `(preview `.
+  - Its other note, the push race between sibling bump jobs, is tap-wide and predates this PR.
+  - The first preview formula was rendered by hand (tap PR #9).
+- **Receipt** on fable-m5max: `brew install 2lab-ai/tap/zwallet-preview` installed 2026.10.20.1315; `zwallet --version` printed `zwallet 0.1.0 (preview 814c4aed0978)`; `brew test` returned rc=0.
