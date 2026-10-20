@@ -3,11 +3,12 @@
 
 use crate::chains::evm::{self, Evm, abi, rpc as evm_rpc};
 use crate::chains::{
-    self, CHAINS, Chain, ChainFamily, Family, Net, PRIMARY_CHAIN, PreparedTx, TransferRequest,
+    self, Broadcast, CHAINS, Chain, ChainFamily, Family, Net, PRIMARY_CHAIN, PreparedTx,
+    TransferRequest, redact_url,
 };
 use crate::cli::{
     AddressArgs, BalanceArgs, CallArgs, Cli, Command, CreateArgs, InvokeArgs, KeyArg, Out,
-    SignMessageArgs, TransferArgs, UnlockArgs, render_human,
+    SendArgs, SignMessageArgs, TransferArgs, UnlockArgs, render_human,
 };
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
@@ -79,7 +80,7 @@ fn chains_list() -> Out {
                 "family": c.family.name(),
                 "symbol": c.symbol,
                 "chainId": c.chain_id_json(),
-                "rpc": rpc_url(c, None),
+                "rpc": redact_url(&rpc_url(c, None)),
             })
         })
         .collect();
@@ -91,7 +92,7 @@ fn chains_list() -> Out {
                 c.key,
                 c.chain_id_json(),
                 c.symbol,
-                rpc_url(c, None)
+                redact_url(&rpc_url(c, None))
             )
         })
         .collect::<Vec<_>>()
@@ -595,6 +596,7 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
         Some(v) => parse_units(v, chain.decimals)?,
         None => U256::ZERO,
     };
+    let max_fee_per_gas = max_fee_wei(&a.send)?;
     let (from, index, key_name) = signing_key(home, &a.key, chain).await?;
     require_unlocked(home).await?;
     let net = net(chain, a.rpc.as_deref());
@@ -606,7 +608,9 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
         input: input.clone(),
         token: None,
         fallback_gas: None,
-        dry_run: a.dry_run,
+        dry_run: a.send.dry_run,
+        nonce: a.send.nonce,
+        max_fee_per_gas,
     };
     let prepared = evm_rpc::prepare(&p, &net, intent).await?;
     let mut base = Map::new();
@@ -619,10 +623,22 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     base.insert("data".into(), json!(format!("0x{}", hex::encode(&input))));
     base.insert("value".into(), json!(format_units(value, chain.decimals)));
     base.insert("valueRaw".into(), json!(value.to_string()));
-    sign_and_send(
-        &Evm, &net, home, index, &from, prepared, a.dry_run, a.wait, base,
-    )
-    .await
+    sign_and_send(&Evm, &net, home, index, &from, prepared, &a.send, base).await
+}
+
+/// `--max-fee-gwei` in wei (gwei = 10^9 wei), validated before any RPC.
+fn max_fee_wei(send: &SendArgs) -> Result<Option<u128>> {
+    let Some(gwei) = send.max_fee_gwei.as_deref() else {
+        return Ok(None);
+    };
+    let bad = |why: String| WalletError::validation(format!("--max-fee-gwei: {why}"));
+    let wei = parse_units(gwei, 9).map_err(|e| bad(e.message))?;
+    if wei.is_zero() {
+        return Err(bad("must be greater than zero".into()));
+    }
+    u128::try_from(wei)
+        .map(Some)
+        .map_err(|_| bad(format!("'{gwei}' is too large")))
 }
 
 async fn transfer(home: &Path, a: TransferArgs) -> Result<Out> {
@@ -646,6 +662,7 @@ async fn transfer_with<F: ChainFamily>(
     } else {
         parse_units(&a.amount, chain.decimals)?;
     }
+    let max_fee_per_gas = max_fee_wei(&a.send)?;
     let (from, index, key_name) = signing_key(home, &a.key, chain).await?;
     require_unlocked(home).await?;
     let req = TransferRequest {
@@ -653,7 +670,10 @@ async fn transfer_with<F: ChainFamily>(
         to: to.clone(),
         amount: a.amount.clone(),
         token: a.token.clone(),
-        dry_run: a.dry_run,
+        dry_run: a.send.dry_run,
+        nonce: a.send.nonce,
+        max_fee_per_gas,
+        force: a.force,
     };
     let prepared = fam.prepare_transfer(net, &req).await?;
     let mut base = Map::new();
@@ -661,10 +681,7 @@ async fn transfer_with<F: ChainFamily>(
     base.insert("key".into(), json!(key_name));
     base.insert("from".into(), json!(from));
     base.insert("to".into(), json!(to));
-    sign_and_send(
-        fam, net, home, index, &from, prepared, a.dry_run, a.wait, base,
-    )
-    .await
+    sign_and_send(fam, net, home, index, &from, prepared, &a.send, base).await
 }
 
 /// Shared tail of `transfer` and `invoke`: sign through the daemon, check the raw bytes really
@@ -677,8 +694,7 @@ async fn sign_and_send<F: ChainFamily>(
     index: u32,
     from: &str,
     prepared: PreparedTx,
-    dry_run: bool,
-    wait: bool,
+    send: &SendArgs,
     mut out: Map<String, Value>,
 ) -> Result<Out> {
     let signed_value = protocol::send_unlocked(
@@ -701,49 +717,41 @@ async fn sign_and_send<F: ChainFamily>(
     for (k, v) in prepared.fields {
         out.entry(k).or_insert(v);
     }
-    out.insert("dryRun".into(), json!(dry_run));
+    // The nonce the signed bytes actually consume.
+    if let Some(n) = signed.nonce {
+        out.insert("nonce".into(), json!(n));
+    }
+    out.insert("dryRun".into(), json!(send.dry_run));
     // What the key holder decoded from the bytes it signed (not what this process intended).
     if let Some(view) = signed_value.get("decoded") {
         out.insert("signerDecoded".into(), view.clone());
     }
-    if dry_run {
-        out.insert("rawTx".into(), json!(signed.raw));
-        out.insert("txHash".into(), json!(signed.tx_hash));
+    // The hash is computed from the signed bytes, never taken from the node.
+    out.insert("txHash".into(), json!(signed.tx_hash));
+    if send.dry_run {
+        // No rawTx: a dry-run must not hand out a transaction that can be broadcast without
+        // zwallet.
         out.insert("recoveredFrom".into(), json!(signed.signer));
         return Ok(Out::json(Value::Object(out)));
     }
-    let tx_hash = fam.broadcast(net, &signed).await.map_err(|e| {
-        WalletError::new(
-            e.code,
-            format!(
-                "{} (the transaction {} may still have reached the network: {})",
-                e.message,
-                signed.tx_hash,
-                net.chain.explorer_tx_url(&signed.tx_hash)
-            ),
-        )
-    })?;
-    out.insert("txHash".into(), json!(tx_hash));
+    let outcome = fam.broadcast(net, &signed).await?;
     out.insert(
         "explorerUrl".into(),
-        json!(net.chain.explorer_tx_url(&tx_hash)),
+        json!(net.chain.explorer_tx_url(&signed.tx_hash)),
     );
-    if wait {
-        // Already broadcast: never turn a receipt problem into a failure (a retry would resend).
-        match fam.wait_for_receipt(net, &tx_hash, WAIT_TIMEOUT).await {
-            Ok(Some(receipt)) => {
-                if let Value::Object(r) = receipt {
-                    out.extend(r);
-                }
-            }
-            Ok(None) => {
-                out.insert("status".into(), json!("pending"));
-            }
-            Err(e) => {
-                out.insert("status".into(), json!("unknown"));
-                out.insert("receiptError".into(), json!(e.message));
-            }
-        }
+    if let Broadcast::KnownDespite(why) = outcome {
+        out.insert(
+            "broadcastWarning".into(),
+            json!(format!(
+                "{why}; the node reports the transaction, so it was sent"
+            )),
+        );
+    }
+    if send.wait {
+        let receipt = fam
+            .wait_for_receipt(net, &signed.tx_hash, WAIT_TIMEOUT)
+            .await;
+        chains::record_receipt(&mut out, receipt);
     }
     Ok(Out::json(Value::Object(out)))
 }

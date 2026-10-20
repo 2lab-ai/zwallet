@@ -89,6 +89,33 @@ impl ConsensusTx {
             Self::Legacy(t) => t.encoded_for_signing(),
         }
     }
+
+    fn chain_id(&self) -> u64 {
+        match self {
+            Self::Eip1559(t) => t.chain_id,
+            // `decode_unsigned` refuses legacy payloads without an EIP-155 chain id.
+            Self::Legacy(t) => t.chain_id.unwrap_or_default(),
+        }
+    }
+
+    fn fees(&self) -> EvmFees {
+        match self {
+            Self::Eip1559(t) => EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(t.max_fee_per_gas),
+                max_priority_fee_per_gas: U128::from(t.max_priority_fee_per_gas),
+            },
+            Self::Legacy(t) => EvmFees::Legacy {
+                gas_price: U128::from(t.gas_price),
+            },
+        }
+    }
+
+    fn fields(&self) -> (u64, u64, TxKind, U256, &Bytes) {
+        match self {
+            Self::Eip1559(t) => (t.nonce, t.gas_limit, t.to, t.value, &t.input),
+            Self::Legacy(t) => (t.nonce, t.gas_limit, t.to, t.value, &t.input),
+        }
+    }
 }
 
 fn to_consensus(tx: &UnsignedEvmTx) -> ConsensusTx {
@@ -199,6 +226,23 @@ impl Action {
     }
 }
 
+/// Decodes known-selector calldata and requires it to be that call's canonical ABI encoding.
+/// alloy's default decoder ignores trailing bytes and the 12 high bytes of address words, so
+/// different byte strings would decode to the same action; re-encoding must reproduce `input`.
+fn decode_canonical<C: SolCall>(input: &[u8], name: &str) -> Result<C> {
+    let malformed = || {
+        WalletError::validation(format!(
+            "refusing to sign: calldata has the ERC-20 {name} selector but is not its canonical \
+             ABI encoding"
+        ))
+    };
+    let call = C::abi_decode(input).map_err(|_| malformed())?;
+    if call.abi_encode() != input {
+        return Err(malformed());
+    }
+    Ok(call)
+}
+
 fn classify(to: Address, value: U256, input: &[u8]) -> Result<Action> {
     let Some(selector) = input.get(..4) else {
         return if input.is_empty() {
@@ -209,15 +253,22 @@ fn classify(to: Address, value: U256, input: &[u8]) -> Result<Action> {
             ))
         };
     };
-    let malformed = |name: &str| {
-        WalletError::validation(format!(
-            "refusing to sign: calldata has the ERC-20 {name} selector but malformed arguments"
-        ))
+    // zwallet never attaches native value to an ERC-20 call; a policy keyed on the ERC-20 action
+    // would not see that native spend, so such a transaction is refused outright.
+    let erc20 = |name: &str| {
+        if value.is_zero() {
+            Ok(())
+        } else {
+            Err(WalletError::validation(format!(
+                "refusing to sign: ERC-20 {name} call that also sends {value} wei of native value"
+            )))
+        }
     };
     let selector: [u8; 4] = selector.try_into().unwrap_or_default();
     Ok(match selector {
         IERC20::transferCall::SELECTOR => {
-            let c = IERC20::transferCall::abi_decode(input).map_err(|_| malformed("transfer"))?;
+            erc20("transfer")?;
+            let c: IERC20::transferCall = decode_canonical(input, "transfer")?;
             Action::Erc20Transfer {
                 token: to,
                 recipient: c.to,
@@ -225,7 +276,8 @@ fn classify(to: Address, value: U256, input: &[u8]) -> Result<Action> {
             }
         }
         IERC20::approveCall::SELECTOR => {
-            let c = IERC20::approveCall::abi_decode(input).map_err(|_| malformed("approve"))?;
+            erc20("approve")?;
+            let c: IERC20::approveCall = decode_canonical(input, "approve")?;
             Action::Erc20Approve {
                 token: to,
                 spender: c.spender,
@@ -233,8 +285,8 @@ fn classify(to: Address, value: U256, input: &[u8]) -> Result<Action> {
             }
         }
         IERC20::transferFromCall::SELECTOR => {
-            let c = IERC20::transferFromCall::abi_decode(input)
-                .map_err(|_| malformed("transferFrom"))?;
+            erc20("transferFrom")?;
+            let c: IERC20::transferFromCall = decode_canonical(input, "transferFrom")?;
             Action::Erc20TransferFrom {
                 token: to,
                 from: c.from,
@@ -251,28 +303,59 @@ fn classify(to: Address, value: U256, input: &[u8]) -> Result<Action> {
 }
 
 /// The daemon's view of an unsigned transaction, decoded from the exact bytes it will sign.
+///
+/// Read-only by construction: the only state is the consensus transaction that
+/// [`sign_decoded`] signs and the [`Action`] classified from it at decode time, both private.
+/// Every accessor reads that same object, so a policy cannot be shown one transaction while
+/// another is signed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedUnsigned {
-    pub chain_id: u64,
-    pub nonce: u64,
-    pub gas_limit: u64,
-    pub fees: EvmFees,
-    pub to: Address,
-    pub value: U256,
-    pub input: Bytes,
-    pub action: Action,
     consensus: ConsensusTx,
+    action: Action,
 }
 
 impl DecodedUnsigned {
+    pub fn chain_id(&self) -> u64 {
+        self.consensus.chain_id()
+    }
+
+    pub fn nonce(&self) -> u64 {
+        self.consensus.fields().0
+    }
+
+    pub fn gas_limit(&self) -> u64 {
+        self.consensus.fields().1
+    }
+
+    pub fn fees(&self) -> EvmFees {
+        self.consensus.fees()
+    }
+
+    /// The called address (`decode_unsigned` refuses contract creation).
+    pub fn to(&self) -> Address {
+        self.consensus.fields().2.to().copied().unwrap_or_default()
+    }
+
+    pub fn value(&self) -> U256 {
+        self.consensus.fields().3
+    }
+
+    pub fn input(&self) -> &Bytes {
+        self.consensus.fields().4
+    }
+
+    pub fn action(&self) -> &Action {
+        &self.action
+    }
+
     pub fn to_json(&self) -> Value {
         json!({
-            "chainId": self.chain_id,
-            "nonce": self.nonce,
-            "gasLimit": self.gas_limit,
-            "maxGasPrice": self.fees.max_price().to_string(),
-            "to": self.to.to_checksum(None),
-            "value": self.value.to_string(),
+            "chainId": self.chain_id(),
+            "nonce": self.nonce(),
+            "gasLimit": self.gas_limit(),
+            "maxGasPrice": self.fees().max_price().to_string(),
+            "to": self.to().to_checksum(None),
+            "value": self.value().to_string(),
             "action": self.action.to_json(),
         })
     }
@@ -314,46 +397,12 @@ pub fn decode_unsigned(payload: &[u8]) -> Result<DecodedUnsigned> {
     if consensus.encoded_for_signing() != payload {
         return Err(refuse("non-canonical transaction encoding"));
     }
-    let (chain_id, nonce, gas_limit, fees, kind, value, input) = match &consensus {
-        ConsensusTx::Eip1559(t) => (
-            t.chain_id,
-            t.nonce,
-            t.gas_limit,
-            EvmFees::Eip1559 {
-                max_fee_per_gas: U128::from(t.max_fee_per_gas),
-                max_priority_fee_per_gas: U128::from(t.max_priority_fee_per_gas),
-            },
-            t.to,
-            t.value,
-            t.input.clone(),
-        ),
-        ConsensusTx::Legacy(t) => (
-            t.chain_id.unwrap_or_default(),
-            t.nonce,
-            t.gas_limit,
-            EvmFees::Legacy {
-                gas_price: U128::from(t.gas_price),
-            },
-            t.to,
-            t.value,
-            t.input.clone(),
-        ),
-    };
+    let (_, _, kind, value, input) = consensus.fields();
     let TxKind::Call(to) = kind else {
         return Err(refuse("contract creation is not supported"));
     };
-    let action = classify(to, value, &input)?;
-    Ok(DecodedUnsigned {
-        chain_id,
-        nonce,
-        gas_limit,
-        fees,
-        to,
-        value,
-        input,
-        action,
-        consensus,
-    })
+    let action = classify(to, value, input)?;
+    Ok(DecodedUnsigned { consensus, action })
 }
 
 /// Signs exactly the decoded transaction.
@@ -381,6 +430,7 @@ pub struct DecodedEvmTx {
     pub chain_id: Option<u64>,
     pub hash: B256,
     pub signer: Address,
+    pub nonce: u64,
     pub to: Option<Address>,
     pub value: U256,
 }
@@ -395,6 +445,7 @@ pub fn decode_signed(raw: &[u8]) -> Result<DecodedEvmTx> {
         chain_id: envelope.chain_id(),
         hash: *envelope.tx_hash(),
         signer,
+        nonce: envelope.nonce(),
         to: envelope.to(),
         value: envelope.value(),
     })
@@ -455,6 +506,13 @@ mod tests {
         let signed = sign_decoded(&signer(), &decoded).unwrap();
         let back = decode_signed(&signed.raw).unwrap();
         assert_eq!(back.hash, signed.hash);
+        // The policy view and the signed bytes describe one transaction.
+        assert_eq!(Some(decoded.chain_id()), back.chain_id);
+        assert_eq!(decoded.nonce(), back.nonce);
+        assert_eq!(Some(decoded.to()), back.to);
+        assert_eq!(decoded.value(), back.value);
+        assert_eq!((decoded.gas_limit(), decoded.fees()), (t.gas_limit, t.fees));
+        assert_eq!(decoded.input(), &t.input);
         (decoded, back)
     }
 
@@ -464,13 +522,13 @@ mod tests {
         let t = tx(1, eip1559(), RECIPIENT, value, Bytes::new());
         let (decoded, back) = sign_via_payload(&t);
         assert_eq!(
-            decoded.action,
+            *decoded.action(),
             Action::NativeTransfer {
                 to: RECIPIENT,
                 value
             }
         );
-        assert_eq!(decoded.chain_id, 1);
+        assert_eq!(decoded.chain_id(), 1);
         assert_eq!(back.signer, HARDHAT0);
         assert_eq!(back.chain_id, Some(1));
         assert_eq!(back.to, Some(RECIPIENT));
@@ -491,7 +549,7 @@ mod tests {
         let (decoded, back) = sign_via_payload(&t);
         // The daemon's own reading of the calldata, not anything the CLI claimed.
         assert_eq!(
-            decoded.action,
+            *decoded.action(),
             Action::Erc20Transfer {
                 token: USDC,
                 recipient: RECIPIENT,
@@ -519,7 +577,7 @@ mod tests {
         )))
         .unwrap();
         assert!(
-            matches!(d.action, Action::Erc20Approve { spender, amount, .. }
+            matches!(*d.action(), Action::Erc20Approve { spender, amount, .. }
             if spender == RECIPIENT && amount == U256::MAX)
         );
 
@@ -537,7 +595,7 @@ mod tests {
             from.into(),
         )))
         .unwrap();
-        assert!(matches!(d.action, Action::Erc20TransferFrom { .. }));
+        assert!(matches!(d.action(), Action::Erc20TransferFrom { .. }));
 
         let weth_deposit = Bytes::from_static(&[0xd0, 0xe3, 0x0d, 0xb0]);
         let d = decode_unsigned(&encoded_for_signing(&tx(
@@ -549,7 +607,7 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(
-            d.action.to_json()["selector"],
+            d.action().to_json()["selector"],
             "0xd0e30db0",
             "unknown selectors are reported, not guessed"
         );
@@ -567,7 +625,7 @@ mod tests {
             Bytes::new(),
         );
         let (decoded, back) = sign_via_payload(&t);
-        assert_eq!(decoded.chain_id, 56);
+        assert_eq!(decoded.chain_id(), 56);
         assert_eq!(back.signer, HARDHAT0);
         assert_eq!(back.chain_id, Some(56));
     }
@@ -626,6 +684,109 @@ mod tests {
         }
         assert!(decode_unsigned(&good).is_ok());
         assert!(decode_unsigned(&legacy).is_ok());
+    }
+
+    /// Calldata for the three known ERC-20 selectors, each with every address word listed by
+    /// byte offset (selector included).
+    fn known_selector_calldata() -> Vec<(&'static str, Vec<u8>, Vec<usize>)> {
+        vec![
+            (
+                "transfer",
+                IERC20::transferCall {
+                    to: RECIPIENT,
+                    amount: U256::from(5u64),
+                }
+                .abi_encode(),
+                vec![4],
+            ),
+            (
+                "approve",
+                IERC20::approveCall {
+                    spender: RECIPIENT,
+                    amount: U256::MAX,
+                }
+                .abi_encode(),
+                vec![4],
+            ),
+            (
+                "transferFrom",
+                IERC20::transferFromCall {
+                    from: HARDHAT0,
+                    to: RECIPIENT,
+                    amount: U256::from(5u64),
+                }
+                .abi_encode(),
+                vec![4, 36],
+            ),
+        ]
+    }
+
+    fn decode_calldata(value: U256, data: Vec<u8>) -> Result<DecodedUnsigned> {
+        decode_unsigned(&encoded_for_signing(&tx(
+            1,
+            eip1559(),
+            USDC,
+            value,
+            data.into(),
+        )))
+    }
+
+    #[test]
+    fn known_selectors_refuse_trailing_bytes() {
+        let mut accepted = Vec::new();
+        for (name, data, _) in known_selector_calldata() {
+            assert!(decode_calldata(U256::ZERO, data.clone()).is_ok(), "{name}");
+            for suffix in [vec![0u8], vec![0u8; 32], vec![0xff; 5]] {
+                let mut d = data.clone();
+                d.extend_from_slice(&suffix);
+                if decode_calldata(U256::ZERO, d).is_ok() {
+                    accepted.push(format!("{name}+{}", suffix.len()));
+                }
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "accepted with trailing bytes: {accepted:?}"
+        );
+    }
+
+    #[test]
+    fn known_selectors_refuse_dirty_address_padding() {
+        let mut accepted = Vec::new();
+        for (name, data, address_words) in known_selector_calldata() {
+            for word in address_words {
+                // Any non-zero byte in the 12 high bytes of an address word.
+                for at in [word, word + 11] {
+                    let mut d = data.clone();
+                    d[at] = 0x01;
+                    if decode_calldata(U256::ZERO, d).is_ok() {
+                        accepted.push(format!("{name}@{at}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "accepted with dirty padding: {accepted:?}"
+        );
+    }
+
+    #[test]
+    fn known_erc20_selectors_refuse_native_value() {
+        let mut accepted = Vec::new();
+        for (name, data, _) in known_selector_calldata() {
+            match decode_calldata(U256::from(1u64), data) {
+                Ok(_) => accepted.push(name),
+                Err(e) => assert!(e.message.contains("refusing to sign"), "{name}: {e}"),
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "accepted with native value: {accepted:?}"
+        );
+        // An unknown selector may carry value (e.g. WETH deposit).
+        let deposit = vec![0xd0, 0xe3, 0x0d, 0xb0];
+        assert!(decode_calldata(U256::from(1u64), deposit).is_ok());
     }
 
     #[test]

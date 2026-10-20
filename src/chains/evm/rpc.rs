@@ -6,7 +6,7 @@ use super::tx::{
     gas_with_margin,
 };
 use super::{config, parse_address};
-use crate::chains::{Net, PreparedTx, TransferRequest};
+use crate::chains::{Net, PreparedTx, TransferRequest, redact_url, redact_urls};
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use alloy::eips::BlockNumberOrTag;
@@ -22,6 +22,15 @@ use std::time::{Duration, Instant};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const RECEIPT_POLL: Duration = Duration::from_secs(3);
+/// After a failed send, how often and how far apart to ask the node for the transaction.
+const KNOWN_POLLS: u32 = 5;
+const KNOWN_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const GWEI: u128 = 1_000_000_000;
+/// Fee ceiling (see [`check_fee_ceiling`]): multiples of the reference price.
+const TIP_CEILING_MULT: u128 = 2;
+const PRICE_CEILING_MULT: u128 = 6;
+/// Floor of the reference price, so near-zero L2 and testnet base fees do not reject every tip.
+const REFERENCE_FLOOR: u128 = GWEI;
 /// OP-stack GasPriceOracle predeploy.
 const GAS_PRICE_ORACLE: Address = address!("0x420000000000000000000000000000000000000F");
 /// Gas limit used for a token-transfer dry-run when the node cannot estimate (no token balance).
@@ -35,7 +44,10 @@ async fn rpc<T, E: Display>(
 ) -> Result<T> {
     match tokio::time::timeout(RPC_TIMEOUT, call.into_future()).await {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(WalletError::rpc(format!("{what} failed: {e}"))),
+        // Transport errors quote the request URL, which may carry an API key.
+        Ok(Err(e)) => Err(WalletError::rpc(redact_urls(&format!(
+            "{what} failed: {e}"
+        )))),
         Err(_) => Err(WalletError::rpc(format!(
             "{what} timed out after {}s",
             RPC_TIMEOUT.as_secs()
@@ -45,17 +57,17 @@ async fn rpc<T, E: Display>(
 
 /// Opens the endpoint and checks it serves the chain we think it does.
 pub async fn connect(net: &Net) -> Result<EvmProvider> {
-    let url = net
-        .rpc_url
-        .parse()
-        .map_err(|_| WalletError::validation(format!("invalid RPC URL '{}'", net.rpc_url)))?;
+    let url = net.rpc_url.parse().map_err(|_| {
+        WalletError::validation(format!("invalid RPC URL '{}'", redact_url(&net.rpc_url)))
+    })?;
     let p = RootProvider::<Ethereum>::new_http(url);
     let got = rpc("eth_chainId", p.get_chain_id()).await?;
     let want = config(net.chain).chain_id;
     if got != want {
         return Err(WalletError::rpc(format!(
             "RPC {} serves chainId {got}, but {} is chainId {want}",
-            net.rpc_url, net.chain.key
+            redact_url(&net.rpc_url),
+            net.chain.key
         )));
     }
     Ok(p)
@@ -126,30 +138,106 @@ pub async fn erc20_balance(p: &EvmProvider, token: Address, owner: Address) -> R
         .map_err(|e| WalletError::rpc(format!("balanceOf returned malformed data: {e}")))
 }
 
-/// EIP-1559 fees when the chain has a base fee, legacy `eth_gasPrice` otherwise.
-pub async fn fees(p: &EvmProvider) -> Result<EvmFees> {
+/// EIP-1559 fees when the chain has a base fee, legacy `eth_gasPrice` otherwise, checked against
+/// [`check_fee_ceiling`] (`explicit` = `--max-fee-gwei` in wei).
+pub async fn fees(p: &EvmProvider, explicit: Option<u128>) -> Result<EvmFees> {
     let block = rpc(
         "eth_getBlockByNumber",
         p.get_block_by_number(BlockNumberOrTag::Latest),
     )
     .await?
     .ok_or_else(|| WalletError::rpc("latest block is not available"))?;
-    match block.header.base_fee_per_gas {
+    let gas_price = rpc("eth_gasPrice", p.get_gas_price()).await?;
+    let (fees, base) = match block.header.base_fee_per_gas {
         Some(base) if base > 0 => {
+            let base = u128::from(base);
             let est = rpc("eth_feeHistory", p.estimate_eip1559_fees()).await?;
             let priority = est.max_priority_fee_per_gas;
             // 2x base fee + tip survives several full blocks of base-fee growth.
-            let floor = u128::from(base).saturating_mul(2).saturating_add(priority);
+            let floor = base.saturating_mul(2).saturating_add(priority);
             let max = est.max_fee_per_gas.max(floor);
-            Ok(EvmFees::Eip1559 {
+            let fees = EvmFees::Eip1559 {
                 max_fee_per_gas: U128::from(max),
                 max_priority_fee_per_gas: U128::from(priority),
-            })
+            };
+            (fees, base)
         }
-        _ => Ok(EvmFees::Legacy {
-            gas_price: U128::from(rpc("eth_gasPrice", p.get_gas_price()).await?),
-        }),
+        _ => {
+            let fees = EvmFees::Legacy {
+                gas_price: U128::from(gas_price),
+            };
+            (fees, 0)
+        }
+    };
+    check_fee_ceiling(&fees, base, gas_price, explicit)?;
+    Ok(fees)
+}
+
+/// Refuses node-suggested fees above a ceiling before anything is signed. Every fee input comes
+/// from the RPC endpoint, so a broken or hostile one could ask for any price per gas:
+///
+/// ```text
+/// reference     = max(latest block baseFeePerGas, eth_gasPrice, 1 gwei)
+/// tip ceiling   = 2 x reference   (maxPriorityFeePerGas)
+/// price ceiling = 6 x reference   (maxFeePerGas, or gasPrice on a legacy chain)
+/// ```
+///
+/// The normal estimate, maxFee = 2 x base fee + tip, stays well inside it. `eth_gasPrice` (base
+/// fee plus the node's suggested tip) and the 1 gwei floor keep chains whose tip exceeds the base
+/// fee working (Polygon, OP Mainnet, Sepolia). On a legacy chain the price *is* `eth_gasPrice`,
+/// so only an explicit ceiling can reject it there.
+///
+/// `explicit` (`--max-fee-gwei`) replaces both ceilings with one price, which may be higher or
+/// lower. The reference comes from the same node, so this stops one bad estimate, not a node that
+/// lies consistently; an absolute limit belongs in the daemon-side signing policy.
+pub fn check_fee_ceiling(
+    fees: &EvmFees,
+    base_fee: u128,
+    gas_price: u128,
+    explicit: Option<u128>,
+) -> Result<()> {
+    let gwei = |wei: u128| format!("{} gwei", format_units(U256::from(wei), 9));
+    let reference = base_fee.max(gas_price).max(REFERENCE_FLOOR);
+    let (tip_cap, price_cap, rule) = match explicit {
+        Some(max) => (max, max, format!("--max-fee-gwei {}", gwei(max))),
+        None => (
+            reference.saturating_mul(TIP_CEILING_MULT),
+            reference.saturating_mul(PRICE_CEILING_MULT),
+            format!(
+                "zwallet's ceiling ({PRICE_CEILING_MULT} x max(baseFee {}, eth_gasPrice {}, 1 gwei), \
+                 tip {TIP_CEILING_MULT} x)",
+                gwei(base_fee),
+                gwei(gas_price)
+            ),
+        ),
+    };
+    let (name, value, cap) = match *fees {
+        EvmFees::Eip1559 {
+            max_priority_fee_per_gas,
+            ..
+        } if max_priority_fee_per_gas.to::<u128>() > tip_cap => (
+            "maxPriorityFeePerGas",
+            max_priority_fee_per_gas.to::<u128>(),
+            tip_cap,
+        ),
+        EvmFees::Eip1559 {
+            max_fee_per_gas, ..
+        } => ("maxFeePerGas", max_fee_per_gas.to::<u128>(), price_cap),
+        EvmFees::Legacy { gas_price } => ("gasPrice", gas_price.to::<u128>(), price_cap),
+    };
+    if value <= cap {
+        return Ok(());
     }
+    let hint = if explicit.is_some() {
+        "raise --max-fee-gwei if this price is intended"
+    } else {
+        "if fees really are this high, pass --max-fee-gwei <gwei> to allow up to that price per gas"
+    };
+    Err(WalletError::validation(format!(
+        "the RPC's fee {name} {} is above {rule} = {}; nothing was signed. {hint}",
+        gwei(value),
+        gwei(cap)
+    )))
 }
 
 /// A token the transaction debits besides native value (for the balance pre-check).
@@ -172,6 +260,10 @@ pub struct Intent {
     /// Gas limit to use in a dry-run when the node refuses to estimate an unfunded tx.
     pub fallback_gas: Option<u64>,
     pub dry_run: bool,
+    /// `--nonce`: replace a pending transaction (or name the next nonce) instead of `pending`.
+    pub nonce: Option<u64>,
+    /// `--max-fee-gwei` in wei: the explicit fee ceiling.
+    pub max_fee_per_gas: Option<u128>,
 }
 
 async fn estimate(p: &EvmProvider, intent: &Intent, value: U256) -> Result<u64> {
@@ -240,12 +332,23 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         return Err(insufficient(&s));
     }
 
-    let nonce = rpc(
+    let pending = rpc(
         "eth_getTransactionCount",
         p.get_transaction_count(intent.from).pending(),
     )
     .await?;
-    let fees = fees(p).await?;
+    let nonce = match intent.nonce {
+        None => pending,
+        Some(n) => {
+            let mined = rpc(
+                "eth_getTransactionCount",
+                p.get_transaction_count(intent.from).latest(),
+            )
+            .await?;
+            check_nonce(n, mined, pending)?
+        }
+    };
+    let fees = fees(p, intent.max_fee_per_gas).await?;
     let (gas_estimate, gas_source) = match estimate(p, &intent, intent.value).await {
         Ok(g) => (g, "estimate"),
         // The node will not estimate a tx the account cannot fund. In a dry-run, estimate
@@ -303,6 +406,9 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     let mut fields = Map::new();
     fields.insert("chainId".into(), json!(unsigned.chain_id));
     fields.insert("nonce".into(), json!(nonce));
+    if intent.nonce.is_some() {
+        fields.insert("replacesPending".into(), json!(nonce < pending));
+    }
     fields.insert("gasLimit".into(), json!(gas_limit));
     fields.insert("gasEstimate".into(), json!(gas_estimate));
     fields.insert("gasLimitSource".into(), json!(gas_source));
@@ -350,6 +456,25 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     })
 }
 
+/// An explicit `--nonce n` must reuse a nonce that is still pending (`mined <= n < pending`, the
+/// replacement case) or be the next free one (`n == pending`). Below `mined` it is already spent;
+/// above `pending` the transaction would wait forever for the gap to fill.
+fn check_nonce(n: u64, mined: u64, pending: u64) -> Result<u64> {
+    if n < mined {
+        return Err(WalletError::validation(format!(
+            "--nonce {n} is already used: this account has {mined} mined transaction(s); the \
+             next free nonce is {pending}"
+        )));
+    }
+    if n > pending {
+        return Err(WalletError::validation(format!(
+            "--nonce {n} would leave a gap: the next free nonce is {pending}, and a later nonce \
+             is not mined until every earlier one is"
+        )));
+    }
+    Ok(n)
+}
+
 async fn op_l1_fee(p: &EvmProvider, tx: &UnsignedEvmTx) -> Result<U256> {
     let data = IGasPriceOracle::getL1FeeCall {
         data: encoded_for_signing(tx).into(),
@@ -360,12 +485,36 @@ async fn op_l1_fee(p: &EvmProvider, tx: &UnsignedEvmTx) -> Result<U256> {
         .map_err(|e| WalletError::rpc(format!("getL1Fee returned malformed data: {e}")))
 }
 
-/// Native or ERC-20 transfer. Addresses and the native amount are validated before any RPC.
+/// Recipients that are almost always a mistake: the zero address, or the token contract itself
+/// (most tokens cannot send back what they hold). `--force` allows them.
+fn check_recipient(to: Address, token: Option<Address>, force: bool) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+    if to == Address::ZERO {
+        return Err(WalletError::invalid_address(
+            "refusing to send to the zero address: nothing can ever spend from it; pass --force \
+             if this burn is intended",
+        ));
+    }
+    if token == Some(to) {
+        return Err(WalletError::invalid_address(format!(
+            "refusing to send tokens to the token contract itself ({}): most tokens cannot send \
+             them back; pass --force if this is intended",
+            to.to_checksum(None)
+        )));
+    }
+    Ok(())
+}
+
+/// Native or ERC-20 transfer. Addresses, the recipient and the native amount are validated
+/// before any RPC.
 pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<PreparedTx> {
     let chain = net.chain;
     let from = parse_address(&req.from)?;
     let to = parse_address(&req.to)?;
     let token = req.token.as_deref().map(parse_address).transpose()?;
+    check_recipient(to, token, req.force)?;
     let native_amount = match token {
         None => Some(parse_units(&req.amount, chain.decimals)?),
         Some(_) => None,
@@ -394,6 +543,8 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
                 }),
                 fallback_gas: Some(TOKEN_FALLBACK_GAS),
                 dry_run: req.dry_run,
+                nonce: req.nonce,
+                max_fee_per_gas: req.max_fee_per_gas,
             };
             (intent, extra)
         }
@@ -412,6 +563,8 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
                 token: None,
                 fallback_gas: None,
                 dry_run: req.dry_run,
+                nonce: req.nonce,
+                max_fee_per_gas: req.max_fee_per_gas,
             };
             (intent, extra)
         }
@@ -422,9 +575,57 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
     Ok(prepared)
 }
 
-pub async fn broadcast(p: &EvmProvider, raw: &[u8]) -> Result<B256> {
-    let pending = rpc("eth_sendRawTransaction", p.send_raw_transaction(raw)).await?;
-    Ok(*pending.tx_hash())
+/// What became of `eth_sendRawTransaction` once the request went out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// The node answered with the transaction's own hash.
+    Accepted,
+    /// The node answered with some other hash: a broken or dishonest endpoint.
+    HashMismatch(B256),
+    /// The call failed or timed out (the text), but the node reports the transaction.
+    KnownDespite(String),
+    /// The call failed or timed out (the text), and the node does not report the transaction.
+    Unknown(String),
+}
+
+/// Sends `raw`, whose hash the caller computed from the bytes. The node's reply is only checked
+/// against that hash, never used in its place. If the call fails after the request may have gone
+/// out, the node is asked for the transaction by `hash` before giving up.
+pub async fn send_raw(p: &EvmProvider, raw: &[u8], hash: B256) -> SendOutcome {
+    let call = p.client().request::<_, B256>(
+        "eth_sendRawTransaction",
+        (alloy::hex::encode_prefixed(raw),),
+    );
+    match rpc("eth_sendRawTransaction", call).await {
+        Ok(h) if h == hash => SendOutcome::Accepted,
+        Ok(h) => SendOutcome::HashMismatch(h),
+        Err(e) if node_has_tx(p, hash).await => SendOutcome::KnownDespite(e.message),
+        Err(e) => SendOutcome::Unknown(e.message),
+    }
+}
+
+/// Asks for the transaction by hash a few times: a load-balanced endpoint may answer from a
+/// backend that has not seen it yet. The reply is read as plain JSON (any non-null object whose
+/// `hash` matches), so chain-specific transaction types cannot fail the lookup.
+async fn node_has_tx(p: &EvmProvider, hash: B256) -> bool {
+    for attempt in 0..KNOWN_POLLS {
+        if attempt > 0 {
+            tokio::time::sleep(KNOWN_POLL_INTERVAL).await;
+        }
+        let call = p
+            .client()
+            .request::<_, Option<Value>>("eth_getTransactionByHash", (hash,));
+        if let Ok(Some(tx)) = rpc("eth_getTransactionByHash", call).await
+            && tx
+                .get("hash")
+                .and_then(Value::as_str)
+                .and_then(|h| h.parse::<B256>().ok())
+                == Some(hash)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Polls for the receipt until `timeout`; `Ok(None)` if it has not been mined by then.
@@ -442,5 +643,125 @@ pub async fn wait_receipt(p: &EvmProvider, hash: B256, timeout: Duration) -> Res
             return Ok(None);
         }
         tokio::time::sleep(RECEIPT_POLL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const G: u128 = GWEI;
+
+    /// What zwallet asks for on a node: alloy's estimate (2 x base + median 20th-percentile
+    /// tip), floored at 2 x base + tip.
+    fn eip1559(base: u128, tip: u128) -> EvmFees {
+        EvmFees::Eip1559 {
+            max_fee_per_gas: U128::from(2 * base + tip),
+            max_priority_fee_per_gas: U128::from(tip),
+        }
+    }
+
+    #[test]
+    fn fee_ceiling_accepts_what_public_nodes_quoted_on_2026_10_20() {
+        // (chain, latest baseFeePerGas, eth_gasPrice, median 20th-percentile tip), in wei, read
+        // from the default publicnode.com endpoints on 2026-10-20.
+        for (chain, base, gas_price, tip) in [
+            ("ethereum", 72_766_367, 72_766_367, 100_000),
+            ("base", 5_000_000, 6_000_000, 312_872),
+            ("arbitrum", 20_000_000, 20_072_000, 1),
+            ("optimism", 19_579, 1_019_574, 1),
+            ("polygon", 253_547_540_214, 281_072_289_569, 126_168_000_000),
+            ("avalanche", 2_500_000_000, 2_500_000_150, 1_245_891_731),
+            ("sepolia", 15, 22, 12),
+            // Outliers seen in the same samples: a Sepolia block whose tips were ~1 gwei, an
+            // Avalanche block with a 28 gwei tip at a 2.5 gwei base fee.
+            ("sepolia-busy", 15, 22, 999_999_985),
+            (
+                "avalanche-spike",
+                2_500_000_000,
+                2_500_000_150,
+                28_114_905_753,
+            ),
+        ] {
+            let fees = eip1559(base, tip);
+            // Avalanche's spike is above the 2x tip ceiling: refused, then allowed explicitly.
+            if chain == "avalanche-spike" {
+                assert!(check_fee_ceiling(&fees, base, gas_price, None).is_err());
+                assert!(check_fee_ceiling(&fees, base, gas_price, Some(40 * G)).is_ok());
+                continue;
+            }
+            check_fee_ceiling(&fees, base, gas_price, None)
+                .unwrap_or_else(|e| panic!("{chain}: {}", e.message));
+        }
+        // BSC is a legacy chain (base fee 0): gasPrice = eth_gasPrice = 0.05 gwei.
+        let bsc = EvmFees::Legacy {
+            gas_price: U128::from(50_000_000u64),
+        };
+        check_fee_ceiling(&bsc, 0, 50_000_000, None).unwrap();
+    }
+
+    #[test]
+    fn fee_ceiling_refuses_inflated_tips_and_prices() {
+        // 1 gwei base fee: reference 1 gwei (or eth_gasPrice if higher).
+        let tip = check_fee_ceiling(&eip1559(G, 3 * G), G, G, None).unwrap_err();
+        assert!(
+            tip.message.contains("maxPriorityFeePerGas 3 gwei"),
+            "{}",
+            tip.message
+        );
+        assert!(tip.message.contains("--max-fee-gwei"), "{}", tip.message);
+        let price = EvmFees::Eip1559 {
+            max_fee_per_gas: U128::from(7 * G),
+            max_priority_fee_per_gas: U128::from(G),
+        };
+        let e = check_fee_ceiling(&price, G, G, None).unwrap_err();
+        assert!(e.message.contains("maxFeePerGas 7 gwei"), "{}", e.message);
+        assert!(check_fee_ceiling(&price, G, 2 * G, None).is_ok());
+        // Explicit ceiling: replaces the automatic one, both up and down.
+        assert!(check_fee_ceiling(&price, G, G, Some(7 * G)).is_ok());
+        assert!(check_fee_ceiling(&eip1559(G, G / 10), G, G, Some(2 * G)).is_err());
+        let legacy = EvmFees::Legacy {
+            gas_price: U128::from(3 * G),
+        };
+        assert!(check_fee_ceiling(&legacy, 0, 3 * G, None).is_ok());
+        let e = check_fee_ceiling(&legacy, 0, 3 * G, Some(2 * G)).unwrap_err();
+        assert!(e.message.contains("gasPrice 3 gwei"), "{}", e.message);
+    }
+
+    #[test]
+    fn explicit_nonce_must_be_pending_or_next() {
+        // 5 mined, 7 = next free: 5 and 6 replace pending transactions, 7 is new.
+        for n in [5, 6, 7] {
+            assert_eq!(check_nonce(n, 5, 7).unwrap(), n);
+        }
+        assert!(
+            check_nonce(4, 5, 7)
+                .unwrap_err()
+                .message
+                .contains("already used")
+        );
+        assert!(check_nonce(8, 5, 7).unwrap_err().message.contains("gap"));
+    }
+
+    #[test]
+    fn recipient_checks() {
+        let token: Address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+            .parse()
+            .unwrap();
+        let other: Address = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            check_recipient(Address::ZERO, None, false)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidAddress
+        );
+        assert!(check_recipient(Address::ZERO, Some(token), false).is_err());
+        assert!(check_recipient(token, Some(token), false).is_err());
+        assert!(check_recipient(token, None, false).is_ok());
+        assert!(check_recipient(other, Some(token), false).is_ok());
+        assert!(check_recipient(Address::ZERO, None, true).is_ok());
+        assert!(check_recipient(token, Some(token), true).is_ok());
     }
 }
