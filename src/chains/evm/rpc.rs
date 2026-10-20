@@ -7,7 +7,8 @@ use super::tx::{
 };
 use super::{config, parse_address, parse_tx_hash};
 use crate::chains::{
-    BUMP_SCALE, DEFAULT_BUMP, Net, PreparedTx, TransferRequest, bump_label, redact_url, url_origin,
+    BUMP_SCALE, DEFAULT_BUMP, Net, PreparedTx, SendJournal, TransferRequest, bump_label,
+    nonce_label, redact_url, url_origin,
 };
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
@@ -40,12 +41,14 @@ const GAS_PRICE_ORACLE: Address = address!("0x4200000000000000000000000000000000
 pub const TOKEN_FALLBACK_GAS: u64 = 100_000;
 /// `eth_sendRawTransaction` errors in which the node refuses the transaction itself (geth's
 /// txpool wording, which most clients share), matched case-insensitively: it never entered the
-/// node's pool, so nothing was broadcast.
+/// node's pool, so nothing was broadcast. "transaction underpriced" is a price below the pool's
+/// minimum; "replacement transaction underpriced" is checked first ([`SEND_NONCE_TAKEN`]).
 const SEND_REJECTIONS: &[&str] = &[
     "insufficient funds",
     "intrinsic gas too low",
     "exceeds block gas limit",
     "max fee per gas less than block base fee",
+    "transaction underpriced",
 ];
 /// `eth_sendRawTransaction` errors meaning the nonce is already used, by another transaction or
 /// by this very one (resent after it went in); only the lookup by hash can tell which.
@@ -97,9 +100,12 @@ impl EvmProvider {
     }
 
     /// A non-2xx answer is printed as its status and the endpoint's origin only: its body is a
-    /// gateway's text, which can quote the API key in any encoding. So is a 2xx answer that is
-    /// not JSON-RPC (its text is dropped). Transport errors quote the request URL, and a node's
-    /// JSON-RPC error message can quote the key on its own; both are scrubbed ([`Net::redact`]).
+    /// gateway's text, which can quote the API key in any encoding. A 2xx answer that is not
+    /// JSON-RPC, or not the type expected, is a fixed text with the serde error's category and
+    /// position: serde quotes the offending value escaped (`\"`, `\\`), which no scrub of the
+    /// key as written would catch. Transport errors quote the request URL, and a node's JSON-RPC
+    /// error message can quote the key on its own; both are scrubbed ([`Net::redact`]). The
+    /// error's `data` is kept only when it is a JSON string (revert data), and decoded first.
     fn failed(&self, what: &str, e: &TransportError) -> WalletError {
         let why = match e {
             RpcError::Transport(kind) => match kind.as_http_error() {
@@ -110,13 +116,39 @@ impl EvmProvider {
                 ),
                 None => self.net.redact(&kind.to_string()),
             },
-            RpcError::DeserError { err, .. } => self.net.redact(&format!(
-                "the endpoint's answer is not valid JSON-RPC ({err})"
-            )),
+            RpcError::DeserError { err, .. } => deser_text(err),
+            RpcError::ErrorResp(payload) => {
+                let data = payload
+                    .data
+                    .as_ref()
+                    .and_then(|d| serde_json::from_str::<String>(d.get()).ok())
+                    .map(|d| format!(", data: {d}"))
+                    .unwrap_or_default();
+                self.net.redact(&format!(
+                    "server returned an error response: error code {}: {}{data}",
+                    payload.code, payload.message
+                ))
+            }
             other => self.net.redact(&other.to_string()),
         };
         WalletError::rpc(format!("{what} failed: {why}"))
     }
+}
+
+/// A serde error as printable text: its category and position only, never its message.
+fn deser_text(err: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    let kind = match err.classify() {
+        Category::Io => "an I/O error",
+        Category::Syntax => "a syntax error",
+        Category::Data => "a data type error",
+        Category::Eof => "an unexpected end",
+    };
+    format!(
+        "the endpoint's answer is not valid JSON-RPC ({kind} at line {} column {})",
+        err.line(),
+        err.column()
+    )
 }
 
 fn timed_out(what: &str) -> WalletError {
@@ -203,9 +235,9 @@ pub async fn erc20_balance(p: &EvmProvider, token: Address, owner: Address) -> R
         .map_err(|e| WalletError::rpc(format!("balanceOf returned malformed data: {e}")))
 }
 
-/// What a replacement (`--nonce` below the pending nonce, or `--replace`) must outbid: `bump`
-/// ([`crate::chains::parse_bump`]) times the estimate, and times the fees of the transaction it
-/// replaces when those are known.
+/// What a replacement (`--nonce` below the pending nonce, or `--replace`) or an explicit
+/// `--bump` must outbid: `bump` ([`crate::chains::parse_bump`]) times the estimate, and times the
+/// fees of the transaction it replaces when those are known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Outbid {
     pub bump: u128,
@@ -220,7 +252,7 @@ pub struct OriginalFees {
 }
 
 /// EIP-1559 fees when the chain has a base fee, legacy `eth_gasPrice` otherwise, raised by
-/// `outbid` when replacing a pending transaction, then checked against [`check_fee_ceiling`]
+/// `outbid` when replacing a pending transaction or bumping, then checked against [`check_fee_ceiling`]
 /// (`explicit` = `--max-fee-gwei` in wei).
 pub async fn fees(
     p: &EvmProvider,
@@ -265,8 +297,7 @@ pub async fn fees(
         WalletError::new(
             e.code,
             format!(
-                "{} (this replaces a pending transaction, so the fees include the {} replacement \
-                 bump{})",
+                "{} (the fees include the {} bump{})",
                 e.message,
                 bump_label(outbid.bump),
                 if outbid.original.is_some() {
@@ -304,26 +335,50 @@ fn replacement_fees(fees: EvmFees, outbid: Outbid) -> EvmFees {
 }
 
 /// The fees of the transaction `--replace` names, read as plain JSON. It must be `from`'s
-/// transaction at `nonce` and not yet mined. A node that does not know it cannot tell its fees.
+/// transaction at `nonce` and not yet mined. A node that does not know it cannot tell its fees;
+/// what to do then depends on whether this node holds another transaction at `nonce` (`nonce <
+/// pending`): if so the hash is the wrong one, and the error names the journal's entries there;
+/// if not, the slot is free and a retry at the same nonce without `--replace` is allowed, so the
+/// two errors never send the agent back and forth.
 async fn original_fees(
     p: &EvmProvider,
     hash: B256,
     from: Address,
     nonce: u64,
+    pending: u64,
+    journal: Option<&SendJournal>,
 ) -> Result<OriginalFees> {
     let call = p
         .client()
         .request::<_, Option<Value>>("eth_getTransactionByHash", (hash,));
-    let tx = p
-        .rpc("eth_getTransactionByHash", call)
-        .await?
-        .ok_or_else(|| {
-            WalletError::rpc(format!(
-                "the node does not know --replace {hash}, so its fees are unknown; nothing was \
-                 signed. If that transaction was dropped, retry with the same --nonce {nonce} \
-                 and no --replace (with a larger --bump if the node refuses the replacement)"
+    let Some(tx) = p.rpc("eth_getTransactionByHash", call).await? else {
+        let shown = format!("{hash:#x}");
+        if nonce < pending {
+            // The hash the agent passed is known not to be the one at `nonce`.
+            let pointer = journal
+                .map(|j| format!(" {}.", j.pointer(nonce..=nonce, Some(&shown)).0))
+                .unwrap_or_default();
+            let mut e = WalletError::rpc(format!(
+                "the node does not know --replace {shown}, but it holds another pending \
+                 transaction from this key at nonce {nonce}; nothing was signed. Look up the \
+                 txHash of your send at nonce {nonce} (its own output, or the send journal) and \
+                 pass that to --replace.{pointer}"
             ))
-        })?;
+            .with_detail("nonce", nonce);
+            if let Some(j) = journal {
+                e = e.with_detail("journal", j.display());
+            }
+            return Err(e);
+        }
+        return Err(WalletError::rpc(format!(
+            "the node does not know --replace {shown} and holds nothing from this key at nonce \
+             {nonce}: that transaction was dropped or never reached this node; nothing was \
+             signed. To send at nonce {nonce} anyway, retry with --nonce {nonce} and no \
+             --replace: it uses the same nonce, so it can take that transaction's place but \
+             never add a second one"
+        ))
+        .with_detail("nonce", nonce));
+    };
     let num = |k: &str| {
         tx.get(k)
             .and_then(Value::as_str)
@@ -482,12 +537,17 @@ pub struct Intent {
     pub dry_run: bool,
     /// `--nonce`: replace a pending transaction (or name the next nonce) instead of `pending`.
     pub nonce: Option<u64>,
-    /// `--bump` in ten-thousandths (default [`DEFAULT_BUMP`] when replacing).
+    /// `--bump` in ten-thousandths; applied whenever given (default [`DEFAULT_BUMP`] when
+    /// replacing).
     pub bump: Option<u128>,
     /// `--replace`: the pending transaction being replaced, whose fees are outbid too.
     pub replace: Option<B256>,
     /// `--max-fee-gwei` in wei: the explicit fee ceiling.
     pub max_fee_per_gas: Option<u128>,
+    /// `--allow-pending`: without `nonce`, send even while a transaction from `from` is pending.
+    pub allow_pending: bool,
+    /// The account's send journal, for naming earlier transactions in errors.
+    pub journal: Option<SendJournal>,
 }
 
 async fn estimate(p: &EvmProvider, intent: &Intent, value: U256) -> Result<u64> {
@@ -556,31 +616,49 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         return Err(insufficient(&s));
     }
 
+    // Mined first: a transaction mined between the two reads then shows as pending (a refusal
+    // to look it up), never the other way round.
+    let mined = p
+        .rpc(
+            "eth_getTransactionCount",
+            p.get_transaction_count(intent.from).latest(),
+        )
+        .await?;
     let pending = p
         .rpc(
             "eth_getTransactionCount",
             p.get_transaction_count(intent.from).pending(),
         )
         .await?;
+    let in_flight = (pending > mined).then(|| mined..=pending - 1);
+    let journal = intent.journal.as_ref();
     let nonce = match intent.nonce {
-        None => pending,
+        None => {
+            // A dry-run reports them (`pendingNonces`) instead, as it does a shortfall.
+            if let Some(nonces) = &in_flight
+                && !intent.allow_pending
+                && !intent.dry_run
+            {
+                return Err(pending_guard_error(net, nonces.clone(), journal));
+            }
+            pending
+        }
         Some(n) => {
-            let mined = p
-                .rpc(
-                    "eth_getTransactionCount",
-                    p.get_transaction_count(intent.from).latest(),
-                )
-                .await?;
-            check_nonce(n, mined, pending)?
+            let n = check_nonce(n, mined, pending)?;
+            if n < pending && intent.replace.is_none() {
+                return Err(needs_replace_error(n, journal));
+            }
+            n
         }
     };
     let replacing = nonce < pending;
     let original = match intent.replace {
-        Some(hash) => Some(original_fees(p, hash, intent.from, nonce).await?),
+        Some(hash) => Some(original_fees(p, hash, intent.from, nonce, pending, journal).await?),
         None => None,
     };
-    // `--replace` outbids the named transaction even where this node no longer counts it.
-    let outbid = (replacing || original.is_some()).then(|| Outbid {
+    // `--replace` outbids the named transaction even where this node no longer counts it, and
+    // an explicit `--bump` always applies: the agent asked for it, whatever this node holds.
+    let outbid = (replacing || original.is_some() || intent.bump.is_some()).then(|| Outbid {
         bump: intent.bump.unwrap_or(DEFAULT_BUMP),
         original,
     });
@@ -642,6 +720,8 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     let mut fields = Map::new();
     fields.insert("chainId".into(), json!(unsigned.chain_id));
     fields.insert("nonce".into(), json!(nonce));
+    let pending_nonces: Vec<u64> = in_flight.map(|r| r.collect()).unwrap_or_default();
+    fields.insert("pendingNonces".into(), json!(pending_nonces));
     if intent.nonce.is_some() {
         fields.insert("replacesPending".into(), json!(replacing));
         let bump = outbid.map(|o| bump_label(o.bump));
@@ -695,6 +775,69 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         )),
         fields,
     })
+}
+
+/// Most pending nonces a guard error lists in its `pendingNonces` field.
+const PENDING_LISTED: usize = 64;
+
+/// A send without `--nonce` while transactions from this key are pending at `nonces`: refused,
+/// because the usual reason is a re-run of a send that was cut off (the harness killed it, the
+/// output was lost), and sent again it would land at the next nonce as a second payment.
+fn pending_guard_error(
+    net: &Net,
+    nonces: std::ops::RangeInclusive<u64>,
+    journal: Option<&SendJournal>,
+) -> WalletError {
+    let at = nonce_label(&nonces);
+    let (pointer, entries) = match journal {
+        Some(j) => {
+            let (text, entries) = j.pointer(nonces.clone(), None);
+            (format!(" {text}."), entries)
+        }
+        None => (String::new(), Vec::new()),
+    };
+    let n = if nonces.start() == nonces.end() {
+        nonces.start().to_string()
+    } else {
+        "<its nonce>".to_string()
+    };
+    let listed: Vec<u64> = nonces.clone().take(PENDING_LISTED).collect();
+    let mut e = WalletError::validation(format!(
+        "a transaction from this key is still pending on {} at {at}; nothing was \
+         signed.{pointer} If this command repeats a payment sent earlier (for example a run that \
+         was cut off), do not run it again: look that txHash up, and to speed it up or replace \
+         it use --nonce {n} --replace <its txHash>. Only for a different payment, pass \
+         --allow-pending to send it after the pending one",
+        net.chain.key
+    ))
+    .with_detail("pendingNonces", json!(listed))
+    .with_detail("pendingSends", Value::Array(entries));
+    if let Some(j) = journal {
+        e = e.with_detail("journal", j.display());
+    }
+    e
+}
+
+/// `--nonce n` below the pending nonce without `--replace`: it would replace the transaction
+/// pending at `n` without saying which, so the agent must name it.
+fn needs_replace_error(n: u64, journal: Option<&SendJournal>) -> WalletError {
+    let (pointer, entries) = match journal {
+        Some(j) => {
+            let (text, entries) = j.pointer(n..=n, None);
+            (format!(". {text}"), entries)
+        }
+        None => (String::new(), Vec::new()),
+    };
+    let mut e = WalletError::validation(format!(
+        "nonce {n} belongs to a pending transaction; pass --replace <its txHash> to replace it \
+         (see the send journal); nothing was signed{pointer}"
+    ))
+    .with_detail("nonce", n)
+    .with_detail("pendingSends", Value::Array(entries));
+    if let Some(j) = journal {
+        e = e.with_detail("journal", j.display());
+    }
+    e
 }
 
 /// An explicit `--nonce n` must reuse a nonce that is still pending (`mined <= n < pending`, the
@@ -797,6 +940,8 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
                 bump: req.bump,
                 replace,
                 max_fee_per_gas: req.max_fee_per_gas,
+                allow_pending: req.allow_pending,
+                journal: req.journal.clone(),
             };
             (intent, extra)
         }
@@ -819,6 +964,8 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
                 bump: req.bump,
                 replace,
                 max_fee_per_gas: req.max_fee_per_gas,
+                allow_pending: req.allow_pending,
+                journal: req.journal.clone(),
             };
             (intent, extra)
         }
@@ -842,13 +989,15 @@ pub enum SendOutcome {
     HashMismatch(B256),
     /// The call failed or timed out (the text), and the node does not report the transaction.
     Unknown(String),
-    /// The node says the nonce is already used (the text; see [`SEND_NONCE_TAKEN`]) and does not
+    /// The node says the nonce is already used (`why`; see [`SEND_NONCE_TAKEN`]) and does not
     /// report this transaction: another transaction, pending or mined, holds the nonce. It may be
-    /// an earlier send of the same payment.
-    NonceTaken(String),
-    /// The node refused the transaction itself (the text; see [`SEND_REJECTIONS`]): nothing was
-    /// broadcast.
-    Rejected(String),
+    /// an earlier send of the same payment. `underpriced`: the node's raw answer was "replacement
+    /// transaction underpriced".
+    NonceTaken { why: String, underpriced: bool },
+    /// The node refused the transaction itself (`why`; see [`SEND_REJECTIONS`]): nothing was
+    /// broadcast. `underpriced`: the node's raw answer was "transaction underpriced" (a price
+    /// below the pool's minimum).
+    Rejected { why: String, underpriced: bool },
 }
 
 /// How a JSON-RPC error message from `eth_sendRawTransaction` reads.
@@ -914,16 +1063,17 @@ pub async fn send_raw(p: &EvmProvider, raw: &[u8], hash: B256) -> SendOutcome {
             };
         }
         Ok(Err(e)) => {
+            // `why` is the scrubbed text for printing; the classification and every hint come
+            // from the node's raw message, which scrubbing could have cut into.
             let why = p.failed(WHAT, &e).message;
             // Only a JSON-RPC error object (HTTP 200, or a 4xx carrying one) is the node's
             // answer; a bare transport error says nothing about the transaction.
-            match e
-                .as_error_resp()
-                .map_or(SendError::Other, |r| classify_send_error(&r.message))
-            {
-                SendError::Rejected => return SendOutcome::Rejected(why),
+            let raw = e.as_error_resp().map(|r| r.message.to_lowercase());
+            let underpriced = raw.as_deref().is_some_and(|m| m.contains("underpriced"));
+            match raw.as_deref().map_or(SendError::Other, classify_send_error) {
+                SendError::Rejected => return SendOutcome::Rejected { why, underpriced },
                 SendError::NonceTaken if node_has_tx(p, hash).await => return found(why, None),
-                SendError::NonceTaken => return SendOutcome::NonceTaken(why),
+                SendError::NonceTaken => return SendOutcome::NonceTaken { why, underpriced },
                 SendError::Known | SendError::Other => why,
             }
         }
@@ -960,9 +1110,10 @@ async fn node_has_tx(p: &EvmProvider, hash: B256) -> bool {
     false
 }
 
-/// Polls for the receipt until `timeout`; `Ok(None)` if it has not been mined by then.
+/// Polls for the receipt until `timeout`; `Ok(None)` if it has not been mined by then. A timeout
+/// past what `Instant` can hold waits without end.
 pub async fn wait_receipt(p: &EvmProvider, hash: B256, timeout: Duration) -> Result<Option<Value>> {
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now().checked_add(timeout);
     loop {
         if let Some(r) = p
             .rpc("eth_getTransactionReceipt", p.get_transaction_receipt(hash))
@@ -974,7 +1125,7 @@ pub async fn wait_receipt(p: &EvmProvider, hash: B256, timeout: Duration) -> Res
                 "gasUsed": r.gas_used,
             })));
         }
-        if Instant::now() + RECEIPT_POLL > deadline {
+        if deadline.is_some_and(|d| Instant::now() + RECEIPT_POLL > d) {
             return Ok(None);
         }
         tokio::time::sleep(RECEIPT_POLL).await;
@@ -1262,6 +1413,104 @@ mod tests {
         assert_eq!(
             classify_send_error("unknown transaction: nonce too low"),
             SendError::NonceTaken
+        );
+        // A price below the pool's minimum is refused outright; a replacement that does not
+        // outbid the pending one is a used nonce (looked up first).
+        for m in [
+            "transaction underpriced",
+            "Transaction underpriced: gas tip cap 1, minimum needed 25000000",
+        ] {
+            assert_eq!(classify_send_error(m), SendError::Rejected, "{m}");
+        }
+        assert_eq!(
+            classify_send_error("REPLACEMENT transaction underpriced"),
+            SendError::NonceTaken
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn serde_errors_never_print_the_value_they_quote() {
+        use alloy::transports::{RpcError, TransportError};
+        // A key with a quote and a backslash in it: serde quotes a mistyped value escaped
+        // (`\"`, `\\`), which no scrub of the key as written would match.
+        let key = r#"SEC"RET\KEY99"#;
+        let net = Net {
+            chain: crate::chains::find("ethereum").unwrap(),
+            rpc_url: "https://eth.example.com/?apikey=SEC%22RET%5CKEY99".into(),
+        };
+        let p = EvmProvider::new(&net).unwrap();
+        let echoed = serde_json::to_string(&format!("invalid key {key}")).unwrap();
+        // A real type mismatch: a string where a number was expected.
+        let err = serde_json::from_str::<u64>(&echoed).unwrap_err();
+        assert!(err.to_string().contains(r#"SEC\"RET\\KEY99"#), "{err}");
+        let err: TransportError = RpcError::DeserError {
+            err,
+            text: echoed.clone(),
+        };
+        let e = p
+            .rpc("eth_chainId", std::future::ready(Err::<(), _>(err)))
+            .await
+            .unwrap_err();
+        for part in ["SEC", "RET", "KEY99", "invalid key"] {
+            assert!(!e.message.contains(part), "{part}: {}", e.message);
+        }
+        assert_eq!(
+            e.message,
+            "eth_chainId failed: the endpoint's answer is not valid JSON-RPC (a data type error \
+             at line 1 column 29)"
+        );
+        // A JSON-RPC error's `data`: a string is decoded (then scrubbed), anything else dropped.
+        let resp = |data: &str| -> TransportError {
+            RpcError::ErrorResp(
+                serde_json::from_str(&format!(
+                    r#"{{"code":3,"message":"execution reverted","data":{data}}}"#
+                ))
+                .unwrap(),
+            )
+        };
+        for data in [
+            serde_json::to_string(&format!("key {key}")).unwrap(),
+            format!(r#"{{"note":{echoed}}}"#),
+        ] {
+            let e = p
+                .rpc("eth_call", std::future::ready(Err::<(), _>(resp(&data))))
+                .await
+                .unwrap_err();
+            for part in ["RET", "KEY99"] {
+                assert!(!e.message.contains(part), "{part}: {}", e.message);
+            }
+        }
+        let e = p
+            .rpc(
+                "eth_call",
+                std::future::ready(Err::<(), _>(resp(r#""0x08c379a0""#))),
+            )
+            .await
+            .unwrap_err();
+        assert!(e.message.ends_with("data: 0x08c379a0"), "{}", e.message);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_error_origin_redacts_a_key_like_host_label() {
+        use alloy::transports::TransportErrorKind;
+        let net = Net {
+            chain: crate::chains::find("ethereum").unwrap(),
+            rpc_url: "https://deadbeef0123.eth.example.com".into(),
+        };
+        let p = EvmProvider::new(&net).unwrap();
+        let e = p
+            .rpc(
+                "eth_call",
+                std::future::ready(Err::<(), _>(TransportErrorKind::http_error(
+                    403,
+                    "no".into(),
+                ))),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.message,
+            "eth_call failed: HTTP 403 from https://<redacted>.eth.example.com"
         );
     }
 

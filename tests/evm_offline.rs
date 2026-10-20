@@ -19,9 +19,11 @@ use std::time::Duration;
 const OTHER: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const GWEI: u128 = 1_000_000_000;
-/// The mock account's nonces: confirmed (`latest`) and next free (`pending`).
-const LATEST_NONCE: u64 = 5;
+/// The mock account's next free nonce (`pending`). [`healthy`] has nothing pending, so its mined
+/// count (`latest`) is the same.
 const PENDING_NONCE: u64 = 7;
+/// [`pending_node`]'s mined count: nonces 5 and 6 are pending there.
+const LATEST_NONCE: u64 = 5;
 
 enum Reply {
     Result(Value),
@@ -182,9 +184,44 @@ fn block(base_fee: Option<u128>) -> Value {
     b
 }
 
-/// A healthy, funded EIP-1559 node: base fee 1 gwei, tips 0.1 gwei, 1 ETH balance.
+/// A healthy, funded EIP-1559 node: base fee 1 gwei, tips 0.1 gwei, 1 ETH balance, nothing
+/// pending.
 fn healthy(method: &str, params: &Value) -> Reply {
     fee_node(method, params, Some(GWEI), GWEI / 10, GWEI + GWEI / 10)
+}
+
+/// The hash the mock gives the transaction pending at nonce `n` (5 or 6 on [`pending_node`]).
+fn pending_tx(n: u64) -> String {
+    format!("0x{}", format!("{n:02x}").repeat(32))
+}
+
+/// `base` with nonces 5 and 6 pending from `me`: `latest` is 5, and the transactions there
+/// ([`pending_tx`]) are known, unmined, at 1 wei fees (so a replacement's bump applies to the
+/// estimate).
+fn pending_node(
+    me: &str,
+    base: impl Fn(&str, &Value) -> Reply + Send + Sync + 'static,
+) -> impl Fn(&str, &Value) -> Reply + Send + Sync + 'static {
+    let me = me.to_lowercase();
+    move |m, p| match m {
+        "eth_getTransactionCount" if p[1] == "latest" => Reply::Result(hex(LATEST_NONCE.into())),
+        "eth_getTransactionByHash" => {
+            match (LATEST_NONCE..PENDING_NONCE).find(|n| p[0] == pending_tx(*n).as_str()) {
+                Some(n) => Reply::Result(json!({
+                    "hash": p[0], "from": me, "nonce": hex(n.into()), "blockNumber": null,
+                    "maxFeePerGas": "0x1", "maxPriorityFeePerGas": "0x1",
+                })),
+                None => base(m, p),
+            }
+        }
+        _ => base(m, p),
+    }
+}
+
+/// The send journal of `me` on Ethereum in `home`.
+fn journal_path(home: &Home, me: &str) -> std::path::PathBuf {
+    home.path()
+        .join(format!("sends-1-{}.jsonl", me.to_lowercase()))
 }
 
 /// A node with the given base fee (`None` = legacy chain), feeHistory tip, and eth_gasPrice.
@@ -192,10 +229,7 @@ fn fee_node(method: &str, params: &Value, base: Option<u128>, tip: u128, gas_pri
     Reply::Result(match method {
         "eth_chainId" => json!("0x1"),
         "eth_getBalance" => hex(10u128.pow(18)),
-        "eth_getTransactionCount" => match params[1].as_str() {
-            Some("latest") => hex(LATEST_NONCE.into()),
-            _ => hex(PENDING_NONCE.into()),
-        },
+        "eth_getTransactionCount" => hex(PENDING_NONCE.into()),
         "eth_getBlockByNumber" => block(base),
         "eth_feeHistory" => json!({
             "oldestBlock": "0xf6",
@@ -243,6 +277,9 @@ fn dry_run_prints_no_broadcastable_raw_tx() {
     assert_eq!(v["recoveredFrom"], me.as_str());
     assert!(v["txHash"].as_str().unwrap().starts_with("0x"));
     assert_eq!(v["signerDecoded"]["action"]["kind"], "native-transfer");
+    assert_eq!(v["pendingNonces"], json!([]));
+    // Nothing broadcast, nothing journaled.
+    assert!(!journal_path(&home, &me).exists());
     let inv = home
         .run(&[
             "invoke",
@@ -313,7 +350,15 @@ fn lost_send_reply_is_broadcast_uncertain_with_hash_nonce_from() {
     assert_eq!(v["txHash"], hash.as_str(), "{v:#}");
     assert_eq!(v["nonce"], PENDING_NONCE);
     assert_eq!(v["from"], me.as_str());
-    assert!(msg.contains("--nonce 7"), "{msg}");
+    // A retry must name what it replaces, so the hint carries the hash.
+    assert!(
+        msg.contains(&format!("retry with --nonce 7 --replace {hash}")),
+        "{msg}"
+    );
+    assert_eq!(
+        v["journal"],
+        journal_path(&home, &me).display().to_string().as_str()
+    );
     // It looked for the transaction by the hash it computed, more than once.
     let polls = rpc.calls("eth_getTransactionByHash");
     assert!(polls.len() >= 2, "{polls:?}");
@@ -366,6 +411,8 @@ fn node_rejection_is_rpc_error_not_broadcast_uncertain() {
         "intrinsic gas too low",
         "exceeds block gas limit",
         "max fee per gas less than block base fee: maxFeePerGas: 1, baseFee: 2",
+        // Below the pool's minimum price (not a replacement).
+        "transaction underpriced: gas tip cap 1, minimum needed 25000000",
     ];
     for (i, why) in rejections.into_iter().enumerate() {
         *answer.lock().unwrap() = why;
@@ -378,6 +425,12 @@ fn node_rejection_is_rpc_error_not_broadcast_uncertain() {
         assert!(msg.contains(why), "{msg}");
         // A retry must reuse the nonce, so that it can never become a second send.
         assert!(msg.contains("--nonce 7"), "{msg}");
+        // Underpriced: the way to pay more at the same nonce.
+        assert_eq!(
+            msg.contains("retry with --nonce 7 --bump"),
+            why.starts_with("transaction underpriced"),
+            "{msg}"
+        );
         let v = r.json();
         let sent = rpc.sent();
         assert_eq!(sent.len(), i + 1, "the CLI must send exactly once");
@@ -385,7 +438,7 @@ fn node_rejection_is_rpc_error_not_broadcast_uncertain() {
         assert_eq!(v["nonce"], PENDING_NONCE);
         assert_eq!(v["from"], me.as_str());
     }
-    // These four refuse the transaction itself: no lookup by hash.
+    // These refuse the transaction itself: no lookup by hash.
     assert!(rpc.calls("eth_getTransactionByHash").is_empty());
     // Any other error text still asks for the transaction and stays uncertain.
     *answer.lock().unwrap() = "internal error";
@@ -445,65 +498,91 @@ fn nonce_taken_by_another_tx_says_look_up_before_sending_again() {
     let v = r.json();
     println!("{v:#}");
     assert!(
-        msg.contains("nonce 7 is taken by another transaction (pending or mined)"),
+        msg.contains("nonce 7 is taken by another transaction from this key, pending or mined"),
         "{msg}"
     );
     assert!(
         msg.contains(
-            "if this was a retry of an earlier send, look that txHash up before sending again"
+            "If you were retrying an earlier send, look up that send's txHash before sending \
+             again"
         ),
         "{msg}"
     );
-    assert!(
-        msg.contains("otherwise re-run to take the next nonce"),
-        "{msg}"
-    );
+    assert!(!msg.contains("next nonce"), "{msg}");
     assert!(!msg.contains("rejected"), "{msg}");
-    assert_eq!(v["txHash"], tx_hash_of(&rpc.sent()[0]).as_str(), "{v:#}");
+    let hash = tx_hash_of(&rpc.sent()[0]);
+    // The refused transaction will never be found: it is not `txHash`.
+    assert!(v.get("txHash").is_none(), "{v:#}");
+    assert_eq!(v["refusedTxHash"], hash.as_str(), "{v:#}");
     assert_eq!(v["nonce"], PENDING_NONCE);
     assert_eq!(v["from"], me.as_str());
-    let hash = tx_hash_of(&rpc.sent()[0]);
     let polls = rpc.calls("eth_getTransactionByHash");
     assert!(!polls.is_empty() && polls.iter().all(|p| p[0] == hash.as_str()));
 
-    // With --nonce (a retry of a pending send): the earlier send may be the one that took it.
+    // With --nonce (a retry): the earlier send, recorded in the journal, may be the one that
+    // took the nonce.
+    let earlier = format!("0x{}", "e1".repeat(32));
+    let line = json!({ "ts": "2026-10-20T00:00:00Z", "chain": "ethereum", "from": me,
+                       "nonce": 7, "txHash": earlier, "to": OTHER, "value": "0.01 ETH",
+                       "kind": "transfer" });
     for why in ["nonce too low", "replacement transaction underpriced"] {
+        std::fs::write(journal_path(&home, &me), format!("{line}\n")).unwrap();
         let rpc = send_error_node(why, false);
-        let r = home.run(&transfer(&rpc.url, &["--nonce", "6"]));
+        let r = home.run(&transfer(&rpc.url, &["--nonce", "7"]));
         let msg = r.err("BROADCAST_UNCERTAIN");
-        assert!(
-            msg.contains("nonce 6 is taken by another transaction"),
-            "{msg}"
-        );
-        assert!(
-            msg.contains("look that txHash up before sending again"),
-            "{msg}"
-        );
+        println!("{msg}");
+        let refused = tx_hash_of(&rpc.sent()[0]);
+        for part in [
+            "nonce 7 is taken by another transaction from this key, pending or mined",
+            "This retry was refused and will not be found",
+            "look up the txHash of your earlier send at nonce 7 from its own output (or the send \
+             journal below). The send journal ",
+            "While it may be pending or mined, do not send this payment without --nonce; to \
+             replace it use --nonce 7 --replace <earlier txHash>",
+        ] {
+            assert!(msg.contains(part), "{part}: {msg}");
+        }
+        assert!(!msg.contains("next nonce"), "{msg}");
+        // The journal's earlier send is named; the refused retry is not offered as it.
+        assert!(msg.contains(&earlier), "{msg}");
+        assert!(!msg.contains(&format!("{refused} (")), "{msg}");
         let v = r.json();
-        assert_eq!(v["nonce"], 6, "{v:#}");
-        assert_eq!(v["txHash"], tx_hash_of(&rpc.sent()[0]).as_str(), "{v:#}");
+        assert_eq!(v["nonce"], 7, "{v:#}");
+        assert!(v.get("txHash").is_none(), "{v:#}");
+        assert_eq!(v["refusedTxHash"], refused.as_str(), "{v:#}");
+        assert_eq!(
+            v["journal"],
+            journal_path(&home, &me).display().to_string().as_str()
+        );
         if why.starts_with("replacement") {
-            assert!(msg.contains("--bump"), "{msg}");
+            assert!(
+                msg.contains("--replace <its txHash> and a larger --bump"),
+                "{msg}"
+            );
         }
     }
 }
 
 #[test]
 fn replacing_a_pending_nonce_pays_a_quarter_more() {
-    let (home, _) = unlocked();
+    let (home, me) = unlocked();
     let wei = |v: &Value, k: &str| -> u128 {
         v[k].as_str()
             .unwrap_or_else(|| panic!("{k}: {v:#}"))
             .parse()
             .unwrap()
     };
-    let rpc = MockRpc::start(healthy);
-    // Nonce 7 is the next free one (no replacement), 6 is pending (replaced).
+    let rpc = MockRpc::start(pending_node(&me, healthy));
+    let six = pending_tx(6);
+    // Nonce 7 is the next free one (no replacement), 6 is pending (replaced, and named).
     let fresh = home
         .run(&transfer(&rpc.url, &["--nonce", "7", "--dry-run"]))
         .ok();
     let repl = home
-        .run(&transfer(&rpc.url, &["--nonce", "6", "--dry-run"]))
+        .run(&transfer(
+            &rpc.url,
+            &["--nonce", "6", "--replace", &six, "--dry-run"],
+        ))
         .ok();
     assert_eq!(fresh["replacesPending"], false);
     assert_eq!(fresh["feeBump"], Value::Null);
@@ -528,9 +607,12 @@ fn replacing_a_pending_nonce_pays_a_quarter_more() {
 
     // Legacy chain: gasPrice 3 gwei becomes at least 3.75 gwei, and --max-fee-gwei is checked
     // against the bumped price.
-    let legacy = MockRpc::start(|m, p| fee_node(m, p, None, 0, 3 * GWEI));
+    let legacy = MockRpc::start(pending_node(&me, |m, p| fee_node(m, p, None, 0, 3 * GWEI)));
     let v = home
-        .run(&transfer(&legacy.url, &["--nonce", "6", "--dry-run"]))
+        .run(&transfer(
+            &legacy.url,
+            &["--nonce", "6", "--replace", &six, "--dry-run"],
+        ))
         .ok();
     assert!(wei(&v, "gasPrice") * 4 >= 3 * GWEI * 5, "{v:#}");
     assert_eq!(v["feeBump"], "1.25x");
@@ -542,11 +624,65 @@ fn replacing_a_pending_nonce_pays_a_quarter_more() {
     let msg = home
         .run(&transfer(
             &legacy.url,
-            &["--nonce", "6", "--dry-run", "--max-fee-gwei", "3.5"],
+            &[
+                "--nonce",
+                "6",
+                "--replace",
+                &six,
+                "--dry-run",
+                "--max-fee-gwei",
+                "3.5",
+            ],
         ))
         .err("VALIDATION_ERROR");
     assert!(msg.contains("--max-fee-gwei"), "{msg}");
     assert!(rpc.sent().is_empty() && legacy.sent().is_empty());
+}
+
+#[test]
+fn replacing_a_pending_nonce_must_name_the_transaction_it_replaces() {
+    let (home, me) = unlocked();
+    let rpc = MockRpc::start(pending_node(&me, healthy));
+    // An earlier send at nonce 6 in this home's journal.
+    let six = pending_tx(6);
+    let line = json!({ "ts": "2026-10-20T00:00:00Z", "chain": "ethereum", "from": me,
+                       "nonce": 6, "txHash": six, "to": OTHER, "value": "0.01 ETH",
+                       "kind": "transfer" });
+    std::fs::write(journal_path(&home, &me), format!("{line}\n")).unwrap();
+    for args in [
+        vec!["--nonce", "6", "--dry-run"],
+        vec!["--nonce", "6", "--bump", "2"],
+    ] {
+        let r = home.run(&transfer(&rpc.url, &args));
+        let msg = r.err("VALIDATION_ERROR");
+        assert!(
+            msg.starts_with(
+                "nonce 6 belongs to a pending transaction; pass --replace <its txHash> to \
+                 replace it (see the send journal); nothing was signed. The send journal "
+            ),
+            "{msg}"
+        );
+        // The journal names it.
+        assert!(msg.contains(&six), "{msg}");
+        let v = r.json();
+        assert_eq!(v["nonce"], 6);
+        assert_eq!(v["pendingSends"][0]["txHash"], six.as_str(), "{v:#}");
+    }
+    // Nonce 5 has no journal entry: sent from elsewhere, so the explorer is named instead.
+    let msg = home
+        .run(&transfer(&rpc.url, &["--nonce", "5", "--dry-run"]))
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains("has no entry at nonce 5"), "{msg}");
+    assert!(
+        msg.contains(&format!("https://etherscan.io/address/{me}")),
+        "{msg}"
+    );
+    // The next free nonce replaces nothing, so it needs no --replace.
+    let v = home
+        .run(&transfer(&rpc.url, &["--nonce", "7", "--dry-run"]))
+        .ok();
+    assert_eq!(v["replacesPending"], false);
+    assert!(rpc.sent().is_empty());
 }
 
 #[test]
@@ -558,25 +694,36 @@ fn bump_and_replace_outbid_the_pending_transaction() {
             .parse()
             .unwrap()
     };
-    let rpc = MockRpc::start(healthy);
+    let rpc = MockRpc::start(pending_node(&me, healthy));
     let est = home
         .run(&transfer(&rpc.url, &["--nonce", "7", "--dry-run"]))
         .ok();
-    // --bump 2: twice the estimate, signed.
-    let v = home
-        .run(&transfer(
-            &rpc.url,
-            &["--nonce", "6", "--bump", "2", "--dry-run"],
-        ))
-        .ok();
-    assert_eq!(v["feeBump"], "2x");
-    for field in ["maxFeePerGas", "maxPriorityFeePerGas"] {
-        assert_eq!(wei(&v, field), 2 * wei(&est, field), "{field}");
+    assert_eq!(est["feeBump"], Value::Null);
+    // --bump 2: twice the estimate, signed, whether it replaces nonce 6 or takes the free nonce
+    // 7 (an explicit bump applies even where nothing is pending).
+    let six = pending_tx(6);
+    for args in [
+        vec![
+            "--nonce",
+            "6",
+            "--replace",
+            &six,
+            "--bump",
+            "2",
+            "--dry-run",
+        ],
+        vec!["--nonce", "7", "--bump", "2", "--dry-run"],
+    ] {
+        let v = home.run(&transfer(&rpc.url, &args)).ok();
+        assert_eq!(v["feeBump"], "2x", "{args:?}");
+        for field in ["maxFeePerGas", "maxPriorityFeePerGas"] {
+            assert_eq!(wei(&v, field), 2 * wei(&est, field), "{field} {args:?}");
+        }
+        assert_eq!(
+            wei(&v["signerDecoded"], "maxGasPrice"),
+            2 * wei(&est, "maxFeePerGas")
+        );
     }
-    assert_eq!(
-        wei(&v["signerDecoded"], "maxGasPrice"),
-        2 * wei(&est, "maxFeePerGas")
-    );
     // Out of range, malformed, or without --nonce: refused before any RPC.
     for bad in [
         vec!["--nonce", "6", "--bump", "1.05"],
@@ -595,21 +742,22 @@ fn bump_and_replace_outbid_the_pending_transaction() {
     let msg = home
         .run(&transfer(
             &legacy.url,
-            &["--nonce", "6", "--bump", "2.5", "--dry-run"],
+            &["--nonce", "7", "--bump", "2.5", "--dry-run"],
         ))
         .err("VALIDATION_ERROR");
-    assert!(msg.contains("2.5x replacement bump"), "{msg}");
+    assert!(msg.contains("the fees include the 2.5x bump"), "{msg}");
 
     // --replace: the original's fees (4 gwei cap, 1 gwei tip) beat the estimate, so the
     // replacement pays bump x the original.
     let original = format!("0x{}", "cd".repeat(32));
     let (o, from) = (original.clone(), me.clone());
+    let inner = pending_node(&me, healthy);
     let node = MockRpc::start(move |m, p| match m {
         "eth_getTransactionByHash" if p[0] == o.as_str() => Reply::Result(json!({
             "hash": o, "from": from.to_lowercase(), "nonce": "0x6", "blockNumber": null,
             "maxFeePerGas": hex(4 * GWEI), "maxPriorityFeePerGas": hex(GWEI),
         })),
-        _ => healthy(m, p),
+        _ => inner(m, p),
     });
     let v = home
         .run(&transfer(
@@ -629,17 +777,39 @@ fn bump_and_replace_outbid_the_pending_transaction() {
         ))
         .err("VALIDATION_ERROR");
     assert!(msg.contains("nonce 6"), "{msg}");
+    // A hash the node does not know: at a nonce it holds another pending transaction for, the
+    // hash is the wrong one; at the free nonce, the slot is free and a retry without --replace
+    // is allowed (so the two answers never send the agent back and forth).
     let unknown = format!("0x{}", "ef".repeat(32));
-    home.run(&transfer(
-        &node.url,
-        &["--nonce", "6", "--replace", &unknown, "--dry-run"],
-    ))
-    .err("RPC_ERROR");
+    let msg = home
+        .run(&transfer(
+            &node.url,
+            &["--nonce", "6", "--replace", &unknown, "--dry-run"],
+        ))
+        .err("RPC_ERROR");
+    assert!(
+        msg.contains("but it holds another pending transaction from this key at nonce 6"),
+        "{msg}"
+    );
+    assert!(msg.contains("pass that to --replace"), "{msg}");
+    let msg = home
+        .run(&transfer(
+            &node.url,
+            &["--nonce", "7", "--replace", &unknown, "--dry-run"],
+        ))
+        .err("RPC_ERROR");
+    assert!(
+        msg.contains("retry with --nonce 7 and no --replace"),
+        "{msg}"
+    );
+    home.run(&transfer(&node.url, &["--nonce", "7", "--dry-run"]))
+        .ok();
+    let inner = pending_node(&me, healthy);
     let stranger = MockRpc::start(move |m, p| match m {
         "eth_getTransactionByHash" => Reply::Result(json!({
             "hash": p[0], "from": OTHER, "nonce": "0x6", "blockNumber": null, "gasPrice": hex(GWEI),
         })),
-        _ => healthy(m, p),
+        _ => inner(m, p),
     });
     let msg = home
         .run(&transfer(
@@ -653,7 +823,7 @@ fn bump_and_replace_outbid_the_pending_transaction() {
 
 #[test]
 fn failure_before_the_send_is_rpc_error_and_says_nothing_was_sent() {
-    let (home, _) = unlocked();
+    let (home, me) = unlocked();
     // `prepare` connects once (eth_chainId); the broadcast's own connect is the second call.
     let n = Arc::new(AtomicUsize::new(0));
     let c = n.clone();
@@ -669,14 +839,21 @@ fn failure_before_the_send_is_rpc_error_and_says_nothing_was_sent() {
     assert!(!msg.contains("so a retry is safe"), "{msg}");
     assert_eq!(r.json()["nonce"], PENDING_NONCE);
     assert!(rpc.sent().is_empty());
+    // The journal line is written right before the send request, which never went out.
+    assert!(!journal_path(&home, &me).exists());
+    assert!(!r.stderr.contains("broadcasting"), "{}", r.stderr);
 }
 
 #[test]
 fn explicit_nonce_is_signed_and_must_be_replaceable_or_next() {
-    let (home, _) = unlocked();
-    let rpc = MockRpc::start(healthy);
+    let (home, me) = unlocked();
+    let rpc = MockRpc::start(pending_node(&me, healthy));
+    let (five, six) = (pending_tx(5), pending_tx(6));
     let v = home
-        .run(&transfer(&rpc.url, &["--nonce", "6", "--dry-run"]))
+        .run(&transfer(
+            &rpc.url,
+            &["--nonce", "6", "--replace", &six, "--dry-run"],
+        ))
         .ok();
     assert_eq!(v["nonce"], 6);
     assert_eq!(v["signerDecoded"]["nonce"], 6);
@@ -716,6 +893,8 @@ fn explicit_nonce_is_signed_and_must_be_replaceable_or_next() {
             "0x",
             "--nonce",
             "5",
+            "--replace",
+            &five,
             "--rpc",
             &rpc.url,
             "--dry-run",
@@ -745,7 +924,10 @@ fn rpc_returning_another_hash_is_reconciled_by_the_computed_hash() {
     assert_eq!(v["rpcTxHash"], bogus.as_str());
     assert_eq!(v["nonce"], PENDING_NONCE);
     assert_eq!(v["from"], me.as_str());
-    assert!(msg.contains("--nonce 7"), "{msg}");
+    assert!(
+        msg.contains(&format!("--nonce 7 --replace {hash}")),
+        "{msg}"
+    );
     let polls = rpc.calls("eth_getTransactionByHash");
     assert!(!polls.is_empty() && polls.iter().all(|p| p[0] == hash.as_str()));
 
@@ -778,17 +960,15 @@ fn rpc_returning_another_hash_is_reconciled_by_the_computed_hash() {
 #[test]
 fn a_send_while_another_from_the_key_is_in_flight_fails_fast_and_signs_nothing() {
     let (home, me) = unlocked();
-    // A node whose pending nonce counts what it accepted, and which takes a while to accept.
-    // Waiting for the first send would let a second attempt at the same payment sign the next
-    // nonce and land as well; it must fail at once instead.
+    // A node whose nonces count what it accepted (mined at once), and which takes a while to
+    // accept. Waiting for the first send would let a second attempt at the same payment sign
+    // the next nonce and land as well; it must fail at once instead.
     let accepted = Arc::new(AtomicUsize::new(0));
     let a = accepted.clone();
     let rpc = MockRpc::start(move |m, p| match m {
-        "eth_getTransactionCount" if p[1] == "pending" => {
-            Reply::Result(hex(
-                u128::from(PENDING_NONCE) + a.load(Ordering::SeqCst) as u128
-            ))
-        }
+        "eth_getTransactionCount" => Reply::Result(hex(
+            u128::from(PENDING_NONCE) + a.load(Ordering::SeqCst) as u128
+        )),
         "eth_sendRawTransaction" => {
             std::thread::sleep(Duration::from_secs(4));
             a.fetch_add(1, Ordering::SeqCst);
@@ -850,7 +1030,220 @@ fn receipt_trouble_after_the_send_is_exit_0_with_nonce() {
     let v = home.run(&transfer(&rpc.url, &["--wait"])).ok();
     assert_eq!(v["status"], "unknown");
     assert_eq!(v["nonce"], PENDING_NONCE);
-    assert_eq!(v["txHash"], tx_hash_of(&rpc.sent()[0]).as_str());
+    let hash = tx_hash_of(&rpc.sent()[0]);
+    assert_eq!(v["txHash"], hash.as_str());
+    let hint = v["hint"].as_str().unwrap();
+    assert!(
+        hint.ends_with(&format!(
+            "to speed up or cancel use --nonce 7 --replace {hash}; a run without --nonce is a \
+             second payment"
+        )),
+        "{hint}"
+    );
+}
+
+#[test]
+fn the_journal_line_is_on_disk_before_the_node_sees_the_raw_tx() {
+    let (home, me) = unlocked();
+    let journal = journal_path(&home, &me);
+    // What the journal held at the moment the node received the raw transaction.
+    let seen = Arc::new(Mutex::new(None::<String>));
+    let (s, j) = (seen.clone(), journal.clone());
+    let rpc = MockRpc::start(move |m, p| match m {
+        "eth_sendRawTransaction" => {
+            *s.lock().unwrap() = Some(std::fs::read_to_string(&j).unwrap_or_default());
+            healthy(m, p)
+        }
+        _ => healthy(m, p),
+    });
+    let r = home.run(&transfer(&rpc.url, &[]));
+    let v = r.ok();
+    let hash = tx_hash_of(&rpc.sent()[0]);
+    let at_send = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(at_send.lines().count(), 1, "{at_send}");
+    let line: Value = serde_json::from_str(at_send.lines().next().unwrap()).unwrap();
+    for (k, want) in [
+        ("chain", json!("ethereum")),
+        ("from", json!(me)),
+        ("nonce", json!(PENDING_NONCE)),
+        ("txHash", json!(hash)),
+        ("to", json!(OTHER)),
+        ("value", json!("0.01 ETH")),
+        ("kind", json!("transfer")),
+    ] {
+        assert_eq!(line[k], want, "{k}: {line}");
+    }
+    assert!(line["ts"].as_str().unwrap().ends_with('Z'), "{line}");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&journal).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    // The same fields, and what to do if the command is cut off, on stderr.
+    assert!(
+        r.stderr.contains(&format!(
+            "broadcasting {hash} (nonce 7 on ethereum); if this command does not finish, look \
+             this hash up before sending again; a retry must pass --nonce 7 --replace {hash}"
+        )),
+        "{}",
+        r.stderr
+    );
+    assert!(r.stderr.contains(&line.to_string()), "{}", r.stderr);
+    assert_eq!(r.stderr.lines().count(), 1, "{}", r.stderr);
+    assert_eq!(v["journal"], journal.display().to_string().as_str());
+    // An invoke and a token transfer are journaled under their own kind.
+    let inv = home
+        .run(&[
+            "invoke",
+            "--chain",
+            "ethereum",
+            "--to",
+            OTHER,
+            "--data",
+            "0xd0e30db0",
+            "--value",
+            "0.5",
+            "--rpc",
+            &rpc.url,
+            "--json",
+        ])
+        .ok();
+    let text = std::fs::read_to_string(&journal).unwrap();
+    let last: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!(last["kind"], "invoke");
+    assert_eq!(last["value"], "0.5 ETH");
+    assert_eq!(last["txHash"], inv["txHash"]);
+}
+
+#[test]
+fn a_fresh_send_while_one_is_pending_is_refused_unless_allow_pending() {
+    let (home, me) = unlocked();
+    // Accepted transactions stay pending: `latest` stays at 7.
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let a = accepted.clone();
+    let rpc = MockRpc::start(move |m, p| match m {
+        "eth_getTransactionCount" if p[1] == "pending" => {
+            Reply::Result(hex(
+                u128::from(PENDING_NONCE) + a.load(Ordering::SeqCst) as u128
+            ))
+        }
+        "eth_sendRawTransaction" => {
+            a.fetch_add(1, Ordering::SeqCst);
+            healthy(m, p)
+        }
+        _ => healthy(m, p),
+    });
+    let args = transfer(&rpc.url, &[]);
+    let first = home.run(&args).ok();
+    let first_hash = first["txHash"].as_str().unwrap().to_string();
+    // The harness cut the first run off and runs it again: refused, naming the pending send.
+    let r = home.run(&args);
+    let msg = r.err("VALIDATION_ERROR");
+    println!("{msg}");
+    for part in [
+        "a transaction from this key is still pending on ethereum at nonce 7; nothing was \
+         signed.",
+        "If this command repeats a payment sent earlier (for example a run that was cut off), \
+         do not run it again",
+        "use --nonce 7 --replace <its txHash>",
+        "Only for a different payment, pass --allow-pending",
+    ] {
+        assert!(msg.contains(part), "{part}: {msg}");
+    }
+    assert!(msg.contains(&first_hash), "{msg}");
+    let v = r.json();
+    assert_eq!(v["pendingNonces"], json!([7]));
+    assert_eq!(v["pendingSends"][0]["txHash"], first_hash.as_str());
+    assert_eq!(
+        v["journal"],
+        journal_path(&home, &me).display().to_string().as_str()
+    );
+    assert_eq!(rpc.sent().len(), 1, "the re-run was broadcast");
+    // A dry-run reports the pending nonces instead of refusing.
+    let dry = home.run(&transfer(&rpc.url, &["--dry-run"])).ok();
+    assert_eq!(dry["pendingNonces"], json!([7]));
+    // A different payment, said so explicitly.
+    let v = home.run(&transfer(&rpc.url, &["--allow-pending"])).ok();
+    assert_eq!(v["nonce"], PENDING_NONCE + 1);
+    assert_eq!(v["pendingNonces"], json!([7]));
+    assert_eq!(rpc.sent().len(), 2);
+}
+
+#[test]
+fn the_send_lock_is_held_through_wait() {
+    let (home, _) = unlocked();
+    // Never mined: --wait runs to its timeout.
+    let rpc = MockRpc::start(healthy);
+    let args = transfer(&rpc.url, &["--wait", "--wait-timeout", "4s"]);
+    std::thread::scope(|s| {
+        let first = s.spawn(|| home.run(&args));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while rpc.calls("eth_getTransactionReceipt").is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never waited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The first send is waiting for its receipt: a second one fails at once.
+        let started = std::time::Instant::now();
+        let msg = home.run(&transfer(&rpc.url, &[])).err("VALIDATION_ERROR");
+        assert!(
+            msg.starts_with("another send from this key on ethereum is in progress"),
+            "{msg}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(3), "it waited");
+        let v = first.join().unwrap().ok();
+        // Not mined within --wait-timeout: pending, with the safe next step.
+        assert_eq!(v["status"], "pending");
+        let hash = v["txHash"].as_str().unwrap();
+        assert_eq!(
+            v["hint"],
+            format!(
+                "still pending; to speed up or cancel use --nonce 7 --replace {hash}; a run \
+                 without --nonce is a second payment"
+            )
+            .as_str()
+        );
+    });
+    assert_eq!(rpc.sent().len(), 1);
+}
+
+#[test]
+fn human_errors_print_the_send_details() {
+    let (home, me) = unlocked();
+    let rpc = MockRpc::start(|m, p| match m {
+        "eth_sendRawTransaction" => Reply::Drop,
+        _ => healthy(m, p),
+    });
+    let mut args = transfer(&rpc.url, &[]);
+    args.retain(|a| *a != "--json");
+    let r = home.run(&args);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    let hash = tx_hash_of(&rpc.sent()[0]);
+    let journal = journal_path(&home, &me).display().to_string();
+    for line in [
+        format!("txHash: {hash}"),
+        "nonce: 7".to_string(),
+        format!("from: {me}"),
+        format!("journal: {journal}"),
+    ] {
+        assert!(r.stderr.lines().any(|l| l == line), "{line}: {}", r.stderr);
+    }
+    assert!(r.stderr.contains("[BROADCAST_UNCERTAIN]"), "{}", r.stderr);
+    // A refused transaction is named as such.
+    let refused = send_error_node("nonce too low", false);
+    let mut args = transfer(&refused.url, &[]);
+    args.retain(|a| *a != "--json");
+    let r = home.run(&args);
+    let hash = tx_hash_of(&refused.sent()[0]);
+    assert!(
+        r.stderr
+            .lines()
+            .any(|l| l == format!("refusedTxHash: {hash}")),
+        "{}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.lines().any(|l| l.starts_with("txHash:")),
+        "{}",
+        r.stderr
+    );
 }
 
 #[test]
@@ -932,6 +1325,22 @@ fn rpc_url_path_and_query_are_never_printed() {
     assert_eq!(base["rpc"], "https://eth.example.com/<redacted>");
     let human = home.run_env(&["chains"], &[("ZWALLET_RPC_BASE", secret_env)]);
     assert!(!human.stdout.contains("SECRETKEY"), "{}", human.stdout);
+    // A key in a subdomain label; the default hosts stay readable.
+    let key_host = "https://k3y0a1b2c3d4e5f6.base.example.com";
+    let v = home
+        .run_env(&["chains", "--json"], &[("ZWALLET_RPC_BASE", key_host)])
+        .ok();
+    for row in v.as_array().unwrap() {
+        let shown = row["rpc"].as_str().unwrap();
+        if row["key"] == "base" {
+            assert_eq!(shown, "https://<redacted>.base.example.com");
+        } else {
+            assert!(shown.ends_with("-rpc.publicnode.com"), "{shown}");
+            assert!(!shown.contains("redacted"), "{shown}");
+        }
+    }
+    let human = home.run_env(&["chains"], &[("ZWALLET_RPC_BASE", key_host)]);
+    assert!(!human.stdout.contains("k3y0a1b2"), "{}", human.stdout);
 
     home.create("t", &[]);
     let leaks = |r: &common::Run| r.stdout.contains("SECRETKEY") || r.stderr.contains("SECRETKEY");

@@ -27,8 +27,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-/// How long `--wait` polls for a receipt before reporting `status: "pending"`.
-const WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long `--wait` polls for a receipt before reporting `status: "pending"`, unless
+/// `--wait-timeout` says otherwise.
+const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn home() -> Result<PathBuf> {
     store::resolve_home(std::env::var_os("ZWALLET_HOME"), std::env::home_dir())
@@ -649,6 +650,8 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
         bump,
         replace,
         max_fee_per_gas,
+        allow_pending: a.send.allow_pending,
+        journal: Some(chains::SendJournal::new(home, chain, &from)),
     };
     let prepared = evm_rpc::prepare(&p, &net, intent).await?;
     let mut base = Map::new();
@@ -662,13 +665,13 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     base.insert("value".into(), json!(format_units(value, chain.decimals)));
     base.insert("valueRaw".into(), json!(value.to_string()));
     sign_and_send(
-        &Evm, &net, home, index, &from, prepared, &a.send, base, lock,
+        &Evm, &net, home, index, &from, prepared, &a.send, base, lock, "invoke",
     )
     .await
 }
 
-/// The account's send lock, from the nonce read through the broadcast. A dry-run consumes no
-/// nonce, so it takes none.
+/// The account's send lock, from the nonce read until the command returns (through `--wait`).
+/// A dry-run consumes no nonce, so it takes none.
 fn send_lock(
     home: &Path,
     chain: &Chain,
@@ -743,6 +746,8 @@ async fn transfer_with<F: ChainFamily>(
         replace: replace.map(|h| format!("{h:#x}")),
         max_fee_per_gas,
         force: a.force,
+        allow_pending: a.send.allow_pending,
+        journal: Some(chains::SendJournal::new(home, chain, &from)),
     };
     let prepared = fam.prepare_transfer(net, &req).await?;
     let mut base = Map::new();
@@ -750,12 +755,22 @@ async fn transfer_with<F: ChainFamily>(
     base.insert("key".into(), json!(key_name));
     base.insert("from".into(), json!(from));
     base.insert("to".into(), json!(to));
-    sign_and_send(fam, net, home, index, &from, prepared, &a.send, base, lock).await
+    let kind = if a.token.is_some() {
+        "token-transfer"
+    } else {
+        "transfer"
+    };
+    sign_and_send(
+        fam, net, home, index, &from, prepared, &a.send, base, lock, kind,
+    )
+    .await
 }
 
 /// Shared tail of `transfer` and `invoke`: sign through the daemon, check the raw bytes really
-/// come from `from`, then either report (dry-run) or broadcast (and optionally wait). `lock` is
-/// released once the node has answered the broadcast, before any `--wait`.
+/// come from `from`, then either report (dry-run) or broadcast (and optionally wait). Right
+/// before the broadcast the send is written to the account's journal and announced on stderr
+/// (`kind` names the command). `_lock` is held until this returns, through any `--wait`, so no
+/// other send from the key starts while this one's outcome is still being read.
 #[allow(clippy::too_many_arguments)]
 async fn sign_and_send<F: ChainFamily>(
     fam: &F,
@@ -766,7 +781,8 @@ async fn sign_and_send<F: ChainFamily>(
     prepared: PreparedTx,
     send: &SendArgs,
     mut out: Map<String, Value>,
-    lock: Option<chains::SendLock>,
+    _lock: Option<chains::SendLock>,
+    kind: &str,
 ) -> Result<Out> {
     let signed_value = protocol::send_unlocked(
         home,
@@ -805,12 +821,34 @@ async fn sign_and_send<F: ChainFamily>(
         out.insert("recoveredFrom".into(), json!(signed.signer));
         return Ok(Out::json(Value::Object(out)));
     }
-    let outcome = fam.broadcast(net, &signed, send.nonce.is_some()).await?;
-    drop(lock);
+    let journal = chains::SendJournal::new(home, net.chain, from);
+    let shown = |k: &str| {
+        out.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string()
+    };
+    // The amount with its symbol: `amount` and the asset's `symbol` for a transfer, the native
+    // `value` for an invoke.
+    let value = format!(
+        "{} {}",
+        out.get("amount")
+            .or_else(|| out.get("value"))
+            .and_then(Value::as_str)
+            .unwrap_or("?"),
+        out.get("symbol")
+            .and_then(Value::as_str)
+            .unwrap_or(net.chain.symbol)
+    );
+    let record = chains::SendRecord::new(journal, &signed, &shown("to"), &value, kind);
+    let outcome = fam
+        .broadcast(net, &signed, send.nonce.is_some(), &record)
+        .await?;
     out.insert(
         "explorerUrl".into(),
         json!(net.chain.explorer_tx_url(&signed.tx_hash)),
     );
+    out.insert("journal".into(), json!(record.journal.display()));
     if let Broadcast::KnownDespite {
         warning,
         rpc_tx_hash,
@@ -827,9 +865,8 @@ async fn sign_and_send<F: ChainFamily>(
         }
     }
     if send.wait {
-        let receipt = fam
-            .wait_for_receipt(net, &signed.tx_hash, WAIT_TIMEOUT)
-            .await;
+        let timeout = send.wait_timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT);
+        let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
         chains::record_receipt(&mut out, receipt);
     }
     Ok(Out::json(Value::Object(out)))

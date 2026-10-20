@@ -6,8 +6,9 @@ pub mod rpc;
 pub mod tx;
 
 use crate::chains::{
-    Balance, Broadcast, Chain, ChainFamily, Family, FamilyKeys, Net, PreparedTx, SignedTx,
-    TransferRequest, after_send_error, before_send_error, nonce_taken_error, rejected_send_error,
+    Balance, Broadcast, Chain, ChainFamily, Family, FamilyKeys, Net, PreparedTx, SendRecord,
+    SignedTx, TransferRequest, after_send_error, before_send_error, nonce_taken_error,
+    rejected_send_error,
 };
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
@@ -248,6 +249,7 @@ impl ChainFamily for Evm {
         net: &Net,
         signed: &SignedTx,
         explicit_nonce: bool,
+        record: &SendRecord,
     ) -> Result<Broadcast> {
         let nothing_sent = |e: WalletError| before_send_error(signed, e);
         let raw = hex::decode(signed.raw.trim_start_matches("0x"))
@@ -257,7 +259,12 @@ impl ChainFamily for Evm {
             .parse()
             .map_err(|_| nothing_sent(WalletError::validation("malformed tx hash")))?;
         let p = rpc::connect(net).await.map_err(nothing_sent)?;
-        match rpc::send_raw(&p, &raw, hash).await {
+        // Last step before the send request: from here on the hash is on disk and on stderr.
+        record.write().map_err(nothing_sent)?;
+        let n = signed
+            .nonce
+            .map_or_else(|| "<its nonce>".to_string(), |n| n.to_string());
+        let outcome = match rpc::send_raw(&p, &raw, hash).await {
             rpc::SendOutcome::Accepted => Ok(Broadcast::Accepted),
             rpc::SendOutcome::KnownDespite { why, rpc_hash } => Ok(Broadcast::KnownDespite {
                 warning: why,
@@ -280,15 +287,13 @@ impl ChainFamily for Evm {
                 signed,
                 &format!("{why}, and the node does not report the transaction"),
             )),
-            rpc::SendOutcome::NonceTaken(why) => {
-                // Replacing a pending transaction needs a higher bid than it, which a larger bump
-                // or the original's own fees (`--replace`) provide.
-                let underpriced = why.to_lowercase().contains("underpriced");
+            rpc::SendOutcome::NonceTaken { why, underpriced } => {
+                // Replacing a pending transaction needs a higher bid than it: the original's own
+                // fees (`--replace`) times a large enough bump.
                 let hint = (explicit_nonce && underpriced).then(|| {
                     format!(
-                        "To replace a transaction that is still pending, retry with the same \
-                         --nonce {} and a larger --bump, or --replace <its txHash>",
-                        signed.nonce.unwrap_or_default()
+                        "The node wants a higher bid to replace the transaction pending at nonce \
+                         {n}: retry with --nonce {n} --replace <its txHash> and a larger --bump"
                     )
                 });
                 Err(nonce_taken_error(
@@ -296,10 +301,22 @@ impl ChainFamily for Evm {
                     &why,
                     explicit_nonce,
                     hint.as_deref(),
+                    Some(&record.journal),
                 ))
             }
-            rpc::SendOutcome::Rejected(why) => Err(rejected_send_error(signed, &why)),
-        }
+            rpc::SendOutcome::Rejected { why, underpriced } => {
+                // Below the pool's minimum price: nothing is pending at this nonce, so a retry at
+                // the same nonce with a bump pays more without replacing anything.
+                let hint = underpriced.then(|| {
+                    format!(
+                        "The price is below this node's minimum; to pay more, retry with --nonce \
+                         {n} --bump <factor> (e.g. 1.5)"
+                    )
+                });
+                Err(rejected_send_error(signed, &why, hint.as_deref()))
+            }
+        };
+        outcome.map_err(|e| e.with_detail("journal", record.journal.display()))
     }
 
     async fn wait_for_receipt(

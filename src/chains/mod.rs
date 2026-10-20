@@ -11,11 +11,14 @@ use crate::core::seed::Seed;
 use crate::core::store;
 use alloy::primitives::U256;
 use alloy::transports::http::reqwest::Url;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::File;
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::ops::RangeInclusive;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Family plus its family-specific configuration.
@@ -186,6 +189,12 @@ impl Chain {
             Family::Evm(c) => format!("{}/tx/{tx_hash}", c.explorer),
         }
     }
+
+    pub fn explorer_address_url(&self, address: &str) -> String {
+        match &self.family {
+            Family::Evm(c) => format!("{}/address/{address}", c.explorer),
+        }
+    }
 }
 
 /// Address cache for the key at `index`: chain key → address. Derives once per family.
@@ -326,13 +335,45 @@ fn percent_decode(s: &str, plus: bool) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
+/// Shortest hyphen-free run of a host label that is a possible key on its own.
+const KEY_LABEL_RUN: usize = 20;
+/// Shortest host label that is a possible key when it mixes letters and digits.
+const KEY_LABEL_MIXED: usize = 12;
+
+/// Does a host name label look like an API key (some providers put the key in a subdomain)?
+/// Yes when it has a hyphen-free run of 20 or more characters, or has 12 or more characters with
+/// both letters and digits. Word-like labels made of shorter runs, such as the default
+/// `avalanche-c-chain-rpc` (21 characters), stay readable.
+fn key_like_label(label: &str) -> bool {
+    let letters = label.chars().any(|c| c.is_ascii_alphabetic());
+    let digits = label.chars().any(|c| c.is_ascii_digit());
+    (label.chars().count() >= KEY_LABEL_MIXED && letters && digits)
+        || label
+            .split('-')
+            .any(|run| run.chars().count() >= KEY_LABEL_RUN)
+}
+
+/// The host of `u` as it may be printed: each key-like label ([`key_like_label`]) of a domain
+/// replaced with `<redacted>`. IP addresses print as they are.
+fn shown_host(u: &Url) -> Option<String> {
+    Some(match u.domain() {
+        Some(d) => d
+            .split('.')
+            .map(|l| if key_like_label(l) { REDACTED } else { l })
+            .collect::<Vec<_>>()
+            .join("."),
+        None => u.host_str()?.to_string(),
+    })
+}
+
 /// The parts of an RPC URL that may carry an API key, longest first, each as written in the URL
 /// and percent-decoded (`+` also as a space in the query), parsed the way the HTTP client parses
 /// the URL:
 /// - credential slots, at any length: the userinfo whole and each of its parts, the query string
 ///   whole and each parameter value;
 /// - the path whole (unless empty or `/`), and each path segment of 8 or more characters;
-/// - the fragment, at 8 or more characters (it is never sent, so a short one is noise).
+/// - the fragment, at 8 or more characters (it is never sent, so a short one is noise);
+/// - each key-like host label ([`key_like_label`]).
 ///
 /// Text that does not parse as a URL is one secret as a whole (as in [`redact_url`]).
 pub fn url_secrets(url: &str) -> Vec<String> {
@@ -377,6 +418,14 @@ pub fn url_secrets(url: &str) -> Vec<String> {
     if let Some(fragment) = u.fragment() {
         both(&mut long, fragment, false);
     }
+    if let Some(domain) = u.domain() {
+        any.extend(
+            domain
+                .split('.')
+                .filter(|l| key_like_label(l))
+                .map(String::from),
+        );
+    }
     long.retain(|s| s.chars().count() >= SECRET_MIN_LEN);
     let mut secrets: Vec<String> = any
         .into_iter()
@@ -388,18 +437,18 @@ pub fn url_secrets(url: &str) -> Vec<String> {
     secrets
 }
 
-/// `scheme://host[:port]` of an RPC URL as the HTTP client parses it, or `None` if it does not
-/// parse or has no host.
+/// `scheme://host[:port]` of an RPC URL as the HTTP client parses it, key-like host labels
+/// redacted ([`shown_host`]), or `None` if it does not parse or has no host.
 fn origin(u: &Url) -> Option<String> {
-    let host = u.host_str()?;
+    let host = shown_host(u)?;
     Some(match u.port() {
         Some(port) => format!("{}://{host}:{port}", u.scheme()),
         None => format!("{}://{host}", u.scheme()),
     })
 }
 
-/// `scheme://host[:port]` of an RPC URL (as the HTTP client parses it), or `<redacted>` if it has
-/// none: what an error about the endpoint itself may name.
+/// `scheme://host[:port]` of an RPC URL (as the HTTP client parses it, key-like host labels
+/// redacted), or `<redacted>` if it has none: what an error about the endpoint itself may name.
 pub fn url_origin(url: &str) -> String {
     Url::parse(url.trim())
         .ok()
@@ -411,8 +460,9 @@ pub fn url_origin(url: &str) -> String {
 /// An RPC URL as it may be printed: scheme and host (with port) only, parsed the way the HTTP
 /// client parses it. Providers put API keys in the path, the query or the userinfo
 /// (`https://eth-mainnet.g.alchemy.com/v2/<key>`), so anything after the host becomes
-/// `/<redacted>`. `https://host` and `https://host/` print as they are. Text that is not a URL
-/// with a host is redacted whole.
+/// `/<redacted>`; some put it in a subdomain, so a key-like host label becomes `<redacted>` too.
+/// `https://host` and `https://host/` print as they are. Text that is not a URL with a host is
+/// redacted whole.
 pub fn redact_url(url: &str) -> String {
     let raw = url.trim();
     let Ok(u) = Url::parse(raw) else {
@@ -482,6 +532,11 @@ pub struct TransferRequest {
     pub max_fee_per_gas: Option<u128>,
     /// Allow recipients that are almost certainly mistakes (zero address, the token itself).
     pub force: bool,
+    /// `--allow-pending`: a send without `nonce` goes ahead while an earlier transaction from
+    /// this key is still pending.
+    pub allow_pending: bool,
+    /// The account's send journal, for naming earlier transactions in errors.
+    pub journal: Option<SendJournal>,
 }
 
 /// A replacement's fee bump in ten-thousandths: 12_500 = 1.25x. Nodes drop a replacement that
@@ -547,8 +602,8 @@ pub enum Broadcast {
 }
 
 /// One send at a time per account and chain within a home: held from reading the next nonce
-/// until the node has answered the broadcast, so two concurrent sends never sign the same nonce.
-/// A second send fails at once instead of waiting: it may be a second attempt at the same
+/// until the command returns (through `--wait`), so two concurrent sends never sign the same
+/// nonce. A second send fails at once instead of waiting: it may be a second attempt at the same
 /// payment, and after waiting it would sign the next nonce and land as well. An exclusive flock
 /// on `<home>/nonce-<chainId>-<address>.lock`, released when this value drops, or by the OS when
 /// the process dies.
@@ -579,31 +634,231 @@ impl SendLock {
     }
 }
 
+/// The send journal of one account on one chain: `<home>/sends-<chainId>-<address>.jsonl`, one
+/// JSON line `{ ts, chain, from, nonce, txHash, to, value, kind }` per transaction, appended and
+/// fsynced right before it is broadcast. If the process dies after the broadcast, this is where
+/// the transaction is still named. Not secret, but created 0600 like every file in the home.
+#[derive(Debug, Clone)]
+pub struct SendJournal {
+    path: PathBuf,
+    chain: &'static Chain,
+    address: String,
+}
+
+/// How many journal entries an error message names at most (the newest).
+const JOURNAL_SHOWN: usize = 5;
+
+impl SendJournal {
+    pub fn new(home: &Path, chain: &'static Chain, address: &str) -> Self {
+        let path = home.join(format!(
+            "sends-{}-{}.jsonl",
+            chain.chain_id_json(),
+            address.to_ascii_lowercase()
+        ));
+        Self {
+            path,
+            chain,
+            address: address.to_string(),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn display(&self) -> String {
+        self.path.display().to_string()
+    }
+
+    /// Appends `entry` as one line and fsyncs it (and the home, when the file is new). Never
+    /// follows a symlink.
+    pub fn append(&self, entry: &Value) -> Result<()> {
+        let fail = |e: std::io::Error| {
+            WalletError::validation(format!(
+                "cannot write the send journal {}: {e}",
+                self.display()
+            ))
+        };
+        let mut f = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(store::FILE_MODE)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&self.path)
+            .map_err(fail)?;
+        f.set_permissions(std::fs::Permissions::from_mode(store::FILE_MODE))
+            .map_err(fail)?;
+        let fresh = f.metadata().map_err(fail)?.len() == 0;
+        let mut line = entry.to_string();
+        line.push('\n');
+        f.write_all(line.as_bytes()).map_err(fail)?;
+        f.sync_all().map_err(fail)?;
+        if fresh && let Some(dir) = self.path.parent() {
+            File::open(dir).and_then(|d| d.sync_all()).map_err(fail)?;
+        }
+        Ok(())
+    }
+
+    /// The entries whose nonce is in `nonces`, oldest first, minus the one for `except` (a hash
+    /// known not to be the one sought). Best effort: a missing journal or a malformed line reads
+    /// as nothing.
+    pub fn entries_at(&self, nonces: RangeInclusive<u64>, except: Option<&str>) -> Vec<Value> {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|e| e["nonce"].as_u64().is_some_and(|n| nonces.contains(&n)))
+            .filter(|e| {
+                except.is_none_or(|h| {
+                    !e["txHash"]
+                        .as_str()
+                        .is_some_and(|t| t.eq_ignore_ascii_case(h))
+                })
+            })
+            .collect()
+    }
+
+    /// Where to find the earlier transactions at `nonces`, as one sentence for an error message
+    /// (no final period): the journal's newest entries there (minus `except`), or that it has
+    /// none and where else to look. Also returns the entries, for the error's `--json` fields.
+    pub fn pointer(
+        &self,
+        nonces: RangeInclusive<u64>,
+        except: Option<&str>,
+    ) -> (String, Vec<Value>) {
+        let entries = self.entries_at(nonces.clone(), except);
+        let at = nonce_label(&nonces);
+        if entries.is_empty() {
+            let text = format!(
+                "The send journal {} has no {}entry at {at}; find it on the explorer: {}",
+                self.display(),
+                if except.is_some() { "other " } else { "" },
+                self.chain.explorer_address_url(&self.address)
+            );
+            return (text, entries);
+        }
+        let shown: Vec<String> = entries
+            .iter()
+            .rev()
+            .take(JOURNAL_SHOWN)
+            .rev()
+            .map(describe_entry)
+            .collect();
+        let text = format!(
+            "The send journal {} has at {at}: {}",
+            self.display(),
+            shown.join("; ")
+        );
+        (text, entries)
+    }
+}
+
+/// `nonce 6` or `nonces 5 to 7`.
+pub fn nonce_label(nonces: &RangeInclusive<u64>) -> String {
+    if nonces.start() == nonces.end() {
+        format!("nonce {}", nonces.start())
+    } else {
+        format!("nonces {} to {}", nonces.start(), nonces.end())
+    }
+}
+
+/// A journal entry as text: `0xab.. (nonce 6, sent 2026-10-20T04:05:06Z: transfer 0.01 ETH to
+/// 0x..)`.
+fn describe_entry(e: &Value) -> String {
+    let s = |k: &str| e[k].as_str().unwrap_or("?").to_string();
+    let nonce = e["nonce"]
+        .as_u64()
+        .map_or_else(|| "?".to_string(), |n| n.to_string());
+    format!(
+        "{} (nonce {nonce}, sent {}: {} {} to {})",
+        s("txHash"),
+        s("ts"),
+        s("kind"),
+        s("value"),
+        s("to")
+    )
+}
+
+/// A signed transaction about to be broadcast, and its journal line.
+pub struct SendRecord {
+    pub journal: SendJournal,
+    pub entry: Value,
+}
+
+impl SendRecord {
+    /// `kind` is what the command does (`transfer`, `token-transfer`, `invoke`); `value` is the
+    /// amount with its symbol, `to` the recipient (the contract for `invoke`).
+    pub fn new(journal: SendJournal, signed: &SignedTx, to: &str, value: &str, kind: &str) -> Self {
+        let entry = json!({
+            "ts": crate::core::time::now_rfc3339(),
+            "chain": journal.chain.key,
+            "from": signed.signer,
+            "nonce": signed.nonce,
+            "txHash": signed.tx_hash,
+            "to": to,
+            "value": value,
+            "kind": kind,
+        });
+        Self { journal, entry }
+    }
+
+    /// Call right before the transaction is broadcast: appends the journal line (fsynced) and
+    /// prints the same fields as one line on stderr, so that a run cut off after the broadcast
+    /// still leaves the hash behind. A failure here means nothing was broadcast.
+    pub fn write(&self) -> Result<()> {
+        self.journal.append(&self.entry)?;
+        let hash = self.entry["txHash"].as_str().unwrap_or("?");
+        let chain = self.journal.chain.key;
+        let line = match self.entry["nonce"].as_u64() {
+            Some(n) => format!(
+                "broadcasting {hash} (nonce {n} on {chain}); if this command does not finish, \
+                 look this hash up before sending again; a retry must pass --nonce {n} \
+                 --replace {hash}"
+            ),
+            None => format!(
+                "broadcasting {hash} (on {chain}); if this command does not finish, look this \
+                 hash up before sending again"
+            ),
+        };
+        // Not `eprintln!`: a closed stderr must not panic the send.
+        let _ = writeln!(
+            std::io::stderr(),
+            "{line}. Journal {}: {}",
+            self.journal.display(),
+            self.entry
+        );
+        Ok(())
+    }
+}
+
 /// The error for a transaction that may have reached the network: it carries `txHash`, `from`
-/// and `nonce` so the caller can look the transaction up, or retry with the same nonce so that
-/// the retry replaces it instead of becoming a second send.
+/// and `nonce` so the caller can look the transaction up, or retry with the same nonce and
+/// `--replace` so that the retry replaces it instead of becoming a second send.
 pub fn after_send_error(
     code: ErrorCode,
     chain: &Chain,
     signed: &SignedTx,
     what: &str,
 ) -> WalletError {
+    let hash = &signed.tx_hash;
     let mut message = format!(
-        "{what}. The transaction {} may have reached the network ({}); do not resend blindly: \
-         look it up first",
-        signed.tx_hash,
-        chain.explorer_tx_url(&signed.tx_hash)
+        "{what}. The transaction {hash} may have reached the network ({}); do not resend \
+         blindly: look it up first",
+        chain.explorer_tx_url(hash)
     );
     if let Some(n) = signed.nonce {
         message.push_str(&format!(
-            ", or retry with --nonce {n} so that the retry replaces it instead of sending twice"
+            ", or retry with --nonce {n} --replace {hash} so that the retry replaces it instead \
+             of sending twice"
         ));
     }
     with_tx_details(WalletError::new(code, message), signed)
 }
 
-/// What to do about a retry once a transaction is signed: reuse its nonce, so that the retry can
-/// only replace this transaction, never add a second one.
+/// What to do about a retry once a transaction is signed but was not broadcast: reuse its
+/// nonce, so that the retry can only take this transaction's place, never add a second one. No
+/// `--replace`: nothing was broadcast, so the nonce is still free and there is nothing to name.
 fn retry_hint(signed: &SignedTx) -> String {
     match signed.nonce {
         Some(n) => {
@@ -615,14 +870,17 @@ fn retry_hint(signed: &SignedTx) -> String {
 
 /// The error for a transaction the node refused outright (`why` is its answer): nothing was
 /// broadcast. It carries the same `txHash`, `from` and `nonce` fields as [`after_send_error`].
-pub fn rejected_send_error(signed: &SignedTx, why: &str) -> WalletError {
-    with_tx_details(
-        WalletError::rpc(format!(
-            "the node rejected the transaction; nothing was broadcast ({why}). {}",
-            retry_hint(signed)
-        )),
-        signed,
-    )
+/// `hint` is a family-specific addition.
+pub fn rejected_send_error(signed: &SignedTx, why: &str, hint: Option<&str>) -> WalletError {
+    let mut message = format!(
+        "the node rejected the transaction; nothing was broadcast ({why}). {}",
+        retry_hint(signed)
+    );
+    if let Some(h) = hint {
+        message.push_str(". ");
+        message.push_str(h);
+    }
+    with_tx_details(WalletError::rpc(message), signed)
 }
 
 /// `e` (code kept) for a failure after signing but before the send request went out: nothing
@@ -642,34 +900,67 @@ pub fn before_send_error(signed: &SignedTx, e: WalletError) -> WalletError {
 }
 
 /// The node says the transaction's nonce is already used (`why` is its answer) and does not
-/// report this transaction by its hash: another transaction, pending or mined, holds the nonce.
-/// That one may be an earlier send of this same payment, so the message never invites a plain
-/// resend. `BROADCAST_UNCERTAIN` when this send was a `--nonce` retry (`explicit_nonce`), else
-/// `RPC_ERROR`. `hint` is a family-specific addition.
+/// report this transaction by its hash: another transaction from this key, pending or mined,
+/// holds the nonce. This one was refused and will never be found, so its hash is
+/// `refusedTxHash`, never `txHash`. The holder may be an earlier send of this same payment, so
+/// the message sends the agent to that earlier send (`journal` names its entries) and never
+/// invites a plain resend. `BROADCAST_UNCERTAIN` when this send was a `--nonce` retry
+/// (`explicit_nonce`), else `RPC_ERROR`. `hint` is a family-specific addition.
 pub fn nonce_taken_error(
     signed: &SignedTx,
     why: &str,
     explicit_nonce: bool,
     hint: Option<&str>,
+    journal: Option<&SendJournal>,
 ) -> WalletError {
-    let nonce = signed
-        .nonce
-        .map_or_else(|| "its nonce".to_string(), |n| format!("nonce {n}"));
-    let code = if explicit_nonce {
-        ErrorCode::BroadcastUncertain
-    } else {
-        ErrorCode::RpcError
+    let (nonce, n) = match signed.nonce {
+        Some(n) => (format!("nonce {n}"), n.to_string()),
+        None => ("its nonce".to_string(), "<its nonce>".to_string()),
     };
-    let mut message = format!(
-        "{nonce} is taken by another transaction (pending or mined), so the node did not take \
-         this one ({why}); if this was a retry of an earlier send, look that txHash up before \
-         sending again; otherwise re-run to take the next nonce"
-    );
+    // The journal also holds this refused transaction's own line: it is not the earlier send.
+    let pointer = match (journal, signed.nonce) {
+        (Some(j), Some(n)) => {
+            let (text, _) = j.pointer(n..=n, Some(&signed.tx_hash));
+            format!(" {text}.")
+        }
+        _ => String::new(),
+    };
+    let (code, mut message) = if explicit_nonce {
+        (
+            ErrorCode::BroadcastUncertain,
+            format!(
+                "{nonce} is taken by another transaction from this key, pending or mined \
+                 ({why}). This retry was refused and will not be found; look up the txHash of \
+                 your earlier send at {nonce} from its own output (or the send journal \
+                 below).{pointer} While it may be pending or mined, do not send this payment \
+                 without --nonce; to replace it use --nonce {n} --replace <earlier txHash>"
+            ),
+        )
+    } else {
+        (
+            ErrorCode::RpcError,
+            format!(
+                "{nonce} is taken by another transaction from this key, pending or mined, so the \
+                 node refused this one ({why}); it will not be found. If you were retrying an \
+                 earlier send, look up that send's txHash before sending again (its own output, \
+                 or the send journal below).{pointer}"
+            ),
+        )
+    };
     if let Some(h) = hint {
-        message.push_str(". ");
+        message.push_str(if message.ends_with('.') { " " } else { ". " });
         message.push_str(h);
     }
-    with_tx_details(WalletError::new(code, message), signed)
+    let mut e = WalletError::new(code, message)
+        .with_detail("refusedTxHash", signed.tx_hash.as_str())
+        .with_detail("from", signed.signer.as_str());
+    if let Some(n) = signed.nonce {
+        e = e.with_detail("nonce", n);
+    }
+    if let Some(j) = journal {
+        e = e.with_detail("journal", j.display());
+    }
+    e
 }
 
 fn with_tx_details(e: WalletError, signed: &SignedTx) -> WalletError {
@@ -682,20 +973,39 @@ fn with_tx_details(e: WalletError, signed: &SignedTx) -> WalletError {
     e
 }
 
-/// Adds a `--wait` result to a broadcast's output. The transaction is already sent, so a receipt
-/// problem never becomes a failure (a retry would send again): no receipt in time is
-/// `status: "pending"`, an RPC error is `status: "unknown"` with `receiptError`.
+/// Adds a `--wait` result to a broadcast's output (which carries `txHash` and `nonce`). The
+/// transaction is already sent, so a receipt problem never becomes a failure (a retry would send
+/// again): no receipt in time is `status: "pending"`, an RPC error is `status: "unknown"` with
+/// `receiptError`. Both add a `hint` that keeps the next step on the same nonce.
 pub fn record_receipt(out: &mut Map<String, Value>, receipt: Result<Option<Value>>) {
-    match receipt {
-        Ok(Some(Value::Object(r))) => out.extend(r),
+    let state = match receipt {
+        Ok(Some(Value::Object(r))) => {
+            out.extend(r);
+            return;
+        }
         Ok(Some(_)) | Ok(None) => {
             out.insert("status".into(), Value::from("pending"));
+            "still pending"
         }
         Err(e) => {
             out.insert("status".into(), Value::from("unknown"));
             out.insert("receiptError".into(), Value::from(e.message));
+            "receipt unknown, it may still be pending"
         }
-    }
+    };
+    let hash = out
+        .get("txHash")
+        .and_then(Value::as_str)
+        .unwrap_or("<txHash>")
+        .to_string();
+    let hint = match out.get("nonce").and_then(Value::as_u64) {
+        Some(n) => format!(
+            "{state}; to speed up or cancel use --nonce {n} --replace {hash}; a run without \
+             --nonce is a second payment"
+        ),
+        None => format!("{state}; look {hash} up before sending again"),
+    };
+    out.insert("hint".into(), Value::from(hint));
 }
 
 /// Network-side operations, run by the one-shot CLI process (no key access).
@@ -716,17 +1026,20 @@ pub trait ChainFamily: FamilyKeys {
     /// Builds an unsigned transfer from live chain state. Outside dry-run this fails with
     /// `INSUFFICIENT_FUNDS` instead of returning a transaction that cannot pay for itself.
     async fn prepare_transfer(&self, net: &Net, req: &TransferRequest) -> Result<PreparedTx>;
-    /// Hands `signed` to the node. A failure before the send is [`before_send_error`], and the
+    /// Hands `signed` to the node, calling `record.write()` right before the send request (a
+    /// failure there sends nothing). A failure before the send is [`before_send_error`], and the
     /// node refusing the transaction itself is [`rejected_send_error`]; both say nothing was
     /// broadcast. A used nonce that is not this transaction's is [`nonce_taken_error`]
     /// (`explicit_nonce` = the send was a `--nonce` retry). Once the request has gone out, any
     /// other failure whose outcome the node cannot confirm is `BROADCAST_UNCERTAIN` (see
-    /// [`after_send_error`]).
+    /// [`after_send_error`]). Every error after the journal line was written names it
+    /// (`journal`).
     async fn broadcast(
         &self,
         net: &Net,
         signed: &SignedTx,
         explicit_nonce: bool,
+        record: &SendRecord,
     ) -> Result<Broadcast>;
     /// `Ok(None)` when no receipt appeared within `timeout`.
     async fn wait_for_receipt(
@@ -849,6 +1162,60 @@ mod tests {
     }
 
     #[test]
+    fn key_like_host_labels_are_redacted_and_default_hosts_stay_readable() {
+        // Every default endpoint prints as it is, including the 21- and 20-character labels
+        // `avalanche-c-chain-rpc` and `ethereum-sepolia-rpc`.
+        for chain in CHAINS {
+            assert_eq!(redact_url(chain.default_rpc()), chain.default_rpc());
+            assert_eq!(url_origin(chain.default_rpc()), chain.default_rpc());
+            assert!(url_secrets(chain.default_rpc()).is_empty(), "{}", chain.key);
+        }
+        for (url, shown) in [
+            // 20+ characters in one run.
+            (
+                "https://abcdefghijklmnopqrstu.rpc.example",
+                "https://<redacted>.rpc.example",
+            ),
+            // 12+ characters with letters and digits (a hex key, a UUID).
+            (
+                "https://deadbeef0123.eth.example:8545/v2/x",
+                "https://<redacted>.eth.example:8545/<redacted>",
+            ),
+            (
+                "https://123e4567-e89b-12d3-a456-426614174000.rpc.example",
+                "https://<redacted>.rpc.example",
+            ),
+            // Short or letters-only labels stay.
+            ("https://mainnet.infura.io", "https://mainnet.infura.io"),
+            (
+                "https://eth-mainnet.g.alchemy.com",
+                "https://eth-mainnet.g.alchemy.com",
+            ),
+            ("https://node1.example", "https://node1.example"),
+            ("http://127.0.0.1:8545", "http://127.0.0.1:8545"),
+        ] {
+            assert_eq!(redact_url(url), shown, "{url}");
+        }
+        assert_eq!(
+            url_origin("https://deadbeef0123.eth.example/v2/x"),
+            "https://<redacted>.eth.example"
+        );
+        assert_eq!(
+            redact_urls("refused by https://deadbeef0123.eth.example (x)"),
+            "refused by https://<redacted>.eth.example (x)"
+        );
+        // The label alone, echoed by the endpoint, is scrubbed too.
+        let net = Net {
+            chain: find("ethereum").unwrap(),
+            rpc_url: "https://deadbeef0123.eth.example".into(),
+        };
+        assert_eq!(
+            net.redact("project deadbeef0123 is over quota"),
+            "project <redacted> is over quota"
+        );
+    }
+
+    #[test]
     fn net_debug_prints_the_redacted_url() {
         let net = Net {
             chain: find("base").unwrap(),
@@ -956,7 +1323,8 @@ mod tests {
             signer: "0xF00".into(),
             nonce: Some(4),
         };
-        let e = rejected_send_error(&signed, "replacement transaction underpriced");
+        let e = rejected_send_error(&signed, "transaction underpriced", Some("Hint"));
+        assert!(e.message.ends_with(". Hint"), "{}", e.message);
         let v = e.to_json();
         assert_eq!(v["errorCode"], "RPC_ERROR");
         assert_eq!(v["txHash"], "0xabc");
@@ -986,32 +1354,139 @@ mod tests {
         );
     }
 
+    fn temp_home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
     #[test]
-    fn nonce_taken_is_uncertain_only_for_a_nonce_retry() {
+    fn nonce_taken_names_the_refused_hash_and_sends_to_the_earlier_send() {
+        let home = temp_home();
+        let chain = find("ethereum").unwrap();
+        let journal = SendJournal::new(home.path(), chain, "0xF00");
+        // An earlier send at nonce 4, then the refused retry's own line.
+        journal
+            .append(
+                &json!({ "nonce": 4, "txHash": "0xea1", "ts": "t0", "kind": "transfer",
+                             "value": "1 ETH", "to": "0xB0B" }),
+            )
+            .unwrap();
+        journal
+            .append(&json!({ "nonce": 4, "txHash": "0xabc", "ts": "t1" }))
+            .unwrap();
         let signed = SignedTx {
             raw: "0x02".into(),
             tx_hash: "0xabc".into(),
             signer: "0xF00".into(),
             nonce: Some(4),
         };
-        let fresh = nonce_taken_error(&signed, "nonce too low", false, None);
+        let fresh = nonce_taken_error(&signed, "nonce too low", false, None, Some(&journal));
         assert_eq!(fresh.code, ErrorCode::RpcError);
         assert!(
-            fresh
-                .message
-                .starts_with("nonce 4 is taken by another transaction (pending or mined)"),
+            fresh.message.starts_with(
+                "nonce 4 is taken by another transaction from this key, pending or mined"
+            ),
             "{}",
             fresh.message
         );
         assert!(
-            fresh
-                .message
-                .contains("look that txHash up before sending again")
+            fresh.message.contains(
+                "If you were retrying an earlier send, look up that send's txHash before \
+                 sending again"
+            ),
+            "{}",
+            fresh.message
         );
-        let retry = nonce_taken_error(&signed, "nonce too low", true, Some("Hint"));
+        let retry = nonce_taken_error(&signed, "nonce too low", true, Some("Hint"), Some(&journal));
         assert_eq!(retry.code, ErrorCode::BroadcastUncertain);
         assert!(retry.message.ends_with(". Hint"), "{}", retry.message);
-        assert_eq!(retry.to_json()["txHash"], "0xabc");
+        for part in [
+            "This retry was refused and will not be found",
+            "look up the txHash of your earlier send at nonce 4",
+            "do not send this payment without --nonce",
+            "--nonce 4 --replace <earlier txHash>",
+        ] {
+            assert!(retry.message.contains(part), "{part}: {}", retry.message);
+        }
+        assert!(!retry.message.contains("next nonce"), "{}", retry.message);
+        for e in [&fresh, &retry] {
+            let v = e.to_json();
+            // The refused transaction is never `txHash`: it will not be found.
+            assert!(v.get("txHash").is_none(), "{v}");
+            assert_eq!(v["refusedTxHash"], "0xabc");
+            assert_eq!(v["nonce"], 4);
+            assert_eq!(v["journal"], journal.display());
+            // The journal's earlier send is named; the refused one is not offered as it.
+            assert!(e.message.contains("0xea1"), "{}", e.message);
+            assert!(
+                !e.message.contains("0xabc ("),
+                "refused hash listed: {}",
+                e.message
+            );
+        }
+    }
+
+    #[test]
+    fn send_journal_appends_fsynced_lines_in_a_0600_file() {
+        let home = temp_home();
+        let chain = find("base").unwrap();
+        let journal = SendJournal::new(home.path(), chain, "0xAbC");
+        assert_eq!(
+            journal.path(),
+            home.path().join("sends-8453-0xabc.jsonl").as_path()
+        );
+        assert!(journal.entries_at(0..=9, None).is_empty());
+        let signed = SignedTx {
+            raw: "0x02".into(),
+            tx_hash: "0x11".into(),
+            signer: "0xAbC".into(),
+            nonce: Some(3),
+        };
+        let record = SendRecord::new(journal.clone(), &signed, "0xB0B", "0.5 ETH", "transfer");
+        record.write().unwrap();
+        journal
+            .append(&json!({ "nonce": 5, "txHash": "0x22" }))
+            .unwrap();
+        let mode = std::fs::metadata(journal.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let text = std::fs::read_to_string(journal.path()).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        let first: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        for (k, want) in [
+            ("chain", json!("base")),
+            ("from", json!("0xAbC")),
+            ("nonce", json!(3)),
+            ("txHash", json!("0x11")),
+            ("to", json!("0xB0B")),
+            ("value", json!("0.5 ETH")),
+            ("kind", json!("transfer")),
+        ] {
+            assert_eq!(first[k], want, "{k}: {first}");
+        }
+        assert!(first["ts"].as_str().unwrap().ends_with('Z'), "{first}");
+        assert_eq!(journal.entries_at(3..=3, None).len(), 1);
+        assert_eq!(journal.entries_at(3..=5, None).len(), 2);
+        assert!(journal.entries_at(3..=5, Some("0X11")).len() == 1);
+        let (text, _) = journal.pointer(4..=4, None);
+        assert!(text.contains("has no entry at nonce 4"), "{text}");
+        assert!(
+            text.contains("https://basescan.org/address/0xAbC"),
+            "{text}"
+        );
+        let (text, entries) = journal.pointer(3..=5, None);
+        assert_eq!(entries.len(), 2);
+        assert!(text.contains("at nonces 3 to 5: 0x11 (nonce 3"), "{text}");
+        // A symlink in its place is never followed.
+        let other = SendJournal::new(home.path(), chain, "0xdef");
+        std::os::unix::fs::symlink(home.path().join("target"), other.path()).unwrap();
+        assert!(other.append(&json!({})).is_err());
+        assert!(!home.path().join("target").exists());
     }
 
     #[test]
@@ -1026,16 +1501,34 @@ mod tests {
         record_receipt(&mut timed_out, Ok(None));
         assert_eq!(timed_out["status"], "pending");
         assert_eq!(timed_out["nonce"], 7);
+        assert_eq!(
+            timed_out["hint"],
+            "still pending; to speed up or cancel use --nonce 7 --replace 0xab; a run without \
+             --nonce is a second payment"
+        );
         let mut failed = sent();
         record_receipt(&mut failed, Err(WalletError::rpc("boom")));
         assert_eq!(failed["status"], "unknown");
         assert_eq!(failed["receiptError"], "boom");
         assert_eq!(failed["nonce"], 7);
+        let hint = failed["hint"].as_str().unwrap();
+        assert!(
+            hint.starts_with("receipt unknown, it may still be pending"),
+            "{hint}"
+        );
+        assert!(
+            hint.ends_with(
+                "to speed up or cancel use --nonce 7 --replace 0xab; a run without --nonce is a \
+                 second payment"
+            ),
+            "{hint}"
+        );
         let mut mined = sent();
         let receipt = serde_json::json!({ "status": "success", "blockNumber": 9 });
         record_receipt(&mut mined, Ok(Some(receipt)));
         assert_eq!(mined["status"], "success");
         assert_eq!(mined["nonce"], 7);
+        assert!(mined.get("hint").is_none());
     }
 
     #[test]
@@ -1054,7 +1547,11 @@ mod tests {
         assert_eq!(v["nonce"], 4);
         assert_eq!(v["from"], "0xF00");
         assert!(e.message.starts_with("timed out."), "{}", e.message);
-        assert!(e.message.contains("--nonce 4"), "{}", e.message);
+        assert!(
+            e.message.contains("retry with --nonce 4 --replace 0xabc"),
+            "{}",
+            e.message
+        );
         assert!(e.message.contains("https://basescan.org/tx/0xabc"));
     }
 
