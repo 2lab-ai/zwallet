@@ -357,6 +357,14 @@ fn lost_send_reply_is_broadcast_uncertain_with_hash_nonce_from() {
         msg.contains(&format!("retry with --nonce 7 --replace {hash}")),
         "{msg}"
     );
+    // How to look it up: the exact command and the explorer page.
+    assert!(
+        msg.contains(&format!(
+            "look it up first (`zwallet tx --chain ethereum {hash}` or \
+             https://etherscan.io/tx/{hash})"
+        )),
+        "{msg}"
+    );
     assert_eq!(
         v["journal"],
         journal_path(&home, &me).display().to_string().as_str()
@@ -547,8 +555,15 @@ fn nonce_taken_by_another_tx_says_look_up_before_sending_again() {
             assert!(msg.contains(part), "{part}: {msg}");
         }
         assert!(!msg.contains("next nonce"), "{msg}");
-        // The journal's earlier send is named; the refused retry is not offered as it.
+        // The journal's earlier send is named, with how to look it up; the refused retry is
+        // not offered as it.
         assert!(msg.contains(&earlier), "{msg}");
+        assert!(
+            msg.contains(&format!(
+                "`zwallet tx --chain ethereum {earlier}` or https://etherscan.io/tx/{earlier}"
+            )),
+            "{msg}"
+        );
         assert!(!msg.contains(&format!("{refused} (")), "{msg}");
         let v = r.json();
         assert_eq!(v["nonce"], 7, "{v:#}");
@@ -666,8 +681,20 @@ fn replacing_a_pending_nonce_must_name_the_transaction_it_replaces() {
             ),
             "{msg}"
         );
-        // The journal names it.
+        // The journal names it, with the command that looks it up.
         assert!(msg.contains(&six), "{msg}");
+        assert!(
+            msg.contains(&format!("`zwallet tx --chain ethereum {six}`")),
+            "{msg}"
+        );
+        // The pending transaction may be another payment: never replace that one.
+        assert!(
+            msg.ends_with(
+                "If the transaction at nonce 6 is a different payment than the one you are \
+                 retrying, do not replace it; that payment and yours are separate"
+            ),
+            "{msg}"
+        );
         let v = r.json();
         assert_eq!(v["nonce"], 6);
         assert_eq!(v["pendingSends"][0]["txHash"], six.as_str(), "{v:#}");
@@ -796,6 +823,13 @@ fn bump_and_replace_outbid_the_pending_transaction() {
         "{msg}"
     );
     assert!(msg.contains("pass that to --replace"), "{msg}");
+    assert!(
+        msg.ends_with(
+            "If the transaction at nonce 6 is a different payment than the one you are \
+             retrying, do not replace it; that payment and yours are separate"
+        ),
+        "{msg}"
+    );
     let msg = home
         .run(&transfer(
             &node.url,
@@ -870,21 +904,25 @@ fn explicit_nonce_is_signed_and_must_be_replaceable_or_next() {
     let lo = home
         .run(&transfer(&rpc.url, &["--nonce", "4", "--dry-run"]))
         .err("VALIDATION_ERROR");
-    assert!(lo.contains("nonce 4 is already mined"), "{lo}");
-    assert!(
-        lo.contains("that send (or its replacement) went through"),
-        "{lo}"
-    );
-    assert!(
-        lo.contains("look up its txHash before sending anything new"),
-        "{lo}"
-    );
+    for part in [
+        "the transaction at nonce 4 is already mined; nothing was signed. If it was your \
+         earlier attempt at this payment, the payment went through; look it up before sending \
+         anything new.",
+        "If the transaction at nonce 4 is a different payment than the one you are retrying, \
+         do not replace it; that payment and yours are separate.",
+        // Where to look: the journal has nothing at nonce 4, so the explorer.
+        "has no entry at nonce 4; find it on the explorer: https://etherscan.io/address/",
+    ] {
+        assert!(lo.contains(part), "{part}: {lo}");
+    }
+    assert!(!lo.contains("that send went through"), "{lo}");
     // Never a pointer to another nonce: that is how a retry becomes a second send.
     assert!(!lo.contains("next free nonce"), "{lo}");
     let hi = home
         .run(&transfer(&rpc.url, &["--nonce", "8", "--dry-run"]))
         .err("VALIDATION_ERROR");
     assert!(hi.contains("gap"), "{hi}");
+    assert!(hi.contains("has no entry at nonce 8"), "{hi}");
     assert!(!hi.contains("next free nonce is"), "{hi}");
     let inv = home
         .run(&[
@@ -1004,10 +1042,17 @@ fn a_send_while_another_from_the_key_is_in_flight_fails_fast_and_signs_nothing()
             "{msg}"
         );
         let named = format!("{lock_name}); nothing was signed or broadcast. ");
+        let journal = format!(
+            "once it is broadcast, in the send journal {} (look it up with `zwallet tx --chain \
+             ethereum <txHash>` or https://etherscan.io/tx/<txHash>); for a different payment, \
+             retry after it finishes",
+            journal_path(&home, &me).display()
+        );
         for part in [
             named.as_str(),
             "If it is an earlier attempt at this same payment, wait for it to finish and look up \
-             its result before sending again; for a different payment, retry after it finishes",
+             its result before sending again: its txHash is in its output and, ",
+            journal.as_str(),
         ] {
             assert!(msg.contains(part), "{msg}");
         }
@@ -1044,7 +1089,8 @@ fn receipt_trouble_after_the_send_is_exit_0_with_nonce() {
     assert!(
         hint.ends_with(&format!(
             "to speed up or cancel use --nonce 7 --replace {hash}; a run without --nonce is a \
-             second payment"
+             second payment; look it up with `zwallet tx --chain ethereum {hash}` or \
+             https://etherscan.io/tx/{hash}"
         )),
         "{hint}"
     );
@@ -1090,7 +1136,8 @@ fn the_journal_line_is_on_disk_before_the_node_sees_the_raw_tx() {
     assert!(
         r.stderr.contains(&format!(
             "broadcasting {hash} (nonce 7 on ethereum); if this command does not finish, look \
-             this hash up before sending again; a retry must pass --nonce 7 --replace {hash}"
+             this hash up before sending again (`zwallet tx --chain ethereum {hash}` or \
+             https://etherscan.io/tx/{hash}); a retry must pass --nonce 7 --replace {hash}"
         )),
         "{}",
         r.stderr
@@ -1159,6 +1206,10 @@ fn a_fresh_send_while_one_is_pending_is_refused_unless_allow_pending() {
         assert!(msg.contains(part), "{part}: {msg}");
     }
     assert!(msg.contains(&first_hash), "{msg}");
+    assert!(
+        msg.contains(&format!("`zwallet tx --chain ethereum {first_hash}`")),
+        "{msg}"
+    );
     let v = r.json();
     assert_eq!(v["pendingNonces"], json!([7]));
     assert_eq!(v["pendingRange"], json!([7, 7]));
@@ -1222,7 +1273,8 @@ fn the_send_lock_is_held_through_wait() {
             v["hint"],
             format!(
                 "still pending; to speed up or cancel use --nonce 7 --replace {hash}; a run \
-                 without --nonce is a second payment"
+                 without --nonce is a second payment; look it up with `zwallet tx --chain \
+                 ethereum {hash}` or https://etherscan.io/tx/{hash}"
             )
             .as_str()
         );
@@ -1477,6 +1529,13 @@ fn a_repeat_of_a_recent_send_is_refused_unless_allow_duplicate() {
         msg.contains(&format!("{first_hash} (nonce 7, sent ")),
         "{msg}"
     );
+    assert!(
+        msg.contains(&format!(
+            "look it up: `zwallet tx --chain ethereum {first_hash}` or \
+             https://etherscan.io/tx/{first_hash})"
+        )),
+        "{msg}"
+    );
     assert!(msg.ends_with("; nothing was signed"), "{msg}");
     let v = r.json();
     let dup = &v["duplicateSends"][0];
@@ -1719,4 +1778,206 @@ fn a_bogus_pending_count_is_reported_bounded_not_enumerated() {
     check(&v);
     assert_eq!(v["nonce"], pending);
     assert_eq!(rpc.sent().len(), 1);
+}
+
+/// A node that knows `pending` (unmined), `mined` (in block 0x99, with a receipt whose status is
+/// `ok`), and nothing else. Every transaction is from `from` to OTHER at nonce 7, 0.01 ETH.
+fn lookup_node(from: &str, pending: &str, mined: &str, ok: bool) -> MockRpc {
+    let (from, pending, mined) = (from.to_lowercase(), pending.to_string(), mined.to_string());
+    MockRpc::start(move |m, p| {
+        let h = p[0].as_str().unwrap_or("");
+        let tx = |block: Value| {
+            json!({ "hash": h, "from": from, "to": OTHER.to_lowercase(), "nonce": "0x7",
+                    "value": hex(10u128.pow(16)), "blockNumber": block, "gas": "0x5208",
+                    "maxFeePerGas": "0x1", "maxPriorityFeePerGas": "0x1" })
+        };
+        match m {
+            "eth_chainId" => Reply::Result(json!("0x1")),
+            "eth_getTransactionByHash" if h == pending => Reply::Result(tx(Value::Null)),
+            "eth_getTransactionByHash" if h == mined => Reply::Result(tx(json!("0x99"))),
+            "eth_getTransactionReceipt" if h == mined => Reply::Result(json!({
+                "transactionHash": h, "blockNumber": "0x99", "gasUsed": "0x5208",
+                "status": if ok { "0x1" } else { "0x0" },
+            })),
+            "eth_getTransactionByHash" | "eth_getTransactionReceipt" => Reply::Result(Value::Null),
+            other => panic!("mock: unexpected {other}"),
+        }
+    })
+}
+
+#[test]
+fn tx_looks_a_transaction_up_while_locked() {
+    let home = Home::new();
+    // A wallet that was never unlocked; `tx` needs no key at all.
+    let me = home.create("t", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (pending, mined, unknown) = (
+        format!("0x{}", "a1".repeat(32)),
+        format!("0x{}", "b2".repeat(32)),
+        format!("0x{}", "c3".repeat(32)),
+    );
+    let rpc = lookup_node(&me, &pending, &mined, true);
+    let tx = |hash: &str| {
+        home.run(&[
+            "tx", "--chain", "ethereum", hash, "--rpc", &rpc.url, "--json",
+        ])
+        .ok()
+    };
+
+    let v = tx(&mined);
+    println!("{v:#}");
+    assert_eq!(v["chain"], "ethereum");
+    assert_eq!(v["txHash"], mined.as_str());
+    assert_eq!(v["found"], true);
+    assert_eq!(v["status"], "mined");
+    assert_eq!(v["from"], me.as_str());
+    assert_eq!(v["to"], OTHER);
+    assert_eq!(v["nonce"], 7);
+    assert_eq!(v["value"], "0.01");
+    assert_eq!(v["valueRaw"], "10000000000000000");
+    assert_eq!(v["blockNumber"], 0x99);
+    assert_eq!(v["gasUsed"], 21000);
+    assert_eq!(v["success"], true);
+    assert_eq!(
+        v["explorerUrl"],
+        format!("https://etherscan.io/tx/{mined}").as_str()
+    );
+    assert!(v.get("hint").is_none(), "{v:#}");
+
+    let v = tx(&pending);
+    println!("{v:#}");
+    assert_eq!(v["found"], true);
+    assert_eq!(v["status"], "pending");
+    assert_eq!(v["nonce"], 7);
+    assert_eq!(v["from"], me.as_str());
+    for k in ["blockNumber", "gasUsed", "success"] {
+        assert!(v.get(k).is_none(), "{k}: {v:#}");
+    }
+    assert_eq!(
+        v["hint"],
+        format!(
+            "still pending; to speed up or cancel use --nonce 7 --replace {pending}; a run \
+             without --nonce is a second payment"
+        )
+        .as_str()
+    );
+
+    let v = tx(&unknown);
+    println!("{v:#}");
+    assert_eq!(v["found"], false);
+    assert_eq!(v["status"], "not found");
+    assert_eq!(v["txHash"], unknown.as_str());
+    for k in ["from", "to", "nonce", "value"] {
+        assert!(v[k].is_null(), "{k}: {v:#}");
+    }
+    assert_eq!(
+        v["explorerUrl"],
+        format!("https://etherscan.io/tx/{unknown}").as_str()
+    );
+    let hint = v["hint"].as_str().unwrap();
+    for part in [
+        "this node does not know the transaction",
+        "that does not mean it was never sent",
+        "Do not send this payment again without --nonce",
+        "--nonce <the nonce it was signed with>",
+    ] {
+        assert!(hint.contains(part), "{part}: {hint}");
+    }
+
+    // A reverted transaction is mined, not successful.
+    let reverted = lookup_node(&me, &pending, &mined, false);
+    let v = home
+        .run(&[
+            "tx",
+            "--chain",
+            "ethereum",
+            &mined,
+            "--rpc",
+            &reverted.url,
+            "--json",
+        ])
+        .ok();
+    assert_eq!(v["status"], "mined");
+    assert_eq!(v["success"], false);
+
+    // Human output, and no wallet at all.
+    let bare = Home::new();
+    let r = bare.run(&["tx", "--chain", "ethereum", &mined, "--rpc", &rpc.url]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout.lines().any(|l| l == "status: mined"),
+        "{}",
+        r.stdout
+    );
+    // Nothing was ever sent.
+    assert!(rpc.sent().is_empty() && reverted.sent().is_empty());
+}
+
+#[test]
+fn tx_refuses_a_bad_hash_and_a_node_answering_another_transaction() {
+    let home = Home::new();
+    // Not a hash: refused before any RPC (the port is closed).
+    for bad in ["0x1234", "abcd", "0xzz"] {
+        home.run(&[
+            "tx",
+            "--chain",
+            "ethereum",
+            bad,
+            "--rpc",
+            "http://127.0.0.1:1",
+            "--json",
+        ])
+        .err("VALIDATION_ERROR");
+    }
+    // A node that answers with another transaction cannot say anything about this one.
+    let other = format!("0x{}", "dd".repeat(32));
+    let o = other.clone();
+    let rpc = MockRpc::start(move |m, _| match m {
+        "eth_chainId" => Reply::Result(json!("0x1")),
+        "eth_getTransactionByHash" => Reply::Result(json!({
+            "hash": o, "from": OTHER, "to": OTHER, "nonce": "0x1", "value": "0x0",
+            "blockNumber": "0x1",
+        })),
+        "eth_getTransactionReceipt" => Reply::Result(Value::Null),
+        other => panic!("mock: unexpected {other}"),
+    });
+    let wanted = format!("0x{}", "ee".repeat(32));
+    let msg = home
+        .run(&[
+            "tx", "--chain", "ethereum", &wanted, "--rpc", &rpc.url, "--json",
+        ])
+        .err("RPC_ERROR");
+    assert!(msg.contains(&other), "{msg}");
+}
+
+#[test]
+fn replacing_a_mined_transaction_says_the_payment_may_have_gone_through() {
+    let (home, me) = unlocked();
+    let mined = format!("0x{}", "9a".repeat(32));
+    let (m, from) = (mined.clone(), me.clone());
+    let inner = pending_node(&me, healthy);
+    let rpc = MockRpc::start(move |method, p| match method {
+        "eth_getTransactionByHash" if p[0] == m.as_str() => Reply::Result(json!({
+            "hash": m, "from": from.to_lowercase(), "nonce": "0x6", "blockNumber": "0x99",
+            "maxFeePerGas": "0x1", "maxPriorityFeePerGas": "0x1",
+        })),
+        _ => inner(method, p),
+    });
+    let msg = home
+        .run(&transfer(
+            &rpc.url,
+            &["--nonce", "6", "--replace", &mined, "--dry-run"],
+        ))
+        .err("VALIDATION_ERROR");
+    for part in [
+        "it is already mined: if it was your earlier attempt at this payment, the payment went \
+         through; look it up before sending anything new",
+        &format!("`zwallet tx --chain ethereum {mined}` or https://etherscan.io/tx/{mined}"),
+        "nothing was signed",
+    ] {
+        assert!(msg.contains(part), "{part}: {msg}");
+    }
+    assert!(rpc.sent().is_empty());
 }

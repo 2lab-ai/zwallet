@@ -625,10 +625,13 @@ impl SendLock {
             None => Err(WalletError::validation(format!(
                 "another send from this key on {} is in progress (lock {}); nothing was signed \
                  or broadcast. If it is an earlier attempt at this same payment, wait for it to \
-                 finish and look up its result before sending again; for a different payment, \
-                 retry after it finishes",
+                 finish and look up its result before sending again: its txHash is in its output \
+                 and, once it is broadcast, in the send journal {} (look it up with {}); for a \
+                 different payment, retry after it finishes",
                 chain.key,
-                path.display()
+                path.display(),
+                journal_path(home, chain, address).display(),
+                lookup_hint(chain, "<txHash>")
             ))),
         }
     }
@@ -672,15 +675,19 @@ pub struct SendSummary {
     pub token: Option<String>,
 }
 
+/// Where [`SendJournal`] keeps `address`'s sends on `chain` in `home`.
+fn journal_path(home: &Path, chain: &Chain, address: &str) -> PathBuf {
+    home.join(format!(
+        "sends-{}-{}.jsonl",
+        chain.chain_id_json(),
+        address.to_ascii_lowercase()
+    ))
+}
+
 impl SendJournal {
     pub fn new(home: &Path, chain: &'static Chain, address: &str) -> Self {
-        let path = home.join(format!(
-            "sends-{}-{}.jsonl",
-            chain.chain_id_json(),
-            address.to_ascii_lowercase()
-        ));
         Self {
-            path,
+            path: journal_path(home, chain, address),
             chain,
             address: address.to_string(),
         }
@@ -865,7 +872,7 @@ impl SendJournal {
             .rev()
             .take(JOURNAL_SHOWN)
             .rev()
-            .map(describe_entry)
+            .map(|e| self.describe_entry(e))
             .collect();
         let text = format!(
             "The send journal {} has at {at}: {}",
@@ -920,6 +927,24 @@ impl SendJournal {
             .collect())
     }
 
+    /// A journal entry as text, with how to look it up: `0xab.. (nonce 6, sent
+    /// 2026-10-20T04:05:06Z: transfer 0.01 ETH to 0x..; look it up: `zwallet tx ...` or <url>)`.
+    fn describe_entry(&self, e: &Value) -> String {
+        let s = |k: &str| e[k].as_str().unwrap_or("?").to_string();
+        let nonce = e["nonce"]
+            .as_u64()
+            .map_or_else(|| "?".to_string(), |n| n.to_string());
+        format!(
+            "{} (nonce {nonce}, sent {}: {} {} to {}; look it up: {})",
+            s("txHash"),
+            s("ts"),
+            s("kind"),
+            s("value"),
+            s("to"),
+            lookup_hint(self.chain, &s("txHash"))
+        )
+    }
+
     /// The refusal of a send without `--nonce` that repeats `duplicates` (from
     /// [`Self::recent_duplicates`], not empty): nothing was signed.
     pub fn duplicate_error(&self, duplicates: Vec<Value>) -> WalletError {
@@ -929,21 +954,22 @@ impl SendJournal {
             .take(JOURNAL_SHOWN)
             .rev()
             .map(|e| {
+                let hash = e["txHash"].as_str().unwrap_or("?");
                 format!(
-                    "{} (nonce {}, sent {})",
-                    e["txHash"].as_str().unwrap_or("?"),
+                    "{hash} (nonce {}, sent {}; look it up: {})",
                     e["nonce"]
                         .as_u64()
                         .map_or_else(|| "?".to_string(), |n| n.to_string()),
-                    e["ts"].as_str().unwrap_or("?")
+                    e["ts"].as_str().unwrap_or("?"),
+                    lookup_hint(self.chain, hash)
                 )
             })
             .collect();
         WalletError::validation(format!(
             "this looks like a repeat of a recent send; look those hashes up first. If this \
              really is a second payment, pass --allow-duplicate. The send journal {} has the same \
-             send (chain, kind, recipient, value and token) from the last {} minutes: {}; nothing \
-             was signed",
+             send (chain, kind, recipient, amount and token) from the last {} minutes: {}; \
+             nothing was signed",
             self.display(),
             DUPLICATE_WINDOW_SECS / 60,
             shown.join("; ")
@@ -977,23 +1003,6 @@ pub fn nonce_label(nonces: &RangeInclusive<u64>) -> String {
     } else {
         format!("nonces {} to {}", nonces.start(), nonces.end())
     }
-}
-
-/// A journal entry as text: `0xab.. (nonce 6, sent 2026-10-20T04:05:06Z: transfer 0.01 ETH to
-/// 0x..)`.
-fn describe_entry(e: &Value) -> String {
-    let s = |k: &str| e[k].as_str().unwrap_or("?").to_string();
-    let nonce = e["nonce"]
-        .as_u64()
-        .map_or_else(|| "?".to_string(), |n| n.to_string());
-    format!(
-        "{} (nonce {nonce}, sent {}: {} {} to {})",
-        s("txHash"),
-        s("ts"),
-        s("kind"),
-        s("value"),
-        s("to")
-    )
 }
 
 /// A signed transaction about to be broadcast, and its journal line.
@@ -1032,15 +1041,16 @@ impl SendRecord {
         self.journal.append(&self.entry)?;
         let hash = self.entry["txHash"].as_str().unwrap_or("?");
         let chain = self.journal.chain.key;
+        let lookup = lookup_hint(self.journal.chain, hash);
         let line = match self.entry["nonce"].as_u64() {
             Some(n) => format!(
                 "broadcasting {hash} (nonce {n} on {chain}); if this command does not finish, \
-                 look this hash up before sending again; a retry must pass --nonce {n} \
-                 --replace {hash}"
+                 look this hash up before sending again ({lookup}); a retry must pass --nonce \
+                 {n} --replace {hash}"
             ),
             None => format!(
                 "broadcasting {hash} (on {chain}); if this command does not finish, look this \
-                 hash up before sending again"
+                 hash up before sending again ({lookup})"
             ),
         };
         // Not `eprintln!`: a closed stderr must not panic the send.
@@ -1065,9 +1075,9 @@ pub fn after_send_error(
 ) -> WalletError {
     let hash = &signed.tx_hash;
     let mut message = format!(
-        "{what}. The transaction {hash} may have reached the network ({}); do not resend \
-         blindly: look it up first",
-        chain.explorer_tx_url(hash)
+        "{what}. The transaction {hash} may have reached the network; do not resend blindly: \
+         look it up first ({})",
+        lookup_hint(chain, hash)
     );
     if let Some(n) = signed.nonce {
         message.push_str(&format!(
@@ -1195,11 +1205,31 @@ fn with_tx_details(e: WalletError, signed: &SignedTx) -> WalletError {
     e
 }
 
+/// How to look `hash` up on `chain`: the `zwallet tx` command and the explorer page, for every
+/// message that sends the agent to a transaction before it sends anything again.
+pub fn lookup_hint(chain: &Chain, hash: &str) -> String {
+    format!(
+        "`zwallet tx --chain {} {hash}` or {}",
+        chain.key,
+        chain.explorer_tx_url(hash)
+    )
+}
+
+/// What to do about a sent transaction that may still be pending (`state` says how it stands):
+/// replace it at its own nonce, never send the payment again without one.
+pub fn pending_hint(state: &str, nonce: u64, hash: &str) -> String {
+    format!(
+        "{state}; to speed up or cancel use --nonce {nonce} --replace {hash}; a run without \
+         --nonce is a second payment"
+    )
+}
+
 /// Adds a `--wait` result to a broadcast's output (which carries `txHash` and `nonce`). The
 /// transaction is already sent, so a receipt problem never becomes a failure (a retry would send
 /// again): no receipt in time is `status: "pending"`, an RPC error is `status: "unknown"` with
-/// `receiptError`. Both add a `hint` that keeps the next step on the same nonce.
-pub fn record_receipt(out: &mut Map<String, Value>, receipt: Result<Option<Value>>) {
+/// `receiptError`. Both add a `hint` that keeps the next step on the same nonce and says how to
+/// look the transaction up later ([`lookup_hint`]).
+pub fn record_receipt(out: &mut Map<String, Value>, chain: &Chain, receipt: Result<Option<Value>>) {
     let state = match receipt {
         Ok(Some(Value::Object(r))) => {
             out.extend(r);
@@ -1220,12 +1250,13 @@ pub fn record_receipt(out: &mut Map<String, Value>, receipt: Result<Option<Value
         .and_then(Value::as_str)
         .unwrap_or("<txHash>")
         .to_string();
+    let lookup = lookup_hint(chain, &hash);
     let hint = match out.get("nonce").and_then(Value::as_u64) {
         Some(n) => format!(
-            "{state}; to speed up or cancel use --nonce {n} --replace {hash}; a run without \
-             --nonce is a second payment"
+            "{}; look it up with {lookup}",
+            pending_hint(state, n, &hash)
         ),
-        None => format!("{state}; look {hash} up before sending again"),
+        None => format!("{state}; look it up with {lookup} before sending again"),
     };
     out.insert("hint".into(), Value::from(hint));
 }
@@ -1270,6 +1301,11 @@ pub trait ChainFamily: FamilyKeys {
         tx_hash: &str,
         timeout: Duration,
     ) -> Result<Option<Value>>;
+    /// `zwallet tx`: the transaction `tx_hash` as the node reports it, `{ chain, txHash, found,
+    /// status: "mined" | "pending" | "not found", from, to, nonce, value, valueRaw, symbol,
+    /// explorerUrl, blockNumber?, gasUsed?, success?, hint? }`. An answer about another
+    /// transaction is `RPC_ERROR`, never "not found".
+    async fn lookup_tx(&self, net: &Net, tx_hash: &str) -> Result<Map<String, Value>>;
 }
 
 /// `CAPABILITY_UNSUPPORTED` unless the chain's family supports contract calls.
@@ -2011,17 +2047,19 @@ mod tests {
             m.insert("nonce".into(), Value::from(7));
             m
         };
+        let base = find("base").unwrap();
         let mut timed_out = sent();
-        record_receipt(&mut timed_out, Ok(None));
+        record_receipt(&mut timed_out, base, Ok(None));
         assert_eq!(timed_out["status"], "pending");
         assert_eq!(timed_out["nonce"], 7);
         assert_eq!(
             timed_out["hint"],
             "still pending; to speed up or cancel use --nonce 7 --replace 0xab; a run without \
-             --nonce is a second payment"
+             --nonce is a second payment; look it up with `zwallet tx --chain base 0xab` or \
+             https://basescan.org/tx/0xab"
         );
         let mut failed = sent();
-        record_receipt(&mut failed, Err(WalletError::rpc("boom")));
+        record_receipt(&mut failed, base, Err(WalletError::rpc("boom")));
         assert_eq!(failed["status"], "unknown");
         assert_eq!(failed["receiptError"], "boom");
         assert_eq!(failed["nonce"], 7);
@@ -2033,13 +2071,14 @@ mod tests {
         assert!(
             hint.ends_with(
                 "to speed up or cancel use --nonce 7 --replace 0xab; a run without --nonce is a \
-                 second payment"
+                 second payment; look it up with `zwallet tx --chain base 0xab` or \
+                 https://basescan.org/tx/0xab"
             ),
             "{hint}"
         );
         let mut mined = sent();
         let receipt = serde_json::json!({ "status": "success", "blockNumber": 9 });
-        record_receipt(&mut mined, Ok(Some(receipt)));
+        record_receipt(&mut mined, base, Ok(Some(receipt)));
         assert_eq!(mined["status"], "success");
         assert_eq!(mined["nonce"], 7);
         assert!(mined.get("hint").is_none());
@@ -2066,7 +2105,14 @@ mod tests {
             "{}",
             e.message
         );
-        assert!(e.message.contains("https://basescan.org/tx/0xabc"));
+        assert!(
+            e.message.contains(
+                "look it up first (`zwallet tx --chain base 0xabc` or \
+                 https://basescan.org/tx/0xabc)"
+            ),
+            "{}",
+            e.message
+        );
     }
 
     #[test]

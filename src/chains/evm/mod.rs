@@ -18,7 +18,7 @@ use alloy::primitives::{Address, B256, Signature};
 use alloy::signers::SignerSync;
 use alloy::signers::local::coins_bip39::English;
 use alloy::signers::local::{MnemonicBuilder, PrivateKeySigner};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::time::Duration;
 
 /// EVM-specific registry configuration.
@@ -330,6 +330,12 @@ impl ChainFamily for Evm {
             .map_err(|_| WalletError::validation("malformed tx hash"))?;
         let p = rpc::connect(net).await?;
         rpc::wait_receipt(&p, hash, timeout).await
+    }
+
+    async fn lookup_tx(&self, net: &Net, tx_hash: &str) -> Result<Map<String, Value>> {
+        let hash = parse_tx_hash(tx_hash)?;
+        let p = rpc::connect(net).await?;
+        rpc::lookup_tx(&p, net, hash).await
     }
 }
 
