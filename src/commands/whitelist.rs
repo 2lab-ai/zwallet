@@ -410,9 +410,9 @@ fn edit_text(out: &Value) -> String {
             let mut what = format!(
                 "{} {} ({} {} on {})",
                 s("change"),
-                e["nickname"].as_str().unwrap_or("?"),
-                e["kind"].as_str().unwrap_or("?"),
-                e["address"].as_str().unwrap_or("?"),
+                shown(e["nickname"].as_str().unwrap_or("?")),
+                shown(e["kind"].as_str().unwrap_or("?")),
+                shown(e["address"].as_str().unwrap_or("?")),
                 join(&e["chains"])
             );
             if e["selectors"].is_array() {
@@ -456,8 +456,8 @@ fn edit_text(out: &Value) -> String {
         lines.push(format!(
             "discarded (not signed, the edit started from an empty list): {}; its unverified \
              entries: {}",
-            out["discarded"]["reason"].as_str().unwrap_or("?"),
-            out["discarded"]["entries"]
+            printable(out["discarded"]["reason"].as_str().unwrap_or("?")),
+            ascii_json(&out["discarded"]["entries"])
         ));
     }
     if out["keyCreated"] == json!(true) {
@@ -483,20 +483,72 @@ fn edit_text(out: &Value) -> String {
     lines.join("\n")
 }
 
-/// A JSON array's items, comma-separated.
+/// A JSON array's items, comma-separated, each [`shown`] (or as JSON if not a string).
 fn join(v: &Value) -> String {
     v.as_array()
         .map(|items| {
             items
                 .iter()
                 .map(|i| match i {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
+                    Value::String(s) => shown(s),
+                    other => ascii_json(other),
                 })
                 .collect::<Vec<_>>()
                 .join(", ")
         })
         .unwrap_or_default()
+}
+
+/// The most characters of one value from a file that human output shows.
+const SHOWN_CHARS: usize = 64;
+
+/// A value from a file (a hand-edited whitelist.json is anything) for a terminal: as is when it
+/// is at most [`SHOWN_CHARS`] of printable ASCII, else quoted with escapes (`{:?}`, which escapes
+/// control and format characters such as ESC and U+202E) and cut there.
+fn shown(value: &str) -> String {
+    if !value.is_empty()
+        && value.len() <= SHOWN_CHARS
+        && value.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return value.to_string();
+    }
+    match value.char_indices().nth(SHOWN_CHARS) {
+        Some((cut, _)) => format!("{:?}…", &value[..cut]),
+        None => format!("{value:?}"),
+    }
+}
+
+/// Free text that may quote a file (a reason) for a terminal: every character that is not
+/// printable as it is (control and format characters) escaped as `{:?}` would, quotes and
+/// backslashes left as they are.
+fn printable(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            let escaped: Vec<char> = if matches!(c, '"' | '\\' | '\'') {
+                vec![c]
+            } else {
+                c.escape_debug().collect()
+            };
+            escaped
+        })
+        .collect()
+}
+
+/// `value` as compact JSON in printable ASCII: every other character as a `\u` escape, which
+/// is still the same JSON.
+fn ascii_json(value: &Value) -> String {
+    let mut out = String::new();
+    for c in value.to_string().chars() {
+        if c == ' ' || c.is_ascii_graphic() {
+            out.push(c);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    out
 }
 
 /// `whitelist list`: whitelist.json as it is, `verified: false`; with `--verify`, the list the
@@ -590,7 +642,7 @@ fn list_text(out: &Value, verify: bool) -> String {
         "whitelist gen {}, {}{}",
         match &out["gen"] {
             Value::Null => "-".to_string(),
-            g => g.to_string(),
+            g => ascii_json(g),
         },
         if out["verified"] == json!(true) {
             "verified"
@@ -605,11 +657,19 @@ fn list_text(out: &Value, verify: bool) -> String {
         }
     )];
     for e in out["entries"].as_array().into_iter().flatten() {
+        if !e.is_object() {
+            lines.push(format!("  {}", ascii_json(e)));
+            continue;
+        }
+        let field = |k: &str| match &e[k] {
+            Value::String(s) => shown(s),
+            other => ascii_json(other),
+        };
         let mut line = format!(
             "  {:<16} {:<8} {} {}",
-            e["nickname"].as_str().unwrap_or("?"),
-            e["kind"].as_str().unwrap_or("?"),
-            e["address"].as_str().unwrap_or("?"),
+            field("nickname"),
+            field("kind"),
+            field("address"),
             join(&e["chains"])
         );
         if e["selectors"].is_array() {
@@ -624,9 +684,9 @@ fn list_text(out: &Value, verify: bool) -> String {
                 let wei = wei.as_str().unwrap_or("?");
                 match (chains::find(key), U256::from_str_radix(wei, 10)) {
                     (Ok(c), Ok(w)) => {
-                        format!("{key} {} {}", format_units(w, c.decimals), c.symbol)
+                        format!("{} {} {}", c.key, format_units(w, c.decimals), c.symbol)
                     }
-                    _ => format!("{key} {wei} wei"),
+                    _ => format!("{} {} wei", shown(key), shown(wei)),
                 }
             })
             .collect();
@@ -641,7 +701,7 @@ fn list_text(out: &Value, verify: bool) -> String {
         ));
     }
     if let Some(r) = out["reason"].as_str() {
-        lines.push(format!("reason: {r}"));
+        lines.push(format!("reason: {}", printable(r)));
     }
     if !verify {
         lines.push(VERIFY_NOTE.to_string());
@@ -743,6 +803,40 @@ mod tests {
                 && e.message.contains("signature does not verify"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn file_values_reach_human_output_escaped() {
+        assert_eq!(shown("alice"), "alice");
+        assert_eq!(shown("mallory\u{1b}[2J"), "\"mallory\\u{1b}[2J\"");
+        assert_eq!(shown("a\u{202e}b"), "\"a\\u{202e}b\"");
+        assert_eq!(shown(""), "\"\"");
+        let long = "x".repeat(SHOWN_CHARS + 1);
+        assert_eq!(shown(&long), format!("{:?}…", &long[..SHOWN_CHARS]));
+        assert_eq!(
+            printable("entry \"m\u{1b}\": bad \u{202e}"),
+            "entry \"m\\u{1b}\": bad \\u{202e}"
+        );
+        let raw = json!([{ "nickname": "m\u{1b}\u{202e}é" }]);
+        let text = ascii_json(&raw);
+        assert!(
+            text.is_ascii() && !text.chars().any(|c| c.is_ascii_control()),
+            "{text}"
+        );
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), raw);
+        // An edit that discarded such a list says so in printable ASCII only.
+        let out = json!({
+            "change": "added", "gen": 2, "previousGen": 1, "entries": ["bob"],
+            "entry": { "nickname": "bob", "kind": "address", "address": "0xb0b", "chains": ["base"] },
+            "discarded": { "reason": "bad \u{202e}", "entries": raw },
+            "keyCreated": false, "stoppedDaemons": [], "locked": true,
+        });
+        let text = edit_text(&out);
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{202e}'),
+            "{text:?}"
+        );
+        assert!(text.contains("discarded"), "{text}");
     }
 
     #[test]

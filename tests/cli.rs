@@ -2395,3 +2395,35 @@ fn at_nickname_recipients_resolve_through_the_list() {
         assert!(msg.contains("zwallet whitelist list"), "{to}: {msg}");
     }
 }
+
+#[test]
+fn hand_edited_values_reach_the_terminal_escaped() {
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let path = home.path().join("whitelist.json");
+    let mut file: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    // A nickname that would clear the screen, and an address with a right-to-left override.
+    file["entries"].as_array_mut().unwrap().push(json!({
+        "nickname": "mallory\u{1b}[2J",
+        "kind": "address",
+        "address": "0x6666\u{202e}6666",
+        "chains": ["base\u{7}"],
+    }));
+    fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+    let pw = format!("{PW}\n");
+    for r in [
+        home.run(&["whitelist", "list"]),
+        home.run_stdin(&["whitelist", "list", "--verify", "--password-stdin"], &pw),
+    ] {
+        assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+        for bad in ['\u{1b}', '\u{202e}', '\u{7}'] {
+            assert!(
+                !r.stdout.contains(bad) && !r.stderr.contains(bad),
+                "{bad:?} reached the terminal: {:?}",
+                r.stdout
+            );
+        }
+        assert!(r.stdout.contains("mallory"), "{}", r.stdout);
+    }
+}
