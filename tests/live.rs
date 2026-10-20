@@ -446,3 +446,44 @@ async fn tx_looks_up_a_mined_mainnet_transfer_without_a_wallet() {
         "{v:#}"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live: public RPC"]
+async fn every_registry_token_answers_its_symbol_and_decimals() {
+    // Every row of the built-in registry, on its own chain through the default RPC: `symbol()`
+    // is the recorded on-chain symbol and `decimals()` the recorded decimals.
+    let mut failures = Vec::new();
+    for t in evm::registry::TOKENS {
+        let chain = chains::CHAINS
+            .iter()
+            .find(|c| evm::config(c).chain_id == t.chain_id)
+            .unwrap();
+        let net = Net {
+            chain,
+            rpc_url: chain.default_rpc().to_string(),
+        };
+        let token: Address = t.address.parse().unwrap();
+        let meta = match evm::rpc::connect(&net).await {
+            Ok(p) => evm::rpc::erc20_meta(&p, &net, token).await,
+            Err(e) => Err(e),
+        };
+        let row = format!("{:<9} {:<4} {}", chain.key, t.symbol, t.address);
+        match meta {
+            Ok(m) if m.symbol == t.onchain_symbol && m.decimals == t.decimals => {
+                println!("ok   {row} {} {}", m.symbol, m.decimals);
+            }
+            Ok(m) => {
+                println!("FAIL {row} {:?} {}", m.symbol, m.decimals);
+                failures.push(format!(
+                    "{row}: symbol {:?} decimals {}, expected {:?} {}",
+                    m.symbol, m.decimals, t.onchain_symbol, t.decimals
+                ));
+            }
+            Err(e) => {
+                println!("FAIL {row} {}", e.message);
+                failures.push(format!("{row}: {}", e.message));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
