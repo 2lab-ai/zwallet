@@ -25,8 +25,10 @@ zwallet lock                 # human: wipe the key now (ends every zwallet sessi
 ## Commands
 
 Every command takes `--json`. On failure with `--json` the CLI prints
-`{ "error": "<msg>", "errorCode": "<CODE>" }` on stdout (plus `txHash`, `nonce`, `from` after a
-send, see **Error codes**) and exits 1; without `--json` the message goes to stderr, exit 1.
+`{ "error": "<msg>", "errorCode": "<CODE>" }` on stdout (plus `txHash` or `refusedTxHash`,
+`nonce`, `from`, `journal` after a send, see **Error codes**) and exits 1; without `--json` the
+message goes to stderr as `error: <msg> [<CODE>]`, followed by one `txHash: …` /
+`refusedTxHash: …` / `nonce: …` / `from: …` / `journal: …` line for each of those fields, exit 1.
 Commands that act on a key take `--key <name>` (default: the active key).
 
 | Command | Output (`--json`) | While locked |
@@ -40,8 +42,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `status` | `{ wallet, locked, home, daemonPids?, daemonPid?, expiresAt?, active?, address?, verified? }` | works |
 | `balance --chain <key> [--token <erc20>] [--rpc <url>]` | `{ chain, key, address, symbol, decimals, balance, raw, verified: false, token? }` | works |
 | `call --chain <key> --to <contract> --sig "<fn>" [ARGS...] [--rpc <url>]` | `{ chain, from, to, sig, args, result, raw }` | works |
-| `invoke --chain <key> --to <contract> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait] [--nonce <n> [--bump <factor>] [--replace <txHash>]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw }` | `WALLET_LOCKED` |
-| `transfer --chain <key> --to <0x> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait] [--nonce <n> [--bump <factor>] [--replace <txHash>]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
+| `invoke --chain <key> --to <contract> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw }` | `WALLET_LOCKED` |
+| `transfer --chain <key> --to <0x> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
 | `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191) | `WALLET_LOCKED` |
 | `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0]` | `{ locked: false, duration, expiresAt, active, address, daemonPid, verified: true }` | - |
 | `lock` | `{ locked: true, wasUnlocked, stopped: [<pid>] }` | - |
@@ -99,20 +101,59 @@ Commands that act on a key take `--key <name>` (default: the active key).
   has no base fee), `eth_estimateGas` + 20% (exactly 21000 for plain transfers) and, on Base and OP
   Mainnet, the L1 data fee. Without `--dry-run` a shortfall is `INSUFFICIENT_FUNDS` before anything
   is signed. `--dry-run` signs but does not broadcast and returns `{ dryRun: true, chain, key, from,
-  to, amount, amountRaw, symbol, decimals, token?, chainId, nonce, gasLimit, gasEstimate,
-  gasLimitSource, type, maxFeePerGas, maxPriorityFeePerGas, gasPrice, maxGasCost, l1Fee,
-  nativeBalance, sufficientFunds, shortfall, signerDecoded, txHash, recoveredFrom }`. It has no
-  `rawTx`: a dry-run never hands out bytes that could be broadcast without zwallet.
-  `recoveredFrom` is recovered from the signed raw bytes, `signerDecoded` is what the key daemon
-  decoded from the bytes it signed, and an empty wallet can be dry-run. Live: `{ ..., txHash,
-  explorerUrl, broadcastWarning?, rpcTxHash? }` plus `{ status, blockNumber, gasUsed }` with
-  `--wait` (`status: "pending"` if not mined within 5 minutes; a receipt problem never turns a
-  broadcast into an error). Sends from one key on one chain never overlap: each holds
-  `nonce-<chainId>-<address>.lock` in the wallet home from before reading the nonce until the node
-  has answered the broadcast. A send that finds the lock held does not wait (after waiting, a
-  second attempt at the same payment would sign the next nonce and land too): it fails at once
+  to, amount, amountRaw, symbol, decimals, token?, chainId, nonce, pendingNonces, duplicateSends?,
+  gasLimit, gasEstimate, gasLimitSource, type, maxFeePerGas, maxPriorityFeePerGas, gasPrice,
+  maxGasCost, l1Fee, nativeBalance, sufficientFunds, shortfall, signerDecoded, txHash,
+  recoveredFrom }`. It has no `rawTx`: a dry-run never hands out bytes that could be broadcast
+  without zwallet. `recoveredFrom` is recovered from the signed raw bytes, `signerDecoded` is what
+  the key daemon decoded from the bytes it signed, and an empty wallet can be dry-run.
+  `pendingNonces` lists the key's nonces that are pending (between its mined count and its next
+  free nonce) on the node; `duplicateSends` (a send without `--nonce`) lists the journal's
+  recent sends that this one repeats (see below).
+  Live: `{ ..., txHash, explorerUrl, journal, broadcastWarning?, rpcTxHash? }` plus `{ status,
+  blockNumber, gasUsed }` with `--wait`.
+- **`--wait`** polls for the receipt for `--wait-timeout <dur>` (default `90s`; same units as
+  unlock durations). Not mined by then is `status: "pending"`, and a receipt RPC problem is
+  `status: "unknown"` with `receiptError`; neither turns a broadcast into an error, and both add
+  `hint: "still pending; to speed up or cancel use --nonce N --replace <txHash>; a run without
+  --nonce is a second payment"` (for `unknown` it starts "receipt unknown, it may still be
+  pending").
+- **The send journal.** Right before `eth_sendRawTransaction`, zwallet appends one JSON line
+  `{ ts, chain, from, nonce, txHash, to, value, kind, token? }` (`value` like `"0.01 ETH"`, `kind`
+  `transfer`, `token-transfer` or `invoke`, `to` the recipient or the contract, `token` the token
+  contract of a token transfer) to
+  `sends-<chainId>-<address>.jsonl` in the wallet home (0600, fsynced), and prints the same fields
+  on one stderr line: "broadcasting <txHash> (nonce N on <chain>); if this command does not finish,
+  look this hash up before sending again; a retry must pass --nonce N --replace <txHash>. Journal
+  <path>: {…}". So a run that is killed after the broadcast still leaves its hash behind. If the
+  line cannot be written, nothing is broadcast. Errors and messages below that send the agent to an
+  earlier transaction name the journal's entries at that nonce.
+- **One send at a time.** Sends from one key on one chain never overlap: each holds
+  `nonce-<chainId>-<address>.lock` in the wallet home from before reading the nonce until the
+  command returns, through `--wait`. A send that finds the lock held does not wait (after waiting,
+  a second attempt at the same payment would sign the next nonce and land too): it fails at once
   with `VALIDATION_ERROR`, before any RPC call, so nothing is signed or broadcast (see **Error
   codes**). A dry-run takes no lock.
+- **A send without `--nonce` while one is pending is refused.** If the key has a transaction
+  pending on the node (its next free nonce is above its mined count), a send without `--nonce` is
+  `VALIDATION_ERROR` "a transaction from this key is still pending on <chain> at nonce N; nothing
+  was signed", with the journal's entries at those nonces (`pendingNonces`, `pendingSends`,
+  `journal`). The usual cause is a re-run of a send that was cut off, which would land at the next
+  nonce as a second payment: look the pending transaction up, and to speed it up or replace it use
+  `--nonce N --replace <its txHash>`. `--allow-pending` sends anyway; use it only for a different
+  payment. A dry-run reports `pendingNonces` instead of refusing.
+- **A send without `--nonce` that repeats a recent one is refused.** If the send journal has an
+  entry from the last 10 minutes with the same chain, kind, `to` and value (and, for a token
+  transfer, the same token contract), a send without `--nonce` is `VALIDATION_ERROR` "this looks
+  like a repeat of a recent send; look those hashes up first. If this really is a second payment,
+  pass --allow-duplicate", naming each match's txHash, nonce and time (`duplicateSends`,
+  `journal`); nothing is signed. This catches the re-run of a send that was cut off after it was
+  already mined, which the pending check cannot see. A send that was refused or never got out is
+  in the journal too, so the lookup comes first there as well. `--allow-duplicate` sends anyway;
+  a dry-run reports `duplicateSends` instead of refusing, and a live send without `--nonce`
+  reports it too. `--nonce` sends skip the check: at a fixed nonce they can only replace or retry,
+  never add a payment. Only the journal's last 1 MiB is read, and lines that are not entries are
+  skipped.
 - **`signerDecoded.action`** names the ABI method the calldata calls, never an asset, because
   ERC-20 and ERC-721 share these selectors: `{ kind: "native-transfer", to, value }`,
   `{ kind: "transfer-call", token, to, amount, assetType: "unverified" }`,
@@ -122,19 +163,24 @@ Commands that act on a key take `--key <name>` (default: the active key).
 - **`--nonce <n>`** signs with nonce `n` instead of the next free one; `n` must be between the
   account's mined count and its next free nonce (`VALIDATION_ERROR` otherwise). A mined `n` means
   the send that used it (or its replacement) went through: look up its txHash before sending
-  anything new. Below the next free nonce `--nonce` replaces the pending transaction: zwallet then
-  pays `--bump` times its own fee estimate (tip and max fee, or `gasPrice`; default 1.25, allowed
-  1.1 to 3) so that nodes accept the replacement. `--replace <txHash>` names that pending
-  transaction (it must be this key's, at nonce `n`, not mined): zwallet reads its fees from the
-  node and pays at least `--bump` times them as well. With `--nonce` the output adds
-  `replacesPending` and `feeBump` (e.g. `"1.25x"` when replacing, else `null`), and `--replace`
-  adds `replacesTx`.
+  anything new. `n` equal to the next free nonce takes that free slot. Below it, `--nonce` replaces
+  the transaction pending at `n`, and `--replace <txHash>` must name it (it must be this key's, at
+  nonce `n`, not mined); without it the send is `VALIDATION_ERROR` "nonce N belongs to a pending
+  transaction; pass --replace <its txHash> to replace it (see the send journal)". zwallet reads the
+  replaced transaction's fees from the node and pays `--bump` times the higher of them and its own
+  estimate (tip and max fee, or `gasPrice`; default 1.25, allowed 1.1 to 3) so that nodes accept
+  the replacement. An explicit `--bump` also applies when nothing is replaced. If the node does not
+  know the `--replace` hash: where it holds another pending transaction at `n`, the error says the
+  hash is the wrong one and names the journal's entries at `n`; where nothing is pending at `n`,
+  it says to retry with `--nonce n` and no `--replace`. With `--nonce` the output adds
+  `replacesPending` and `feeBump` (e.g. `"1.25x"`, or `null` without a bump), and `--replace` adds
+  `replacesTx`.
 - **`--max-fee-gwei <gwei>`**: fees come from the RPC node, so zwallet refuses a tip above 2x and a
   price per gas above 6x of max(base fee, `eth_gasPrice`, 1 gwei) with `VALIDATION_ERROR` before
   signing. On a legacy chain (no base fee, e.g. BSC) the price is `eth_gasPrice` itself, so it is
   left out of its own ceiling: `gasPrice` may be at most 6x of max(base fee, 1 gwei), i.e. 6 gwei.
   `--max-fee-gwei` replaces these ceilings with one explicit price per gas (higher or lower); it
-  is checked after the replacement bump.
+  is checked after the bump.
 - **`--force`** (`transfer`) allows a recipient that is almost always a mistake: the zero address,
   or the token contract itself. Without it they are `INVALID_ADDRESS`.
 - **Amounts** are decimal strings converted exactly (no floats); more fractional digits than the
@@ -142,24 +188,32 @@ Commands that act on a key take `--key <name>` (default: the active key).
 - **Error codes**: `VALIDATION_ERROR`, `WALLET_EXISTS`, `WALLET_NOT_FOUND`, `WRONG_PASSWORD`,
   `WALLET_LOCKED`, `KEY_EXISTS`, `KEY_NOT_FOUND`, `CHAIN_UNSUPPORTED`, `CAPABILITY_UNSUPPORTED`,
   `INVALID_ADDRESS`, `RPC_ERROR`, `INSUFFICIENT_FUNDS`, `BROADCAST_UNCERTAIN`. Errors from the
-  broadcast step carry the signed transaction's `txHash`, `nonce` and `from`, and zwallet never
-  suggests a plain resend: a retry of the same payment always passes `--nonce <nonce>`, so it can
+  broadcast step carry the signed transaction's `txHash` (or `refusedTxHash`, below), `nonce`,
+  `from` and, once the journal line is written, `journal`. zwallet never suggests a plain resend:
+  a retry of a send that may have gone out passes `--nonce <nonce> --replace <txHash>`, so it can
   only replace the first attempt, never add a second one.
   - A failure after signing but before the send request keeps its code (`RPC_ERROR` when the node
-    is unreachable) and says "...; nothing was broadcast. If you retry, pass --nonce N ...".
+    is unreachable) and says "...; nothing was broadcast. If you retry, pass --nonce N ...":
+    nothing went out, so nonce N is still free and there is nothing to name with `--replace`.
   - `BROADCAST_UNCERTAIN`: the send failed or timed out, or the node answered with another hash
     (`rpcTxHash`), and the node does not report the transaction by its own hash. It may still be
-    on the network. Look it up, or retry with `--nonce <nonce>` so the retry replaces it instead
-    of sending twice.
-  - "nonce N is taken by another transaction (pending or mined)": the node answered "nonce too
-    low" or "replacement transaction underpriced" and does not report this transaction by its
-    hash. If this was a retry of an earlier send, look that earlier txHash up before sending
-    again; otherwise re-run to take the next nonce. `BROADCAST_UNCERTAIN` when the send was a
-    `--nonce` retry, else `RPC_ERROR`. For "underpriced" with `--nonce`, a larger `--bump` or
-    `--replace <txHash>` outbids the pending transaction.
+    on the network. Look it up, or retry with `--nonce <nonce> --replace <txHash>` so the retry
+    replaces it instead of sending twice.
+  - "nonce N is taken by another transaction from this key, pending or mined": the node answered
+    "nonce too low" or "replacement transaction underpriced" and does not report this transaction
+    by its hash. This transaction was refused and will never be found, so its hash is
+    `refusedTxHash`, not `txHash`, and the message names the journal's other entries at nonce N.
+    Without `--nonce` it is `RPC_ERROR`: "If you were retrying an earlier send, look up that
+    send's txHash before sending again". With `--nonce` (a retry) it is `BROADCAST_UNCERTAIN`:
+    "This retry was refused and will not be found; look up the txHash of your earlier send at
+    nonce N from its own output (or the send journal below). While it may be pending or mined, do
+    not send this payment without --nonce; to replace it use --nonce N --replace <earlier
+    txHash>" (for "underpriced", with a larger `--bump`).
   - `RPC_ERROR` "the node rejected the transaction; nothing was broadcast" when the node refuses
     it outright ("insufficient funds", "intrinsic gas too low", "exceeds block gas limit", "max
-    fee per gas less than block base fee"); it also says to pass `--nonce N` on a retry.
+    fee per gas less than block base fee", or "transaction underpriced", a price below the pool's
+    minimum); it also says to pass `--nonce N` on a retry, and for "transaction underpriced" to
+    pay more with `--nonce N --bump <factor>`.
   - A send error or another hash for a transaction the node does report by its own hash (e.g.
     "already known", or "nonce too low" for this very transaction) is a success with
     `broadcastWarning` (and `rpcTxHash` if the node answered another hash).
@@ -167,6 +221,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
     nothing was signed or broadcast. If the running send is an earlier attempt at this same
     payment, wait for it to finish and look up its result before sending again; for a different
     payment, retry after it finishes.
+  - `VALIDATION_ERROR` "this looks like a repeat of a recent send" and "a transaction from this
+    key is still pending on <chain> at nonce N" (a send without `--nonce`, see above) and "nonce N belongs to a pending transaction; pass
+    --replace <its txHash>" (`--nonce` below the next free nonce): nothing was signed.
 
 ## Chains
 
@@ -184,11 +241,17 @@ Commands that act on a key take `--key <name>` (default: the active key).
 RPC precedence: `--rpc <url>`, then `ZWALLET_RPC_<KEY>` (e.g. `ZWALLET_RPC_BASE`), then the
 default. zwallet checks the endpoint's `eth_chainId` before using it. An RPC URL may carry an API
 key, so zwallet prints only its scheme and host (`https://host/<redacted>`), parsing the URL the
-way the HTTP client does. A non-2xx HTTP answer is reported as `HTTP <status> from
-<scheme://host:port>`, never with its body. In other error text the endpoint sends back, zwallet
-replaces with `<redacted>` the URL's userinfo, query values and whole path at any length, and its
-path segments (and fragment) of 8+ characters, each as written and percent-decoded; a part shorter
-than 8 characters only where it stands as a whole word.
+way the HTTP client does. Some providers put the key in a subdomain, so a host label that looks
+like a key (a hyphen-free run of 20+ characters, or 12+ characters mixing letters and digits) is
+`<redacted>` too wherever the URL or its origin is printed (`chains`, HTTP errors, a chainId
+mismatch); the default hosts above stay readable. A non-2xx HTTP answer is reported as
+`HTTP <status> from <scheme://host:port>`, never with its body, and an answer that is not the
+JSON-RPC expected only by the parse error's kind and position, never the value it quotes. In other
+error text the endpoint sends back, zwallet replaces with `<redacted>` the URL's userinfo, query
+values, whole path and key-like host labels at any length, and its path segments (and fragment)
+of 8+ characters, each as written and percent-decoded; a part shorter than 8 characters only where
+it stands as a whole word. A JSON-RPC error's `data` is printed only when it is a string (revert
+data).
 
 ## Custody model
 

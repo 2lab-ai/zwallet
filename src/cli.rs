@@ -182,22 +182,36 @@ pub struct SendArgs {
     /// Build and sign from live chain state, but do not broadcast.
     #[arg(long)]
     pub dry_run: bool,
-    /// Wait for the receipt after broadcasting.
+    /// Wait for the receipt after broadcasting (the send lock is held meanwhile).
     #[arg(long)]
     pub wait: bool,
-    /// Use this nonce instead of the next free one. Reusing the nonce of a pending transaction
-    /// replaces it, so a retry after BROADCAST_UNCERTAIN cannot become a second send.
+    /// With --wait: how long to wait for the receipt, e.g. 30s, 5m (default 90s).
+    #[arg(long, value_name = "DURATION", requires = "wait", value_parser = duration_arg)]
+    pub wait_timeout: Option<std::time::Duration>,
+    /// Use this nonce instead of the next free one. Below the next free one it replaces the
+    /// pending transaction there, which --replace must name; a retry after BROADCAST_UNCERTAIN
+    /// passes --nonce N --replace <txHash> so that it cannot become a second send.
     #[arg(long, value_name = "N")]
     pub nonce: Option<u64>,
-    /// With --nonce below the next free nonce (a replacement): pay this many times the fee
-    /// estimate, from 1.1 to 3 (default 1.25), so that nodes take it over the pending
+    /// With --nonce: pay this many times the fee estimate (and a replaced transaction's fees),
+    /// from 1.1 to 3 (default 1.25 when replacing), so that nodes take it over the pending
     /// transaction. The fee ceiling still applies.
     #[arg(long, value_name = "FACTOR", requires = "nonce")]
     pub bump: Option<String>,
-    /// With --nonce: the txHash of the pending transaction being replaced. Its fees are read from
-    /// the node, and the replacement also pays at least --bump times them.
+    /// With --nonce: the txHash of the pending transaction being replaced (required below the
+    /// next free nonce). Its fees are read from the node, and the replacement also pays at least
+    /// --bump times them.
     #[arg(long, value_name = "TXHASH", requires = "nonce")]
     pub replace: Option<String>,
+    /// Send even though a transaction from this key is still pending. Only for a different
+    /// payment: a re-run of a send that was cut off would land as a second payment.
+    #[arg(long, conflicts_with = "nonce")]
+    pub allow_pending: bool,
+    /// Send even though the send journal has the same send (recipient, value, token) from the
+    /// last 10 minutes. Only for a real second payment: a re-run of a send that went through
+    /// would pay twice.
+    #[arg(long, conflicts_with = "nonce")]
+    pub allow_duplicate: bool,
     /// Allow a price per gas up to this many gwei, replacing the automatic ceiling on fees the
     /// RPC suggests (raise it only when fees really are that high).
     #[arg(long, value_name = "GWEI")]
@@ -335,12 +349,31 @@ pub fn main_entry() -> i32 {
     }
 }
 
+/// A `--wait-timeout` value: a [`crate::core::time::parse_duration`] duration.
+fn duration_arg(s: &str) -> Result<std::time::Duration, String> {
+    crate::core::time::parse_duration(s).map_err(|e| e.message)
+}
+
+/// Error details a human needs to look a send up, printed under the message.
+const HUMAN_DETAILS: &[&str] = &["txHash", "refusedTxHash", "nonce", "from", "journal"];
+
 fn print_error(json: bool, e: &WalletError) {
     if json {
         println!("{}", e.to_json());
     } else {
-        eprintln!("error: {} [{}]", e.message, e.code);
+        eprintln!("{}", human_error(e));
     }
+}
+
+/// `error: <message> [CODE]`, then one `<key>: <value>` line per [`HUMAN_DETAILS`] field.
+fn human_error(e: &WalletError) -> String {
+    let mut text = format!("error: {} [{}]", e.message, e.code);
+    for key in HUMAN_DETAILS {
+        if let Some(v) = e.details.get(*key) {
+            text.push_str(&format!("\n{key}: {}", scalar(v)));
+        }
+    }
+    text
 }
 
 fn print_out(json: bool, out: &Out) {
@@ -495,21 +528,62 @@ mod tests {
             other => panic!("{other:?}"),
         }
         // A negative or fractional nonce is a parse error; --force is transfer-only; --bump and
-        // --replace need --nonce.
+        // --replace need --nonce; --wait-timeout needs --wait and a duration; --allow-pending
+        // is for a send without --nonce.
         let bad = [
             "zwallet", "invoke", "--chain", "base", "--to", "0x00", "--data", "0x",
         ];
         for extra in [
-            ["--nonce", "-1"],
-            ["--nonce", "1.5"],
-            ["--force", "--dry-run"],
-            ["--bump", "2"],
-            ["--replace", "0xab"],
+            &["--nonce", "-1"][..],
+            &["--nonce", "1.5"],
+            &["--force", "--dry-run"],
+            &["--bump", "2"],
+            &["--replace", "0xab"],
+            &["--wait-timeout", "30s"],
+            &["--wait", "--wait-timeout", "30"],
+            &["--wait", "--wait-timeout", "0s"],
+            &["--allow-pending", "--nonce", "3"],
+            &["--allow-duplicate", "--nonce", "3"],
         ] {
             let mut args = bad.to_vec();
             args.extend(extra);
             assert!(Cli::try_parse_from(args).is_err(), "{extra:?}");
         }
+        let mut args = bad.to_vec();
+        args.extend([
+            "--wait",
+            "--wait-timeout",
+            "2m",
+            "--allow-pending",
+            "--allow-duplicate",
+        ]);
+        match Cli::try_parse_from(args).unwrap().command {
+            Command::Invoke(a) => {
+                assert_eq!(
+                    a.send.wait_timeout,
+                    Some(std::time::Duration::from_secs(120))
+                );
+                assert!(a.send.allow_pending && a.send.allow_duplicate);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn human_errors_show_the_send_details() {
+        let e = WalletError::new(ErrorCode::BroadcastUncertain, "maybe sent")
+            .with_detail("refusedTxHash", "0xdead")
+            .with_detail("nonce", 7)
+            .with_detail("from", "0xF00")
+            .with_detail("journal", "/h/sends-1-0xf00.jsonl")
+            .with_detail("pendingSends", serde_json::json!([]));
+        assert_eq!(
+            human_error(&e),
+            "error: maybe sent [BROADCAST_UNCERTAIN]\nrefusedTxHash: 0xdead\nnonce: 7\nfrom: \
+             0xF00\njournal: /h/sends-1-0xf00.jsonl"
+        );
+        let plain = WalletError::validation("bad");
+        assert_eq!(human_error(&plain), "error: bad [VALIDATION_ERROR]");
     }
 
     #[test]
