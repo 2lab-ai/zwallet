@@ -24,12 +24,11 @@
 //! signature first passes the signing policy (`chains::evm::policy`): on each signing request the
 //! daemon reads `whitelist.json` (or a staged `whitelist.next.json`) through the safe reader and
 //! trusts it only if it verifies against that anchor (`.prd/04-whitelist.md`). Each connection is
-//! served in its own task
-//! with I/O timeouts, while the main loop keeps the clock: on `lock`, on expiry (wall clock, so
-//! system sleep counts), on SIGTERM/SIGINT, or as soon as wallet.json's ciphertext changes or
-//! `d.sock` is no longer its socket (checked every tick and on every request), it drops the seed
-//! (zeroized) and exits, even while connections are open. A daemon process exists only while the
-//! wallet is unlocked.
+//! served in its own task with I/O timeouts, while the main loop keeps the clock: on `lock`, on
+//! expiry (wall clock, so system sleep counts), on SIGTERM/SIGINT, or as soon as wallet.json's
+//! ciphertext changes or `d.sock` is no longer its socket (checked every tick and on every
+//! request), it drops the seed (zeroized) and exits, even while connections are open. A daemon
+//! process exists only while the wallet is unlocked.
 
 use crate::chains;
 use crate::chains::evm::policy::{self, ListView};
