@@ -32,12 +32,13 @@ for published binaries, `dev` for a local build.
 
 ```sh
 zwallet create main          # human, at a terminal: choose a password (asked twice)
+zwallet whitelist add alice 0x... --chains base  # human: let the wallet pay alice on base
 zwallet unlock 24h           # human: unlock signing for 24h (also 30m, 365d, 1y, ...)
 zwallet address --verify     # human: 0x..., checked against the seed with the password
 zwallet address              # anyone: 0x... from the cache (works while locked)
 zwallet balance --chain base
-zwallet transfer --chain base --to 0x... --amount 0.01 --dry-run
-zwallet transfer --chain base --to 0x... --amount 0.01 --wait
+zwallet transfer --chain base --to @alice --amount 0.01 --dry-run
+zwallet transfer --chain base --to @alice --amount 0.01 --wait
 zwallet lock                 # human: wipe the key now (ends every zwallet session of this user)
 ```
 
@@ -58,16 +59,22 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `change <name>` | `{ active, address, verified }` | works |
 | `address [--chain <key>] [--verify [--password-stdin]]` | `{ chain, key, address, verified }` (EIP-55; `--verify` adds `index` and `warning?`) | works |
 | `addresses` | `{ key, addresses: [{ chainId: <key>, address }], verified }` | works |
-| `status` | `{ wallet, locked, home, daemonPids?, otherDaemonPids, daemonPid?, expiresAt?, active?, address?, verified? }` | works |
+| `status` | `{ wallet, locked, home, daemonPids?, otherDaemonPids, daemonPid?, expiresAt?, whitelist?, active?, address?, verified? }` | works |
 | `balance --chain <key> [--token <erc20>] [--rpc <url>]` | `{ chain, key, address, symbol, decimals, balance, raw, verified: false, token? }` | works |
 | `call --chain <key> --to <contract> --sig "<fn>" [ARGS...] [--rpc <url>]` | `{ chain, from, to, sig, args, result, raw }` | works |
-| `invoke --chain <key> --to <contract> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw }` | `WALLET_LOCKED` |
-| `transfer --chain <key> --to <0x> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
-| `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191) | `WALLET_LOCKED` |
+| `invoke --chain <key> --to <contract\|@nick> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw, toNickname? }` | `WALLET_LOCKED` |
+| `transfer --chain <key> --to <0x\|@nick> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
+| `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191; refused unless the whitelist allows it) | `WALLET_LOCKED` |
 | `tx --chain <key> <txHash> [--rpc <url>]` | `{ chain, txHash, found, status, from, to, nonce, value, valueRaw, symbol, explorerUrl, blockNumber?, gasUsed?, success?, hint? }` | works (no wallet needed) |
-| `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, warning? }` | - |
+| `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, whitelist, warning? }` | - |
 | `lock` | `{ locked: true, wasUnlocked, stopped: [<pid>] }` | - |
 | `backup` | prints the recovery phrase; interactive terminal only | asks for the password |
+| `whitelist list [--verify [--password-stdin]]` | `{ gen, entries: [{ nickname, kind, address, chains, selectors? }], policy: { maxFeeWei, allowMessageSigning }, verified, source?, sealedGen?, reason? }` | works |
+| `whitelist add <nick> <0x> [--chains <c1,c2>\|'*'] [--contract --selectors <0x…,0x…>]` | a change (see **The whitelist**) + `{ entry, warning? }` | asks for the password |
+| `whitelist remove <nick>` | a change + `{ entry }` | asks for the password |
+| `whitelist fee-cap <chain> <amount>` | a change + `{ feeCap: { chain, maxFeeWei, maxFee } }` | asks for the password |
+| `whitelist allow-message-signing on\|off` | a change + `{ allowMessageSigning }` | asks for the password |
+| `whitelist reset` | a change + `{ dropped }` | asks for the password |
 
 - **Durations** are positional: an integer and one unit of `s m h d w y` (`1y` = 365d). `0`,
   negatives, fractions and unknown units are `VALIDATION_ERROR`.
@@ -105,6 +112,55 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `change` still compare the cache with its derivation and fail with `VALIDATION_ERROR` on a
   mismatch, but a match only means nothing visibly tampered: it is never `verified`. Take a
   funding address from `address --verify` (or `unlock`) on your own terminal.
+- **The whitelist** ([`.prd/04-whitelist.md`](.prd/04-whitelist.md)): the key daemon signs a
+  transaction that moves value only when a list signed with this wallet's whitelist key allows
+  it. That ed25519 key is not derived from the seed. It lives in `whitelist.key`, encrypted under
+  the same password, and only the CLI opens it, with the password; the daemon holds only its
+  public key, the list's generation and its digest, sealed in `wallet.json`. The list
+  (`whitelist.json`) is plain JSON anyone can read; the daemon trusts it only when it verifies.
+  - **Entries.** `whitelist add <nick> <0x>` lists a payee: native coin and registry tokens
+    (USDC, USDT, DAI and WETH where their issuers publish them) may be sent to it on its
+    `--chains` (comma-separated chain keys, default `ethereum`; `'*'`, quoted, for every chain,
+    only when given). `whitelist add <nick> <0x> --chains <c> --contract --selectors
+    <0x12345678,…>` lists a contract that may be called with those 4-byte selectors only (named
+    chains, never `*` and never a registry token); it prints `warning: a listed contract may
+    forward value or act on its arguments`. Nicknames are 1-32 of `a-z 0-9 _ -` starting with a
+    letter or digit, and each address is listed once.
+  - **What the daemon allows**: a native transfer to a payee on one of its chains, or to the
+    signing key's own address (always, even with no list); a registry-token `transfer` to a payee
+    that is not itself a token contract; `approve(…, 0)` of a registry token (revoke only); a
+    call to a contract entry with one of its selectors (native value only then). Everything else
+    (`transferFrom`, other approvals, calls to anything unlisted, any call to a registry token,
+    `sign-message` until `whitelist allow-message-signing on`) is `WHITELIST_DENIED`. A fee above
+    the chain's cap (`gasLimit × maxFeePerGas`, or `× gasPrice`) is `FEE_CAP_EXCEEDED`; the
+    defaults are ethereum 0.003 ETH; base, arbitrum and optimism 0.0005 ETH; polygon 2 POL; bsc
+    0.003 BNB; avalanche 0.05 AVAX; sepolia 0.01 ETH, changed with `whitelist fee-cap <chain>
+    <amount>`. A list that does not verify (none yet, edited by hand, an older copy) is
+    `WHITELIST_INVALID` for everything but a self-transfer. Each refusal names the exact
+    `zwallet whitelist …` command that would allow it (details `command`, `counterparty`,
+    `chain`).
+  - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false` (human
+    output shows a value from the file as is only when it is short printable ASCII, else quoted
+    with escapes). `--verify` (password) checks it against the seal: `verified: true` with
+    `source` and `sealedGen`, or `verified: false` with the `reason`. `unlock` and `status` show
+    what the daemon trusts: `whitelist: { gen, verified, entries: [nicknames], reason? }`.
+  - **Changes** (`add`, `remove`, `fee-cap`, `allow-message-signing on|off`, `reset`) ask for the
+    password (terminal prompt, or `--password-stdin`). A wrong password, or a change the current
+    list refuses, stops nothing. Otherwise the change remembers the session's `expiresAt`, stops
+    every zwallet daemon of this user (as `lock` does), signs the next generation, re-seals it
+    into `wallet.json`, and unlocks again with the same password until the remembered
+    `expiresAt`, not for a new duration. Without a session, or once it has run out, the wallet
+    stays locked. Re-unlocking runs `unlock`'s checks, so on Linux it may need
+    `--allow-ptrace-scope-0`. Output: `{ change, gen, previousGen, base, keyCreated, entries:
+    [nicknames], verified: true, stoppedDaemons, discarded?, locked, previousExpiresAt?,
+    expiresAt?, daemonPid?, rewarm? }` plus the change's own fields. A `whitelist.json` that does
+    not verify is never signed again: the change shows it as `discarded` (the reason and its
+    unverified entries, as JSON) and starts from an empty list (`base: "empty"`). The first `add`
+    creates `whitelist.key` (`keyCreated: true`); `reset` makes a new key and an empty list with
+    the default caps, for a lost or damaged `whitelist.key`.
+  - **`@nick`**: `transfer --to @alice` and `invoke --to @router` take the address from
+    `whitelist.json` as it is, unverified (the daemon decides anyway), and add `toNickname`. An
+    unknown nickname is `VALIDATION_ERROR` naming `zwallet whitelist list`.
 - **`call` / `invoke` signatures** are `name(argTypes)(returnTypes)`, e.g.
   `balanceOf(address)(uint256)` or `getReserves()(uint112,uint112,uint32)`. Return types are
   optional (without them `result` is null and `raw` has the hex). Arrays are written `[1,2]`,
@@ -255,11 +311,15 @@ Commands that act on a key take `--key <name>` (default: the active key).
   asset's decimals is `VALIDATION_ERROR`. ENS names are refused (`INVALID_ADDRESS`).
 - **Error codes**: `VALIDATION_ERROR`, `WALLET_EXISTS`, `WALLET_NOT_FOUND`, `WRONG_PASSWORD`,
   `WALLET_LOCKED`, `KEY_EXISTS`, `KEY_NOT_FOUND`, `CHAIN_UNSUPPORTED`, `CAPABILITY_UNSUPPORTED`,
-  `INVALID_ADDRESS`, `RPC_ERROR`, `INSUFFICIENT_FUNDS`, `BROADCAST_UNCERTAIN`. Errors from the
-  broadcast step carry the signed transaction's `txHash` (or `refusedTxHash`, below), `nonce`,
-  `from` and, once the journal line is written, `journal`. zwallet never suggests a plain resend:
+  `INVALID_ADDRESS`, `RPC_ERROR`, `INSUFFICIENT_FUNDS`, `BROADCAST_UNCERTAIN`,
+  `WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED`. Errors from the broadcast step
+  carry the signed transaction's `txHash` (or `refusedTxHash`, below), `nonce`, `from` and, once
+  the journal line is written, `journal`. zwallet never suggests a plain resend:
   a retry of a send that may have gone out passes `--nonce <nonce> --replace <txHash>`, so it can
   only replace the first attempt, never add a second one.
+  - `WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED` come from the key daemon before it
+    signs (see **The whitelist**): nothing was signed or broadcast. The message names the
+    `zwallet whitelist …` command a human would run to allow it.
   - A failure after signing but before the send request keeps its code (`RPC_ERROR` when the node
     is unreachable) and says "...; nothing was broadcast. If you retry, pass --nonce N ...":
     nothing went out, so nonce N is still free and there is nothing to name with `--replace`.
@@ -332,9 +392,17 @@ data).
   metadata: `createdAt`, `active`, `nextIndex`, and
   `keys: [{ name, index, createdAt, addresses: { <chain>: <address> } }]`. The sealed plaintext is
   a versioned object `{ version, mnemonic, policy }`: one BIP39 English mnemonic (no BIP39
-  passphrase) and a `policy` object reserved for a future signing policy (empty for now, carried
-  through intact). The policy lives under the password because anything outside it can be edited
-  by the same OS user without the password.
+  passphrase) and a `policy` object holding the whitelist's anchor (`whitelistPub`,
+  `whitelistGen`, `whitelistDigest`; empty until the first `whitelist add`, and carried through
+  every other write intact). The policy lives under the password because anything outside it can
+  be edited by the same OS user without the password.
+- **`whitelist.json`, `whitelist.key`** (0600, next to `wallet.json`): the signed list in plain
+  JSON, and its ed25519 signing key sealed like the seed (AES-256-GCM under its own scrypt salt
+  and nonce, same password, its own associated data so the two ciphertexts cannot be swapped).
+  Only `whitelist` changes write them, under `w.lock`, which orders zwallet's own writers but
+  cannot stop a same-user process that ignores it: what exposes such a write is the signature
+  and the seal. `whitelist.next.json` exists while a change is being published, or after one was
+  cut off (see **Known limits**).
 - **Password**: held by the human only, at least 12 characters. There is no password file and no
   password env variable; it is typed at a terminal prompt (no echo) or piped with
   `--password-stdin`, and read with raw reads into one wiped buffer. Nothing on disk decrypts the
@@ -405,9 +473,11 @@ data).
   room, and one that still fills it is an error, never a shorter list. File names (`d.sock`,
   `d.lock`) never decide which daemons exist, since any same-user process can rename or replace
   them.
-- **Daemon duties**: the daemon keeps only the master seed in memory, and does nothing but derive
-  addresses and sign; it makes no network request. For a transaction it receives only the
-  unsigned signing payload bytes and decodes them itself: type, chain id, recipient, value, and
+- **Daemon duties**: the daemon keeps only the master seed and the whitelist's sealed anchor in
+  memory, and does nothing but derive addresses and sign; it makes no network request. Before it
+  signs a transaction it reads `whitelist.json` and checks it against the anchor (see **The
+  whitelist**). For a transaction it receives only the unsigned signing payload bytes and
+  decodes them itself: type, chain id, recipient, value, and
   the ABI method the calldata calls (`transfer-call` / `approve-call` / `transfer-from-call`, each
   `assetType: "unverified"`, else `contract-call`; see **`signerDecoded.action`**). It refuses
   anything zwallet does not produce (other tx types, access lists, contract creation,
@@ -469,6 +539,34 @@ things a same-user process can still do, and what to do about them:
   and for any process under root or CAP_KILL), makes `lock` and `status` fail ("refusing to
   trust a partial daemon list"). Signal permission is what is checked, not ownership.
 - **Root** defeats all of this.
+
+The whitelist ([`.prd/04-whitelist.md`](.prd/04-whitelist.md)) limits what an unlocked daemon
+signs for such an agent. What it does not do:
+
+- **No amount caps.** An agent can send the whole balance, in one transfer, to any listed payee
+  on its chains. List only payees you would accept that for; amount caps are planned.
+- **Listed contracts.** A contract entry lets the agent call its listed selectors with any
+  arguments and native value, and the contract may forward value or act on those arguments. List
+  only contracts and selectors whose effects you accept from any caller.
+- **Joint rollback.** The seal is authenticated but not fresh: an older `wallet.json` still opens
+  with the password. Restoring an older `wallet.json`, `whitelist.json` and `whitelist.key`
+  together brings back the older list, revoked entries included; nothing stored in the home can
+  tell. `unlock`, `status` and `whitelist list` show the generation and the entries: check them.
+  Restoring `wallet.json` alone fails closed: the older anchor does not match the list, or (from
+  before the first `whitelist add`) there is none, and every value-moving signature is refused.
+- **Same password.** `whitelist.key` is encrypted under the wallet password, so the whitelist
+  adds no second factor: whoever has the password can change the list. What it buys is that the
+  daemon never holds the key that signs the list.
+- **The staged list.** A change cut off between its re-seal and its rename leaves the new list in
+  `whitelist.next.json`. The daemon and `whitelist list --verify` use it, since it is exactly the
+  list the seal names (generation and digest), and the next change moves it into place.
+- **A change ends every session.** Like `lock`, a whitelist change stops every zwallet daemon of
+  this user, for every home; only this home's session is unlocked again.
+- **The re-warm trusts the running session's expiry.** The new session runs until the
+  `expiresAt` that this home's daemon reported before the change. A same-user process posing as
+  that daemon (a process with its arguments, answering on `d.sock`) can report a later time:
+  check `expiresAt` in the change's output against the duration you unlocked for, and run
+  `zwallet lock` if it is wrong.
 
 ## Development
 

@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+mod whitelist;
+
 /// How long `--wait` polls for a receipt before reporting `status: "pending"`, unless
 /// `--wait-timeout` says otherwise.
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
@@ -53,6 +55,7 @@ pub async fn run(cli: Cli) -> Result<Out> {
         Command::Backup => backup(&home()?),
         Command::Unlock(a) => unlock(&home()?, a).await,
         Command::Lock => lock(),
+        Command::Whitelist(w) => whitelist::run(&home()?, w).await,
         Command::Daemon { home } => {
             daemon::run(home).await?;
             Ok(Out::silent())
@@ -677,7 +680,8 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
 async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
     chains::require_contract_calls(chain)?;
-    let to = evm::parse_address(&a.to)?;
+    let (to, nickname) = whitelist::recipient(home, &a.to)?;
+    let to = evm::parse_address(&to)?;
     let (input, sig) = match (&a.sig, &a.data) {
         (Some(sig), None) => {
             let func = abi::parse_function(sig)?;
@@ -729,6 +733,9 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     base.insert("key".into(), json!(key_name));
     base.insert("from".into(), json!(from));
     base.insert("to".into(), json!(to.to_checksum(None)));
+    if let Some(n) = nickname {
+        base.insert("toNickname".into(), json!(n));
+    }
     base.insert("sig".into(), json!(sig));
     base.insert("args".into(), json!(a.args));
     base.insert("data".into(), json!(format!("0x{}", hex::encode(&input))));
@@ -794,7 +801,8 @@ async fn transfer_with<F: ChainFamily>(
     a: TransferArgs,
 ) -> Result<Out> {
     let chain = net.chain;
-    let to = fam.normalize_address(&a.to)?;
+    let (to, nickname) = whitelist::recipient(home, &a.to)?;
+    let to = fam.normalize_address(&to)?;
     if let Some(t) = &a.token {
         fam.normalize_address(t)?;
     } else {
@@ -825,6 +833,9 @@ async fn transfer_with<F: ChainFamily>(
     base.insert("key".into(), json!(key_name));
     base.insert("from".into(), json!(from));
     base.insert("to".into(), json!(to));
+    if let Some(n) = nickname {
+        base.insert("toNickname".into(), json!(n));
+    }
     let kind = if a.token.is_some() {
         "token-transfer"
     } else {
