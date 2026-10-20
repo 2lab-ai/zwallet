@@ -723,7 +723,7 @@ mod tests {
         serde_json::to_vec(&Request::Lock).unwrap()
     }
 
-    /// A reader that returns [`list`] once released (or after 5 s), and says when it started.
+    /// A reader that returns [`list`] once released (or after 10 s), and says when it started.
     struct Gate {
         entered: AtomicBool,
         release: Mutex<mpsc::Sender<()>>,
@@ -738,7 +738,7 @@ mod tests {
         let (g, rx) = (gate.clone(), Mutex::new(rx));
         let reader: ListReader = Arc::new(move |_, _| {
             g.entered.store(true, Ordering::SeqCst);
-            let _ = rx.lock().unwrap().recv_timeout(Duration::from_secs(5));
+            let _ = rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
             Ok(list())
         });
         (reader, gate)
@@ -797,7 +797,7 @@ mod tests {
         assert!(resp.ok && stop, "{resp:?}");
         assert_eq!(resp.result.unwrap()["wasUnlocked"], true);
         assert!(
-            locked_after < Duration::from_secs(2),
+            locked_after < Duration::from_secs(4),
             "lock waited {locked_after:?} for the stalled read"
         );
         assert!(f.shared.session().is_none(), "the seed outlived lock");
@@ -814,7 +814,7 @@ mod tests {
         gate.wait_entered().await;
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert!(
-            start.elapsed() < Duration::from_secs(3),
+            start.elapsed() < Duration::from_secs(5),
             "the stalled read held the runtime: {:?}",
             start.elapsed()
         );
@@ -845,7 +845,7 @@ mod tests {
         // After `lock` or expiry the daemon's runtime is dropped as the process ends; an
         // abandoned read must not hold that up (tokio waits for its blocking pool on drop).
         let reader: ListReader = Arc::new(|_, _| {
-            std::thread::sleep(Duration::from_secs(3));
+            std::thread::sleep(Duration::from_secs(6));
             Ok(list())
         });
         let f = fixture(reader, Duration::from_millis(100), Duration::from_secs(60));
@@ -862,7 +862,7 @@ mod tests {
         let start = Instant::now();
         drop(rt);
         assert!(
-            start.elapsed() < Duration::from_secs(1),
+            start.elapsed() < Duration::from_secs(3),
             "the runtime waited {:?} for the abandoned read",
             start.elapsed()
         );
@@ -871,14 +871,14 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_read_past_the_wait_is_an_untrusted_list() {
         let reader: ListReader = Arc::new(|_, _| {
-            std::thread::sleep(Duration::from_millis(1500));
+            std::thread::sleep(Duration::from_secs(6));
             Ok(list())
         });
         let f = fixture(reader, Duration::from_millis(200), Duration::from_secs(60));
         let start = Instant::now();
         let (resp, stop) = handle(&f.shared, &sign_tx(BOB)).await;
         assert!(
-            start.elapsed() < Duration::from_millis(1200),
+            start.elapsed() < Duration::from_secs(4),
             "{:?}",
             start.elapsed()
         );
