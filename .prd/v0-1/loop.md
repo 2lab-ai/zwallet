@@ -7,7 +7,11 @@ acceptance A1–A12. This file holds only open work.
 
 | WU | Repo · branch · worktree | Scope | Owner | State |
 |---|---|---|---|---|
-| WU1 | zwallet · `feat/1-evm-wallet-core` · `.worktrees/feat-1-evm-wallet-core` | core (store, seed, amounts, durations, errors), EVM family, `call`/`invoke`/`transfer`/`balance`, unlock daemon, HD named keys + flat CLI, offline + `#[ignore]` live tests (A1–A9, A2b) | opus-coder | PR [#1](https://github.com/2lab-ai/zwallet/pull/1) (89ad1d7, 6cdd474, bf5c3eb). Dispatcher reran on 2026-10-20: gate rc=0 (52 lib + 10 CLI), live 6/6, manual end-to-end in a temp home. Review in flight: 3× gpt6 (daemon/protocol, store/seed, evm tx) + 2× opus (custody, EVM/CLI) |
+| WU1 | zwallet · `feat/1-evm-wallet-core` · `.worktrees/feat-1-evm-wallet-core` | core (store, seed, amounts, durations, errors), EVM family, `call`/`invoke`/`transfer`/`balance`, unlock daemon, HD named keys + flat CLI, offline + `#[ignore]` live tests (A1–A9, A2b) | opus-coder | PR [#1](https://github.com/2lab-ai/zwallet/pull/1).
+- **Review round 1** (3× gpt6 + 2× opus): all CHANGES_REQUESTED. Critical: a same-user fake daemon captured the unlock password.
+- **Fixed:** custody C1–C14 (b210eb9) and EVM E1–E12 (e581711, b733d25), merged at d1ef24d. RED was reproduced first for C1/C4/C5/C6/C7abc/C8–C11/C13 and E1–E10. C3 and C7(d) did not reproduce.
+- **Dispatcher rerun** on the merged tree, 2026-10-20: gate rc=0 (77 lib + 25 CLI + 10 evm_offline), CLI suite 5/5 repeats green, live 7/7.
+- **In flight:** follow-up F1–F4 (`--nonce` fee bump, README, redaction). Round 2 review comes next. |
 | WU1b | zwallet · `feat/3-signing-policy` (after WU1 merge) | daemon-side signing policy per 02-architecture §Resistance: authenticated policy in the encrypted store, rolling-24h native cap, approve/permit deny unless the spender is allowlisted, per-token caps with unknown tokens denied, `zwallet policy` view (locked) and edit (password), defaults shown at `create` | opus-coder, brief written after WU1's gate rerun (protocol/store as landed) | planned |
 | WU2 | zwallet · `feat/2-distribution` | `ci.yml`/`preview.yml`/`release.yml` from harn's, version line `zwallet <ver> (<channel> <rev12>)` (the preview formula test greps `preview`), MIT `LICENSE` file | after WU1 merge | planned |
 | WU3 | homebrew-tap · `feat/zwallet-formulae` · `.worktrees/feat-zwallet-formulae` | `Formula/zwallet.rb.tmpl` and `zwallet-preview.rb.tmpl`, `bump-zwallet` and `bump-zwallet-preview` jobs, README rows (mirror of harn commit 2a3af89) | opus-coder | committed 5468a0a + ed9150e (desc ≤80). The diff is name-only against the harn jobs; tap `scripts/test-*.sh` pass 8/8; actionlint clean. **Hold the merge until zwallet is public (WU5)**: the preview job's `gh release list` has no `\|\| true`, so it goes red on a private repo |
@@ -17,8 +21,14 @@ acceptance A1–A12. This file holds only open work.
 
 ## Build facts
 
-- Gate: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`. Dispatcher measured it on 2026-10-20: rc=0, 52 lib + 10 integration tests (`tests/cli.rs`, ~4 s).
-- Open from WU1's hand-back, for WU1b: the plaintext metadata (`active`, names, `nextIndex`) is not authenticated, so a hand-edited `active` goes undetected (A9b says it must). "Policy viewable while locked" conflicts with the policy living inside the seal, so the view needs the password or the daemon. The calldata classifier lacks `increaseAllowance`, `setApprovalForAll` and Permit2.
+- Gate: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`. Dispatcher measured it on d1ef24d, 2026-10-20: rc=0, 77 lib + 25 `tests/cli.rs` (~10–14 s; scrypt log_n=18 ≈ 0.5 s per op) + 10 `tests/evm_offline.rs` (~10 s).
+- Linux-only code (`prctl`, the `/proc` scan in tests) has not been compiled yet. CI on ubuntu (WU2) is its first build.
+- Open for WU1b:
+  - The plaintext metadata (`active`, names, `nextIndex`) is still unauthenticated. While unlocked, address reads are cross-checked against the daemon; while locked they say `verified:false`.
+  - "Policy viewable while locked" conflicts with the policy living inside the seal, so the view needs the password or the daemon.
+  - The calldata classifier lacks `increaseAllowance`, `setApprovalForAll` and Permit2.
+  - An absolute fee limit belongs in the policy, because RPC-relative fee caps trust the RPC.
+- c3 (concurrent unlocks) failed once in the custody coder's run (root cause not established). In the dispatcher's 5 repeats it passed 5/5. Watch for it in CI.
 - Live tests: `cargo test -- --ignored` (public mainnet RPC). Unit tests never touch the real `~/.zwallet`. Daemon tests use a short `/tmp/zwt-*` home because of `sun_path`.
 
 ## Open gaps
