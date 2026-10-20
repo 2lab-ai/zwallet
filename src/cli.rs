@@ -69,6 +69,10 @@ pub enum Command {
     /// Lock now: stops every zwallet key daemon of this user, whatever home it serves. Reads no
     /// home.
     Lock,
+    /// The signed whitelist: the only payees and contracts the key daemon signs for. `list`
+    /// works while locked; every change asks for the password.
+    #[command(subcommand)]
+    Whitelist(WhitelistCommand),
     /// The key-holding daemon (started by `unlock`).
     #[command(hide = true)]
     Daemon {
@@ -290,6 +294,103 @@ pub struct UnlockArgs {
     /// i.e. any same-user process can attach to it during start-up.
     #[arg(long)]
     pub allow_ptrace_scope_0: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WhitelistCommand {
+    /// The list: generation, entries and policy. Works while locked (`verified: false`).
+    List(WhitelistListArgs),
+    /// Allow payments to ADDRESS as NICKNAME (with --contract: calls of its --selectors).
+    Add(WhitelistAddArgs),
+    /// Remove the entry NICKNAME.
+    Remove(WhitelistRemoveArgs),
+    /// Set CHAIN's fee cap, in its coin: the most gasLimit × max price may cost.
+    FeeCap(WhitelistFeeCapArgs),
+    /// Let `sign-message` sign (on) or refuse it (off, the default).
+    AllowMessageSigning(WhitelistToggleArgs),
+    /// A new whitelist key and an empty list, for a lost or damaged whitelist.key.
+    Reset(WhitelistEditArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WhitelistListArgs {
+    /// Check the list's signature against wallet.json's seal with the password; only this
+    /// reports `verified: true`.
+    #[arg(long)]
+    pub verify: bool,
+    /// With --verify: read the password from one line of stdin instead of prompting.
+    #[arg(long, requires = "verify")]
+    pub password_stdin: bool,
+}
+
+/// What every whitelist change takes.
+#[derive(Debug, Args)]
+pub struct WhitelistEditArgs {
+    #[command(flatten)]
+    pub password: PasswordStdin,
+    /// When the change re-unlocks a running session: see `unlock --allow-ptrace-scope-0`.
+    #[arg(long)]
+    pub allow_ptrace_scope_0: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WhitelistAddArgs {
+    /// 1-32 of a-z 0-9 _ -, starting with a letter or digit; `@NICKNAME` then works as
+    /// `transfer --to` and `invoke --to`.
+    pub nickname: String,
+    /// The 0x address (mixed case must be a valid EIP-55 checksum).
+    pub address: String,
+    /// Chain keys the entry applies on, comma-separated, or "*" (quoted) for every chain (not
+    /// for a contract). Default: ethereum.
+    #[arg(
+        long,
+        visible_alias = "chain",
+        value_delimiter = ',',
+        value_name = "CHAINS"
+    )]
+    pub chains: Vec<String>,
+    /// A contract entry: only calls with one of --selectors, never a plain payment.
+    #[arg(long, requires = "selectors")]
+    pub contract: bool,
+    /// With --contract: the 4-byte function selectors it may be called with (0x12345678,…).
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "SELECTORS",
+        requires = "contract"
+    )]
+    pub selectors: Vec<String>,
+    #[command(flatten)]
+    pub edit: WhitelistEditArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct WhitelistRemoveArgs {
+    pub nickname: String,
+    #[command(flatten)]
+    pub edit: WhitelistEditArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct WhitelistFeeCapArgs {
+    pub chain: String,
+    /// The cap in the chain's coin (e.g. 0.001), exact; more than zero.
+    pub amount: String,
+    #[command(flatten)]
+    pub edit: WhitelistEditArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct WhitelistToggleArgs {
+    pub setting: Toggle,
+    #[command(flatten)]
+    pub edit: WhitelistEditArgs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Toggle {
+    On,
+    Off,
 }
 
 /// A command's result: JSON, plus optional human text (generic rendering otherwise).
@@ -659,5 +760,68 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(Cli::try_parse_from(["zwallet", "unlock"]).is_err());
+    }
+
+    #[test]
+    fn whitelist_verbs_parse_the_forms_the_errors_name() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["zwallet", "whitelist"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all).map(|c| c.command)
+        };
+        match parse(&["add", "alice", "0xab", "--chains", "base,ethereum"]).unwrap() {
+            Command::Whitelist(WhitelistCommand::Add(a)) => {
+                assert_eq!((a.nickname.as_str(), a.address.as_str()), ("alice", "0xab"));
+                assert_eq!(a.chains, ["base", "ethereum"]);
+                assert!(!a.contract && a.selectors.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&[
+            "add",
+            "router",
+            "0xab",
+            "--chain",
+            "base",
+            "--contract",
+            "--selectors",
+            "0x12345678,0xabcdef01",
+            "--password-stdin",
+        ])
+        .unwrap()
+        {
+            Command::Whitelist(WhitelistCommand::Add(a)) => {
+                assert_eq!(a.chains, ["base"]);
+                assert_eq!(a.selectors, ["0x12345678", "0xabcdef01"]);
+                assert!(a.contract && a.edit.password.password_stdin);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&["fee-cap", "base", "0.001"]).unwrap() {
+            Command::Whitelist(WhitelistCommand::FeeCap(a)) => {
+                assert_eq!((a.chain.as_str(), a.amount.as_str()), ("base", "0.001"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&["allow-message-signing", "on"]).unwrap() {
+            Command::Whitelist(WhitelistCommand::AllowMessageSigning(a)) => {
+                assert_eq!(a.setting, Toggle::On);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            parse(&["list", "--verify", "--password-stdin"]).unwrap(),
+            Command::Whitelist(WhitelistCommand::List(a)) if a.verify && a.password_stdin
+        ));
+        for bad in [
+            &["add", "r", "0xab", "--contract"][..],
+            &["add", "r", "0xab", "--selectors", "0x12345678"],
+            &["allow-message-signing", "yes"],
+            &["list", "--password-stdin"],
+            &["remove"],
+            &["fee-cap", "base"],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
     }
 }

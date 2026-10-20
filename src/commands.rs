@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+mod whitelist;
+
 /// How long `--wait` polls for a receipt before reporting `status: "pending"`, unless
 /// `--wait-timeout` says otherwise.
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
@@ -53,6 +55,7 @@ pub async fn run(cli: Cli) -> Result<Out> {
         Command::Backup => backup(&home()?),
         Command::Unlock(a) => unlock(&home()?, a).await,
         Command::Lock => lock(),
+        Command::Whitelist(w) => whitelist::run(&home()?, w).await,
         Command::Daemon { home } => {
             daemon::run(home).await?;
             Ok(Out::silent())
