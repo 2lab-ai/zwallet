@@ -3,8 +3,12 @@
 
 mod common;
 
+use alloy::primitives::{Address, U256};
+use alloy::providers::Provider;
 use common::Home;
+use serde_json::Value;
 use zwallet::chains::{self, Net, evm};
+use zwallet::core::amount::parse_units;
 
 const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
@@ -29,18 +33,35 @@ async fn every_default_rpc_serves_its_chain_id() {
     assert!(failures.is_empty(), "failing RPCs: {failures:?}");
 }
 
+/// Unlocked for an hour: long enough for slow public RPCs; the guard locks it at the end.
 fn unlocked_wallet() -> (Home, String) {
     let home = Home::new();
-    let address = home.create("live", &["--unlock", "5m"])["address"]
+    let address = home.create("live", &["--unlock", "1h"])["address"]
         .as_str()
         .unwrap()
         .to_string();
     (home, address)
 }
 
-#[test]
+/// The account's pending nonce, read here over RPC rather than from zwallet's output.
+async fn pending_nonce(chain: &str, address: &str) -> u64 {
+    let chain = chains::find(chain).unwrap();
+    let net = Net {
+        chain,
+        rpc_url: chain.default_rpc().to_string(),
+    };
+    let p = evm::rpc::connect(&net).await.unwrap();
+    let a: Address = address.parse().unwrap();
+    p.get_transaction_count(a).pending().await.unwrap()
+}
+
+fn wei(decimal: &Value) -> U256 {
+    parse_units(decimal.as_str().unwrap(), 18).unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
 #[ignore = "live: public RPC"]
-fn transfer_dry_run_self_zero_value_on_ethereum() {
+async fn transfer_dry_run_self_zero_value_on_ethereum() {
     let (home, me) = unlocked_wallet();
     let v = home
         .run(&[
@@ -59,11 +80,15 @@ fn transfer_dry_run_self_zero_value_on_ethereum() {
     assert_eq!(v["dryRun"], true);
     assert_eq!(v["from"], me.as_str());
     assert_eq!(v["recoveredFrom"], me.as_str());
-    assert_eq!(v["nonce"], 0);
+    let nonce = pending_nonce("ethereum", &me).await;
+    assert_eq!(v["nonce"], nonce);
+    assert_eq!(v["signerDecoded"]["nonce"], nonce);
     assert_eq!(v["gasLimit"], 21_000);
     assert_eq!(v["type"], "eip1559");
     assert!(v["maxFeePerGas"].as_str().unwrap().parse::<u128>().unwrap() > 0);
-    assert!(v["rawTx"].as_str().unwrap().starts_with("0x02"));
+    // A dry-run never prints the broadcastable signed bytes.
+    assert!(v.get("rawTx").is_none());
+    assert!(v["txHash"].as_str().unwrap().starts_with("0x"));
     // Zero balance cannot pay gas: reported, not fatal, in a dry-run.
     assert_eq!(v["sufficientFunds"], false);
 }
@@ -89,21 +114,31 @@ fn invoke_dry_run_through_the_daemon() {
     assert_eq!(v["recoveredFrom"], me.as_str());
     assert_eq!(v["data"], "0xd0e30db0");
     assert!(v["gasLimit"].as_u64().unwrap() > 21_000);
+    assert!(v.get("rawTx").is_none());
+}
 
-    // Live (non-dry-run) from an empty wallet stops at INSUFFICIENT_FUNDS before broadcasting.
-    home.run(&[
-        "invoke",
-        "--chain",
-        "ethereum",
-        "--to",
-        WETH,
-        "--sig",
-        "deposit()",
-        "--value",
-        "0.001",
-        "--json",
-    ])
-    .err("INSUFFICIENT_FUNDS");
+#[test]
+#[ignore = "live: public RPC"]
+fn invoke_from_an_empty_wallet_is_insufficient_funds_before_signing() {
+    let (home, _) = unlocked_wallet();
+    // Unlocked (so not WALLET_LOCKED); a live send from an empty wallet stops at the balance
+    // pre-check, before anything is signed or broadcast.
+    let msg = home
+        .run(&[
+            "invoke",
+            "--chain",
+            "ethereum",
+            "--to",
+            WETH,
+            "--sig",
+            "deposit()",
+            "--value",
+            "0.001",
+            "--json",
+        ])
+        .err("INSUFFICIENT_FUNDS");
+    println!("{msg}");
+    assert!(msg.contains("need 0.001 ETH but have 0"), "{msg}");
 }
 
 #[test]
@@ -240,6 +275,21 @@ fn op_stack_dry_run_includes_l1_fee() {
     assert_eq!(v["recoveredFrom"], me.as_str());
     assert_eq!(v["chainId"], 8453);
     assert!(v["l1Fee"].is_string(), "missing l1Fee: {v}");
+    // The L1 data fee is part of what the account must hold: the native shortfall's
+    // `required` is value (0) + maxGasCost (L2 gas) + l1Fee, to the wei.
+    let l1 = wei(&v["l1Fee"]);
+    assert!(l1 > U256::ZERO, "{v}");
+    let native = v["shortfall"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["asset"] == "ETH")
+        .unwrap_or_else(|| panic!("no ETH shortfall: {v}"));
+    assert_eq!(
+        wei(&native["required"]),
+        wei(&v["maxGasCost"]) + l1,
+        "{v:#}"
+    );
     let eth = home
         .run(&[
             "transfer",
