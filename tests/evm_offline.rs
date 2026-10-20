@@ -2517,6 +2517,7 @@ fn w5_a_list_that_does_not_verify_refuses_every_value_send_but_self_transfers() 
     home.allow("alice", ALICE, &["*"]);
     let gen1 = std::fs::read(home.path().join("whitelist.json")).unwrap();
     home.allow("bob", BOB, &["*"]);
+    let gen2 = std::fs::read(home.path().join("whitelist.json")).unwrap();
     // whitelist.json alone swapped back to the older signed copy.
     std::fs::write(home.path().join("whitelist.json"), &gen1).unwrap();
     let me = home.unlock("10m")["address"].as_str().unwrap().to_string();
@@ -2533,7 +2534,7 @@ fn w5_a_list_that_does_not_verify_refuses_every_value_send_but_self_transfers() 
     }
     // A hand edit of the current list (an entry added, the signature kept): the same.
     let current = home.path().join("whitelist.json");
-    home.allow("carol", ROUTER, &["*"]); // gen 3 over the swapped file
+    std::fs::write(&current, &gen2).unwrap(); // an edit never builds on the swapped file
     let mut v: Value = serde_json::from_slice(&std::fs::read(&current).unwrap()).unwrap();
     v["entries"].as_array_mut().unwrap().push(json!({
         "nickname": "mallory", "kind": "address", "address": SPENDER, "chains": ["*"],
