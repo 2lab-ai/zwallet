@@ -23,6 +23,8 @@ const PENDING_NONCE: u64 = 7;
 enum Reply {
     Result(Value),
     Error(&'static str),
+    /// A non-200 HTTP status with this plain-text body (an API gateway's error page).
+    Http(u16, &'static str),
     /// Read the request, then close the connection without answering.
     Drop,
 }
@@ -105,16 +107,23 @@ fn serve(stream: TcpStream, handler: &Handler, log: &Mutex<Vec<(String, Value)>>
         let method = req["method"].as_str().unwrap().to_string();
         let params = req["params"].clone();
         log.lock().unwrap().push((method.clone(), params.clone()));
-        let answer = match handler(&method, &params) {
+        let (status, text) = match handler(&method, &params) {
             Reply::Drop => return,
-            Reply::Result(r) => json!({ "jsonrpc": "2.0", "id": req["id"], "result": r }),
-            Reply::Error(msg) => json!({
-                "jsonrpc": "2.0", "id": req["id"], "error": { "code": -32000, "message": msg },
-            }),
+            Reply::Result(r) => (
+                "200 OK".to_string(),
+                json!({ "jsonrpc": "2.0", "id": req["id"], "result": r }).to_string(),
+            ),
+            Reply::Error(msg) => (
+                "200 OK".to_string(),
+                json!({
+                    "jsonrpc": "2.0", "id": req["id"], "error": { "code": -32000, "message": msg },
+                })
+                .to_string(),
+            ),
+            Reply::Http(code, body) => (format!("{code} Error"), body.to_string()),
         };
-        let text = answer.to_string();
         let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
             text.len()
         );
         if writer.write_all(head.as_bytes()).is_err() || writer.write_all(text.as_bytes()).is_err()
@@ -330,6 +339,110 @@ fn send_error_for_a_tx_the_node_knows_is_success() {
 }
 
 #[test]
+fn node_rejection_is_rpc_error_not_broadcast_uncertain() {
+    let (home, me) = unlocked();
+    let answer = Arc::new(Mutex::new(""));
+    let a = answer.clone();
+    let rpc = MockRpc::start(move |m, p| match m {
+        "eth_sendRawTransaction" => Reply::Error(*a.lock().unwrap()),
+        _ => healthy(m, p),
+    });
+    // geth's wording (most clients share it), matched case-insensitively.
+    let rejections = [
+        "replacement transaction underpriced",
+        "Nonce too low: address 0xf39F, tx: 7 state: 8",
+        "INSUFFICIENT FUNDS for gas * price + value",
+        "intrinsic gas too low",
+        "exceeds block gas limit",
+        "max fee per gas less than block base fee: maxFeePerGas: 1, baseFee: 2",
+    ];
+    for (i, why) in rejections.into_iter().enumerate() {
+        *answer.lock().unwrap() = why;
+        let r = home.run(&transfer(&rpc.url, &[]));
+        let msg = r.err("RPC_ERROR");
+        assert!(
+            msg.contains("the node rejected the transaction; nothing was broadcast"),
+            "{msg}"
+        );
+        assert!(msg.contains(why), "{msg}");
+        let v = r.json();
+        let sent = rpc.sent();
+        assert_eq!(sent.len(), i + 1, "the CLI must send exactly once");
+        assert_eq!(v["txHash"], tx_hash_of(&sent[i]).as_str(), "{v:#}");
+        assert_eq!(v["nonce"], PENDING_NONCE);
+        assert_eq!(v["from"], me.as_str());
+    }
+    // A rejection is definitive: no lookup by hash.
+    assert!(rpc.calls("eth_getTransactionByHash").is_empty());
+    // Any other error text still asks for the transaction and stays uncertain.
+    *answer.lock().unwrap() = "internal error";
+    home.run(&transfer(&rpc.url, &[]))
+        .err("BROADCAST_UNCERTAIN");
+    assert!(!rpc.calls("eth_getTransactionByHash").is_empty());
+}
+
+#[test]
+fn replacing_a_pending_nonce_pays_a_quarter_more() {
+    let (home, _) = unlocked();
+    let wei = |v: &Value, k: &str| -> u128 {
+        v[k].as_str()
+            .unwrap_or_else(|| panic!("{k}: {v:#}"))
+            .parse()
+            .unwrap()
+    };
+    let rpc = MockRpc::start(healthy);
+    // Nonce 7 is the next free one (no replacement), 6 is pending (replaced).
+    let fresh = home
+        .run(&transfer(&rpc.url, &["--nonce", "7", "--dry-run"]))
+        .ok();
+    let repl = home
+        .run(&transfer(&rpc.url, &["--nonce", "6", "--dry-run"]))
+        .ok();
+    assert_eq!(fresh["replacesPending"], false);
+    assert_eq!(fresh["feeBump"], Value::Null);
+    assert_eq!(repl["replacesPending"], true);
+    assert_eq!(repl["feeBump"], "1.25x");
+    for field in ["maxFeePerGas", "maxPriorityFeePerGas"] {
+        let (est, bumped) = (wei(&fresh, field), wei(&repl, field));
+        assert!(
+            est > 0 && bumped * 4 >= est * 5,
+            "{field}: {est} -> {bumped}"
+        );
+    }
+    // The signed bytes carry the bumped price, not only the printed fields.
+    let (est, bumped) = (
+        wei(&fresh["signerDecoded"], "maxGasPrice"),
+        wei(&repl["signerDecoded"], "maxGasPrice"),
+    );
+    assert!(
+        bumped * 4 >= est * 5,
+        "signed maxGasPrice: {est} -> {bumped}"
+    );
+
+    // Legacy chain: gasPrice 3 gwei becomes at least 3.75 gwei, and --max-fee-gwei is checked
+    // against the bumped price.
+    let legacy = MockRpc::start(|m, p| fee_node(m, p, None, 0, 3 * GWEI));
+    let v = home
+        .run(&transfer(&legacy.url, &["--nonce", "6", "--dry-run"]))
+        .ok();
+    assert!(wei(&v, "gasPrice") * 4 >= 3 * GWEI * 5, "{v:#}");
+    assert_eq!(v["feeBump"], "1.25x");
+    home.run(&transfer(
+        &legacy.url,
+        &["--nonce", "7", "--dry-run", "--max-fee-gwei", "3.5"],
+    ))
+    .ok();
+    let msg = home
+        .run(&transfer(
+            &legacy.url,
+            &["--nonce", "6", "--dry-run", "--max-fee-gwei", "3.5"],
+        ))
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains("--max-fee-gwei"), "{msg}");
+    assert!(rpc.sent().is_empty() && legacy.sent().is_empty());
+}
+
+#[test]
 fn failure_before_the_send_is_rpc_error_and_says_nothing_was_sent() {
     let (home, _) = unlocked();
     // `prepare` connects once (eth_chainId); the broadcast's own connect is the second call.
@@ -522,5 +635,18 @@ fn rpc_url_path_and_query_are_never_printed() {
         "--json",
     ]);
     r.err("VALIDATION_ERROR");
+    assert!(!leaks(&r), "{}", r.stdout);
+    // An HTTP error body that echoes the key: as the full path and query, and bare.
+    let echo = MockRpc::start_at("/v3/SECRETKEY7?apikey=SECRETKEY8", |_, _| {
+        Reply::Http(
+            401,
+            "invalid project id SECRETKEY7 for /v3/SECRETKEY7?apikey=SECRETKEY8 (key SECRETKEY8)",
+        )
+    });
+    let r = home.run(&[
+        "balance", "--chain", "ethereum", "--rpc", &echo.url, "--json",
+    ]);
+    let msg = r.err("RPC_ERROR");
+    assert!(msg.contains("401"), "{msg}");
     assert!(!leaks(&r), "{}", r.stdout);
 }

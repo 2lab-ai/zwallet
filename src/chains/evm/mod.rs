@@ -7,7 +7,7 @@ pub mod tx;
 
 use crate::chains::{
     Balance, Broadcast, Chain, ChainFamily, Family, FamilyKeys, Net, PreparedTx, SignedTx,
-    TransferRequest, after_send_error,
+    TransferRequest, after_send_error, rejected_send_error,
 };
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
@@ -256,6 +256,7 @@ impl ChainFamily for Evm {
                 signed,
                 &format!("{why}, and the node does not report the transaction"),
             )),
+            rpc::SendOutcome::Rejected(why) => Err(rejected_send_error(signed, &why)),
         }
     }
 

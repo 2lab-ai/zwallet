@@ -6,7 +6,7 @@ use super::tx::{
     gas_with_margin,
 };
 use super::{config, parse_address};
-use crate::chains::{Net, PreparedTx, TransferRequest, redact_url, redact_urls};
+use crate::chains::{Net, PreparedTx, TransferRequest, redact_url};
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use alloy::eips::BlockNumberOrTag;
@@ -18,6 +18,7 @@ use alloy::sol_types::SolCall;
 use serde_json::{Map, Value, json};
 use std::fmt::Display;
 use std::future::IntoFuture;
+use std::ops::Deref;
 use std::time::{Duration, Instant};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
@@ -35,33 +36,81 @@ const REFERENCE_FLOOR: u128 = GWEI;
 const GAS_PRICE_ORACLE: Address = address!("0x420000000000000000000000000000000000000F");
 /// Gas limit used for a token-transfer dry-run when the node cannot estimate (no token balance).
 pub const TOKEN_FALLBACK_GAS: u64 = 100_000;
+/// A replacement (`--nonce` below the pending nonce) pays this multiple of the estimated fees,
+/// `NUM / DEN`, rounded up. Nodes drop a replacement that does not outbid the pending transaction
+/// by their bump rule (geth and most clients: +10% on both the tip and the fee cap).
+const REPLACEMENT_BUMP_NUM: u128 = 5;
+const REPLACEMENT_BUMP_DEN: u128 = 4;
+const REPLACEMENT_BUMP: &str = "1.25x";
+/// `eth_sendRawTransaction` errors in which the node refuses the transaction itself (geth's
+/// txpool wording, which most clients share), matched case-insensitively: it never entered the
+/// node's pool, so nothing was broadcast.
+const SEND_REJECTIONS: &[&str] = &[
+    "replacement transaction underpriced",
+    "nonce too low",
+    "insufficient funds",
+    "intrinsic gas too low",
+    "exceeds block gas limit",
+    "max fee per gas less than block base fee",
+];
+/// `eth_sendRawTransaction` errors meaning the node already holds this transaction.
+const SEND_KNOWN: &[&str] = &["already known", "known transaction"];
 
-pub type EvmProvider = RootProvider<Ethereum>;
+/// A JSON-RPC client for one endpoint (derefs to the alloy provider). Errors become text only
+/// through its `rpc` method, which scrubs the endpoint's URL and API key ([`Net::redact`]).
+/// No `Debug`: the inner provider holds the URL.
+pub struct EvmProvider {
+    root: RootProvider<Ethereum>,
+    net: Net,
+}
 
-async fn rpc<T, E: Display>(
-    what: &str,
-    call: impl IntoFuture<Output = std::result::Result<T, E>>,
-) -> Result<T> {
-    match tokio::time::timeout(RPC_TIMEOUT, call.into_future()).await {
-        Ok(Ok(v)) => Ok(v),
-        // Transport errors quote the request URL, which may carry an API key.
-        Ok(Err(e)) => Err(WalletError::rpc(redact_urls(&format!(
-            "{what} failed: {e}"
-        )))),
-        Err(_) => Err(WalletError::rpc(format!(
-            "{what} timed out after {}s",
-            RPC_TIMEOUT.as_secs()
-        ))),
+impl Deref for EvmProvider {
+    type Target = RootProvider<Ethereum>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.root
     }
+}
+
+impl EvmProvider {
+    /// No I/O: the HTTP client connects on the first request.
+    fn new(net: &Net) -> Result<Self> {
+        let url = net.rpc_url.parse().map_err(|_| {
+            WalletError::validation(format!("invalid RPC URL '{}'", redact_url(&net.rpc_url)))
+        })?;
+        Ok(Self {
+            root: RootProvider::<Ethereum>::new_http(url),
+            net: net.clone(),
+        })
+    }
+
+    async fn rpc<T, E: Display>(
+        &self,
+        what: &str,
+        call: impl IntoFuture<Output = std::result::Result<T, E>>,
+    ) -> Result<T> {
+        match tokio::time::timeout(RPC_TIMEOUT, call.into_future()).await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(self.failed(what, &e)),
+            Err(_) => Err(timed_out(what)),
+        }
+    }
+
+    /// Transport errors quote the request URL, and an HTTP error body or a node's error message
+    /// can quote the API key on its own; both are scrubbed.
+    fn failed(&self, what: &str, e: &dyn Display) -> WalletError {
+        WalletError::rpc(self.net.redact(&format!("{what} failed: {e}")))
+    }
+}
+
+fn timed_out(what: &str) -> WalletError {
+    WalletError::rpc(format!("{what} timed out after {}s", RPC_TIMEOUT.as_secs()))
 }
 
 /// Opens the endpoint and checks it serves the chain we think it does.
 pub async fn connect(net: &Net) -> Result<EvmProvider> {
-    let url = net.rpc_url.parse().map_err(|_| {
-        WalletError::validation(format!("invalid RPC URL '{}'", redact_url(&net.rpc_url)))
-    })?;
-    let p = RootProvider::<Ethereum>::new_http(url);
-    let got = rpc("eth_chainId", p.get_chain_id()).await?;
+    let p = EvmProvider::new(net)?;
+    let got = p.rpc("eth_chainId", p.get_chain_id()).await?;
     let want = config(net.chain).chain_id;
     if got != want {
         return Err(WalletError::rpc(format!(
@@ -74,7 +123,7 @@ pub async fn connect(net: &Net) -> Result<EvmProvider> {
 }
 
 pub async fn native_balance(p: &EvmProvider, owner: Address) -> Result<U256> {
-    rpc("eth_getBalance", p.get_balance(owner)).await
+    p.rpc("eth_getBalance", p.get_balance(owner)).await
 }
 
 pub async fn eth_call(
@@ -87,7 +136,7 @@ pub async fn eth_call(
     if let Some(from) = from {
         req = req.with_from(from);
     }
-    rpc("eth_call", p.call(req)).await
+    p.rpc("eth_call", p.call(req)).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,20 +187,22 @@ pub async fn erc20_balance(p: &EvmProvider, token: Address, owner: Address) -> R
         .map_err(|e| WalletError::rpc(format!("balanceOf returned malformed data: {e}")))
 }
 
-/// EIP-1559 fees when the chain has a base fee, legacy `eth_gasPrice` otherwise, checked against
-/// [`check_fee_ceiling`] (`explicit` = `--max-fee-gwei` in wei).
-pub async fn fees(p: &EvmProvider, explicit: Option<u128>) -> Result<EvmFees> {
-    let block = rpc(
-        "eth_getBlockByNumber",
-        p.get_block_by_number(BlockNumberOrTag::Latest),
-    )
-    .await?
-    .ok_or_else(|| WalletError::rpc("latest block is not available"))?;
-    let gas_price = rpc("eth_gasPrice", p.get_gas_price()).await?;
+/// EIP-1559 fees when the chain has a base fee, legacy `eth_gasPrice` otherwise, raised 1.25x when
+/// `replacing` a pending transaction, then checked against [`check_fee_ceiling`] (`explicit` =
+/// `--max-fee-gwei` in wei).
+pub async fn fees(p: &EvmProvider, explicit: Option<u128>, replacing: bool) -> Result<EvmFees> {
+    let block = p
+        .rpc(
+            "eth_getBlockByNumber",
+            p.get_block_by_number(BlockNumberOrTag::Latest),
+        )
+        .await?
+        .ok_or_else(|| WalletError::rpc("latest block is not available"))?;
+    let gas_price = p.rpc("eth_gasPrice", p.get_gas_price()).await?;
     let (fees, base) = match block.header.base_fee_per_gas {
         Some(base) if base > 0 => {
             let base = u128::from(base);
-            let est = rpc("eth_feeHistory", p.estimate_eip1559_fees()).await?;
+            let est = p.rpc("eth_feeHistory", p.estimate_eip1559_fees()).await?;
             let priority = est.max_priority_fee_per_gas;
             // 2x base fee + tip survives several full blocks of base-fee growth.
             let floor = base.saturating_mul(2).saturating_add(priority);
@@ -169,8 +220,45 @@ pub async fn fees(p: &EvmProvider, explicit: Option<u128>) -> Result<EvmFees> {
             (fees, 0)
         }
     };
-    check_fee_ceiling(&fees, base, gas_price, explicit)?;
+    if !replacing {
+        check_fee_ceiling(&fees, base, gas_price, explicit)?;
+        return Ok(fees);
+    }
+    let fees = replacement_fees(fees);
+    check_fee_ceiling(&fees, base, gas_price, explicit).map_err(|e| {
+        WalletError::new(
+            e.code,
+            format!(
+                "{} (this replaces a pending transaction, so the fees include the \
+                 {REPLACEMENT_BUMP} replacement bump)",
+                e.message
+            ),
+        )
+    })?;
     Ok(fees)
+}
+
+/// Every fee field times [`REPLACEMENT_BUMP`], rounded up (so a 1 wei tip still rises).
+fn replacement_fees(fees: EvmFees) -> EvmFees {
+    let up = |v: U128| {
+        U128::from(
+            v.to::<u128>()
+                .saturating_mul(REPLACEMENT_BUMP_NUM)
+                .div_ceil(REPLACEMENT_BUMP_DEN),
+        )
+    };
+    match fees {
+        EvmFees::Eip1559 {
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+        } => EvmFees::Eip1559 {
+            max_fee_per_gas: up(max_fee_per_gas),
+            max_priority_fee_per_gas: up(max_priority_fee_per_gas),
+        },
+        EvmFees::Legacy { gas_price } => EvmFees::Legacy {
+            gas_price: up(gas_price),
+        },
+    }
 }
 
 /// Refuses node-suggested fees above a ceiling before anything is signed. Every fee input comes
@@ -182,10 +270,11 @@ pub async fn fees(p: &EvmProvider, explicit: Option<u128>) -> Result<EvmFees> {
 /// price ceiling = 6 x reference   (maxFeePerGas, or gasPrice on a legacy chain)
 /// ```
 ///
-/// The normal estimate, maxFee = 2 x base fee + tip, stays well inside it. `eth_gasPrice` (base
-/// fee plus the node's suggested tip) and the 1 gwei floor keep chains whose tip exceeds the base
-/// fee working (Polygon, OP Mainnet, Sepolia). On a legacy chain the price *is* `eth_gasPrice`,
-/// so only an explicit ceiling can reject it there.
+/// The normal estimate, maxFee = 2 x base fee + tip, stays well inside it, and so does a
+/// replacement's 1.25x of it. `eth_gasPrice` (base fee plus the node's suggested tip) and the
+/// 1 gwei floor keep chains whose tip exceeds the base fee working (Polygon, OP Mainnet, Sepolia).
+/// On a legacy chain the price *is* `eth_gasPrice`, so only an explicit ceiling can reject it
+/// there.
 ///
 /// `explicit` (`--max-fee-gwei`) replaces both ceilings with one price, which may be higher or
 /// lower. The reference comes from the same node, so this stops one bad estimate, not a node that
@@ -273,7 +362,7 @@ async fn estimate(p: &EvmProvider, intent: &Intent, value: U256) -> Result<u64> 
         .with_to(intent.to)
         .with_value(value)
         .with_input(intent.input.clone());
-    rpc("eth_estimateGas", p.estimate_gas(req)).await
+    p.rpc("eth_estimateGas", p.estimate_gas(req)).await
 }
 
 fn shortfall_entry(asset: &str, decimals: u8, required: U256, available: U256) -> Value {
@@ -332,23 +421,26 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         return Err(insufficient(&s));
     }
 
-    let pending = rpc(
-        "eth_getTransactionCount",
-        p.get_transaction_count(intent.from).pending(),
-    )
-    .await?;
+    let pending = p
+        .rpc(
+            "eth_getTransactionCount",
+            p.get_transaction_count(intent.from).pending(),
+        )
+        .await?;
     let nonce = match intent.nonce {
         None => pending,
         Some(n) => {
-            let mined = rpc(
-                "eth_getTransactionCount",
-                p.get_transaction_count(intent.from).latest(),
-            )
-            .await?;
+            let mined = p
+                .rpc(
+                    "eth_getTransactionCount",
+                    p.get_transaction_count(intent.from).latest(),
+                )
+                .await?;
             check_nonce(n, mined, pending)?
         }
     };
-    let fees = fees(p, intent.max_fee_per_gas).await?;
+    let replacing = nonce < pending;
+    let fees = fees(p, intent.max_fee_per_gas, replacing).await?;
     let (gas_estimate, gas_source) = match estimate(p, &intent, intent.value).await {
         Ok(g) => (g, "estimate"),
         // The node will not estimate a tx the account cannot fund. In a dry-run, estimate
@@ -407,7 +499,9 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     fields.insert("chainId".into(), json!(unsigned.chain_id));
     fields.insert("nonce".into(), json!(nonce));
     if intent.nonce.is_some() {
-        fields.insert("replacesPending".into(), json!(nonce < pending));
+        fields.insert("replacesPending".into(), json!(replacing));
+        let bump = replacing.then_some(REPLACEMENT_BUMP);
+        fields.insert("feeBump".into(), json!(bump));
     }
     fields.insert("gasLimit".into(), json!(gas_limit));
     fields.insert("gasEstimate".into(), json!(gas_estimate));
@@ -586,21 +680,65 @@ pub enum SendOutcome {
     KnownDespite(String),
     /// The call failed or timed out (the text), and the node does not report the transaction.
     Unknown(String),
+    /// The node refused the transaction itself (the text; see `SEND_REJECTIONS`): nothing was
+    /// broadcast.
+    Rejected(String),
+}
+
+/// How a JSON-RPC error message from `eth_sendRawTransaction` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendError {
+    /// The node refused the transaction ([`SEND_REJECTIONS`]): nothing was broadcast.
+    Rejected,
+    /// The node already holds it ([`SEND_KNOWN`]): the lookup by hash then reports it as sent.
+    Known,
+    /// Anything else: only the lookup by hash can tell.
+    Other,
+}
+
+fn classify_send_error(message: &str) -> SendError {
+    let m = message.to_lowercase();
+    let has = |list: &[&str]| list.iter().any(|s| m.contains(s));
+    if has(SEND_KNOWN) {
+        SendError::Known
+    } else if has(SEND_REJECTIONS) {
+        SendError::Rejected
+    } else {
+        SendError::Other
+    }
 }
 
 /// Sends `raw`, whose hash the caller computed from the bytes. The node's reply is only checked
-/// against that hash, never used in its place. If the call fails after the request may have gone
-/// out, the node is asked for the transaction by `hash` before giving up.
+/// against that hash, never used in its place. A JSON-RPC error that refuses the transaction
+/// itself is [`SendOutcome::Rejected`]. Any other failure after the request may have gone out
+/// (including "already known", a timeout, or a transport error) asks the node for the
+/// transaction by `hash` before giving up.
 pub async fn send_raw(p: &EvmProvider, raw: &[u8], hash: B256) -> SendOutcome {
-    let call = p.client().request::<_, B256>(
-        "eth_sendRawTransaction",
-        (alloy::hex::encode_prefixed(raw),),
-    );
-    match rpc("eth_sendRawTransaction", call).await {
-        Ok(h) if h == hash => SendOutcome::Accepted,
-        Ok(h) => SendOutcome::HashMismatch(h),
-        Err(e) if node_has_tx(p, hash).await => SendOutcome::KnownDespite(e.message),
-        Err(e) => SendOutcome::Unknown(e.message),
+    const WHAT: &str = "eth_sendRawTransaction";
+    let call = p
+        .client()
+        .request::<_, B256>(WHAT, (alloy::hex::encode_prefixed(raw),));
+    let why = match tokio::time::timeout(RPC_TIMEOUT, call.into_future()).await {
+        Ok(Ok(h)) if h == hash => return SendOutcome::Accepted,
+        Ok(Ok(h)) => return SendOutcome::HashMismatch(h),
+        Ok(Err(e)) => {
+            let why = p.failed(WHAT, &e).message;
+            // Only a JSON-RPC error object (HTTP 200, or a 4xx carrying one) is the node's
+            // answer; a bare transport error says nothing about the transaction.
+            let kind = e
+                .as_error_resp()
+                .map_or(SendError::Other, |r| classify_send_error(&r.message));
+            if kind == SendError::Rejected {
+                return SendOutcome::Rejected(why);
+            }
+            why
+        }
+        Err(_) => timed_out(WHAT).message,
+    };
+    if node_has_tx(p, hash).await {
+        SendOutcome::KnownDespite(why)
+    } else {
+        SendOutcome::Unknown(why)
     }
 }
 
@@ -615,7 +753,7 @@ async fn node_has_tx(p: &EvmProvider, hash: B256) -> bool {
         let call = p
             .client()
             .request::<_, Option<Value>>("eth_getTransactionByHash", (hash,));
-        if let Ok(Some(tx)) = rpc("eth_getTransactionByHash", call).await
+        if let Ok(Some(tx)) = p.rpc("eth_getTransactionByHash", call).await
             && tx
                 .get("hash")
                 .and_then(Value::as_str)
@@ -632,7 +770,10 @@ async fn node_has_tx(p: &EvmProvider, hash: B256) -> bool {
 pub async fn wait_receipt(p: &EvmProvider, hash: B256, timeout: Duration) -> Result<Option<Value>> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(r) = rpc("eth_getTransactionReceipt", p.get_transaction_receipt(hash)).await? {
+        if let Some(r) = p
+            .rpc("eth_getTransactionReceipt", p.get_transaction_receipt(hash))
+            .await?
+        {
             return Ok(Some(json!({
                 "status": if r.status() { "success" } else { "reverted" },
                 "blockNumber": r.block_number,
@@ -763,5 +904,81 @@ mod tests {
         assert!(check_recipient(other, Some(token), false).is_ok());
         assert!(check_recipient(Address::ZERO, None, true).is_ok());
         assert!(check_recipient(token, Some(token), true).is_ok());
+    }
+
+    #[test]
+    fn replacement_fees_rise_by_a_quarter_rounded_up() {
+        let bumped = replacement_fees(eip1559(G, G / 10));
+        assert_eq!(
+            bumped,
+            EvmFees::Eip1559 {
+                // (2 x 1 + 0.1) gwei x 1.25, and 0.1 gwei x 1.25.
+                max_fee_per_gas: U128::from(2_625_000_000u64),
+                max_priority_fee_per_gas: U128::from(125_000_000u64),
+            }
+        );
+        // A 1 wei tip (Arbitrum, OP Mainnet) must still rise, or the node sees no bump.
+        let tiny = replacement_fees(EvmFees::Eip1559 {
+            max_fee_per_gas: U128::from(3u64),
+            max_priority_fee_per_gas: U128::from(1u64),
+        });
+        assert_eq!(
+            tiny,
+            EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(4u64),
+                max_priority_fee_per_gas: U128::from(2u64),
+            }
+        );
+        let legacy = replacement_fees(EvmFees::Legacy {
+            gas_price: U128::from(3 * G),
+        });
+        assert_eq!(legacy.max_price(), 3_750_000_000);
+    }
+
+    #[test]
+    fn send_errors_are_classified_case_insensitively() {
+        for m in [
+            "replacement transaction underpriced",
+            "Nonce too low: address 0xabc, tx: 1 state: 2",
+            "INSUFFICIENT FUNDS for gas * price + value",
+            "intrinsic gas too low",
+            "tx exceeds block gas limit",
+            "max fee per gas less than block base fee: address 0xabc",
+        ] {
+            assert_eq!(classify_send_error(m), SendError::Rejected, "{m}");
+        }
+        for m in ["already known", "Known transaction: 0xabc"] {
+            assert_eq!(classify_send_error(m), SendError::Known, "{m}");
+        }
+        for m in ["internal error", "rate limited", ""] {
+            assert_eq!(classify_send_error(m), SendError::Other, "{m}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rpc_error_text_never_prints_the_endpoint_key() {
+        let net = Net {
+            chain: crate::chains::find("ethereum").unwrap(),
+            rpc_url: "https://eth.example.com/v3/0123456789abcdef?apikey=SECRETKEY99&chain=1"
+                .into(),
+        };
+        let p = EvmProvider::new(&net).unwrap();
+        // An HTTP error body that quotes the key bare, inside the path and query, and the URL.
+        let body = "HTTP error 401 with body: {\"error\":\"invalid project id 0123456789abcdef\",\
+                    \"path\":\"/v3/0123456789abcdef?apikey=SECRETKEY99&chain=1\",\"url\":\
+                    \"https://eth.example.com/v3/0123456789abcdef\"} (apikey SECRETKEY99)";
+        let e = p
+            .rpc("eth_call", std::future::ready(Err::<(), _>(body)))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::RpcError);
+        for key in ["0123456789abcdef", "SECRETKEY99", "apikey=", "/v3/"] {
+            assert!(!e.message.contains(key), "{key}: {}", e.message);
+        }
+        assert!(
+            e.message.starts_with("eth_call failed: HTTP error 401"),
+            "{}",
+            e.message
+        );
     }
 }

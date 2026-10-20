@@ -11,6 +11,7 @@ use crate::core::seed::Seed;
 use alloy::primitives::U256;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::time::Duration;
 
 /// Family plus its family-specific configuration.
@@ -216,12 +217,78 @@ pub trait FamilyKeys: Sync {
     fn sign_tx(&self, seed: &Seed, index: u32, chain: &Chain, unsigned: &Value) -> Result<Value>;
 }
 
-/// An RPC endpoint for one chain.
-#[derive(Debug, Clone)]
+/// An RPC endpoint for one chain. `Debug` prints the URL through [`redact_url`].
+#[derive(Clone)]
 pub struct Net {
     pub chain: &'static Chain,
-    /// May carry an API key; print it only through [`redact_url`].
+    /// May carry an API key; print it only through [`redact_url`], and text that came back from
+    /// the endpoint only through [`Net::redact`].
     pub rpc_url: String,
+}
+
+impl fmt::Debug for Net {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Net")
+            .field("chain", &self.chain.key)
+            .field("rpc_url", &redact_url(&self.rpc_url))
+            .finish()
+    }
+}
+
+impl Net {
+    /// Text from or about this endpoint (a transport error, an HTTP error body, a JSON-RPC error
+    /// message) as it may be printed: every URL through [`redact_url`], then every
+    /// [`url_secrets`] fragment of the configured URL replaced with `<redacted>`, because an
+    /// error body can echo the key without the URL around it.
+    pub fn redact(&self, text: &str) -> String {
+        let mut out = redact_urls(text);
+        for secret in url_secrets(&self.rpc_url) {
+            out = out.replace(&secret, "<redacted>");
+        }
+        out
+    }
+}
+
+/// Shortest URL component [`url_secrets`] treats as a possible key on its own.
+const SECRET_MIN_LEN: usize = 8;
+
+/// The parts of an RPC URL that may carry an API key, longest first: the path (unless empty or
+/// `/`), the query string, the fragment and the userinfo, each whole; and each path segment,
+/// query parameter value and userinfo part of 8 or more characters. Text that is not
+/// `scheme://...` is one secret as a whole (as in [`redact_url`]).
+pub fn url_secrets(url: &str) -> Vec<String> {
+    let url = url.trim();
+    let Some((_, rest)) = url.split_once("://") else {
+        return if url.is_empty() {
+            Vec::new()
+        } else {
+            vec![url.to_string()]
+        };
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let userinfo = authority.rsplit_once('@').map_or("", |(u, _)| u);
+    let (tail, fragment) = tail.split_once('#').unwrap_or((tail, ""));
+    let (path, query) = tail.split_once('?').unwrap_or((tail, ""));
+    let path_whole = if path == "/" { "" } else { path };
+    let parts = path
+        .split('/')
+        .chain(
+            query
+                .split('&')
+                .map(|kv| kv.split_once('=').map_or(kv, |(_, v)| v)),
+        )
+        .chain(userinfo.split(':'))
+        .filter(|p| p.chars().count() >= SECRET_MIN_LEN);
+    let mut secrets: Vec<String> = [path_whole, query, fragment, userinfo]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .chain(parts)
+        .map(str::to_string)
+        .collect();
+    secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    secrets.dedup();
+    secrets
 }
 
 /// An RPC URL as it may be printed: scheme and host (with port) only. Providers put API keys in
@@ -338,7 +405,22 @@ pub fn after_send_error(
             ", or retry with --nonce {n} so that the retry replaces it instead of sending twice"
         ));
     }
-    let mut e = WalletError::new(code, message)
+    with_tx_details(WalletError::new(code, message), signed)
+}
+
+/// The error for a transaction the node refused outright (`why` is its answer): nothing was
+/// broadcast. It carries the same `txHash`, `from` and `nonce` fields as [`after_send_error`].
+pub fn rejected_send_error(signed: &SignedTx, why: &str) -> WalletError {
+    with_tx_details(
+        WalletError::rpc(format!(
+            "the node rejected the transaction; nothing was broadcast ({why})"
+        )),
+        signed,
+    )
+}
+
+fn with_tx_details(e: WalletError, signed: &SignedTx) -> WalletError {
+    let mut e = e
         .with_detail("txHash", signed.tx_hash.as_str())
         .with_detail("from", signed.signer.as_str());
     if let Some(n) = signed.nonce {
@@ -382,8 +464,9 @@ pub trait ChainFamily: FamilyKeys {
     /// `INSUFFICIENT_FUNDS` instead of returning a transaction that cannot pay for itself.
     async fn prepare_transfer(&self, net: &Net, req: &TransferRequest) -> Result<PreparedTx>;
     /// Hands `signed` to the node. A failure before the send is an ordinary error whose message
-    /// says nothing was broadcast. Once the request has gone out, a failure whose outcome the
-    /// node cannot confirm is `BROADCAST_UNCERTAIN` (see [`after_send_error`]).
+    /// says nothing was broadcast, and so is the node refusing the transaction itself
+    /// ([`rejected_send_error`]). Once the request has gone out, any other failure whose outcome
+    /// the node cannot confirm is `BROADCAST_UNCERTAIN` (see [`after_send_error`]).
     async fn broadcast(&self, net: &Net, signed: &SignedTx) -> Result<Broadcast>;
     /// `Ok(None)` when no receipt appeared within `timeout`.
     async fn wait_for_receipt(
@@ -494,6 +577,84 @@ mod tests {
              http://127.0.0.1:1/<redacted> or \"https://a.example\""
         );
         assert_eq!(redact_urls("no urls here"), "no urls here");
+    }
+
+    #[test]
+    fn net_debug_prints_the_redacted_url() {
+        let net = Net {
+            chain: find("base").unwrap(),
+            rpc_url: "https://base.example.com/v2/SECRETKEY1?k=SECRETKEY2".into(),
+        };
+        let shown = format!("{net:?}");
+        assert!(!shown.contains("SECRETKEY"), "{shown}");
+        assert!(
+            shown.contains("https://base.example.com/<redacted>"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn url_secrets_cover_path_query_and_long_parts() {
+        assert_eq!(
+            url_secrets("https://u:PASSWORD1@h.example/v2/KEY12345?apikey=QKEY5678&x=1#frag"),
+            vec![
+                "apikey=QKEY5678&x=1",
+                "/v2/KEY12345",
+                "u:PASSWORD1",
+                "PASSWORD1",
+                "KEY12345",
+                "QKEY5678",
+                "frag",
+            ]
+        );
+        // Nothing after the host: nothing to scrub. Short parts only inside the whole path.
+        assert!(url_secrets("https://ethereum-rpc.publicnode.com").is_empty());
+        assert!(url_secrets("http://127.0.0.1:8545/").is_empty());
+        assert_eq!(url_secrets("https://h.example/v2/short"), vec!["/v2/short"]);
+        assert_eq!(url_secrets(" not a url KEY "), vec!["not a url KEY"]);
+    }
+
+    #[test]
+    fn net_redact_scrubs_an_echoed_key() {
+        let net = Net {
+            chain: find("ethereum").unwrap(),
+            rpc_url: "https://eth.example.com/v2/abcdef0123456789".into(),
+        };
+        let text = "HTTP error 403 with body: key abcdef0123456789 is not allowed on \
+                    https://eth.example.com/v2/abcdef0123456789 (path /v2/abcdef0123456789)";
+        assert_eq!(
+            net.redact(text),
+            "HTTP error 403 with body: key <redacted> is not allowed on \
+             https://eth.example.com/<redacted> (path <redacted>)"
+        );
+        let public = Net {
+            chain: find("ethereum").unwrap(),
+            rpc_url: "https://ethereum-rpc.publicnode.com".into(),
+        };
+        assert_eq!(public.redact("nonce too low"), "nonce too low");
+    }
+
+    #[test]
+    fn rejected_send_error_says_nothing_was_broadcast_with_hash_nonce_from() {
+        let signed = SignedTx {
+            raw: "0x02".into(),
+            tx_hash: "0xabc".into(),
+            signer: "0xF00".into(),
+            nonce: Some(4),
+        };
+        let e = rejected_send_error(&signed, "replacement transaction underpriced");
+        let v = e.to_json();
+        assert_eq!(v["errorCode"], "RPC_ERROR");
+        assert_eq!(v["txHash"], "0xabc");
+        assert_eq!(v["nonce"], 4);
+        assert_eq!(v["from"], "0xF00");
+        assert!(
+            e.message
+                .starts_with("the node rejected the transaction; nothing was broadcast"),
+            "{}",
+            e.message
+        );
+        assert!(!e.message.contains("may have reached"), "{}", e.message);
     }
 
     #[test]
