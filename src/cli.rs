@@ -371,7 +371,15 @@ fn duration_arg(s: &str) -> Result<std::time::Duration, String> {
 }
 
 /// Error details a human needs to look a send up, printed under the message.
-const HUMAN_DETAILS: &[&str] = &["txHash", "refusedTxHash", "nonce", "from", "journal"];
+const HUMAN_DETAILS: &[&str] = &[
+    "txHash",
+    "refusedTxHash",
+    "minedTxHash",
+    "success",
+    "nonce",
+    "from",
+    "journal",
+];
 
 fn print_error(json: bool, e: &WalletError) {
     if json {
@@ -597,6 +605,15 @@ mod tests {
             human_error(&e),
             "error: maybe sent [BROADCAST_UNCERTAIN]\nrefusedTxHash: 0xdead\nnonce: 7\nfrom: \
              0xF00\njournal: /h/sends-1-0xf00.jsonl"
+        );
+        // A mined nonce: the transaction there and its receipt's outcome.
+        let mined = WalletError::validation("already mined")
+            .with_detail("nonce", 4)
+            .with_detail("minedTxHash", "0xab")
+            .with_detail("success", false);
+        assert_eq!(
+            human_error(&mined),
+            "error: already mined [VALIDATION_ERROR]\nminedTxHash: 0xab\nsuccess: false\nnonce: 4"
         );
         let plain = WalletError::validation("bad");
         assert_eq!(human_error(&plain), "error: bad [VALIDATION_ERROR]");

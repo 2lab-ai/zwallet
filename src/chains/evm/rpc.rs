@@ -7,7 +7,7 @@ use super::tx::{
 };
 use super::{config, parse_address, parse_tx_hash};
 use crate::chains::{
-    BUMP_SCALE, DEFAULT_BUMP, Net, PreparedTx, SendJournal, TransferRequest, bump_label,
+    BUMP_SCALE, Chain, DEFAULT_BUMP, Net, PreparedTx, SendJournal, TransferRequest, bump_label,
     nonce_label, redact_url, url_origin,
 };
 use crate::core::amount::{format_units, parse_units};
@@ -409,11 +409,19 @@ async fn original_fees(
         }
     }
     if tx.get("blockNumber").is_some_and(|b| !b.is_null()) {
-        return Err(refuse(format!(
-            "it is already mined: if it was your earlier attempt at this payment, the payment \
-             went through; look it up before sending anything new ({})",
-            crate::chains::lookup_hint(p.net.chain, &format!("{hash:#x}"))
-        )));
+        let shown = format!("{hash:#x}");
+        let e = refuse(mined_nonce_text(nonce, p.net.chain, Some(&shown)));
+        // Best effort: without the receipt the error still says to look it up.
+        return Err(match fetch_receipt(p, hash).await {
+            Ok(Some(r)) => with_outcome(
+                e,
+                &MinedAt {
+                    hash: shown,
+                    success: receipt_success(&r),
+                },
+            ),
+            _ => e,
+        });
     }
     match (
         num("maxFeePerGas"),
@@ -645,8 +653,14 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
             pending
         }
         Some(n) => {
-            let n =
-                check_nonce(n, mined, pending).map_err(|e| with_nonce_pointer(e, n, journal))?;
+            // A mined nonce: the receipt of a transaction known to be there says how it went.
+            let found = if n < mined {
+                mined_at(p, intent.from, n, intent.replace, journal).await
+            } else {
+                None
+            };
+            let n = check_nonce(n, mined, pending, chain, found.as_ref())
+                .map_err(|e| with_nonce_pointer(e, n, journal))?;
             if n < pending && intent.replace.is_none() {
                 return Err(needs_replace_error(n, journal));
             }
@@ -889,21 +903,102 @@ fn with_nonce_pointer(e: WalletError, n: u64, journal: Option<&SendJournal>) -> 
     .with_detail("journal", j.display())
 }
 
+/// A transaction found mined at a nonce ([`mined_at`]), with what its receipt says about how it
+/// executed ([`receipt_success`]).
+struct MinedAt {
+    hash: String,
+    success: Option<bool>,
+}
+
+/// What a mined nonce says: only that the nonce was used. The transaction there may have reverted
+/// and paid nothing, so this never says the payment went through. `hash` is the transaction found
+/// there, if any.
+fn mined_nonce_text(n: u64, chain: &Chain, hash: Option<&str>) -> String {
+    let lookup = match hash {
+        Some(h) => crate::chains::lookup_hint(chain, h),
+        None => format!("`zwallet tx --chain {} <its txHash>`", chain.key),
+    };
+    format!(
+        "the transaction at nonce {n} is already mined (nonce consumed); whether the payment \
+         succeeded is not known from this alone: look up its receipt with {lookup} before \
+         sending anything new"
+    )
+}
+
+/// `e` with the transaction found mined at its nonce: `minedTxHash` and `success` (`null` when
+/// its receipt does not say).
+fn with_outcome(e: WalletError, found: &MinedAt) -> WalletError {
+    e.with_detail("minedTxHash", found.hash.as_str())
+        .with_detail("success", json!(found.success))
+}
+
+/// The transaction from `from` mined at nonce `n`, among the ones known to be there: the
+/// `--replace` hash, then the journal's entries at `n`, newest first, at most
+/// [`JOURNAL_SHOWN`](crate::chains::JOURNAL_SHOWN) + 1 in all. Each must be `from`'s at `n` on
+/// the node and have a receipt. Best effort: a lookup that fails only leaves the outcome out of
+/// the error, which still says to look it up.
+async fn mined_at(
+    p: &EvmProvider,
+    from: Address,
+    n: u64,
+    replace: Option<B256>,
+    journal: Option<&SendJournal>,
+) -> Option<MinedAt> {
+    let mut hashes: Vec<B256> = replace.into_iter().collect();
+    if let Some(Ok(entries)) = journal.map(|j| j.entries_at(n..=n, None)) {
+        for e in entries.iter().rev() {
+            if let Some(h) = e["txHash"].as_str().and_then(|h| h.parse::<B256>().ok())
+                && !hashes.contains(&h)
+            {
+                hashes.push(h);
+            }
+        }
+    }
+    for hash in hashes.into_iter().take(crate::chains::JOURNAL_SHOWN + 1) {
+        let Ok(Some(tx)) = fetch_by_hash(p, "eth_getTransactionByHash", "hash", hash).await else {
+            continue;
+        };
+        let sender = tx.get("from").and_then(Value::as_str);
+        if sender.and_then(|a| a.parse::<Address>().ok()) != Some(from)
+            || quantity(tx.get("nonce").and_then(Value::as_str)) != Some(U256::from(n))
+        {
+            continue;
+        }
+        if let Ok(Some(r)) = fetch_receipt(p, hash).await {
+            return Some(MinedAt {
+                hash: format!("{hash:#x}"),
+                success: receipt_success(&r),
+            });
+        }
+    }
+    None
+}
+
 /// An explicit `--nonce n` must reuse a nonce that is still pending (`mined <= n < pending`, the
-/// replacement case) or be the next free one (`n == pending`). Below `mined` it is already spent;
-/// above `pending` the transaction would wait forever for the gap to fill.
+/// replacement case) or be the next free one (`n == pending`). Below `mined` it is already spent:
+/// the error names the transaction `found` there and its outcome, if known. Above `pending` the
+/// transaction would wait forever for the gap to fill.
 ///
 /// `--nonce` is how a retry is made safe, so neither message names another nonce to use: an
 /// agent that took one would turn its retry into a second send.
-fn check_nonce(n: u64, mined: u64, pending: u64) -> Result<u64> {
+fn check_nonce(
+    n: u64,
+    mined: u64,
+    pending: u64,
+    chain: &Chain,
+    found: Option<&MinedAt>,
+) -> Result<u64> {
     if n < mined {
-        return Err(WalletError::validation(format!(
-            "the transaction at nonce {n} is already mined; nothing was signed. If it was your \
-             earlier attempt at this payment, the payment went through; look it up before \
-             sending anything new. {}",
+        let e = WalletError::validation(format!(
+            "{}; nothing was signed. {}",
+            mined_nonce_text(n, chain, found.map(|f| f.hash.as_str())),
             different_payment(n)
         ))
-        .with_detail("nonce", n));
+        .with_detail("nonce", n);
+        return Err(match found {
+            Some(f) => with_outcome(e, f),
+            None => e,
+        });
     }
     if n > pending {
         return Err(WalletError::validation(format!(
@@ -1170,40 +1265,13 @@ async fn node_has_tx(p: &EvmProvider, hash: B256) -> bool {
 pub async fn lookup_tx(p: &EvmProvider, net: &Net, hash: B256) -> Result<Map<String, Value>> {
     let chain = net.chain;
     let shown = format!("{hash:#x}");
-    let get = |method: &'static str| p.client().request::<_, Option<Value>>(method, (hash,));
-    let tx = p
-        .rpc("eth_getTransactionByHash", get("eth_getTransactionByHash"))
-        .await?;
-    let receipt = p
-        .rpc(
-            "eth_getTransactionReceipt",
-            get("eth_getTransactionReceipt"),
-        )
-        .await?;
-    for (answer, key, method) in [
-        (&tx, "hash", "eth_getTransactionByHash"),
-        (&receipt, "transactionHash", "eth_getTransactionReceipt"),
-    ] {
-        let Some(v) = answer else { continue };
-        let got = v.get(key).and_then(Value::as_str);
-        if got.and_then(|h| h.parse::<B256>().ok()) != Some(hash) {
-            return Err(WalletError::rpc(format!(
-                "{method} for {shown} answered about transaction {}, so the node says nothing \
-                 about this one; look it up on {}",
-                got.unwrap_or("<none>"),
-                chain.explorer_tx_url(&shown)
-            )));
-        }
-    }
+    let tx = fetch_by_hash(p, "eth_getTransactionByHash", "hash", hash).await?;
+    let receipt = fetch_receipt(p, hash).await?;
     let field = |k: &str| {
         tx.as_ref()
             .and_then(|t| t.get(k))
             .or_else(|| receipt.as_ref().and_then(|r| r.get(k)))
             .and_then(Value::as_str)
-    };
-    let quantity = |v: Option<&str>| {
-        v.and_then(|h| h.strip_prefix("0x"))
-            .and_then(|h| U256::from_str_radix(h, 16).ok())
     };
     let address = |k: &str| {
         field(k)
@@ -1242,18 +1310,15 @@ pub async fn lookup_tx(p: &EvmProvider, net: &Net, hash: B256) -> Result<Map<Str
     if status == "mined" {
         out.insert("blockNumber".into(), json!(block));
     }
+    let success = receipt.as_ref().map(receipt_success);
     if let Some(r) = &receipt {
         let used =
             quantity(r.get("gasUsed").and_then(Value::as_str)).and_then(|g| u64::try_from(g).ok());
         out.insert("gasUsed".into(), json!(used));
-        if let Some(ok) = r.get("status").and_then(Value::as_str) {
-            out.insert(
-                "success".into(),
-                json!(quantity(Some(ok)) == Some(U256::from(1))),
-            );
-        }
+        out.insert("success".into(), json!(success.flatten()));
     }
     let hint = match (status, nonce) {
+        ("mined", _) if success == Some(None) => Some(outcome_unknown_hint(chain, &shown)),
         ("pending", Some(n)) => Some(crate::chains::pending_hint("still pending", n, &shown)),
         ("pending", None) => Some(
             "still pending; to speed up or cancel it, retry with --nonce <its nonce> --replace \
@@ -1276,20 +1341,92 @@ pub async fn lookup_tx(p: &EvmProvider, net: &Net, hash: B256) -> Result<Map<Str
     Ok(out)
 }
 
+/// A hex quantity (`0x...`) from a node's plain-JSON answer.
+fn quantity(v: Option<&str>) -> Option<U256> {
+    v.and_then(|h| h.strip_prefix("0x"))
+        .and_then(|h| U256::from_str_radix(h, 16).ok())
+}
+
+/// `method` for `hash` (`eth_getTransactionByHash` or `eth_getTransactionReceipt`), read as plain
+/// JSON so chain-specific transaction and receipt types cannot fail the read. An answer whose
+/// `key` is not `hash` is `RPC_ERROR`: it says nothing about this transaction, and reading it as
+/// "not found" could send the agent into a second payment.
+async fn fetch_by_hash(
+    p: &EvmProvider,
+    method: &'static str,
+    key: &str,
+    hash: B256,
+) -> Result<Option<Value>> {
+    let call = p.client().request::<_, Option<Value>>(method, (hash,));
+    let answer = p.rpc(method, call).await?;
+    if let Some(v) = &answer {
+        let got = v.get(key).and_then(Value::as_str);
+        if got.and_then(|h| h.parse::<B256>().ok()) != Some(hash) {
+            let shown = format!("{hash:#x}");
+            return Err(WalletError::rpc(format!(
+                "{method} for {shown} answered about transaction {}, so the node says nothing \
+                 about this one; look it up on {}",
+                got.unwrap_or("<none>"),
+                p.net.chain.explorer_tx_url(&shown)
+            )));
+        }
+    }
+    Ok(answer)
+}
+
+/// The receipt of `hash` as plain JSON, `None` while it is not mined ([`fetch_by_hash`]).
+async fn fetch_receipt(p: &EvmProvider, hash: B256) -> Result<Option<Value>> {
+    fetch_by_hash(p, "eth_getTransactionReceipt", "transactionHash", hash).await
+}
+
+/// What a receipt says about the execution: its `status` exactly `0x1` (success) or `0x0`
+/// (reverted). Anything else, or no `status` at all (a pre-Byzantium receipt has a state `root`
+/// instead), is unknown: never a failure, which would invite a second payment of one that went
+/// through.
+fn receipt_success(receipt: &Value) -> Option<bool> {
+    match receipt.get("status").and_then(Value::as_str) {
+        Some("0x1") => Some(true),
+        Some("0x0") => Some(false),
+        _ => None,
+    }
+}
+
+/// The `hint` for a mined transaction whose receipt does not say how it executed.
+fn outcome_unknown_hint(chain: &Chain, hash: &str) -> String {
+    format!(
+        "mined, but the execution outcome is unknown (the receipt's status is neither 0x1, \
+         success, nor 0x0, reverted); do not send this payment again; check the receipt on the \
+         explorer: {}",
+        chain.explorer_tx_url(hash)
+    )
+}
+
 /// Polls for the receipt until `timeout`; `Ok(None)` if it has not been mined by then. A timeout
-/// past what `Instant` can hold waits without end.
+/// past what `Instant` can hold waits without end. A receipt is `{ status: "success" |
+/// "reverted" | "mined", success: true | false | null, blockNumber, gasUsed, hint? }`: `mined`
+/// with `success: null` when its status says nothing ([`receipt_success`]), with a `hint`.
 pub async fn wait_receipt(p: &EvmProvider, hash: B256, timeout: Duration) -> Result<Option<Value>> {
     let deadline = Instant::now().checked_add(timeout);
     loop {
-        if let Some(r) = p
-            .rpc("eth_getTransactionReceipt", p.get_transaction_receipt(hash))
-            .await?
-        {
-            return Ok(Some(json!({
-                "status": if r.status() { "success" } else { "reverted" },
-                "blockNumber": r.block_number,
-                "gasUsed": r.gas_used,
-            })));
+        if let Some(r) = fetch_receipt(p, hash).await? {
+            let number = |k: &str| {
+                quantity(r.get(k).and_then(Value::as_str)).and_then(|n| u64::try_from(n).ok())
+            };
+            let success = receipt_success(&r);
+            let mut out = json!({
+                "status": match success {
+                    Some(true) => "success",
+                    Some(false) => "reverted",
+                    None => "mined",
+                },
+                "success": success,
+                "blockNumber": number("blockNumber"),
+                "gasUsed": number("gasUsed"),
+            });
+            if success.is_none() {
+                out["hint"] = json!(outcome_unknown_hint(p.net.chain, &format!("{hash:#x}")));
+            }
+            return Ok(Some(out));
         }
         if deadline.is_some_and(|d| Instant::now() + RECEIPT_POLL > d) {
             return Ok(None);
@@ -1406,24 +1543,77 @@ mod tests {
     }
 
     #[test]
+    fn only_receipt_status_0x1_or_0x0_says_how_a_transaction_executed() {
+        for (status, want) in [
+            (json!("0x1"), Some(true)),
+            (json!("0x0"), Some(false)),
+            (json!(""), None),
+            (json!("0x2"), None),
+            (json!("0x01"), None),
+            (json!("0X1"), None),
+            (json!(1), None),
+            (json!(true), None),
+            (Value::Null, None),
+        ] {
+            assert_eq!(
+                receipt_success(&json!({ "status": status })),
+                want,
+                "{status}"
+            );
+        }
+        // Pre-Byzantium: a state root, no status.
+        let root = format!("0x{}", "1".repeat(64));
+        assert_eq!(receipt_success(&json!({ "root": root })), None);
+    }
+
+    #[test]
     fn explicit_nonce_must_be_pending_or_next() {
+        let base = crate::chains::find("base").unwrap();
+        let check = |n| check_nonce(n, 5, 7, base, None);
         // 5 mined, 7 = next free: 5 and 6 replace pending transactions, 7 is new.
         for n in [5, 6, 7] {
-            assert_eq!(check_nonce(n, 5, 7).unwrap(), n);
+            assert_eq!(check(n).unwrap(), n);
         }
-        let mined = check_nonce(4, 5, 7).unwrap_err().message;
+        let mined = check(4).unwrap_err();
         assert_eq!(
-            mined,
-            "the transaction at nonce 4 is already mined; nothing was signed. If it was your \
-             earlier attempt at this payment, the payment went through; look it up before \
-             sending anything new. If the transaction at nonce 4 is a different payment than the \
-             one you are retrying, do not replace it; that payment and yours are separate"
+            mined.message,
+            "the transaction at nonce 4 is already mined (nonce consumed); whether the payment \
+             succeeded is not known from this alone: look up its receipt with `zwallet tx \
+             --chain base <its txHash>` before sending anything new; nothing was signed. If the \
+             transaction at nonce 4 is a different payment than the one you are retrying, do not \
+             replace it; that payment and yours are separate"
         );
-        for e in [mined, check_nonce(8, 5, 7).unwrap_err().message] {
+        // Mining alone says nothing about the outcome.
+        assert!(!mined.message.contains("went through"), "{}", mined.message);
+        assert_eq!(mined.to_json()["nonce"], 4);
+        assert!(mined.details.get("success").is_none());
+        for e in [mined.message, check(8).unwrap_err().message] {
             // Neither names a nonce to use instead.
             assert!(!e.contains('5') && !e.contains('7'), "{e}");
         }
-        assert!(check_nonce(8, 5, 7).unwrap_err().message.contains("gap"));
+        assert!(check(8).unwrap_err().message.contains("gap"));
+        // The transaction found there and its receipt's outcome, reverted included.
+        for success in [Some(true), Some(false), None] {
+            let found = MinedAt {
+                hash: "0xab".into(),
+                success,
+            };
+            let e = check_nonce(4, 5, 7, base, Some(&found)).unwrap_err();
+            assert!(
+                e.message.starts_with(
+                    "the transaction at nonce 4 is already mined (nonce consumed); whether the \
+                     payment succeeded is not known from this alone: look up its receipt with \
+                     `zwallet tx --chain base 0xab` or https://basescan.org/tx/0xab before \
+                     sending anything new; nothing was signed."
+                ),
+                "{}",
+                e.message
+            );
+            let v = e.to_json();
+            assert_eq!(v["minedTxHash"], "0xab");
+            assert_eq!(v.get("success"), Some(&json!(success)));
+            assert_eq!(v["errorCode"], "VALIDATION_ERROR");
+        }
     }
 
     #[test]

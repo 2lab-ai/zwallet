@@ -115,21 +115,27 @@ Commands that act on a key take `--key <name>` (default: the active key).
   (or `null`) and `pendingCount` how many there are. Both counts come from the node, so the range is
   never listed in full. `duplicateSends` (a send without `--nonce`) lists the journal's recent sends
   that this one repeats (see below). Live: `{ ..., txHash, explorerUrl, journal, broadcastWarning?,
-  rpcTxHash? }` plus `{ status, blockNumber, gasUsed }` with `--wait`.
+  rpcTxHash? }` plus `{ status, success, blockNumber, gasUsed, hint? }` with `--wait`.
 - **`--wait`** polls for the receipt for `--wait-timeout <dur>` (default `90s`; same units as
-  unlock durations). Not mined by then is `status: "pending"`, and a receipt RPC problem is
-  `status: "unknown"` with `receiptError`; neither turns a broadcast into an error, and both add
-  ``hint: "still pending; to speed up or cancel use --nonce N --replace <txHash>; a run without
-  --nonce is a second payment; look it up with `zwallet tx --chain <chain> <txHash>` or
-  <explorer>/tx/<txHash>"`` (for `unknown` it starts "receipt unknown, it may still be pending").
+  unlock durations). A receipt is `status: "success"` (`success: true`) when its status is
+  exactly `0x1`, `"reverted"` (`success: false`) when it is exactly `0x0`, and `"mined"` with
+  `success: null` otherwise (no status, as before Byzantium, or any other value): the execution
+  outcome is unknown, never a failure, and a `hint` says "do not send this payment again; check
+  the receipt on the explorer" with the explorer page. Not mined by then is `status: "pending"`,
+  and a receipt RPC problem is `status: "unknown"` with `receiptError`; neither turns a broadcast
+  into an error, and both add ``hint: "still pending; to speed up or cancel use --nonce N
+  --replace <txHash>; a run without --nonce is a second payment; look it up with `zwallet tx
+  --chain <chain> <txHash>` or <explorer>/tx/<txHash>"`` (for `unknown` it starts "receipt
+  unknown, it may still be pending").
 - **`tx --chain <key> <txHash>`** looks a transaction up on the chain's node
   (`eth_getTransactionByHash` and `eth_getTransactionReceipt`). It needs no wallet and no key, so
   it works while locked. `status` is `"mined"` (with `blockNumber`, and `gasUsed` and `success`
-  from the receipt), `"pending"`, or `"not found"` (`found: false`, and `from`, `to`, `nonce`,
-  `value` are `null`). `value` is in the chain's coin (`valueRaw` in wei); for a token transfer
-  it is `0` and `to` is the token contract. A pending transaction adds `hint: "still pending; to
-  speed up or cancel use --nonce N --replace <txHash>; a run without --nonce is a second
-  payment"`. Not found adds a `hint` that this does not mean it was never sent (it may still
+  from the receipt: `true` for status `0x1`, `false` for `0x0`, `null` with the same `hint` as
+  `--wait` for anything else), `"pending"`, or `"not found"` (`found: false`, and `from`, `to`,
+  `nonce`, `value` are `null`). `value` is in the chain's coin (`valueRaw` in wei); for a token
+  transfer it is `0` and `to` is the token contract. A pending transaction adds `hint: "still
+  pending; to speed up or cancel use --nonce N --replace <txHash>; a run without --nonce is a
+  second payment"`. Not found adds a `hint` that this does not mean it was never sent (it may still
   reach the network, be held by other nodes, or have been dropped) and that a retry of the
   payment passes `--nonce <the nonce it was signed with>`, never a plain resend. A node that
   answers about another transaction is `RPC_ERROR`, never "not found". Every message below that
@@ -191,17 +197,24 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `{ kind: "contract-call", contract, selector, value }`. Amounts are raw base units.
 - **`--nonce <n>`** signs with nonce `n` instead of the next free one; `n` must be between the
   account's mined count and its next free nonce (`VALIDATION_ERROR` otherwise). A mined `n` is "the
-  transaction at nonce N is already mined; nothing was signed. If it was your earlier attempt at
-  this payment, the payment went through; look it up before sending anything new", with the
-  journal's entries at `n`. `n` equal to the next free nonce takes that free slot. Below it,
+  transaction at nonce N is already mined (nonce consumed); whether the payment succeeded is not
+  known from this alone: look up its receipt with `zwallet tx --chain <chain> <hash>` before
+  sending anything new; nothing was signed", with the journal's entries at `n`. Mined only means
+  the nonce was used: the transaction there may have reverted and paid nothing, so no message
+  says a payment went through from that alone. Where the transaction mined at `n` is known (the
+  `--replace` hash or a journal entry at `n` that the node reports as this key's at `n`, with a
+  receipt), the error names it (`minedTxHash`, and the hash in the message) and adds the
+  receipt's `success` (`true`, `false`, or `null` when its status says nothing); otherwise the
+  message has `<its txHash>`. `n` equal to the next free nonce takes that free slot. Below it,
   `--nonce` replaces the transaction pending at `n`, and `--replace <txHash>` must name it (it must
   be this key's, at nonce `n`, not mined); without it the send is `VALIDATION_ERROR` "nonce N
   belongs to a pending transaction; pass --replace <its txHash> to replace it (see the send
   journal)", with the journal's entries at `n`. That message, the mined-nonce one and the
   unknown-`--replace` one below end with "If the transaction at nonce N is a different payment than
   the one you are retrying, do not replace it; that payment and yours are separate". A `--replace`
-  hash that is already mined is refused: if it was your earlier attempt at this payment, the payment
-  went through; look it up. zwallet reads the replaced transaction's fees from the node and pays
+  hash that is already mined is refused with the same "already mined (nonce consumed)" text, its
+  `zwallet tx` command and explorer page, and its receipt's `minedTxHash` and `success`. zwallet
+  reads the replaced transaction's fees from the node and pays
   `--bump` times the higher of them and its own estimate (tip and max fee, or `gasPrice`; default
   1.25, allowed 1.1 to 3) so that nodes accept the replacement. An explicit `--bump` also applies
   when nothing is replaced. If the node does not know the `--replace` hash: where it holds another
