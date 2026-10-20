@@ -1397,6 +1397,28 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn a_pipe_reopens_through_proc_but_the_socket_channel_does_not() {
+        // Why the daemon's channel is a socketpair: any same-user process may open
+        // /proc/<pid>/fd/N of a dumpable process, which for a pipe yields a fresh read or write
+        // end of it (the password, or a fake readiness line); for a socket it fails with ENXIO.
+        let (reader, writer) = std::io::pipe().unwrap();
+        let reopened =
+            std::fs::File::open(format!("/proc/self/fd/{}", reader.as_raw_fd())).map(|_| ());
+        assert!(reopened.is_ok(), "{reopened:?}");
+        drop((reader, writer));
+        let (ours, theirs) = ChildChannel::pair().unwrap();
+        for fd in [ours.as_raw_fd(), theirs.as_raw_fd()] {
+            let err = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(format!("/proc/self/fd/{fd}"))
+                .unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(libc::ENXIO), "{err}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn proc_fd_names_parse() {
         assert_eq!(parse_fd(b"12\0"), Some(12));
         assert_eq!(parse_fd(b"0\0\0\0"), Some(0));
