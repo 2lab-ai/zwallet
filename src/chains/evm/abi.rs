@@ -33,7 +33,12 @@ pub fn encode_call(func: &Function, args: &[String]) -> Result<Bytes> {
         let ty: DynSolType = param.resolve().map_err(|e| {
             WalletError::validation(format!("unsupported parameter type {}: {e}", param.ty))
         })?;
-        let value = coerce(&ty, arg).map_err(|e| {
+        // A top-level string is the argument exactly as given: no quote stripping, no trim.
+        let value = match ty {
+            DynSolType::String => Ok(DynSolValue::String(arg.clone())),
+            _ => coerce(&ty, arg),
+        }
+        .map_err(|e| {
             WalletError::new(
                 e.code,
                 format!(
@@ -51,13 +56,17 @@ pub fn encode_call(func: &Function, args: &[String]) -> Result<Bytes> {
         .map_err(|e| WalletError::validation(format!("cannot encode arguments: {e}")))
 }
 
-/// Coerces one CLI argument to `ty`. Arrays (`[a, b]`) and tuples (`(a, b)`) are split here, so
-/// the value that gets encoded is built by the same parser that checked every leaf:
+/// Coerces one CLI argument, or one element of a list, to `ty`. Arrays (`[a, b]`) and tuples
+/// (`(a, b)`) are split here, so the value that gets encoded is built by the same parser that
+/// checked every leaf:
 /// - `address`: `0x` plus 40 hex digits; mixed case must be a valid EIP-55 checksum (the
 ///   `transfer --to` rule). alloy's coercion alone ignores checksums and the `0x` prefix.
 /// - `uint`/`int`: plain decimal (a leading `-` for `int`) or `0x` hex. alloy's coercion would
 ///   also read units, exponents and other radixes (`1 ether`, `1e18`, `0b1`).
-/// - any other leaf goes to alloy's `coerce_str`.
+/// - `bytes`, `bytesN`, `function`: `0x` hex (exactly N bytes for `bytesN`, 24 for `function`).
+///   alloy's coercion would also take bare hex.
+/// - `string` inside a list: see [`list_string`]. (A top-level string never reaches here.)
+/// - `bool`: alloy's `coerce_str` (`true` or `false`).
 fn coerce(ty: &DynSolType, s: &str) -> Result<DynSolValue> {
     let leaf = |s: &str| {
         ty.coerce_str(s)
@@ -91,11 +100,15 @@ fn coerce(ty: &DynSolType, s: &str) -> Result<DynSolValue> {
             }
             leaf(t)
         }
-        DynSolType::Bool
-        | DynSolType::FixedBytes(_)
-        | DynSolType::Function
-        | DynSolType::Bytes
-        | DynSolType::String => leaf(s),
+        DynSolType::FixedBytes(_) | DynSolType::Function | DynSolType::Bytes => {
+            let t = s.trim();
+            if !t.starts_with("0x") {
+                return Err(WalletError::validation("expected 0x-prefixed hex"));
+            }
+            leaf(t)
+        }
+        DynSolType::String => list_string(s).map(|v| DynSolValue::String(v.to_string())),
+        DynSolType::Bool => leaf(s),
         DynSolType::Array(inner) => split_list(s, '[', ']')?
             .into_iter()
             .map(|e| coerce(inner, e))
@@ -134,10 +147,29 @@ fn coerce(ty: &DynSolType, s: &str) -> Result<DynSolValue> {
     }
 }
 
+/// A string element of a list, as [`split_list`] cut it (trimmed): the element as written, or,
+/// when it starts with `"` or `'`, the text between that quote and the same quote ending the
+/// element. Quoting keeps commas, brackets and surrounding spaces; there are no escapes, so the
+/// text may not contain its own quote (quote with the other kind instead).
+fn list_string(e: &str) -> Result<&str> {
+    let Some(q) = e.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+        return Ok(e);
+    };
+    e[1..]
+        .strip_suffix(q)
+        .filter(|inner| !inner.contains(q))
+        .ok_or_else(|| {
+            WalletError::validation(format!(
+                "a list element that starts with {q} must end with {q} and not contain it (there \
+                 are no escapes; quote with the other kind)"
+            ))
+        })
+}
+
 /// Splits `[a, b]` / `(a, b)` into its trimmed top-level elements. A `"` or `'` that starts an
-/// element opens a quoted string, inside which commas and brackets are text (the same rule as
-/// alloy's string coercion). Unquoted elements must not contain unbalanced brackets, and an empty
-/// element (e.g. a trailing comma) is refused.
+/// element opens a quoted string, inside which commas and brackets are text (see
+/// [`list_string`]). Unquoted elements must not contain unbalanced brackets, and an empty element
+/// (e.g. a trailing comma) is refused.
 fn split_list(s: &str, open: char, close: char) -> Result<Vec<&str>> {
     let bad = |why: &str| WalletError::validation(format!("expected {open}...{close}: {why}"));
     let inner = s
@@ -467,6 +499,84 @@ mod tests {
             ),
             serde_json::json!([[], ["1", "2"], ["3", "4"]])
         );
+    }
+
+    #[test]
+    fn uint_and_int_aliases_get_the_canonical_selector() {
+        // alloy-json-abi canonicalizes the aliases when it parses; pinned here because the
+        // selector of `transfer(address,uint)` would otherwise be keccak of the alias.
+        let f = parse_function("transfer(address,uint)").unwrap();
+        assert_eq!(f.signature(), "transfer(address,uint256)");
+        assert_eq!(hex::encode(f.selector()), "a9059cbb");
+        let nested = parse_function("f((uint,int)[],uint[2],(bool,(int)))").unwrap();
+        let canonical = parse_function("f((uint256,int256)[],uint256[2],(bool,(int256)))").unwrap();
+        assert_eq!(nested.selector(), canonical.selector());
+        // Aliases with no canonical form here are refused rather than hashed as written.
+        for (sig, arg) in [("f(fixed)", "1"), ("f(ufixed)", "1"), ("g(byte)", "0x01")] {
+            let f = parse_function(sig).unwrap();
+            assert!(encode_call(&f, &args(&[arg])).is_err(), "{sig}");
+        }
+    }
+
+    #[test]
+    fn bytes_and_function_args_need_0x() {
+        let (word, function) = ("ab".repeat(32), "ab".repeat(24));
+        let bad: Vec<(&str, &str)> = vec![
+            ("f(bytes)", "dead"),
+            ("f(bytes2)", "abcd"),
+            ("f(bytes32)", &word),
+            ("f(function)", &function),
+            ("f(bytes[])", "[0x01, 02]"),
+            ("f((bytes1,uint8))", "(01, 1)"),
+            ("f(bytes)", "0Xdead"),
+        ];
+        let accepted = accepted(&bad);
+        assert!(accepted.is_empty(), "accepted: {accepted:#?}");
+        let f = parse_function("f(bytes,bytes2,bytes1[])").unwrap();
+        let data = encode_call(&f, &args(&["0xdead", "0xabcd", "[0x01, 0x02]"])).unwrap();
+        let decoded: Vec<Value> = f
+            .abi_decode_input(&data[4..])
+            .unwrap()
+            .iter()
+            .map(to_json)
+            .collect();
+        assert_eq!(
+            Value::Array(decoded),
+            serde_json::json!(["0xdead", "0xabcd", ["0x01", "0x02"]])
+        );
+    }
+
+    #[test]
+    fn top_level_strings_are_verbatim_and_list_strings_unquote() {
+        let f = parse_function("f(string,string,string[])").unwrap();
+        let data = encode_call(
+            &f,
+            &args(&[
+                "\"quoted\"",
+                "  padded  ",
+                "[\" kept spaces \", 'say \"hi\"', plain words, \"a, b\"]",
+            ]),
+        )
+        .unwrap();
+        let decoded: Vec<Value> = f
+            .abi_decode_input(&data[4..])
+            .unwrap()
+            .iter()
+            .map(to_json)
+            .collect();
+        assert_eq!(
+            Value::Array(decoded),
+            serde_json::json!([
+                "\"quoted\"",
+                "  padded  ",
+                [" kept spaces ", "say \"hi\"", "plain words", "a, b"]
+            ])
+        );
+        // A quoted list element must close with its own quote and not contain it.
+        let g = parse_function("g(string[])").unwrap();
+        for bad in ["[\"a\"b\"]", "[\"open]", "['x' y]"] {
+            assert!(encode_call(&g, &args(&[bad])).is_err(), "accepted {bad}");
+        }
     }
 
     #[test]

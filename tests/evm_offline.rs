@@ -773,6 +773,18 @@ fn rpc_fees_above_the_ceiling_need_max_fee_gwei() {
         &["--dry-run", "--max-fee-gwei", "2"],
     ))
     .err("VALIDATION_ERROR");
+    // A legacy node's eth_gasPrice is not its own ceiling: 10 gwei is above 6 x 1 gwei.
+    let pricey = MockRpc::start(|m, p| fee_node(m, p, None, 0, 10 * GWEI));
+    let msg = home
+        .run(&transfer(&pricey.url, &["--dry-run"]))
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains("gasPrice 10 gwei"), "{msg}");
+    assert!(msg.contains("--max-fee-gwei"), "{msg}");
+    home.run(&transfer(
+        &pricey.url,
+        &["--dry-run", "--max-fee-gwei", "10"],
+    ))
+    .ok();
     assert!(greedy.sent().is_empty() && normal.sent().is_empty() && legacy.sent().is_empty());
 }
 

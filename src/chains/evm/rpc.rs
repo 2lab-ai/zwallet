@@ -54,8 +54,11 @@ const SEND_REJECTIONS: &[&str] = &[
 /// `eth_sendRawTransaction` errors meaning the nonce is already used, by another transaction or
 /// by this very one (resent after it went in); only the lookup by hash can tell which.
 const SEND_NONCE_TAKEN: &[&str] = &["nonce too low", "replacement transaction underpriced"];
-/// `eth_sendRawTransaction` errors meaning the node already holds this transaction.
-const SEND_KNOWN: &[&str] = &["already known", "known transaction"];
+/// `eth_sendRawTransaction` errors meaning the node already holds this transaction: "already
+/// known" as a phrase, or a message that starts with "known transaction" (never "unknown
+/// transaction").
+const SEND_KNOWN_PHRASE: &str = "already known";
+const SEND_KNOWN_PREFIX: &str = "known transaction";
 
 /// A JSON-RPC client for one endpoint (derefs to the alloy provider). Errors become text only
 /// through its `rpc` method, which scrubs the endpoint's URL and API key ([`Net::redact`]).
@@ -282,30 +285,47 @@ fn replacement_fees(fees: EvmFees) -> EvmFees {
 /// from the RPC endpoint, so a broken or hostile one could ask for any price per gas:
 ///
 /// ```text
-/// reference     = max(latest block baseFeePerGas, eth_gasPrice, 1 gwei)
-/// tip ceiling   = 2 x reference   (maxPriorityFeePerGas)
-/// price ceiling = 6 x reference   (maxFeePerGas, or gasPrice on a legacy chain)
+/// EIP-1559: reference = max(latest block baseFeePerGas, eth_gasPrice, 1 gwei)
+///           tip ceiling   = 2 x reference   (maxPriorityFeePerGas)
+///           price ceiling = 6 x reference   (maxFeePerGas)
+/// legacy:   reference = max(latest block baseFeePerGas, 1 gwei)
+///           price ceiling = 6 x reference   (gasPrice)
 /// ```
 ///
 /// The normal estimate, maxFee = 2 x base fee + tip, stays well inside it, and so does a
-/// replacement's 1.25x of it. `eth_gasPrice` (base fee plus the node's suggested tip) and the
-/// 1 gwei floor keep chains whose tip exceeds the base fee working (Polygon, OP Mainnet, Sepolia).
-/// On a legacy chain the price *is* `eth_gasPrice`, so only an explicit ceiling can reject it
-/// there.
+/// replacement's bump of it. On an EIP-1559 chain `eth_gasPrice` (base fee plus the node's
+/// suggested tip) and the 1 gwei floor keep chains whose tip exceeds the base fee working
+/// (Polygon, OP Mainnet, Sepolia). On a legacy chain the price *is* `eth_gasPrice`, so it is left
+/// out of its own reference: BSC (base fee 0) caps at 6 gwei unless `--max-fee-gwei` says more.
 ///
 /// `explicit` (`--max-fee-gwei`) replaces both ceilings with one price, which may be higher or
 /// lower. The reference comes from the same node, so this stops one bad estimate, not a node that
-/// lies consistently; an absolute limit belongs in the daemon-side signing policy.
+/// lies consistently.
 pub fn check_fee_ceiling(
     fees: &EvmFees,
     base_fee: u128,
     gas_price: u128,
     explicit: Option<u128>,
 ) -> Result<()> {
+    // Not here: an absolute fee budget that does not depend on the RPC at all. That belongs in
+    // the daemon-side signing policy, which sees the decoded fees of every transaction it signs.
     let gwei = |wei: u128| format!("{} gwei", format_units(U256::from(wei), 9));
-    let reference = base_fee.max(gas_price).max(REFERENCE_FLOOR);
+    let legacy = matches!(fees, EvmFees::Legacy { .. });
+    let reference = if legacy {
+        base_fee.max(REFERENCE_FLOOR)
+    } else {
+        base_fee.max(gas_price).max(REFERENCE_FLOOR)
+    };
     let (tip_cap, price_cap, rule) = match explicit {
         Some(max) => (max, max, format!("--max-fee-gwei {}", gwei(max))),
+        None if legacy => (
+            reference,
+            reference.saturating_mul(PRICE_CEILING_MULT),
+            format!(
+                "zwallet's legacy ceiling ({PRICE_CEILING_MULT} x max(baseFee {}, 1 gwei))",
+                gwei(base_fee)
+            ),
+        ),
         None => (
             reference.saturating_mul(TIP_CEILING_MULT),
             reference.saturating_mul(PRICE_CEILING_MULT),
@@ -729,10 +749,22 @@ enum SendError {
     Other,
 }
 
+/// Does `phrase` occur in `text` as whole words (no letter or digit right before or after)?
+fn has_phrase(text: &str, phrase: &str) -> bool {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    text.match_indices(phrase).any(|(i, _)| {
+        !word(text[..i].chars().last()) && !word(text[i + phrase.len()..].chars().next())
+    })
+}
+
 fn classify_send_error(message: &str) -> SendError {
     let m = message.to_lowercase();
     let has = |list: &[&str]| list.iter().any(|s| m.contains(s));
-    if has(SEND_KNOWN) {
+    let known = has_phrase(&m, SEND_KNOWN_PHRASE)
+        || m.trim_start()
+            .strip_prefix(SEND_KNOWN_PREFIX)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric()));
+    if known {
         SendError::Known
     } else if has(SEND_NONCE_TAKEN) {
         SendError::NonceTaken
@@ -917,6 +949,31 @@ mod tests {
     }
 
     #[test]
+    fn legacy_ceiling_does_not_use_the_price_it_checks() {
+        // On a legacy chain the price *is* eth_gasPrice, so it cannot be its own reference: the
+        // reference is max(base fee, 1 gwei), and BSC (base fee 0) caps at 6 gwei.
+        let legacy = |gwei: u128| EvmFees::Legacy {
+            gas_price: U128::from(gwei * G),
+        };
+        assert!(check_fee_ceiling(&legacy(6), 0, 6 * G, None).is_ok());
+        let e = check_fee_ceiling(&legacy(7), 0, 7 * G, None).unwrap_err();
+        assert!(e.message.contains("gasPrice 7 gwei"), "{}", e.message);
+        assert!(
+            e.message.contains("6 x max(baseFee 0 gwei, 1 gwei)"),
+            "{}",
+            e.message
+        );
+        assert!(!e.message.contains("eth_gasPrice"), "{}", e.message);
+        assert!(check_fee_ceiling(&legacy(7), 0, 7 * G, Some(8 * G)).is_ok());
+        // An EIP-1559 chain still counts eth_gasPrice in its reference.
+        let price = EvmFees::Eip1559 {
+            max_fee_per_gas: U128::from(7 * G),
+            max_priority_fee_per_gas: U128::from(G),
+        };
+        assert!(check_fee_ceiling(&price, G, 2 * G, None).is_ok());
+    }
+
+    #[test]
     fn explicit_nonce_must_be_pending_or_next() {
         // 5 mined, 7 = next free: 5 and 6 replace pending transactions, 7 is new.
         for n in [5, 6, 7] {
@@ -998,12 +1055,27 @@ mod tests {
         ] {
             assert_eq!(classify_send_error(m), SendError::NonceTaken, "{m}");
         }
-        for m in ["already known", "Known transaction: 0xabc"] {
+        for m in [
+            "already known",
+            "ALREADY KNOWN",
+            "Known transaction: 0xabc",
+            "known transaction",
+            "tx already known: 0xabc",
+        ] {
             assert_eq!(classify_send_error(m), SendError::Known, "{m}");
         }
-        for m in ["internal error", "rate limited", ""] {
+        for m in ["internal error", "rate limited", "", "unknown transaction"] {
             assert_eq!(classify_send_error(m), SendError::Other, "{m}");
         }
+        // "unknown transaction" is not "known transaction": the rest of the text decides.
+        assert_eq!(
+            classify_send_error("unknown transaction type; insufficient funds"),
+            SendError::Rejected
+        );
+        assert_eq!(
+            classify_send_error("unknown transaction: nonce too low"),
+            SendError::NonceTaken
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

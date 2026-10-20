@@ -513,8 +513,18 @@ mod tests {
 
     /// The full daemon path: payload bytes -> own decode -> sign -> recover from raw.
     fn sign_via_payload(t: &UnsignedEvmTx) -> (DecodedUnsigned, DecodedEvmTx) {
-        let decoded = decode_unsigned(&encoded_for_signing(t)).unwrap();
+        let payload = encoded_for_signing(t);
+        let decoded = decode_unsigned(&payload).unwrap();
         let signed = sign_decoded(&signer(), &decoded).unwrap();
+        // The signed envelope carries exactly the payload the daemon decoded: every field, fees
+        // and gas included, not only the ones a policy reads.
+        let envelope = TxEnvelope::decode_2718(&mut &signed.raw[..]).unwrap();
+        let signed_payload = match &envelope {
+            TxEnvelope::Eip1559(s) => s.tx().encoded_for_signing(),
+            TxEnvelope::Legacy(s) => s.tx().encoded_for_signing(),
+            other => panic!("unexpected envelope type {:?}", other.tx_type()),
+        };
+        assert_eq!(hex::encode(&signed_payload), hex::encode(&payload));
         let back = decode_signed(&signed.raw).unwrap();
         assert_eq!(back.hash, signed.hash);
         // The policy view and the signed bytes describe one transaction.
