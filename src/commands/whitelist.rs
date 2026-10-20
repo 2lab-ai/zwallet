@@ -13,7 +13,7 @@
 //!    once none is left): nothing is signed while the list changes;
 //! 2. to 4. [`whitelist::edit_as_shown`] (or [`whitelist::reset_as_shown`]) under `w.lock`:
 //!    the files read again once and refused unless they are the bytes shown, the verified base,
-//!    the change at the next generation, signed, staged, re-sealed, renamed;
+//!    the change at the next generation, signed, staged, re-sealed, published from memory;
 //! 5. the wallet stays locked, unless `--unlock <duration>` starts a new session for that
 //!    duration with the password just typed (the staged unlock `zwallet unlock` uses). No
 //!    duration or expiry is taken from a running daemon.
@@ -567,11 +567,14 @@ fn reset_lines(
          fee-cap` again before `--unlock`"
             .to_string()
     });
+    // A rolled-back wallet.json accepts the copy its seal names, so the copy is only for a
+    // generation the human knows is the latest.
     lines.push(
         "  if whitelist.json was only damaged or replaced, put back a genuine copy of it at the \
-         sealed generation instead: it verifies again without a reset, because the seal pins its \
-         digest; if wallet.json was rolled back (whitelist.json is newer than the seal), restore \
-         the current wallet.json instead"
+         sealed generation instead, but only if that is the latest generation you remember \
+         seeing (unlock, status and `zwallet whitelist list` print it): it verifies again \
+         without a reset, because the seal pins its digest; if you remember a higher one, \
+         wallet.json was rolled back: restore the current wallet.json instead"
             .to_string(),
     );
 }
@@ -597,8 +600,8 @@ fn outcome_lines(lines: &mut Vec<String>, current: &FileView, next: &FileView, r
             ));
         }
         lines.push(
-            "    the sealed generation + 1 if wallet.json seals a list that is neither file \
-             (the number is shown once the password opens it)"
+            "    if neither file is the sealed list (it was changed or deleted): gen M+1, where M \
+             is the sealed generation, shown once the password opens wallet.json"
                 .to_string(),
         );
         lines.push("    gen 1 if wallet.json seals no whitelist yet".to_string());
@@ -882,6 +885,13 @@ fn edit_output(
     if let Some(d) = &edited.discarded {
         out["discarded"] = json!({ "reason": d.reason, "entries": d.entries });
     }
+    // What the edit could not tidy up after the change landed, after a contract's residual.
+    if let Some(w) = &edited.warning {
+        out["warning"] = json!(match out["warning"].as_str() {
+            Some(residual) => format!("{residual}; {w}"),
+            None => w.clone(),
+        });
+    }
     session.report(&mut out);
     out
 }
@@ -921,12 +931,24 @@ fn edit_text(out: &Value) -> String {
                 "refused"
             }
         ),
-        _ => format!("reset: a new key and an empty list (dropped {})", {
+        _ => format!("reset: a new key and an empty list; dropped: {}", {
             let d = join(&out["dropped"]);
-            match (d.is_empty(), out["discarded"].is_object()) {
-                (false, _) => d,
-                (true, true) => "no verified entry".into(),
-                (true, false) => "nothing".into(),
+            let discarded = &out["discarded"];
+            match (
+                d.is_empty(),
+                discarded.is_object(),
+                discarded["entries"].is_null(),
+            ) {
+                (false, _, _) => d,
+                // No entries: whitelist.json is missing or cannot be read (the reason says
+                // which), so what it held is unknown, never "none".
+                (true, true, true) => "no verified entry; whitelist.json's entries unknown (it is \
+                                       missing or cannot be read)"
+                    .into(),
+                (true, true, false) => {
+                    "no verified entry; whitelist.json's unverified entries are below".into()
+                }
+                (true, false, _) => "nothing".into(),
             }
         }),
     };
@@ -945,17 +967,14 @@ fn edit_text(out: &Value) -> String {
         lines.push(format!("warning: {w}"));
     }
     if out["discarded"].is_object() {
-        // No entries: the file is missing or cannot be read (the reason says which), so what it
-        // held is unknown, never "none".
         let entries = &out["discarded"]["entries"];
         lines.push(format!(
-            "discarded (not signed, the edit started from an empty list): {}; its unverified \
-             entries: {}",
+            "discarded (not signed, the edit started from an empty list): {}{}",
             printable(out["discarded"]["reason"].as_str().unwrap_or("?")),
             if entries.is_null() {
-                "unknown (the file is missing or cannot be read)".to_string()
+                String::new()
             } else {
-                ascii_json(entries)
+                format!("; its unverified entries: {}", ascii_json(entries))
             }
         ));
     }
@@ -1089,11 +1108,18 @@ fn verified_view(home: &Path, anchor: Result<Option<WhitelistAnchor>>) -> Value 
         }
         Ok(Some(a)) => a,
     };
-    let base = whitelist::pick_base(home, Some(&anchor), &WHITELIST_RULES);
+    let files = ListFiles::read(home);
+    let base = whitelist::pick_base_from(&files, Some(&anchor), &WHITELIST_RULES);
+    // The genuine-copy remedy, as conditional as the edit's (none above the seal: the reason
+    // says what to do).
+    let remedy = |reason: String| match whitelist::unverified_remedy(&files, &anchor) {
+        Some(r) => format!("{reason}. If whitelist.json was only damaged or replaced, {r}"),
+        None => reason,
+    };
     let mut out = match base.source {
         BaseSource::Current => list_view(&base.list, true, WHITELIST_FILE),
         BaseSource::PromotedNext => list_view(&base.list, true, NEXT_FILE),
-        BaseSource::Empty => unverified_view(home, base.discarded.map(|d| d.reason)),
+        BaseSource::Empty => unverified_view(home, base.discarded.map(|d| remedy(d.reason))),
     };
     out["sealedGen"] = json!(anchor.generation);
     out
@@ -1114,12 +1140,22 @@ fn unverified_view(home: &Path, reason: Option<String>) -> Value {
     let path = home.join(WHITELIST_FILE);
     let mut out = match whitelist::read_list(&path) {
         Ok(Some(signed)) => list_view(&signed.list, false, WHITELIST_FILE),
+        // Without whitelist.json, a staged whitelist.next.json is an unfinished edit (or a
+        // planted file): `--verify` says which, and the first add would refuse.
         Ok(None) => json!({
             "gen": null,
             "entries": [],
             "policy": null,
             "verified": false,
-            "reason": format!("there is no whitelist yet; {FIRST_ADD}"),
+            "reason": if home.join(NEXT_FILE).symlink_metadata().is_ok() {
+                format!(
+                    "there is no {WHITELIST_FILE}, but {NEXT_FILE} exists (an unfinished edit, or \
+                     a planted file): `zwallet whitelist list --verify` checks it against \
+                     wallet.json"
+                )
+            } else {
+                format!("there is no whitelist yet; {FIRST_ADD}")
+            },
         }),
         Err(e) => {
             // Unreadable as a list: whatever entries it shows, for the human to look at.
@@ -1343,6 +1379,47 @@ mod tests {
             "{text:?}"
         );
         assert!(text.contains("discarded"), "{text}");
+    }
+
+    #[test]
+    fn r5_3_what_an_edit_could_not_tidy_up_is_a_warning_on_a_change_that_landed() {
+        let mut list = Whitelist::empty(&WHITELIST_RULES);
+        list.generation = 2;
+        list.add(Entry::new_contract(
+            "router",
+            "0x2222222222222222222222222222222222222222",
+            &["base"],
+            &["0x12345678"],
+        ))
+        .unwrap();
+        let left = "the change landed, but whitelist.next.json was left in place (busy)";
+        let edited = Edited {
+            list: list.clone(),
+            previous_generation: Some(1),
+            base: BaseSource::Current,
+            discarded: None,
+            key_created: false,
+            warning: Some(left.into()),
+        };
+        let base = Base {
+            list: list.clone(),
+            source: BaseSource::Current,
+            discarded: None,
+        };
+        let entry = list.by_nickname("router").unwrap().clone();
+        let out = edit_output(&Change::Add(entry), &base, &edited, &[], &Session::Locked);
+        // After a contract's residual, and the change is still reported as made.
+        assert_eq!(out["warning"], format!("{RESIDUAL}; {left}"), "{out}");
+        assert_eq!((&out["gen"], &out["verified"]), (&json!(2), &json!(true)));
+        assert!(edit_text(&out).contains(&format!("warning: {RESIDUAL}; {left}")));
+        let out = edit_output(
+            &Change::MessageSigning(true),
+            &base,
+            &edited,
+            &[],
+            &Session::Locked,
+        );
+        assert_eq!(out["warning"], left, "{out}");
     }
 
     #[test]
@@ -1575,14 +1652,15 @@ mod tests {
             "the reset allows nothing else (no payee, no contract); set `zwallet whitelist \
              fee-cap` again before `--unlock`",
             "if whitelist.json was only damaged or replaced, put back a genuine copy of it at the \
-             sealed generation instead: it verifies again without a reset, because the seal pins \
-             its digest; if wallet.json was rolled back (whitelist.json is newer than the seal), \
-             restore the current wallet.json instead",
+             sealed generation instead, but only if that is the latest generation you remember \
+             seeing (unlock, status and `zwallet whitelist list` print it): it verifies again \
+             without a reset, because the seal pins its digest; if you remember a higher one, \
+             wallet.json was rolled back: restore the current wallet.json instead",
             "the reset makes a new key and an empty list, decided once the password opens \
              wallet.json:",
             "    gen 2 if whitelist.json is the list wallet.json seals",
-            "    the sealed generation + 1 if wallet.json seals a list that is neither file \
-             (the number is shown once the password opens it)",
+            "    if neither file is the sealed list (it was changed or deleted): gen M+1, where M \
+             is the sealed generation, shown once the password opens wallet.json",
             "    gen 1 if wallet.json seals no whitelist yet",
         ] {
             assert!(text.contains(want), "{want:?} not in {text}");
@@ -1621,8 +1699,8 @@ mod tests {
         for want in [
             "    gen 2 if whitelist.json is the list wallet.json seals",
             "    gen 7 if whitelist.next.json is the list wallet.json seals (an unfinished edit)",
-            "    the sealed generation + 1 if wallet.json seals a list that is neither file \
-             (the number is shown once the password opens it)",
+            "    if neither file is the sealed list (it was changed or deleted): gen M+1, where M \
+             is the sealed generation, shown once the password opens wallet.json",
             "    gen 1 if wallet.json seals no whitelist yet",
         ] {
             assert!(text.contains(want), "{want:?} not in {text}");
@@ -1687,10 +1765,12 @@ mod tests {
             "discarded": { "reason": "whitelist.json: not a whitelist file", "entries": null },
         });
         let text = edit_text(&out);
-        assert!(!text.contains("dropped nothing"), "{text}");
+        assert!(!text.contains("dropped: nothing"), "{text}");
+        // Both on the line that says what was dropped.
         assert!(
-            text.contains(
-                "its unverified entries: unknown (the file is missing or cannot be read)"
+            text.lines().next().unwrap().ends_with(
+                "dropped: no verified entry; whitelist.json's entries unknown (it is missing or \
+                 cannot be read)"
             ),
             "{text}"
         );

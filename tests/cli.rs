@@ -2928,16 +2928,20 @@ fn r4_2_a_wallet_json_rolled_back_under_a_newer_list_is_named() {
     whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
     let gen1 = fs::read(home.wallet_json()).unwrap();
     whitelist_edit(&home, &["remove", "alice"]).ok();
-    // wallet.json alone put back to generation 1: the genuine gen-2 list is newer than the seal.
+    let gen2 = fs::read(home.wallet_json()).unwrap();
+    whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).ok();
+    // wallet.json alone put back two edits: the genuine gen-3 list can only mean a rollback.
     fs::write(home.wallet_json(), &gen1).unwrap();
-    let rolled = "whitelist.json (gen 2) is newer than the seal (gen 1): wallet.json was rolled \
+    let rolled = "whitelist.json (gen 3) is newer than the seal (gen 1): wallet.json was rolled \
                   back; restore the current wallet.json";
     let v = verify_list(&home);
     assert_eq!(v["verified"], false, "{v}");
-    assert!(v["reason"].as_str().unwrap_or("").contains(rolled), "{v}");
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(reason.contains(rolled), "{v}");
+    assert!(!reason.contains("genuine copy"), "{v}");
     let before = files_of(&home);
-    let msg =
-        whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).err("VALIDATION_ERROR");
+    let msg = whitelist_edit(&home, &["add", "carol", ROUTER, "--chains", "base"])
+        .err("VALIDATION_ERROR");
     assert!(msg.contains(rolled), "{msg}");
     assert!(msg.contains("never an older whitelist.json"), "{msg}");
     assert!(!msg.contains("genuine copy"), "{msg}");
@@ -2947,4 +2951,104 @@ fn r4_2_a_wallet_json_rolled_back_under_a_newer_list_is_named() {
     let r = home.run(&["sign-message", "--message", "m", "--json"]);
     let msg = r.err("WHITELIST_INVALID");
     assert!(msg.contains(rolled), "{msg}");
+    home.run(&["lock", "--json"]).ok();
+    // Put back one edit: that, or an edit to gen 3 that never finished sealing; the human tells
+    // them apart by the last generation an edit reported.
+    fs::write(home.wallet_json(), &gen2).unwrap();
+    let v = verify_list(&home);
+    let reason = v["reason"].as_str().unwrap_or("");
+    for want in [
+        "whitelist.json (gen 3) is one edit newer than the seal (gen 2)",
+        "an edit to gen 3 that never finished sealing, or wallet.json rolled back by one edit",
+        "Did the last edit you ran report gen 3?",
+    ] {
+        assert!(reason.contains(want), "{want:?} not in {v}");
+    }
+    assert!(!reason.contains("wallet.json was rolled back"), "{v}");
+}
+
+#[test]
+fn r5_1_a_rollback_across_a_reset_is_named_and_no_copy_is_offered() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    let gen1 = fs::read(home.wallet_json()).unwrap();
+    whitelist_edit(&home, &["reset"]).ok();
+    // wallet.json put back to before the reset: the list is the new key's, at gen 2.
+    fs::write(home.wallet_json(), &gen1).unwrap();
+    let why = "whitelist.json (gen 2) is newer than the seal (gen 1) but not signed by this \
+               wallet's whitelist key: wallet.json may have been rolled back across a reset, or \
+               this file is foreign";
+    let v = verify_list(&home);
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(reason.contains(why), "{v}");
+    assert!(!reason.contains("genuine copy"), "{v}");
+    let before = files_of(&home);
+    let msg =
+        whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).err("VALIDATION_ERROR");
+    assert!(msg.contains(why), "{msg}");
+    assert!(!msg.contains("genuine copy"), "{msg}");
+    assert_eq!(files_of(&home), before);
+    // A list at the sealed generation that does not verify: the copy is offered, conditionally.
+    fs::write(home.wallet_json(), &gen1).unwrap();
+    fs::write(home.path().join("whitelist.json"), b"{ not a list").unwrap();
+    let v = verify_list(&home);
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains(
+            "put back a genuine copy of whitelist.json at gen 1 only if gen 1 is the latest \
+             generation you remember seeing"
+        ),
+        "{v}"
+    );
+    assert!(
+        reason.contains("if you remember a higher one, wallet.json was rolled back"),
+        "{v}"
+    );
+}
+
+#[test]
+fn r5_a_first_edit_cut_off_before_its_seal_is_named_by_list_and_list_verify() {
+    use zwallet::chains::evm::registry::WHITELIST_RULES;
+    use zwallet::core::error::WalletError;
+    use zwallet::core::whitelist::{self, EditStage, Entry};
+
+    let home = Home::new();
+    home.create("main", &[]);
+    // The first edit, stopped right after staging (in this process, through the core edit's
+    // test hook): only whitelist.next.json, at gen 1, and no seal.
+    let crash = |s: EditStage<'_>| -> zwallet::core::error::Result<()> {
+        match s {
+            EditStage::NextWritten(_) => Err(WalletError::validation("crash")),
+            _ => Ok(()),
+        }
+    };
+    whitelist::edit_with_hook(
+        home.path(),
+        common::PW,
+        &WHITELIST_RULES,
+        |l| l.add(Entry::new_address("alice", PAYEE, &["base"])),
+        &crash,
+    )
+    .unwrap_err();
+    assert!(!home.path().join("whitelist.json").exists());
+    assert!(home.path().join("whitelist.next.json").exists());
+    let v = verify_list(&home);
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains(
+            "wallet.json seals no whitelist, but whitelist.next.json exists (a first edit \
+             interrupted before it was sealed"
+        ),
+        "{v}"
+    );
+    assert!(!reason.contains("creates it"), "{v}");
+    let plain = home.run(&["whitelist", "list", "--json"]).ok();
+    let reason = plain["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("there is no whitelist.json, but whitelist.next.json exists"),
+        "{plain}"
+    );
+    assert!(!reason.contains("creates it"), "{plain}");
 }
