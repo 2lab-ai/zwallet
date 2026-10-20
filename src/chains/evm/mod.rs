@@ -7,6 +7,7 @@ pub mod registry;
 pub mod rpc;
 pub mod tx;
 
+use crate::chains::evm::policy::ListView;
 use crate::chains::{
     Balance, Broadcast, Chain, ChainFamily, Family, FamilyKeys, Net, PreparedTx, SendRecord,
     SignedTx, TransferRequest, after_send_error, before_send_error, nonce_taken_error,
@@ -123,13 +124,16 @@ impl FamilyKeys for Evm {
         Ok(signer_at(seed, index)?.address().to_checksum(None))
     }
 
+    /// EIP-191 only, and only when the list allows message signing at all.
     fn sign_message(
         &self,
         seed: &Seed,
         index: u32,
         _chain: &Chain,
         message: &[u8],
+        list: &ListView<'_>,
     ) -> Result<Value> {
+        policy::check_message(list)?;
         let signer = signer_at(seed, index)?;
         let digest = alloy::primitives::eip191_hash_message(message);
         let signature = signer
@@ -143,9 +147,17 @@ impl FamilyKeys for Evm {
     }
 
     /// `unsigned` is the hex signing payload and nothing else. The daemon decodes it itself
-    /// (`tx::decode_unsigned`), never trusting intent fields from the CLI; a future signing
-    /// policy checks that decoded view right before `tx::sign_decoded`.
-    fn sign_tx(&self, seed: &Seed, index: u32, chain: &Chain, unsigned: &Value) -> Result<Value> {
+    /// (`tx::decode_unsigned`), never trusting intent fields from the CLI, and the signing policy
+    /// ([`policy::check_tx`]) decides that decoded view against `list` right before
+    /// `tx::sign_decoded` signs exactly it.
+    fn sign_tx(
+        &self,
+        seed: &Seed,
+        index: u32,
+        chain: &Chain,
+        unsigned: &Value,
+        list: &ListView<'_>,
+    ) -> Result<Value> {
         let payload = unsigned
             .as_str()
             .and_then(|s| s.strip_prefix("0x"))
@@ -162,7 +174,9 @@ impl FamilyKeys for Evm {
                 chain.key
             )));
         }
-        let signed = tx::sign_decoded(&signer_at(seed, index)?, &decoded)?;
+        let signer = signer_at(seed, index)?;
+        policy::check_tx(list, chain, &signer.address(), &decoded)?;
+        let signed = tx::sign_decoded(&signer, &decoded)?;
         Ok(json!({
             "rawTx": hex0x(&signed.raw),
             "txHash": hex0x(signed.hash),
@@ -347,10 +361,30 @@ mod tests {
     use crate::chains::find;
     use crate::core::error::ErrorCode;
     use crate::core::seed::TEST_MNEMONIC;
+    use crate::core::whitelist::{Entry, Whitelist};
     use zeroize::Zeroizing;
 
     fn seed() -> Seed {
         Seed::from_phrase(Zeroizing::new(TEST_MNEMONIC.into())).unwrap()
+    }
+
+    /// A non-token contract the tests call.
+    const ROUTER: &str = "0x2222222222222222222222222222222222222222";
+
+    /// A list allowing message signing and calls to [`ROUTER`]'s `deposit()` on base, as if it
+    /// verified.
+    fn permissive() -> Whitelist {
+        let mut list = Whitelist::empty(&registry::WHITELIST_RULES);
+        list.generation = 1;
+        list.entries.push(Entry::new_contract(
+            "router",
+            ROUTER,
+            &["base"],
+            &["0xd0e30db0"],
+        ));
+        list.policy.allow_message_signing = true;
+        list.validate(&registry::WHITELIST_RULES).unwrap();
+        list
     }
 
     #[test]
@@ -374,16 +408,28 @@ mod tests {
             let err = Evm.derive_address(&seed(), index).unwrap_err();
             assert_eq!(err.code, ErrorCode::ValidationError);
             assert!(err.message.contains("2^31"), "{}", err.message);
-            assert!(Evm.sign_message(&seed(), index, chain, b"x").is_err());
+            let list = permissive();
+            let allowed = ListView::Usable(&list);
+            let err = Evm
+                .sign_message(&seed(), index, chain, b"x", &allowed)
+                .unwrap_err();
+            assert!(err.message.contains("2^31"), "{}", err.message);
         }
     }
 
     #[test]
     fn sign_message_recovers_to_key_address() {
         let chain = find("ethereum").unwrap();
+        let list = permissive();
         for index in [0, 1] {
             let signed = Evm
-                .sign_message(&seed(), index, chain, b"hello zwallet")
+                .sign_message(
+                    &seed(),
+                    index,
+                    chain,
+                    b"hello zwallet",
+                    &ListView::Usable(&list),
+                )
                 .unwrap();
             let address = Evm.derive_address(&seed(), index).unwrap();
             assert_eq!(signed["address"], address.as_str());
@@ -412,12 +458,14 @@ mod tests {
                 max_fee_per_gas: alloy::primitives::U128::from(2_000_000_000u64),
                 max_priority_fee_per_gas: alloy::primitives::U128::from(1_000_000u64),
             },
-            to: parse_address("0x4200000000000000000000000000000000000006").unwrap(),
+            to: parse_address(ROUTER).unwrap(),
             value: alloy::primitives::U256::from(1234u64),
             input: abi::parse_calldata("0xd0e30db0").unwrap(),
         };
         let payload = serde_json::json!(hex0x(tx::encoded_for_signing(&unsigned)));
-        let signed = Evm.sign_tx(&seed(), 1, chain, &payload).unwrap();
+        let list = permissive();
+        let allowed = ListView::Usable(&list);
+        let signed = Evm.sign_tx(&seed(), 1, chain, &payload, &allowed).unwrap();
         let inspected = Evm.inspect_signed(chain, &signed).unwrap();
         assert_eq!(
             inspected.signer,
@@ -428,11 +476,95 @@ mod tests {
         assert_eq!(signed["decoded"]["value"], "1234");
         // Wrong chain: refused at signing and at inspection.
         let eth = find("ethereum").unwrap();
-        assert!(Evm.sign_tx(&seed(), 1, eth, &payload).is_err());
+        assert!(Evm.sign_tx(&seed(), 1, eth, &payload, &allowed).is_err());
         assert!(Evm.inspect_signed(eth, &signed).is_err());
         // Structured "intent" JSON is not accepted; only the bytes are.
-        let intent = serde_json::json!({ "to": "0x4200000000000000000000000000000000000006" });
-        assert!(Evm.sign_tx(&seed(), 1, chain, &intent).is_err());
+        let intent = serde_json::json!({ "to": ROUTER });
+        assert!(Evm.sign_tx(&seed(), 1, chain, &intent, &allowed).is_err());
+    }
+
+    #[test]
+    fn sign_tx_asks_the_policy_after_decoding_and_before_signing() {
+        let chain = find("base").unwrap();
+        let tx = |to: &str, input: &str| {
+            let unsigned = tx::UnsignedEvmTx {
+                chain_id: 8453,
+                nonce: 0,
+                gas_limit: 90_000,
+                fees: tx::EvmFees::Eip1559 {
+                    max_fee_per_gas: alloy::primitives::U128::from(1_000_000_000u64),
+                    max_priority_fee_per_gas: alloy::primitives::U128::from(1u64),
+                },
+                to: parse_address(to).unwrap(),
+                value: alloy::primitives::U256::ZERO,
+                input: abi::parse_calldata(input).unwrap(),
+            };
+            serde_json::json!(hex0x(tx::encoded_for_signing(&unsigned)))
+        };
+        let list = permissive();
+        let allowed = ListView::Usable(&list);
+        // Base's WETH, a registry token: never a contract call, whatever the list says.
+        let weth = tx("0x4200000000000000000000000000000000000006", "0xd0e30db0");
+        let err = Evm.sign_tx(&seed(), 1, chain, &weth, &allowed).unwrap_err();
+        assert_eq!(err.code, ErrorCode::WhitelistDenied, "{}", err.message);
+        // A selector the entry does not list.
+        let other = tx(ROUTER, "0x12345678");
+        let err = Evm
+            .sign_tx(&seed(), 1, chain, &other, &allowed)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::WhitelistDenied, "{}", err.message);
+        // No usable list: only the key's own address may be paid.
+        let none = ListView::Unusable(policy::NO_WHITELIST.into());
+        let call = tx(ROUTER, "0xd0e30db0");
+        let err = Evm.sign_tx(&seed(), 1, chain, &call, &none).unwrap_err();
+        assert_eq!(err.code, ErrorCode::WhitelistInvalid, "{}", err.message);
+        Evm.sign_tx(&seed(), 1, chain, &call, &allowed).unwrap();
+        let me = Evm.derive_address(&seed(), 1).unwrap();
+        Evm.sign_tx(&seed(), 1, chain, &tx(&me, "0x"), &none)
+            .unwrap();
+        // The decoder still refuses first: a malformed payload is no policy question.
+        let err = Evm
+            .sign_tx(&seed(), 1, chain, &serde_json::json!("0x04c0"), &allowed)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError, "{}", err.message);
+    }
+
+    #[test]
+    fn w12_type_4_typed_data_and_raw_hashes_are_never_signed() {
+        let chain = find("base").unwrap();
+        let list = permissive();
+        let allowed = ListView::Usable(&list);
+        // An EIP-7702 (type 4) payload: refused by the decoder, even under a list that allows
+        // everything it could.
+        let mut type4 = vec![0x04];
+        type4.extend_from_slice(&[0xc0]);
+        let err = Evm
+            .sign_tx(
+                &seed(),
+                0,
+                chain,
+                &serde_json::json!(hex0x(&type4)),
+                &allowed,
+            )
+            .unwrap_err();
+        assert!(err.message.contains("type 0x04"), "{}", err.message);
+        // sign-message signs EIP-191 of the bytes it is given, never the bytes as a hash: not a
+        // 32-byte "hash", not an EIP-712 `0x1901 || domain || struct` preimage.
+        let hash = [0xab; 32];
+        let mut typed = vec![0x19, 0x01];
+        typed.extend_from_slice(&[0x11; 64]);
+        for message in [&hash[..], &typed[..]] {
+            let signed = Evm
+                .sign_message(&seed(), 0, chain, message, &allowed)
+                .unwrap();
+            let digest = alloy::primitives::eip191_hash_message(message);
+            assert_eq!(signed["digest"], hex0x(digest));
+            assert_ne!(signed["digest"], hex0x(message));
+            assert_ne!(
+                signed["digest"],
+                hex0x(alloy::primitives::keccak256(message))
+            );
+        }
     }
 
     #[test]

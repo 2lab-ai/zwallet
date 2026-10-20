@@ -389,6 +389,10 @@ const HUMAN_DETAILS: &[&str] = &[
     "nonce",
     "from",
     "journal",
+    // Whitelist refusals: what the refusal is about, and the command a human runs to allow it.
+    "counterparty",
+    "chain",
+    "command",
 ];
 
 fn print_error(json: bool, e: &WalletError) {

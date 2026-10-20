@@ -14,6 +14,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use zwallet::core::whitelist::{Entry, Whitelist};
 
 /// A second hardhat account, used as a plain recipient.
 const OTHER: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
@@ -245,13 +246,13 @@ fn fee_node(method: &str, params: &Value, base: Option<u128>, tip: u128, gas_pri
     })
 }
 
+/// A wallet unlocked for 10 minutes whose signed whitelist lets these tests pay OTHER on every
+/// chain and call ROUTER's `deposit()` on Ethereum, under the default fee caps.
 fn unlocked() -> (Home, String) {
-    let home = Home::new();
-    let me = home.create("t", &["--unlock", "10m"])["address"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    (home, me)
+    listed(|l| {
+        payee(l, "other", OTHER, &["*"]);
+        contract(l, "router", ROUTER, &["ethereum"], &[DEPOSIT]);
+    })
 }
 
 fn transfer<'a>(rpc: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
@@ -288,9 +289,9 @@ fn dry_run_prints_no_broadcastable_raw_tx() {
             "--chain",
             "ethereum",
             "--to",
-            OTHER,
+            ROUTER,
             "--data",
-            "0xd0e30db0",
+            DEPOSIT,
             "--rpc",
             &rpc.url,
             "--dry-run",
@@ -1148,18 +1149,8 @@ fn the_journal_line_is_on_disk_before_the_node_sees_the_raw_tx() {
     // An invoke and a token transfer are journaled under their own kind.
     let inv = home
         .run(&[
-            "invoke",
-            "--chain",
-            "ethereum",
-            "--to",
-            OTHER,
-            "--data",
-            "0xd0e30db0",
-            "--value",
-            "0.5",
-            "--rpc",
-            &rpc.url,
-            "--json",
+            "invoke", "--chain", "ethereum", "--to", ROUTER, "--data", DEPOSIT, "--value", "0.5",
+            "--rpc", &rpc.url, "--json",
         ])
         .ok();
     let text = std::fs::read_to_string(&journal).unwrap();
@@ -1326,7 +1317,13 @@ fn human_errors_print_the_send_details() {
 
 #[test]
 fn rpc_fees_above_the_ceiling_need_max_fee_gwei() {
-    let (home, _) = unlocked();
+    // A whitelist fee cap of 0.1 ETH, above every fee this test builds: the CLI's ceiling is
+    // what is tested here (the cap is in `w9_…`).
+    let (home, _) = listed(|l| {
+        payee(l, "other", OTHER, &["*"]);
+        l.policy
+            .set_max_fee_wei("ethereum", alloy::primitives::U256::from(10u128.pow(17)));
+    });
     // Base fee 1 gwei, eth_gasPrice 1.1 gwei, but feeHistory claims 500 gwei tips.
     let greedy = MockRpc::start(|m, p| fee_node(m, p, Some(GWEI), 500 * GWEI, GWEI + GWEI / 10));
     let msg = home
@@ -1599,8 +1596,8 @@ fn only_recent_well_formed_entries_count_as_duplicates() {
 fn token_transfers_match_on_the_token_contract() {
     let (home, me) = unlocked();
     let rpc = mining_node();
-    // Another contract that also calls itself USDC.
-    let fake = "0x1111111111111111111111111111111111111111";
+    // Another (registry) token contract that also calls itself USDC here.
+    let fake = USDT;
     let token = |t: &'static str| {
         let mut a = transfer(&rpc.url, &["--token", t]);
         a[6] = "0.5";
@@ -2354,4 +2351,462 @@ fn a_mined_nonce_whose_receipt_cannot_be_read_names_no_outcome() {
         }
     }
     assert!(rpc.sent().is_empty());
+}
+
+// Whitelist enforcement (`.prd/04-whitelist.md`): the daemon decides every signature from its
+// own decoding of the bytes against the list that verifies against the sealed anchor. Denials are
+// tested on live sends: a dry-run may be stopped by the CLI before the daemon is asked.
+
+/// The EIP-55 example addresses: payees in these tests.
+const ALICE: &str = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+const BOB: &str = "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359";
+/// A contract that is no registry token, and a spender.
+const ROUTER: &str = "0x2222222222222222222222222222222222222222";
+const SPENDER: &str = "0x3333333333333333333333333333333333333333";
+/// Registry tokens on Ethereum besides USDC.
+const USDT: &str = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
+/// `deposit()`.
+const DEPOSIT: &str = "0xd0e30db0";
+
+/// A new wallet whose whitelist is one signed edit (`change` on an empty list), then unlocked for
+/// 10 minutes: `(home, the active key's address)`.
+fn listed(change: impl FnOnce(&mut Whitelist)) -> (Home, String) {
+    let home = Home::new();
+    home.create("t", &[]);
+    home.edit_whitelist(change);
+    let me = home.unlock("10m")["address"].as_str().unwrap().to_string();
+    (home, me)
+}
+
+fn payee(list: &mut Whitelist, nickname: &str, address: &str, chains: &[&str]) {
+    list.add(Entry::new_address(nickname, address, chains))
+        .unwrap();
+}
+
+fn contract(list: &mut Whitelist, nickname: &str, address: &str, chains: &[&str], sels: &[&str]) {
+    list.add(Entry::new_contract(nickname, address, chains, sels))
+        .unwrap();
+}
+
+/// [`healthy`] serving chain `id`, with the OP-stack GasPriceOracle's `getL1Fee` answering 1 gwei.
+fn healthy_on(id: u64) -> impl Fn(&str, &Value) -> Reply + Send + Sync + 'static {
+    move |m, p| match m {
+        "eth_chainId" => Reply::Result(hex(id.into())),
+        "eth_call" => {
+            let data = p[0]["input"]
+                .as_str()
+                .or(p[0]["data"].as_str())
+                .unwrap_or("");
+            assert!(
+                data.starts_with("0x49948e0e"),
+                "mock: unexpected eth_call {data}"
+            );
+            Reply::Result(json!(format!("0x{GWEI:064x}")))
+        }
+        _ => healthy(m, p),
+    }
+}
+
+/// `transfer` of 0.01 native to `to` on `chain`.
+fn pay<'a>(chain: &'a str, to: &'a str, rpc: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "transfer", "--chain", chain, "--to", to, "--amount", "0.01", "--rpc", rpc, "--json",
+    ];
+    args.extend_from_slice(extra);
+    args
+}
+
+/// `invoke` on Ethereum: `to`, then either `--data <hex>` or `--sig <sig> <args…>`.
+fn invoke<'a>(to: &'a str, call: &[&'a str], rpc: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["invoke", "--chain", "ethereum", "--to", to];
+    args.extend_from_slice(call);
+    args.extend_from_slice(&["--rpc", rpc, "--json"]);
+    args.extend_from_slice(extra);
+    args
+}
+
+/// Asserts a daemon refusal with `code` whose `command` detail (when `command` is `Some`) is
+/// that exact command and appears in the message. Returns the error object.
+fn refused(
+    r: &common::Run,
+    code: &str,
+    counterparty: &str,
+    chain: &str,
+    command: Option<&str>,
+) -> Value {
+    let msg = r.err(code);
+    let v = r.json();
+    assert_eq!(v["counterparty"], counterparty, "{v:#}");
+    assert_eq!(v["chain"], chain, "{v:#}");
+    match command {
+        Some(c) => {
+            assert_eq!(v["command"], c, "{v:#}");
+            assert!(msg.contains(c), "{msg}");
+        }
+        None => assert!(v.get("command").is_none(), "{v:#}"),
+    }
+    assert!(msg.starts_with("refusing to sign"), "{msg}");
+    v
+}
+
+#[test]
+fn w2_a_send_to_an_unlisted_address_is_denied_and_nothing_is_signed() {
+    let (home, me) = listed(|l| payee(l, "alice", ALICE, &["ethereum"]));
+    let rpc = MockRpc::start(healthy);
+    let r = home.run(&pay("ethereum", OTHER, &rpc.url, &[]));
+    let cmd = format!("zwallet whitelist add <nick> {OTHER} --chains ethereum");
+    refused(&r, "WHITELIST_DENIED", OTHER, "ethereum", Some(&cmd));
+    assert!(rpc.sent().is_empty(), "a denied send was broadcast");
+    assert!(
+        !journal_path(&home, &me).exists(),
+        "a denied send was journaled"
+    );
+    // Without --json: the message, then what it is about and the command, one per line.
+    let mut human = pay("ethereum", OTHER, &rpc.url, &[]);
+    human.retain(|a| *a != "--json");
+    let r = home.run(&human);
+    assert_eq!(r.code, 1);
+    let lines: Vec<&str> = r.stderr.lines().collect();
+    assert!(
+        lines[0].starts_with("error: refusing to sign: ")
+            && lines[0].ends_with(" [WHITELIST_DENIED]"),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(
+        lines[1..],
+        [
+            format!("counterparty: {OTHER}"),
+            "chain: ethereum".to_string(),
+            format!("command: {cmd}"),
+        ],
+        "{}",
+        r.stderr
+    );
+    // The listed payee on the same wallet goes through.
+    home.run(&pay("ethereum", ALICE, &rpc.url, &[])).ok();
+    assert_eq!(rpc.sent().len(), 1);
+}
+
+#[test]
+fn w3_a_payee_is_payable_only_on_its_chains() {
+    let (home, me) = listed(|l| payee(l, "alice", ALICE, &["base"]));
+    let base = MockRpc::start(healthy_on(8453));
+    let v = home.run(&pay("base", ALICE, &base.url, &[])).ok();
+    assert_eq!(v["signerDecoded"]["action"]["to"], ALICE, "{v:#}");
+    assert_eq!(base.sent().len(), 1, "signed and sent on base");
+    let journal = home
+        .path()
+        .join(format!("sends-8453-{}.jsonl", me.to_lowercase()));
+    assert!(journal.exists());
+    // The same payee on Ethereum: listed, but not for this chain.
+    let eth = MockRpc::start(healthy);
+    let r = home.run(&pay("ethereum", ALICE, &eth.url, &[]));
+    let cmd = format!(
+        "zwallet whitelist remove alice && zwallet whitelist add alice {ALICE} --chains \
+         base,ethereum"
+    );
+    refused(&r, "WHITELIST_DENIED", ALICE, "ethereum", Some(&cmd));
+    assert!(eth.sent().is_empty());
+}
+
+#[test]
+fn w5_a_list_that_does_not_verify_refuses_every_value_send_but_self_transfers() {
+    let home = Home::new();
+    home.create("t", &[]);
+    home.allow("alice", ALICE, &["*"]);
+    let gen1 = std::fs::read(home.path().join("whitelist.json")).unwrap();
+    home.allow("bob", BOB, &["*"]);
+    // whitelist.json alone swapped back to the older signed copy.
+    std::fs::write(home.path().join("whitelist.json"), &gen1).unwrap();
+    let me = home.unlock("10m")["address"].as_str().unwrap().to_string();
+    let rpc = mining_node();
+    for to in [ALICE, BOB] {
+        let r = home.run(&pay("ethereum", to, &rpc.url, &[]));
+        let cmd = format!("zwallet whitelist add <nick> {to} --chains ethereum");
+        let v = refused(&r, "WHITELIST_INVALID", to, "ethereum", Some(&cmd));
+        let msg = v["error"].as_str().unwrap();
+        assert!(
+            msg.contains("generation 1 is not the sealed generation 2"),
+            "{msg}"
+        );
+    }
+    // A hand edit of the current list (an entry added, the signature kept): the same.
+    let current = home.path().join("whitelist.json");
+    home.allow("carol", ROUTER, &["*"]); // gen 3 over the swapped file
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&current).unwrap()).unwrap();
+    v["entries"].as_array_mut().unwrap().push(json!({
+        "nickname": "mallory", "kind": "address", "address": SPENDER, "chains": ["*"],
+    }));
+    std::fs::write(&current, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    home.unlock("10m");
+    let r = home.run(&pay("ethereum", SPENDER, &rpc.url, &[]));
+    let v = r.json();
+    assert_eq!(v["errorCode"], "WHITELIST_INVALID", "{v:#}");
+    assert!(
+        v["error"].as_str().unwrap().contains("does not verify"),
+        "{v:#}"
+    );
+    assert!(rpc.sent().is_empty(), "a send went out on an invalid list");
+    // The signing key's own address is still payable.
+    home.run(&pay("ethereum", &me, &rpc.url, &[])).ok();
+    assert_eq!(rpc.sent().len(), 1);
+}
+
+#[test]
+fn w5b_an_older_wallet_list_and_key_restored_together_are_accepted_and_shown() {
+    let home = Home::new();
+    home.create("t", &[]);
+    home.allow("alice", ALICE, &["*"]);
+    let files = ["wallet.json", "whitelist.json", "whitelist.key"];
+    let old: Vec<Vec<u8>> = files
+        .iter()
+        .map(|f| std::fs::read(home.path().join(f)).unwrap())
+        .collect();
+    home.allow("bob", BOB, &["*"]);
+    for (f, bytes) in files.iter().zip(&old) {
+        std::fs::write(home.path().join(f), bytes).unwrap();
+    }
+    // Accepted, as documented; unlock shows the older generation and its entries.
+    let unlocked = home.unlock("10m");
+    assert_eq!(
+        unlocked["whitelist"],
+        json!({ "gen": 1, "verified": true, "entries": ["alice"] }),
+        "{unlocked:#}"
+    );
+    let rpc = mining_node();
+    home.run(&pay("ethereum", ALICE, &rpc.url, &[])).ok();
+    let r = home.run(&pay("ethereum", BOB, &rpc.url, &[]));
+    let cmd = format!("zwallet whitelist add <nick> {BOB} --chains ethereum");
+    refused(&r, "WHITELIST_DENIED", BOB, "ethereum", Some(&cmd));
+    assert_eq!(rpc.sent().len(), 1);
+}
+
+#[test]
+fn w6_approvals_are_revoke_only_and_transfer_from_is_never_signed() {
+    let (home, me) = listed(|l| payee(l, "alice", ALICE, &["*"]));
+    let rpc = mining_node();
+    let approve = |amount: &'static str| {
+        invoke(
+            USDC,
+            &["--sig", "approve(address,uint256)", SPENDER, amount],
+            &rpc.url,
+            &[],
+        )
+    };
+    let r = home.run(&approve("1"));
+    refused(&r, "WHITELIST_DENIED", SPENDER, "ethereum", None);
+    let r = home.run(&invoke(
+        USDC,
+        &[
+            "--sig",
+            "transferFrom(address,address,uint256)",
+            ALICE,
+            &me,
+            "1",
+        ],
+        &rpc.url,
+        &[],
+    ));
+    refused(&r, "WHITELIST_DENIED", USDC, "ethereum", None);
+    // An approval on a token outside the registry, even of 0.
+    let r = home.run(&invoke(
+        ROUTER,
+        &["--sig", "approve(address,uint256)", SPENDER, "0"],
+        &rpc.url,
+        &[],
+    ));
+    refused(&r, "WHITELIST_DENIED", ROUTER, "ethereum", None);
+    assert!(rpc.sent().is_empty());
+    // Revoking on a registry token: signed and sent, whatever the spender.
+    let v = home.run(&approve("0")).ok();
+    assert_eq!(
+        v["signerDecoded"]["action"]["kind"], "approve-call",
+        "{v:#}"
+    );
+    assert_eq!(rpc.sent().len(), 1);
+}
+
+#[test]
+fn w6_contract_calls_need_a_listed_contract_and_selector() {
+    let (home, _) = listed(|l| {
+        payee(l, "alice", ALICE, &["*"]);
+        contract(l, "router", ROUTER, &["ethereum"], &["0x12345678"]);
+    });
+    let rpc = mining_node();
+    // An unlisted contract.
+    let r = home.run(&invoke(BOB, &["--data", DEPOSIT], &rpc.url, &[]));
+    let cmd = format!(
+        "zwallet whitelist add <nick> {BOB} --chains ethereum --contract --selectors {DEPOSIT}"
+    );
+    refused(&r, "WHITELIST_DENIED", BOB, "ethereum", Some(&cmd));
+    // A payee is no contract entry.
+    let r = home.run(&invoke(ALICE, &["--data", DEPOSIT], &rpc.url, &[]));
+    refused(&r, "WHITELIST_DENIED", ALICE, "ethereum", None);
+    // A listed contract with a selector it does not list.
+    let r = home.run(&invoke(ROUTER, &["--data", DEPOSIT], &rpc.url, &[]));
+    let cmd = format!(
+        "zwallet whitelist remove router && zwallet whitelist add router {ROUTER} --chains \
+         ethereum --contract --selectors 0x12345678,{DEPOSIT}"
+    );
+    refused(&r, "WHITELIST_DENIED", ROUTER, "ethereum", Some(&cmd));
+    // Any other call on a registry token, whatever the list says.
+    let r = home.run(&invoke(USDC, &["--data", DEPOSIT], &rpc.url, &[]));
+    refused(&r, "WHITELIST_DENIED", USDC, "ethereum", None);
+    assert!(rpc.sent().is_empty());
+    // The listed selector, with native value: signed and sent.
+    let v = home
+        .run(&invoke(
+            ROUTER,
+            &["--data", "0x12345678", "--value", "0.001"],
+            &rpc.url,
+            &[],
+        ))
+        .ok();
+    assert_eq!(
+        v["signerDecoded"]["action"]["kind"], "contract-call",
+        "{v:#}"
+    );
+    assert_eq!(rpc.sent().len(), 1);
+}
+
+#[test]
+fn w6_token_transfers_need_a_registry_token_and_a_payee_that_is_no_token() {
+    // USDT listed as a payee (allowed in the list), and still never a token transfer's target.
+    let (home, _) = listed(|l| {
+        payee(l, "alice", ALICE, &["*"]);
+        payee(l, "usdt", USDT, &["ethereum"]);
+    });
+    let rpc = mining_node();
+    let token = |t: &'static str, to: &'static str| {
+        let mut a = pay("ethereum", to, &rpc.url, &["--token", t]);
+        a[6] = "0.5";
+        a
+    };
+    // A contract outside the registry, to a listed payee.
+    let r = home.run(&token(ROUTER, ALICE));
+    refused(&r, "WHITELIST_DENIED", ROUTER, "ethereum", None);
+    // A registry token to another token contract.
+    let r = home.run(&token(USDC, USDT));
+    refused(&r, "WHITELIST_DENIED", USDT, "ethereum", None);
+    // A registry token to an unlisted address.
+    let r = home.run(&token(USDC, BOB));
+    let cmd = format!("zwallet whitelist add <nick> {BOB} --chains ethereum");
+    refused(&r, "WHITELIST_DENIED", BOB, "ethereum", Some(&cmd));
+    assert!(rpc.sent().is_empty());
+    let v = home.run(&token(USDC, ALICE)).ok();
+    assert_eq!(
+        v["signerDecoded"]["action"]["kind"], "transfer-call",
+        "{v:#}"
+    );
+    assert_eq!(rpc.sent().len(), 1);
+}
+
+#[test]
+fn w9_fees_above_the_cap_or_without_a_cap_are_refused_by_the_daemon() {
+    let (home, me) = listed(|l| {
+        payee(l, "alice", ALICE, &["*"]);
+        l.policy.max_fee_wei.remove("arbitrum");
+    });
+    // feeHistory claims 500 gwei tips; --max-fee-gwei lets the CLI build that.
+    let greedy = MockRpc::start(|m, p| fee_node(m, p, Some(GWEI), 500 * GWEI, GWEI + GWEI / 10));
+    let over = |to: &str| {
+        let r = home.run(&pay(
+            "ethereum",
+            to,
+            &greedy.url,
+            &["--max-fee-gwei", "1000.5"],
+        ));
+        let v = r.json();
+        let fee: u128 = v["feeWei"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{v:#}"))
+            .parse()
+            .unwrap();
+        assert!(fee > 3 * 10u128.pow(15), "{v:#}");
+        assert_eq!(v["capWei"], "3000000000000000", "{v:#}");
+        let amount = zwallet::core::amount::format_units(alloy::primitives::U256::from(fee), 18);
+        let cmd = format!("zwallet whitelist fee-cap ethereum {amount}");
+        refused(&r, "FEE_CAP_EXCEEDED", to, "ethereum", Some(&cmd));
+    };
+    over(ALICE);
+    // Self-transfers are under the cap too while a list verifies.
+    over(&me);
+    assert!(greedy.sent().is_empty());
+    // No cap for the chain: refused, naming the command that sets one.
+    let arb = MockRpc::start(healthy_on(42161));
+    let r = home.run(&pay("arbitrum", ALICE, &arb.url, &[]));
+    let v = r.json();
+    assert_eq!(v["errorCode"], "FEE_CAP_EXCEEDED", "{v:#}");
+    let msg = v["error"].as_str().unwrap();
+    assert!(msg.contains("no fee cap for arbitrum"), "{msg}");
+    assert!(
+        v["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("zwallet whitelist fee-cap arbitrum "),
+        "{v:#}"
+    );
+    assert!(arb.sent().is_empty());
+}
+
+#[test]
+fn w11_self_transfers_need_no_list() {
+    let (home, me) = unlocked_without_list();
+    let rpc = mining_node();
+    let mut zero = pay("ethereum", &me, &rpc.url, &[]);
+    zero[6] = "0";
+    let dry = {
+        let mut a = zero.clone();
+        a.push("--dry-run");
+        home.run(&a).ok()
+    };
+    assert_eq!(dry["recoveredFrom"], me.as_str());
+    home.run(&zero).ok();
+    assert_eq!(rpc.sent().len(), 1, "the self-transfer was not sent");
+    // Anyone else: refused until a human signs a first list, with the command that does.
+    let r = home.run(&pay("ethereum", OTHER, &rpc.url, &[]));
+    let cmd = format!("zwallet whitelist add <nick> {OTHER} --chains ethereum");
+    let v = refused(&r, "WHITELIST_INVALID", OTHER, "ethereum", Some(&cmd));
+    assert!(
+        v["error"].as_str().unwrap().contains("no whitelist yet"),
+        "{v:#}"
+    );
+    assert_eq!(rpc.sent().len(), 1);
+}
+
+#[test]
+fn a_malformed_sealed_anchor_unlocks_and_signs_only_self_transfers() {
+    let home = Home::new();
+    home.create("t", &[]);
+    // A sealed policy that names a generation but no key or digest.
+    let lock = zwallet::core::store::MetaLock::acquire(home.path()).unwrap();
+    let opened = lock.open(common::PW).unwrap();
+    lock.reseal(&opened, &json!({ "whitelistGen": 1 })).unwrap();
+    drop(lock);
+    let unlocked = home.unlock("10m");
+    let w = &unlocked["whitelist"];
+    assert_eq!(w["verified"], false, "{unlocked:#}");
+    assert!(
+        w["reason"].as_str().unwrap().contains("malformed"),
+        "{unlocked:#}"
+    );
+    let me = unlocked["address"].as_str().unwrap().to_string();
+    let rpc = mining_node();
+    let r = home.run(&pay("ethereum", ALICE, &rpc.url, &[]));
+    let cmd = format!("zwallet whitelist add <nick> {ALICE} --chains ethereum");
+    refused(&r, "WHITELIST_INVALID", ALICE, "ethereum", Some(&cmd));
+    assert!(rpc.sent().is_empty());
+    home.run(&pay("ethereum", &me, &rpc.url, &[])).ok();
+    assert_eq!(rpc.sent().len(), 1);
+}
+
+/// A new wallet with no whitelist, unlocked for 10 minutes.
+fn unlocked_without_list() -> (Home, String) {
+    let home = Home::new();
+    let me = home.create("t", &["--unlock", "10m"])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (home, me)
 }
