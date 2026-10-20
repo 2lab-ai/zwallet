@@ -228,14 +228,15 @@ impl Whitelist {
     pub fn add(&mut self, entry: Entry) -> Result<()> {
         if self.by_nickname(&entry.nickname).is_some() {
             return Err(WalletError::validation(format!(
-                "the whitelist already has an entry named '{}'",
-                entry.nickname
+                "the whitelist already has an entry named {}",
+                quote(&entry.nickname)
             )));
         }
         if let Some(other) = self.by_address(&entry.address) {
             return Err(WalletError::validation(format!(
-                "{} is already in the whitelist as '{}'",
-                entry.address, other.nickname
+                "{} is already in the whitelist as {}",
+                quote(&entry.address),
+                quote(&other.nickname)
             )));
         }
         self.entries.push(entry);
@@ -256,7 +257,7 @@ impl Whitelist {
         for e in &self.entries {
             for c in e.chains.iter().filter(|c| *c != ANY_CHAIN) {
                 if !(rules.chain_known)(c) {
-                    return Err(entry_error(e, &format!("unknown chain '{c}'")));
+                    return Err(entry_error(e, &format!("unknown chain {}", quote(c))));
                 }
             }
             if e.kind == EntryKind::Contract && (rules.is_registry_token)(&e.address) {
@@ -270,7 +271,8 @@ impl Whitelist {
         for c in self.policy.max_fee_wei.keys() {
             if !(rules.chain_known)(c) {
                 return Err(WalletError::validation(format!(
-                    "whitelist fee cap for unknown chain '{c}'"
+                    "whitelist fee cap for unknown chain {}",
+                    quote(c)
                 )));
             }
         }
@@ -297,7 +299,10 @@ impl Whitelist {
             if !is_lower_hex(&e.address, 20) {
                 return Err(entry_error(
                     e,
-                    "address must be 0x and 40 lower-case hex digits",
+                    &format!(
+                        "address {} must be 0x and 40 lower-case hex digits",
+                        quote(&e.address)
+                    ),
                 ));
             }
             if !addrs.insert(e.address.as_str()) {
@@ -312,7 +317,7 @@ impl Whitelist {
             let mut seen = BTreeSet::new();
             for c in &e.chains {
                 if !seen.insert(c.as_str()) {
-                    return Err(entry_error(e, &format!("chain '{c}' listed twice")));
+                    return Err(entry_error(e, &format!("chain {} listed twice", quote(c))));
                 }
                 if c == ANY_CHAIN {
                     if e.kind == EntryKind::Contract {
@@ -325,7 +330,7 @@ impl Whitelist {
                         return Err(entry_error(e, "\"*\" must be the only chain"));
                     }
                 } else if !is_chain_key(c) {
-                    return Err(entry_error(e, &format!("'{c}' is not a chain key")));
+                    return Err(entry_error(e, &format!("{} is not a chain key", quote(c))));
                 }
             }
             match (e.kind, &e.selectors) {
@@ -346,13 +351,17 @@ impl Whitelist {
                             return Err(entry_error(
                                 e,
                                 &format!(
-                                    "selector '{s}' must be 0x and 8 lower-case hex digits (no \
-                                     wildcard)"
+                                    "selector {} must be 0x and 8 lower-case hex digits (no \
+                                     wildcard)",
+                                    quote(s)
                                 ),
                             ));
                         }
                         if !seen.insert(s.as_str()) {
-                            return Err(entry_error(e, &format!("selector {s} listed twice")));
+                            return Err(entry_error(
+                                e,
+                                &format!("selector {} listed twice", quote(s)),
+                            ));
                         }
                     }
                 }
@@ -361,11 +370,16 @@ impl Whitelist {
         for (c, v) in &self.policy.max_fee_wei {
             if !is_chain_key(c) {
                 return Err(WalletError::validation(format!(
-                    "whitelist fee cap key '{c}' is not a chain key"
+                    "whitelist fee cap key {} is not a chain key",
+                    quote(c)
                 )));
             }
             parse_wei(v).map_err(|e| {
-                WalletError::validation(format!("whitelist fee cap for {c}: {}", e.message))
+                WalletError::validation(format!(
+                    "whitelist fee cap for {}: {}",
+                    quote(c),
+                    e.message
+                ))
             })?;
         }
         Ok(())
@@ -373,7 +387,40 @@ impl Whitelist {
 }
 
 fn entry_error(e: &Entry, why: &str) -> WalletError {
-    WalletError::validation(format!("whitelist entry '{}': {why}", e.nickname))
+    WalletError::validation(format!("whitelist entry {}: {why}", quote(&e.nickname)))
+}
+
+/// The most characters of a value read from a file that a message repeats.
+const SHOWN_CHARS: usize = 64;
+
+/// A value that may come from a file, for a message a human reads (possibly while typing the
+/// password): quoted with control characters escaped (`{:?}`), and cut after [`SHOWN_CHARS`]
+/// characters, so a planted terminal escape or a fake instruction is shown inert.
+fn quote(value: &str) -> String {
+    match value.char_indices().nth(SHOWN_CHARS) {
+        Some((cut, _)) => format!("{:?}…", &value[..cut]),
+        None => format!("{value:?}"),
+    }
+}
+
+/// A parser's message that may repeat file content: control characters escaped and cut after
+/// `max` characters.
+fn clip(message: &str, max: usize) -> String {
+    let escaped: String = message
+        .chars()
+        .flat_map(|c| {
+            let e: Vec<char> = if c.is_control() {
+                c.escape_debug().collect()
+            } else {
+                vec![c]
+            };
+            e
+        })
+        .collect();
+    match escaped.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &escaped[..cut]),
+        None => escaped,
+    }
 }
 
 /// Nicknames: `^[a-z0-9][a-z0-9_-]{0,31}$`.
@@ -388,8 +435,9 @@ pub fn validate_nickname(nickname: &str) -> Result<()> {
         Ok(())
     } else {
         Err(WalletError::validation(format!(
-            "invalid whitelist nickname '{nickname}': use 1-32 of a-z 0-9 _ - starting with a \
-             letter or digit"
+            "invalid whitelist nickname {}: use 1-32 of a-z 0-9 _ - starting with a letter or \
+             digit",
+            quote(nickname)
         )))
     }
 }
@@ -417,11 +465,12 @@ fn parse_wei(s: &str) -> Result<U256> {
         !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) && (s == "0" || !s.starts_with('0'));
     if !canonical {
         return Err(WalletError::validation(format!(
-            "'{s}' is not a decimal wei amount (digits only, no leading zero)"
+            "{} is not a decimal wei amount (digits only, no leading zero)",
+            quote(s)
         )));
     }
     U256::from_str_radix(s, 10)
-        .map_err(|_| WalletError::validation(format!("'{s}' wei is too large")))
+        .map_err(|_| WalletError::validation(format!("{} wei is too large", quote(s))))
 }
 
 /// The canonical encoding the signature covers: JSON of `{version, gen, entries, policy}` with
@@ -550,8 +599,19 @@ impl SignedList {
     /// 64 bytes of lower-case hex are `VALIDATION_ERROR`. The content is not checked here
     /// ([`verify`] does that).
     pub fn from_file_bytes(bytes: &[u8]) -> Result<Self> {
-        let file: ListFile = serde_json::from_slice(bytes)
-            .map_err(|e| WalletError::validation(format!("not a whitelist file: {e}")))?;
+        let file: ListFile = serde_json::from_slice(bytes).map_err(|e| {
+            // serde's message can repeat file content (an unknown key, say): clip it.
+            let full = e.to_string();
+            let what = full
+                .rsplit_once(" at line ")
+                .map_or(full.as_str(), |(m, _)| m);
+            WalletError::validation(format!(
+                "not a whitelist file: {} (line {}, column {})",
+                clip(what, SHOWN_CHARS + 16),
+                e.line(),
+                e.column()
+            ))
+        })?;
         if file.version != LIST_VERSION {
             return Err(WalletError::validation(format!(
                 "unsupported whitelist version {} (this zwallet reads version {LIST_VERSION})",
@@ -1794,6 +1854,74 @@ mod tests {
             assert_eq!(done.list.generation, 3, "{how}");
             load_verified(home, &sealed(home).unwrap()).unwrap();
         }
+    }
+
+    /// No control character (a terminal escape) and never more than 64 characters of a value
+    /// that came from a file (the planted value ends in a run of 200 `x`).
+    fn assert_clean(msg: &str) {
+        assert!(
+            !msg.chars().any(char::is_control),
+            "control character in {msg:?}"
+        );
+        assert!(!msg.contains(&"x".repeat(65)), "unbounded: {msg:?}");
+    }
+
+    #[test]
+    fn n6_text_from_a_file_reaches_messages_escaped_and_bounded() {
+        let evil = format!(
+            "\u{1b}[2J\u{1b}[H run `zwallet whitelist add evil {CAROL}` {}",
+            "x".repeat(200)
+        );
+        type Plant = fn(&mut Whitelist, &str);
+        let plants: [(&str, Plant); 6] = [
+            ("nickname", |l, v| l.entries[0].nickname = v.into()),
+            ("address", |l, v| l.entries[0].address = v.into()),
+            ("chain", |l, v| l.entries[0].chains = vec![v.into()]),
+            ("selector", |l, v| {
+                l.entries[1].selectors = Some(vec![v.into()])
+            }),
+            ("fee cap chain", |l, v| {
+                l.policy.max_fee_wei.insert(v.into(), "1".into());
+            }),
+            ("fee cap", |l, v| {
+                l.policy.max_fee_wei.insert("base".into(), v.into());
+            }),
+        ];
+        for (what, plant) in plants {
+            let mut l = golden_list();
+            plant(&mut l, &evil);
+            let msg = l.check_format().unwrap_err().message;
+            assert!(
+                msg.contains("\\u{1b}"),
+                "{what}: the value is still named: {msg}"
+            );
+            assert_clean(&msg);
+        }
+        assert_clean(&validate_nickname(&evil).unwrap_err().message);
+
+        // Through the edit path: a hand-edited list's reason is shown while the human types.
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        let path = home.join(WHITELIST_FILE);
+        let mut v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        v["entries"][0]["nickname"] = Value::from(evil.as_str());
+        fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let shown = pick_base(home, sealed(home).as_ref(), &RULES)
+            .discarded
+            .unwrap();
+        assert_clean(&shown.reason);
+        assert_eq!(shown.entries, v["entries"], "the entries stay raw JSON");
+        // A key the parser does not know is quoted by the parser's own message.
+        v.as_object_mut()
+            .unwrap()
+            .insert(evil.clone(), Value::from(1));
+        fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert_clean(&read_list(&path).unwrap_err().message);
+        let shown = pick_base(home, sealed(home).as_ref(), &RULES)
+            .discarded
+            .unwrap();
+        assert_clean(&shown.reason);
     }
 
     #[test]
