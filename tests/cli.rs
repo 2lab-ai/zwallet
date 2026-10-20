@@ -1937,7 +1937,8 @@ fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
         "add alice",
         PAYEE,
         "chains: base",
-        "after the change: gen 1",
+        "if wallet.json seals no whitelist yet: a new list from the built-in defaults with a new \
+         key, gen 1",
         "after the change: the wallet stays locked",
     ] {
         assert!(summary.contains(want), "{want:?} not in {summary:?}");
@@ -2586,7 +2587,10 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
             "base",
         ],
         PW,
-        &[PAYEE, "after the change: gen 1"],
+        &[
+            PAYEE,
+            "a new list from the built-in defaults with a new key, gen 1",
+        ],
     )
     .ok();
     shows(
@@ -2595,7 +2599,8 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
         &[
             "chains: every chain (*)",
             "now: gen 1, 1 entry (alice)",
-            "after the change: gen 2",
+            "if whitelist.json is the list wallet.json seals: the change lands on it, making gen 2",
+            "otherwise: nothing changes",
         ],
     )
     .ok();
@@ -2720,22 +2725,28 @@ fn c2_1_the_summary_says_what_happens_to_signing() {
     );
     assert!(!shown.contains("signing session"), "{shown:?}");
     assert_eq!(v["locked"], true, "{v}");
-    // With --unlock: the new session and when it ends, said before the prompt.
+    // With --unlock: the new session and when it ends, said before the prompt. The end shown is
+    // now + 10m as of the summary: between `before` and the moment the prompt is seen.
     let before = now_secs();
+    let seen = std::cell::Cell::new(0);
     let (shown, v) = on_terminal(
         &home,
         &["add", "bob", BOB, "--chains", "base", "--unlock", "10m"],
-        || {},
+        || seen.set(now_secs()),
     );
     assert!(
         shown.contains("after the change: a new signing session for 10m (until"),
         "{shown:?}"
     );
-    let utc = zwallet::core::time::rfc3339_utc(before + 600);
-    let utc_next = zwallet::core::time::rfc3339_utc(before + 601);
+    let at = shown
+        .find("Z)")
+        .unwrap_or_else(|| panic!("no UTC time in {shown:?}"));
+    let until = zwallet::core::time::parse_rfc3339_utc(&shown[at - 19..=at])
+        .unwrap_or_else(|| panic!("not a time: {:?}", &shown[at - 19..=at]));
     assert!(
-        shown.contains(&utc[..16]) || shown.contains(&utc_next[..16]),
-        "{utc} not in {shown:?}"
+        before + 600 <= until && until <= seen.get() + 600,
+        "{before}+600 <= {until} <= {}+600",
+        seen.get()
     );
     assert!(!shown.contains("stays locked"), "{shown:?}");
     assert_eq!(v["locked"], false, "{v}");
@@ -2767,9 +2778,12 @@ fn c2_2_the_change_lands_on_exactly_the_list_shown_or_nothing_changes() {
     whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).ok();
     let path = home.path().join("whitelist.json");
     let genuine = fs::read(&path).unwrap();
+    // A running session: a refused change must leave it running (and so tell which check
+    // refused: only the checks before the daemons are stopped can).
+    let pid = home.unlock("10m")["daemonPid"].as_i64().unwrap() as i32;
 
     // The list shown is rewritten while the human types (the same signed content, other bytes):
-    // the change is refused before anything is written.
+    // the change is refused before anything is stopped or written.
     let before = files_of(&home);
     let compact = {
         let v: serde_json::Value = serde_json::from_slice(&genuine).unwrap();
@@ -2782,8 +2796,15 @@ fn c2_2_the_change_lands_on_exactly_the_list_shown_or_nothing_changes() {
     assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
     let msg = v["error"].as_str().unwrap();
     assert!(
-        msg.contains("whitelist.json changed after it was shown; nothing changed"),
+        msg.contains("whitelist.json changed after it was shown; nothing in the whitelist changed"),
         "{msg}"
+    );
+    assert!(!msg.contains("stopped"), "{msg}");
+    assert_eq!(v["locked"], serde_json::Value::Null, "{v}");
+    assert_eq!(
+        home.daemon_pids(),
+        vec![pid],
+        "a swap after the summary stopped the session"
     );
     fs::write(&path, &genuine).unwrap();
     assert_eq!(
@@ -2805,6 +2826,19 @@ fn c2_2_the_change_lands_on_exactly_the_list_shown_or_nothing_changes() {
         "{shown:?}"
     );
     assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
+    let msg = v["error"].as_str().unwrap();
+    assert!(
+        msg.starts_with(
+            "refusing to edit the whitelist: whitelist.json: whitelist signature does not verify"
+        ),
+        "{msg}"
+    );
+    assert!(msg.contains("nothing changed"), "{msg}");
+    assert_eq!(
+        home.daemon_pids(),
+        vec![pid],
+        "the forged list stopped the session"
+    );
     assert_eq!(
         files_of(&home),
         before,
@@ -2823,4 +2857,57 @@ fn c2_2_the_change_lands_on_exactly_the_list_shown_or_nothing_changes() {
     let e = r.ok();
     assert_eq!(e["gen"], 3, "{e}");
     assert_eq!(nicknames(&e["entries"]), ["alice"], "{e}");
+}
+
+#[test]
+fn r3_2_a_wallet_json_from_before_the_first_edit_refuses_every_edit() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    let fresh = fs::read(home.wallet_json()).unwrap();
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    whitelist_edit(&home, &["fee-cap", "base", "0.0001"]).ok();
+    // The agent puts back the wallet.json from before the first edit: no whitelist is sealed,
+    // but the real list is still on disk.
+    fs::write(home.wallet_json(), &fresh).unwrap();
+    let before = files_of(&home);
+    for args in [
+        &["add", "bob", BOB, "--chains", "base"][..],
+        &["remove", "alice"],
+        &["fee-cap", "base", "0.05"],
+        &["allow-message-signing", "on"],
+    ] {
+        let r = whitelist_edit(&home, args);
+        assert!(
+            r.stderr.contains("otherwise: nothing changes"),
+            "{args:?}: {}",
+            r.stderr
+        );
+        let msg = r.err("VALIDATION_ERROR");
+        for want in [
+            "wallet.json seals no whitelist, but whitelist.json exists",
+            "a wallet.json restored from before the first edit, or a planted file",
+            "nothing changed",
+            "zwallet whitelist reset",
+            "sets every fee cap back to the built-in default",
+        ] {
+            assert!(msg.contains(want), "{args:?}: {want:?} not in {msg}");
+        }
+        assert_eq!(files_of(&home), before, "{args:?} wrote something");
+    }
+    // Reset still works: a new key, an empty list, the list it dropped shown.
+    let z = whitelist_edit(&home, &["reset"]).ok();
+    assert_eq!(
+        (&z["gen"], &z["keyCreated"]),
+        (&json!(1), &json!(true)),
+        "{z}"
+    );
+    assert_eq!(z["entries"], json!([]), "{z}");
+    assert_eq!(nicknames(&z["discarded"]["entries"]), ["alice"], "{z}");
+    let v = verify_list(&home);
+    assert_eq!(
+        (&v["verified"], &v["gen"]),
+        (&json!(true), &json!(1)),
+        "{v}"
+    );
 }

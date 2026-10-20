@@ -2982,6 +2982,8 @@ fn f1_a_dry_run_the_list_denies_is_explained_and_never_reaches_the_signer() {
         .ok();
     assert_eq!(v["whitelist"]["allowed"], false, "{v:#}");
     assert_eq!(v["whitelist"]["code"], "WHITELIST_INVALID", "{v:#}");
+    // No edit is suggested from a list that cannot be trusted.
+    assert!(v["whitelist"].get("command").is_none(), "{v:#}");
     let ops = daemon_ops(&fake);
     assert!(!ops.iter().any(|op| op == "sign_tx"), "{ops:?}");
     assert!(rpc.sent().is_empty());
