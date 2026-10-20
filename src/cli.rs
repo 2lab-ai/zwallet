@@ -47,6 +47,9 @@ pub enum Command {
     Transfer(TransferArgs),
     /// EIP-191 personal_sign. Needs an unlocked wallet.
     SignMessage(SignMessageArgs),
+    /// Look a transaction up by hash: mined (with its receipt), pending, or not found. Works
+    /// while locked, and without a wallet.
+    Tx(TxArgs),
     /// Wallet, lock state, and active key.
     Status,
     /// Print the recovery phrase. Interactive terminals only, after the password.
@@ -241,6 +244,18 @@ pub struct TransferArgs {
     pub rpc: Option<String>,
     #[command(flatten)]
     pub key: KeyArg,
+}
+
+#[derive(Debug, Args)]
+pub struct TxArgs {
+    #[arg(long)]
+    pub chain: String,
+    /// The transaction hash (0x and 64 hex digits).
+    #[arg(value_name = "TXHASH")]
+    pub tx_hash: String,
+    /// RPC URL (overrides ZWALLET_RPC_<CHAIN> and the default).
+    #[arg(long)]
+    pub rpc: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -584,6 +599,19 @@ mod tests {
         );
         let plain = WalletError::validation("bad");
         assert_eq!(human_error(&plain), "error: bad [VALIDATION_ERROR]");
+    }
+
+    #[test]
+    fn tx_takes_a_positional_hash() {
+        let cli =
+            Cli::try_parse_from(["zwallet", "tx", "--chain", "base", "0xab", "--json"]).unwrap();
+        assert!(cli.json);
+        match cli.command {
+            Command::Tx(a) => assert_eq!((a.chain.as_str(), a.tx_hash.as_str()), ("base", "0xab")),
+            other => panic!("{other:?}"),
+        }
+        assert!(Cli::try_parse_from(["zwallet", "tx", "--chain", "base"]).is_err());
+        assert!(Cli::try_parse_from(["zwallet", "tx", "0xab"]).is_err());
     }
 
     #[test]

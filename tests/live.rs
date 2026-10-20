@@ -333,3 +333,82 @@ fn bsc_legacy_dry_run_is_inside_the_ceiling() {
     assert!(price > 0 && price <= 6_000_000_000, "{price}");
     assert_eq!(v["signerDecoded"]["action"]["kind"], "native-transfer");
 }
+
+/// A mined USDC `transfer` from a recent Ethereum block, found over RPC here: `(hash, tx)`.
+async fn recent_usdc_transfer() -> (String, Value) {
+    let chain = chains::find("ethereum").unwrap();
+    let net = Net {
+        chain,
+        rpc_url: chain.default_rpc().to_string(),
+    };
+    let p = evm::rpc::connect(&net).await.unwrap();
+    let latest = p.get_block_number().await.unwrap();
+    // A few blocks back, so every node behind the endpoint has the receipts.
+    for n in (latest - 30..=latest - 5).rev() {
+        let block: Value = p
+            .client()
+            .request("eth_getBlockByNumber", (format!("{n:#x}"), true))
+            .await
+            .unwrap();
+        let found = block["transactions"].as_array().unwrap().iter().find(|tx| {
+            tx["to"]
+                .as_str()
+                .is_some_and(|to| to.eq_ignore_ascii_case(USDC))
+                && tx["input"]
+                    .as_str()
+                    .is_some_and(|i| i.starts_with("0xa9059cbb"))
+        });
+        if let Some(tx) = found {
+            return (tx["hash"].as_str().unwrap().to_string(), tx.clone());
+        }
+    }
+    panic!(
+        "no USDC transfer in blocks {} to {}",
+        latest - 30,
+        latest - 5
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live: public RPC"]
+async fn tx_looks_up_a_mined_mainnet_transfer_without_a_wallet() {
+    let (hash, tx) = recent_usdc_transfer().await;
+    let home = Home::new();
+    let v = home
+        .run(&["tx", "--chain", "ethereum", &hash, "--json"])
+        .ok();
+    println!("{v:#}");
+    assert_eq!(v["txHash"], hash.as_str());
+    assert_eq!(v["found"], true);
+    assert_eq!(v["status"], "mined");
+    let from: Address = tx["from"].as_str().unwrap().parse().unwrap();
+    assert_eq!(v["from"], from.to_checksum(None).as_str());
+    assert_eq!(v["to"], USDC);
+    let nonce =
+        u64::from_str_radix(tx["nonce"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+    assert_eq!(v["nonce"], nonce);
+    let block = u64::from_str_radix(
+        tx["blockNumber"].as_str().unwrap().trim_start_matches("0x"),
+        16,
+    )
+    .unwrap();
+    assert_eq!(v["blockNumber"], block);
+    assert!(v["gasUsed"].as_u64().unwrap() > 21_000, "{v:#}");
+    assert!(v["success"].is_boolean(), "{v:#}");
+    assert_eq!(v["value"], "0");
+    assert_eq!(
+        v["explorerUrl"],
+        format!("https://etherscan.io/tx/{hash}").as_str()
+    );
+    // A hash nobody sent: not found, with the hint that keeps a retry on its nonce.
+    let none = format!("0x{}", "0".repeat(63) + "1");
+    let v = home
+        .run(&["tx", "--chain", "ethereum", &none, "--json"])
+        .ok();
+    println!("{v:#}");
+    assert_eq!(v["status"], "not found");
+    assert!(
+        v["hint"].as_str().unwrap().contains("without --nonce"),
+        "{v:#}"
+    );
+}

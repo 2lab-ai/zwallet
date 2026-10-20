@@ -8,7 +8,7 @@ use crate::chains::{
 };
 use crate::cli::{
     AddressArgs, BalanceArgs, CallArgs, Cli, Command, CreateArgs, InvokeArgs, KeyArg, Out,
-    SendArgs, SignMessageArgs, TransferArgs, UnlockArgs, VerifyArgs, render_human,
+    SendArgs, SignMessageArgs, TransferArgs, TxArgs, UnlockArgs, VerifyArgs, render_human,
 };
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
@@ -48,6 +48,7 @@ pub async fn run(cli: Cli) -> Result<Out> {
         Command::Invoke(a) => invoke(&home()?, a).await,
         Command::Transfer(a) => transfer(&home()?, a).await,
         Command::SignMessage(a) => sign_message(&home()?, a).await,
+        Command::Tx(a) => tx(a).await,
         Command::Status => status(&home()?).await,
         Command::Backup => backup(&home()?),
         Command::Unlock(a) => unlock(&home()?, a).await,
@@ -836,7 +837,9 @@ async fn transfer_with<F: ChainFamily>(
 
 /// What `out` (the command's fields merged with `prepare`'s) says the send does: the recipient
 /// (the contract for an invoke), the amount with its symbol (`amount` and the asset's `symbol`
-/// for a transfer, the native `value` for an invoke), and the token contract of a token transfer.
+/// for a transfer, the native `value` for an invoke), the same amount in base units
+/// (`amountRaw` for a transfer, `valueRaw` for an invoke), and the token contract of a token
+/// transfer. The duplicate check keys on the base units, never on the symbol the node reported.
 fn send_summary(out: &Map<String, Value>, chain: &Chain, kind: &str) -> chains::SendSummary {
     let text = |k: &str| out.get(k).and_then(Value::as_str);
     chains::SendSummary {
@@ -847,6 +850,9 @@ fn send_summary(out: &Map<String, Value>, chain: &Chain, kind: &str) -> chains::
             text("amount").or_else(|| text("value")).unwrap_or("?"),
             text("symbol").unwrap_or(chain.symbol)
         ),
+        amount_raw: text("amountRaw")
+            .or_else(|| text("valueRaw"))
+            .map(str::to_string),
         token: text("token").map(str::to_string),
     }
 }
@@ -884,7 +890,7 @@ async fn sign_and_send<F: ChainFamily>(
     let summary = send_summary(&out, net.chain, kind);
     if send.nonce.is_none() {
         let now = crate::core::time::unix_secs(std::time::SystemTime::now());
-        let duplicates = journal.recent_duplicates(&summary, now);
+        let duplicates = journal.recent_duplicates(&summary, now)?;
         if !duplicates.is_empty() && !send.dry_run && !send.allow_duplicate {
             return Err(journal.duplicate_error(duplicates));
         }
@@ -951,9 +957,20 @@ async fn sign_and_send<F: ChainFamily>(
     if send.wait {
         let timeout = send.wait_timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT);
         let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
-        chains::record_receipt(&mut out, receipt);
+        chains::record_receipt(&mut out, net.chain, receipt);
     }
     Ok(Out::json(Value::Object(out)))
+}
+
+/// `tx`: a transaction looked up by hash on the chain's node. Needs no wallet and no key, so it
+/// works while locked; every message that says to look a send up names this command.
+async fn tx(a: TxArgs) -> Result<Out> {
+    let chain = chains::find(&a.chain)?;
+    let net = net(chain, a.rpc.as_deref());
+    let found = match &chain.family {
+        Family::Evm(_) => Evm.lookup_tx(&net, &a.tx_hash).await?,
+    };
+    Ok(Out::json(Value::Object(found)))
 }
 
 async fn sign_message(home: &Path, a: SignMessageArgs) -> Result<Out> {

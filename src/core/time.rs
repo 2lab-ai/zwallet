@@ -69,8 +69,14 @@ pub fn rfc3339_utc(secs: u64) -> String {
 }
 
 /// Parses what [`rfc3339_utc`] writes (`2026-10-20T04:05:06Z`, exactly) back to UNIX seconds;
-/// `None` for anything else or a time before 1970.
+/// `None` for anything else, a time before 1970, or a day the month does not have (`2026-02-31`
+/// would otherwise roll over into March): the result must format back to `s` itself.
 pub fn parse_rfc3339_utc(s: &str) -> Option<u64> {
+    civil_to_secs(s).filter(|&secs| rfc3339_utc(secs) == s)
+}
+
+/// [`parse_rfc3339_utc`] without the round trip: every day 1 to 31 is accepted in every month.
+fn civil_to_secs(s: &str) -> Option<u64> {
     let b = s.as_bytes();
     let shape = b.len() == 20
         && b[4] == b'-'
@@ -173,6 +179,34 @@ mod tests {
             "2026-1a-20T04:05:06Z",
             "+026-10-20T04:05:06Z",
             "1969-12-31T23:59:59Z",
+        ] {
+            assert_eq!(parse_rfc3339_utc(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn rfc3339_refuses_days_the_month_does_not_have() {
+        // Feb 29 only in leap years (every 4th, but not every 100th unless every 400th).
+        for good in [
+            "2024-02-29T00:00:00Z",
+            "2000-02-29T12:00:00Z",
+            "2026-01-31T23:59:59Z",
+            "2026-04-30T00:00:00Z",
+            "2026-12-31T00:00:00Z",
+        ] {
+            let secs = parse_rfc3339_utc(good).unwrap_or_else(|| panic!("{good}"));
+            assert_eq!(rfc3339_utc(secs), good);
+        }
+        for bad in [
+            "2026-02-29T00:00:00Z",
+            "2100-02-29T00:00:00Z",
+            "2026-02-30T00:00:00Z",
+            "2026-02-31T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-06-31T00:00:00Z",
+            "2026-09-31T00:00:00Z",
+            "2026-11-31T00:00:00Z",
+            "2026-10-00T00:00:00Z",
         ] {
             assert_eq!(parse_rfc3339_utc(bad), None, "{bad:?}");
         }
