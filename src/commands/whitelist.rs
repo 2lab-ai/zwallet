@@ -597,7 +597,8 @@ fn outcome_lines(lines: &mut Vec<String>, current: &FileView, next: &FileView, r
             ));
         }
         lines.push(
-            "    the sealed generation + 1 if neither file is (shown once the password opens it)"
+            "    the sealed generation + 1 if wallet.json seals a list that is neither file \
+             (the number is shown once the password opens it)"
                 .to_string(),
         );
         lines.push("    gen 1 if wallet.json seals no whitelist yet".to_string());
@@ -1580,7 +1581,8 @@ mod tests {
             "the reset makes a new key and an empty list, decided once the password opens \
              wallet.json:",
             "    gen 2 if whitelist.json is the list wallet.json seals",
-            "    the sealed generation + 1 if neither file is (shown once the password opens it)",
+            "    the sealed generation + 1 if wallet.json seals a list that is neither file \
+             (the number is shown once the password opens it)",
             "    gen 1 if wallet.json seals no whitelist yet",
         ] {
             assert!(text.contains(want), "{want:?} not in {text}");
@@ -1619,7 +1621,8 @@ mod tests {
         for want in [
             "    gen 2 if whitelist.json is the list wallet.json seals",
             "    gen 7 if whitelist.next.json is the list wallet.json seals (an unfinished edit)",
-            "    the sealed generation + 1 if neither file is (shown once the password opens it)",
+            "    the sealed generation + 1 if wallet.json seals a list that is neither file \
+             (the number is shown once the password opens it)",
             "    gen 1 if wallet.json seals no whitelist yet",
         ] {
             assert!(text.contains(want), "{want:?} not in {text}");
