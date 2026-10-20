@@ -12,6 +12,7 @@
 //! WETH on Polygon (PoS bridge, not Maker); DAI.e, WETH.e and USDT.e on Avalanche; the wrapped
 //! natives WPOL, WBNB and WAVAX; USDT, DAI and WETH on Sepolia.
 
+use crate::core::whitelist::ChainRules;
 use alloy::hex;
 use alloy::primitives::Address;
 
@@ -136,6 +137,24 @@ pub const DEFAULT_FEE_CAPS_WEI: &[(&str, &str)] = &[
     ("sepolia", "10000000000000000"),
 ];
 
+/// The chain facts the whitelist's validation needs: the supported chain keys, the registry
+/// tokens, and the default fee caps.
+pub const WHITELIST_RULES: ChainRules = ChainRules {
+    chain_known,
+    is_registry_token: is_token_anywhere_str,
+    default_fee_caps_wei: DEFAULT_FEE_CAPS_WEI,
+};
+
+fn chain_known(key: &str) -> bool {
+    crate::chains::CHAINS.iter().any(|c| c.key == key)
+}
+
+fn is_token_anywhere_str(address: &str) -> bool {
+    address
+        .parse::<Address>()
+        .is_ok_and(|a| is_token_anywhere(&a))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +237,44 @@ mod tests {
         assert!(!is_token_anywhere(&addr(
             "0x55d398326f99059fF775485246999027B3197955"
         )));
+    }
+
+    #[test]
+    fn whitelist_rules_are_the_real_chains_and_registry() {
+        use crate::core::whitelist::{Entry, Whitelist};
+        let rules = WHITELIST_RULES;
+        for c in CHAINS {
+            assert!((rules.chain_known)(c.key), "{}", c.key);
+        }
+        for bad in ["Base", " base", "*", "solana", ""] {
+            assert!(!(rules.chain_known)(bad), "{bad:?}");
+        }
+        assert!((rules.is_registry_token)(
+            "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        ));
+        assert!(!(rules.is_registry_token)(
+            "0x1111111111111111111111111111111111111111"
+        ));
+        assert!(!(rules.is_registry_token)("not an address"));
+        assert_eq!(rules.default_fee_caps_wei, DEFAULT_FEE_CAPS_WEI);
+
+        let mut list = Whitelist::empty(&rules);
+        list.generation = 1;
+        list.entries.push(Entry::new_address(
+            "alice",
+            "0x1111111111111111111111111111111111111111",
+            &["base", "sepolia"],
+        ));
+        list.validate(&rules).unwrap();
+        // Arbitrum's DAI as a contract entry, even scoped to a chain where it is no token.
+        list.entries.push(Entry::new_contract(
+            "dai",
+            "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",
+            &["ethereum"],
+            &["0x12345678"],
+        ));
+        let err = list.validate(&rules).unwrap_err();
+        assert!(err.message.contains("registry token"), "{}", err.message);
     }
 
     #[test]
