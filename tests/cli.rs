@@ -2845,8 +2845,9 @@ fn c2_2_the_change_lands_on_exactly_the_list_shown_or_nothing_changes() {
         "the refused change wrote something"
     );
 
-    // An unfinished edit in whitelist.next.json is shown too.
-    fs::copy(&path, home.path().join("whitelist.next.json")).unwrap();
+    // An unfinished edit in whitelist.next.json is shown too (the same signed list, other bytes:
+    // a byte-identical copy is labelled as left after a change instead).
+    fs::write(home.path().join("whitelist.next.json"), &compact).unwrap();
     let r = whitelist_edit(&home, &["remove", "bob"]);
     assert!(
         r.stderr
