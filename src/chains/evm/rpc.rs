@@ -5,8 +5,10 @@ use super::tx::{
     EvmFees, IERC20, IGasPriceOracle, UnsignedEvmTx, encoded_for_signing, erc20_transfer_calldata,
     gas_with_margin,
 };
-use super::{config, parse_address};
-use crate::chains::{Net, PreparedTx, TransferRequest, redact_url, url_origin};
+use super::{config, parse_address, parse_tx_hash};
+use crate::chains::{
+    BUMP_SCALE, DEFAULT_BUMP, Net, PreparedTx, TransferRequest, bump_label, redact_url, url_origin,
+};
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use alloy::eips::BlockNumberOrTag;
@@ -36,12 +38,6 @@ const REFERENCE_FLOOR: u128 = GWEI;
 const GAS_PRICE_ORACLE: Address = address!("0x420000000000000000000000000000000000000F");
 /// Gas limit used for a token-transfer dry-run when the node cannot estimate (no token balance).
 pub const TOKEN_FALLBACK_GAS: u64 = 100_000;
-/// A replacement (`--nonce` below the pending nonce) pays this multiple of the estimated fees,
-/// `NUM / DEN`, rounded up. Nodes drop a replacement that does not outbid the pending transaction
-/// by their bump rule (geth and most clients: +10% on both the tip and the fee cap).
-const REPLACEMENT_BUMP_NUM: u128 = 5;
-const REPLACEMENT_BUMP_DEN: u128 = 4;
-const REPLACEMENT_BUMP: &str = "1.25x";
 /// `eth_sendRawTransaction` errors in which the node refuses the transaction itself (geth's
 /// txpool wording, which most clients share), matched case-insensitively: it never entered the
 /// node's pool, so nothing was broadcast.
@@ -207,10 +203,30 @@ pub async fn erc20_balance(p: &EvmProvider, token: Address, owner: Address) -> R
         .map_err(|e| WalletError::rpc(format!("balanceOf returned malformed data: {e}")))
 }
 
-/// EIP-1559 fees when the chain has a base fee, legacy `eth_gasPrice` otherwise, raised 1.25x when
-/// `replacing` a pending transaction, then checked against [`check_fee_ceiling`] (`explicit` =
-/// `--max-fee-gwei` in wei).
-pub async fn fees(p: &EvmProvider, explicit: Option<u128>, replacing: bool) -> Result<EvmFees> {
+/// What a replacement (`--nonce` below the pending nonce, or `--replace`) must outbid: `bump`
+/// ([`crate::chains::parse_bump`]) times the estimate, and times the fees of the transaction it
+/// replaces when those are known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outbid {
+    pub bump: u128,
+    pub original: Option<OriginalFees>,
+}
+
+/// Fee cap and tip of the transaction being replaced (both its `gasPrice` if it is legacy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OriginalFees {
+    pub max_fee: u128,
+    pub tip: u128,
+}
+
+/// EIP-1559 fees when the chain has a base fee, legacy `eth_gasPrice` otherwise, raised by
+/// `outbid` when replacing a pending transaction, then checked against [`check_fee_ceiling`]
+/// (`explicit` = `--max-fee-gwei` in wei).
+pub async fn fees(
+    p: &EvmProvider,
+    explicit: Option<u128>,
+    outbid: Option<Outbid>,
+) -> Result<EvmFees> {
     let block = p
         .rpc(
             "eth_getBlockByNumber",
@@ -240,44 +256,122 @@ pub async fn fees(p: &EvmProvider, explicit: Option<u128>, replacing: bool) -> R
             (fees, 0)
         }
     };
-    if !replacing {
+    let Some(outbid) = outbid else {
         check_fee_ceiling(&fees, base, gas_price, explicit)?;
         return Ok(fees);
-    }
-    let fees = replacement_fees(fees);
+    };
+    let fees = replacement_fees(fees, outbid);
     check_fee_ceiling(&fees, base, gas_price, explicit).map_err(|e| {
         WalletError::new(
             e.code,
             format!(
-                "{} (this replaces a pending transaction, so the fees include the \
-                 {REPLACEMENT_BUMP} replacement bump)",
-                e.message
+                "{} (this replaces a pending transaction, so the fees include the {} replacement \
+                 bump{})",
+                e.message,
+                bump_label(outbid.bump),
+                if outbid.original.is_some() {
+                    " over the higher of the estimate and the original's fees"
+                } else {
+                    ""
+                }
             ),
         )
     })?;
     Ok(fees)
 }
 
-/// Every fee field times [`REPLACEMENT_BUMP`], rounded up (so a 1 wei tip still rises).
-fn replacement_fees(fees: EvmFees) -> EvmFees {
-    let up = |v: U128| {
-        U128::from(
-            v.to::<u128>()
-                .saturating_mul(REPLACEMENT_BUMP_NUM)
-                .div_ceil(REPLACEMENT_BUMP_DEN),
-        )
-    };
+/// Every fee field times the bump, rounded up (so a 1 wei tip still rises), and at least the bump
+/// times the original's matching fee. The tip never exceeds the fee cap.
+fn replacement_fees(fees: EvmFees, outbid: Outbid) -> EvmFees {
+    let up = |v: u128| v.saturating_mul(outbid.bump).div_ceil(BUMP_SCALE);
+    let (cap, tip) = outbid.original.map_or((0, 0), |o| (o.max_fee, o.tip));
     match fees {
         EvmFees::Eip1559 {
             max_fee_per_gas,
             max_priority_fee_per_gas,
-        } => EvmFees::Eip1559 {
-            max_fee_per_gas: up(max_fee_per_gas),
-            max_priority_fee_per_gas: up(max_priority_fee_per_gas),
-        },
+        } => {
+            let tip = up(max_priority_fee_per_gas.to()).max(up(tip));
+            let max = up(max_fee_per_gas.to()).max(up(cap)).max(tip);
+            EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(max),
+                max_priority_fee_per_gas: U128::from(tip),
+            }
+        }
         EvmFees::Legacy { gas_price } => EvmFees::Legacy {
-            gas_price: up(gas_price),
+            gas_price: U128::from(up(gas_price.to()).max(up(cap))),
         },
+    }
+}
+
+/// The fees of the transaction `--replace` names, read as plain JSON. It must be `from`'s
+/// transaction at `nonce` and not yet mined. A node that does not know it cannot tell its fees.
+async fn original_fees(
+    p: &EvmProvider,
+    hash: B256,
+    from: Address,
+    nonce: u64,
+) -> Result<OriginalFees> {
+    let call = p
+        .client()
+        .request::<_, Option<Value>>("eth_getTransactionByHash", (hash,));
+    let tx = p
+        .rpc("eth_getTransactionByHash", call)
+        .await?
+        .ok_or_else(|| {
+            WalletError::rpc(format!(
+                "the node does not know --replace {hash}, so its fees are unknown; nothing was \
+                 signed. If that transaction was dropped, retry with the same --nonce {nonce} \
+                 and no --replace (with a larger --bump if the node refuses the replacement)"
+            ))
+        })?;
+    let num = |k: &str| {
+        tx.get(k)
+            .and_then(Value::as_str)
+            .and_then(|h| u128::from_str_radix(h.strip_prefix("0x")?, 16).ok())
+    };
+    let refuse = |why: String| {
+        WalletError::validation(format!("--replace {hash}: {why}; nothing was signed"))
+    };
+    let sender = tx
+        .get("from")
+        .and_then(Value::as_str)
+        .and_then(|a| a.parse::<Address>().ok());
+    if sender != Some(from) {
+        return Err(refuse(format!(
+            "it was sent from {}, not from this key ({})",
+            sender.map_or_else(|| "an unknown address".to_string(), |a| a.to_checksum(None)),
+            from.to_checksum(None)
+        )));
+    }
+    match num("nonce") {
+        Some(n) if n == u128::from(nonce) => {}
+        other => {
+            return Err(refuse(format!(
+                "it has nonce {}, not --nonce {nonce}",
+                other.map_or_else(|| "?".to_string(), |n| n.to_string())
+            )));
+        }
+    }
+    if tx.get("blockNumber").is_some_and(|b| !b.is_null()) {
+        return Err(refuse(
+            "it is already mined, so that send went through: look it up before sending anything \
+             new"
+            .to_string(),
+        ));
+    }
+    match (
+        num("maxFeePerGas"),
+        num("maxPriorityFeePerGas"),
+        num("gasPrice"),
+    ) {
+        (Some(max_fee), Some(tip), _) => Ok(OriginalFees { max_fee, tip }),
+        (_, _, Some(price)) => Ok(OriginalFees {
+            max_fee: price,
+            tip: price,
+        }),
+        _ => Err(WalletError::rpc(format!(
+            "the node's answer for --replace {hash} has no fee fields; nothing was signed"
+        ))),
     }
 }
 
@@ -388,6 +482,10 @@ pub struct Intent {
     pub dry_run: bool,
     /// `--nonce`: replace a pending transaction (or name the next nonce) instead of `pending`.
     pub nonce: Option<u64>,
+    /// `--bump` in ten-thousandths (default [`DEFAULT_BUMP`] when replacing).
+    pub bump: Option<u128>,
+    /// `--replace`: the pending transaction being replaced, whose fees are outbid too.
+    pub replace: Option<B256>,
     /// `--max-fee-gwei` in wei: the explicit fee ceiling.
     pub max_fee_per_gas: Option<u128>,
 }
@@ -477,7 +575,16 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         }
     };
     let replacing = nonce < pending;
-    let fees = fees(p, intent.max_fee_per_gas, replacing).await?;
+    let original = match intent.replace {
+        Some(hash) => Some(original_fees(p, hash, intent.from, nonce).await?),
+        None => None,
+    };
+    // `--replace` outbids the named transaction even where this node no longer counts it.
+    let outbid = (replacing || original.is_some()).then(|| Outbid {
+        bump: intent.bump.unwrap_or(DEFAULT_BUMP),
+        original,
+    });
+    let fees = fees(p, intent.max_fee_per_gas, outbid).await?;
     let (gas_estimate, gas_source) = match estimate(p, &intent, intent.value).await {
         Ok(g) => (g, "estimate"),
         // The node will not estimate a tx the account cannot fund. In a dry-run, estimate
@@ -537,8 +644,11 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     fields.insert("nonce".into(), json!(nonce));
     if intent.nonce.is_some() {
         fields.insert("replacesPending".into(), json!(replacing));
-        let bump = replacing.then_some(REPLACEMENT_BUMP);
+        let bump = outbid.map(|o| bump_label(o.bump));
         fields.insert("feeBump".into(), json!(bump));
+    }
+    if let Some(hash) = intent.replace {
+        fields.insert("replacesTx".into(), json!(format!("{hash:#x}")));
     }
     fields.insert("gasLimit".into(), json!(gas_limit));
     fields.insert("gasEstimate".into(), json!(gas_estimate));
@@ -653,6 +763,7 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
     let from = parse_address(&req.from)?;
     let to = parse_address(&req.to)?;
     let token = req.token.as_deref().map(parse_address).transpose()?;
+    let replace = req.replace.as_deref().map(parse_tx_hash).transpose()?;
     check_recipient(to, token, req.force)?;
     let native_amount = match token {
         None => Some(parse_units(&req.amount, chain.decimals)?),
@@ -683,6 +794,8 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
                 fallback_gas: Some(TOKEN_FALLBACK_GAS),
                 dry_run: req.dry_run,
                 nonce: req.nonce,
+                bump: req.bump,
+                replace,
                 max_fee_per_gas: req.max_fee_per_gas,
             };
             (intent, extra)
@@ -703,6 +816,8 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
                 fallback_gas: None,
                 dry_run: req.dry_run,
                 nonce: req.nonce,
+                bump: req.bump,
+                replace,
                 max_fee_per_gas: req.max_fee_per_gas,
             };
             (intent, extra)
@@ -1010,9 +1125,14 @@ mod tests {
         assert!(check_recipient(token, Some(token), true).is_ok());
     }
 
+    const QUARTER: Outbid = Outbid {
+        bump: DEFAULT_BUMP,
+        original: None,
+    };
+
     #[test]
     fn replacement_fees_rise_by_a_quarter_rounded_up() {
-        let bumped = replacement_fees(eip1559(G, G / 10));
+        let bumped = replacement_fees(eip1559(G, G / 10), QUARTER);
         assert_eq!(
             bumped,
             EvmFees::Eip1559 {
@@ -1022,10 +1142,13 @@ mod tests {
             }
         );
         // A 1 wei tip (Arbitrum, OP Mainnet) must still rise, or the node sees no bump.
-        let tiny = replacement_fees(EvmFees::Eip1559 {
-            max_fee_per_gas: U128::from(3u64),
-            max_priority_fee_per_gas: U128::from(1u64),
-        });
+        let tiny = replacement_fees(
+            EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(3u64),
+                max_priority_fee_per_gas: U128::from(1u64),
+            },
+            QUARTER,
+        );
         assert_eq!(
             tiny,
             EvmFees::Eip1559 {
@@ -1033,10 +1156,74 @@ mod tests {
                 max_priority_fee_per_gas: U128::from(2u64),
             }
         );
-        let legacy = replacement_fees(EvmFees::Legacy {
-            gas_price: U128::from(3 * G),
-        });
+        let legacy = replacement_fees(
+            EvmFees::Legacy {
+                gas_price: U128::from(3 * G),
+            },
+            QUARTER,
+        );
         assert_eq!(legacy.max_price(), 3_750_000_000);
+        // The minimum 1.1x still lifts a 1 wei tip.
+        let min = Outbid {
+            bump: 11_000,
+            original: None,
+        };
+        assert_eq!(
+            replacement_fees(eip1559(0, 1), min),
+            EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(2u64),
+                max_priority_fee_per_gas: U128::from(2u64),
+            }
+        );
+    }
+
+    #[test]
+    fn replacement_outbids_the_original_when_its_fees_are_higher() {
+        let original = OriginalFees {
+            max_fee: 10 * G,
+            tip: 2 * G,
+        };
+        let outbid = Outbid {
+            bump: 15_000,
+            original: Some(original),
+        };
+        // Estimate 2.1 gwei / 0.1 gwei: the original's fees win, times 1.5.
+        assert_eq!(
+            replacement_fees(eip1559(G, G / 10), outbid),
+            EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(15 * G),
+                max_priority_fee_per_gas: U128::from(3 * G),
+            }
+        );
+        // A legacy estimate outbids the original's fee cap.
+        let legacy = EvmFees::Legacy {
+            gas_price: U128::from(G),
+        };
+        assert_eq!(replacement_fees(legacy, outbid).max_price(), 15 * G);
+        // A higher estimate wins over a low original.
+        let low = Outbid {
+            bump: 15_000,
+            original: Some(OriginalFees { max_fee: 1, tip: 1 }),
+        };
+        assert_eq!(
+            replacement_fees(eip1559(4 * G, G), low).max_price(),
+            (9 * G * 3) / 2
+        );
+        // A node that reports tip > cap for the original cannot make the tip exceed the cap.
+        let odd = Outbid {
+            bump: DEFAULT_BUMP,
+            original: Some(OriginalFees {
+                max_fee: G,
+                tip: 8 * G,
+            }),
+        };
+        match replacement_fees(eip1559(G, G / 10), odd) {
+            EvmFees::Eip1559 {
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+            } => assert!(max_priority_fee_per_gas <= max_fee_per_gas),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

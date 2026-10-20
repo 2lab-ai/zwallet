@@ -19,7 +19,7 @@ use crate::core::store::{self, KeyEntry, MasterOptions, WalletFile};
 use crate::core::time::parse_duration;
 use crate::daemon;
 use alloy::hex;
-use alloy::primitives::U256;
+use alloy::primitives::{B256, U256};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
@@ -597,6 +597,7 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
         None => U256::ZERO,
     };
     let max_fee_per_gas = max_fee_wei(&a.send)?;
+    let (bump, replace) = replacement(&a.send)?;
     let (from, index, key_name) = signing_key(home, &a.key, chain).await?;
     require_unlocked(home).await?;
     let lock = send_lock(home, chain, &from, &a.send)?;
@@ -611,6 +612,8 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
         fallback_gas: None,
         dry_run: a.send.dry_run,
         nonce: a.send.nonce,
+        bump,
+        replace,
         max_fee_per_gas,
     };
     let prepared = evm_rpc::prepare(&p, &net, intent).await?;
@@ -641,6 +644,17 @@ fn send_lock(
     (!send.dry_run)
         .then(|| chains::SendLock::acquire(home, chain, from))
         .transpose()
+}
+
+/// `--bump` (ten-thousandths) and `--replace` (a tx hash), validated before any RPC.
+fn replacement(send: &SendArgs) -> Result<(Option<u128>, Option<B256>)> {
+    let bump = send.bump.as_deref().map(chains::parse_bump).transpose()?;
+    let replace = send
+        .replace
+        .as_deref()
+        .map(evm::parse_tx_hash)
+        .transpose()?;
+    Ok((bump, replace))
 }
 
 /// `--max-fee-gwei` in wei (gwei = 10^9 wei), validated before any RPC.
@@ -680,6 +694,7 @@ async fn transfer_with<F: ChainFamily>(
         parse_units(&a.amount, chain.decimals)?;
     }
     let max_fee_per_gas = max_fee_wei(&a.send)?;
+    let (bump, replace) = replacement(&a.send)?;
     let (from, index, key_name) = signing_key(home, &a.key, chain).await?;
     require_unlocked(home).await?;
     let lock = send_lock(home, chain, &from, &a.send)?;
@@ -690,6 +705,8 @@ async fn transfer_with<F: ChainFamily>(
         token: a.token.clone(),
         dry_run: a.send.dry_run,
         nonce: a.send.nonce,
+        bump,
+        replace: replace.map(|h| format!("{h:#x}")),
         max_fee_per_gas,
         force: a.force,
     };

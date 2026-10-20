@@ -52,6 +52,19 @@ pub fn signer_at(seed: &Seed, index: u32) -> Result<PrivateKeySigner> {
         .map_err(|_| WalletError::validation(format!("cannot derive EVM key at index {index}")))
 }
 
+/// Parses a `0x` transaction hash (32 bytes).
+pub fn parse_tx_hash(input: &str) -> Result<B256> {
+    let s = input.trim();
+    s.strip_prefix("0x")
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .and_then(|_| s.parse().ok())
+        .ok_or_else(|| {
+            WalletError::validation(format!(
+                "'{s}' is not a transaction hash (0x and 64 hex digits)"
+            ))
+        })
+}
+
 /// Parses a `0x` address. Mixed case must carry a valid EIP-55 checksum. ENS names are refused.
 pub fn parse_address(input: &str) -> Result<Address> {
     let s = input.trim();

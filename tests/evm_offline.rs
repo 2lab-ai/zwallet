@@ -550,6 +550,108 @@ fn replacing_a_pending_nonce_pays_a_quarter_more() {
 }
 
 #[test]
+fn bump_and_replace_outbid_the_pending_transaction() {
+    let (home, me) = unlocked();
+    let wei = |v: &Value, k: &str| -> u128 {
+        v[k].as_str()
+            .unwrap_or_else(|| panic!("{k}: {v:#}"))
+            .parse()
+            .unwrap()
+    };
+    let rpc = MockRpc::start(healthy);
+    let est = home
+        .run(&transfer(&rpc.url, &["--nonce", "7", "--dry-run"]))
+        .ok();
+    // --bump 2: twice the estimate, signed.
+    let v = home
+        .run(&transfer(
+            &rpc.url,
+            &["--nonce", "6", "--bump", "2", "--dry-run"],
+        ))
+        .ok();
+    assert_eq!(v["feeBump"], "2x");
+    for field in ["maxFeePerGas", "maxPriorityFeePerGas"] {
+        assert_eq!(wei(&v, field), 2 * wei(&est, field), "{field}");
+    }
+    assert_eq!(
+        wei(&v["signerDecoded"], "maxGasPrice"),
+        2 * wei(&est, "maxFeePerGas")
+    );
+    // Out of range, malformed, or without --nonce: refused before any RPC.
+    for bad in [
+        vec!["--nonce", "6", "--bump", "1.05"],
+        vec!["--nonce", "6", "--bump", "3.5"],
+        vec!["--nonce", "6", "--bump", "x"],
+        vec!["--bump", "2"],
+        vec!["--replace", "0x01"],
+    ] {
+        let mut args = bad.clone();
+        args.push("--dry-run");
+        home.run(&transfer("http://127.0.0.1:1", &args))
+            .err("VALIDATION_ERROR");
+    }
+    // The ceiling still applies after the bump: 3 gwei legacy x 2.5 = 7.5 gwei > 6 gwei.
+    let legacy = MockRpc::start(|m, p| fee_node(m, p, None, 0, 3 * GWEI));
+    let msg = home
+        .run(&transfer(
+            &legacy.url,
+            &["--nonce", "6", "--bump", "2.5", "--dry-run"],
+        ))
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains("2.5x replacement bump"), "{msg}");
+
+    // --replace: the original's fees (4 gwei cap, 1 gwei tip) beat the estimate, so the
+    // replacement pays bump x the original.
+    let original = format!("0x{}", "cd".repeat(32));
+    let (o, from) = (original.clone(), me.clone());
+    let node = MockRpc::start(move |m, p| match m {
+        "eth_getTransactionByHash" if p[0] == o.as_str() => Reply::Result(json!({
+            "hash": o, "from": from.to_lowercase(), "nonce": "0x6", "blockNumber": null,
+            "maxFeePerGas": hex(4 * GWEI), "maxPriorityFeePerGas": hex(GWEI),
+        })),
+        _ => healthy(m, p),
+    });
+    let v = home
+        .run(&transfer(
+            &node.url,
+            &["--nonce", "6", "--replace", &original, "--dry-run"],
+        ))
+        .ok();
+    assert_eq!(v["replacesTx"], original.as_str());
+    assert_eq!(v["feeBump"], "1.25x");
+    assert_eq!(wei(&v, "maxFeePerGas"), 5 * GWEI);
+    assert_eq!(wei(&v, "maxPriorityFeePerGas"), GWEI + GWEI / 4);
+    // The original must be this key's transaction at that nonce, and known to the node.
+    let msg = home
+        .run(&transfer(
+            &node.url,
+            &["--nonce", "5", "--replace", &original, "--dry-run"],
+        ))
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains("nonce 6"), "{msg}");
+    let unknown = format!("0x{}", "ef".repeat(32));
+    home.run(&transfer(
+        &node.url,
+        &["--nonce", "6", "--replace", &unknown, "--dry-run"],
+    ))
+    .err("RPC_ERROR");
+    let stranger = MockRpc::start(move |m, p| match m {
+        "eth_getTransactionByHash" => Reply::Result(json!({
+            "hash": p[0], "from": OTHER, "nonce": "0x6", "blockNumber": null, "gasPrice": hex(GWEI),
+        })),
+        _ => healthy(m, p),
+    });
+    let msg = home
+        .run(&transfer(
+            &stranger.url,
+            &["--nonce", "6", "--replace", &original, "--dry-run"],
+        ))
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains(OTHER), "{msg}");
+    assert!(rpc.sent().is_empty() && node.sent().is_empty() && legacy.sent().is_empty());
+}
+
+#[test]
 fn failure_before_the_send_is_rpc_error_and_says_nothing_was_sent() {
     let (home, _) = unlocked();
     // `prepare` connects once (eth_chainId); the broadcast's own connect is the second call.

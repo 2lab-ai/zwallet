@@ -474,10 +474,44 @@ pub struct TransferRequest {
     pub dry_run: bool,
     /// Use this account sequence number instead of the next free one (to replace a pending tx).
     pub nonce: Option<u64>,
+    /// `--bump` ([`parse_bump`]): what a replacement pays over the fees it must beat.
+    pub bump: Option<u128>,
+    /// `--replace`: the hash of the pending transaction this one replaces (its fees are read).
+    pub replace: Option<String>,
     /// Explicit ceiling on the price per gas unit, in base units, replacing the automatic one.
     pub max_fee_per_gas: Option<u128>,
     /// Allow recipients that are almost certainly mistakes (zero address, the token itself).
     pub force: bool,
+}
+
+/// A replacement's fee bump in ten-thousandths: 12_500 = 1.25x. Nodes drop a replacement that
+/// does not outbid the pending transaction by their bump rule (geth and most clients: +10% on
+/// both the tip and the fee cap), hence the 1.1x minimum.
+pub const DEFAULT_BUMP: u128 = 12_500;
+pub const BUMP_SCALE: u128 = 10_000;
+const BUMP_MIN: u128 = 11_000;
+const BUMP_MAX: u128 = 30_000;
+
+/// `--bump <factor>` in ten-thousandths: a plain decimal from 1.1 to 3, at most 4 decimals.
+pub fn parse_bump(input: &str) -> Result<u128> {
+    let bad = || {
+        WalletError::validation(format!(
+            "--bump '{input}': expected a factor from 1.1 to 3, e.g. 1.25"
+        ))
+    };
+    let v = crate::core::amount::parse_units(input, 4).map_err(|_| bad())?;
+    u128::try_from(v)
+        .ok()
+        .filter(|v| (BUMP_MIN..=BUMP_MAX).contains(v))
+        .ok_or_else(bad)
+}
+
+/// A bump as printed: `1.25x`.
+pub fn bump_label(bump: u128) -> String {
+    format!(
+        "{}x",
+        crate::core::amount::format_units(U256::from(bump), 4)
+    )
 }
 
 /// An unsigned transaction plus the output fields describing it (nonce, fees, shortfall, ...).
@@ -1031,6 +1065,23 @@ mod tests {
         assert!(e.message.starts_with("timed out."), "{}", e.message);
         assert!(e.message.contains("--nonce 4"), "{}", e.message);
         assert!(e.message.contains("https://basescan.org/tx/0xabc"));
+    }
+
+    #[test]
+    fn bump_factors() {
+        for (s, v) in [
+            ("1.25", 12_500),
+            ("1.1", 11_000),
+            ("3", 30_000),
+            ("2.5", 25_000),
+        ] {
+            assert_eq!(parse_bump(s).unwrap(), v, "{s}");
+        }
+        for s in ["1.09", "3.01", "1", "0", "x", "1.12345", "-2", ""] {
+            assert!(parse_bump(s).is_err(), "{s}");
+        }
+        assert_eq!(bump_label(DEFAULT_BUMP), "1.25x");
+        assert_eq!(bump_label(20_000), "2x");
     }
 
     #[test]
