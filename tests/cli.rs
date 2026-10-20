@@ -2329,7 +2329,7 @@ fn w7_after_a_crash_at_any_write_the_cli_shows_and_continues_a_verified_list() {
     whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
     let mut sealed = 1u64;
     let mut expected = vec!["alice".to_string()];
-    for (i, stage) in ["staged", "resealed", "renamed"].into_iter().enumerate() {
+    for (i, stage) in ["staged", "resealed", "published"].into_iter().enumerate() {
         // The crash: an edit stopped right after one of its writes (in this process, through the
         // core edit's test hook).
         let crashed = format!("c{i}");
@@ -2338,7 +2338,7 @@ fn w7_after_a_crash_at_any_write_the_cli_shows_and_continues_a_verified_list() {
                 (stage, s),
                 ("staged", EditStage::NextWritten(_))
                     | ("resealed", EditStage::Resealed(_))
-                    | ("renamed", EditStage::Renamed(_))
+                    | ("published", EditStage::Published(_))
             );
             if hit {
                 Err(WalletError::validation("crash"))

@@ -6,7 +6,8 @@
 //! Files in the home, all 0600:
 //! - `whitelist.json`: the list and its signature, plaintext. Readable while locked; trusted
 //!   only after [`verify`] against the sealed anchor.
-//! - `whitelist.next.json`: an edit staged between signing it and publishing it by rename.
+//! - `whitelist.next.json`: an edit staged between signing it and publishing it as
+//!   `whitelist.json` (removed once that is done).
 //! - `whitelist.key`: the ed25519 secret, sealed under the wallet password with its own salt,
 //!   nonce and associated data. Read by the editor only, never by the daemon.
 //!
@@ -26,8 +27,9 @@
 //! names; an edit with neither, or with list files but no sealed anchor, refuses,
 //! [`base_for_edit`], and only a reset starts over from empty), write a staged sealed list's
 //! verified bytes as `whitelist.json`, apply the change at generation + 1,
-//! sign, write `whitelist.next.json`, re-seal wallet.json with the new anchor, rename `next` over
-//! `whitelist.json`. An unverified list is never signed. A crash at any point leaves the old
+//! sign, write `whitelist.next.json`, re-seal wallet.json with the new anchor, write the signed
+//! bytes from memory as `whitelist.json` and remove `next` (best-effort). An unverified list is
+//! never signed. A crash at any point leaves the old
 //! generation standing or the staged one promotable. The caller stops every daemon first (a
 //! re-seal ends a running session anyway: the daemon notices wallet.json's ciphertext changed).
 //!
@@ -765,23 +767,68 @@ fn signed_by(signed: &SignedList, key: &VerifyingKey) -> bool {
     .is_ok()
 }
 
-/// Whether `signed` is a list the sealed key signed at a generation above the seal's. Lists are
-/// published (renamed into place) only after the re-seal that names them, so a `whitelist.json`
-/// like that means wallet.json was put back to an older copy.
-fn newer_than_seal(signed: &SignedList, anchor: &WhitelistAnchor) -> bool {
-    signed.list.generation > anchor.generation
-        && VerifyingKey::from_bytes(&anchor.public_key)
-            .is_ok_and(|key| !key.is_weak() && signed_by(signed, &key))
+/// Why a `whitelist.json` above the sealed generation is there, by its generation and its signer
+/// (`None` at or below the seal, or with a sealed key that is not a valid key). A list is
+/// published as `whitelist.json` only after the re-seal that names it, so the seal is the first
+/// suspect, and an older `whitelist.json` is never the remedy (it would verify, and complete a
+/// joint rollback):
+/// - two or more edits above the seal, under the sealed key: only a rolled-back wallet.json
+///   explains it;
+/// - one edit above, under the sealed key: that, or an edit that never finished sealing (its
+///   staged copy put in place of `whitelist.json`), which the human tells apart by the last
+///   generation an edit reported;
+/// - under another key: wallet.json rolled back across a reset, or a foreign file.
+fn above_seal(signed: &SignedList, anchor: &WhitelistAnchor) -> Option<String> {
+    let (n, m) = (signed.list.generation, anchor.generation);
+    if n <= m {
+        return None;
+    }
+    let key = VerifyingKey::from_bytes(&anchor.public_key)
+        .ok()
+        .filter(|k| !k.is_weak())?;
+    Some(if !signed_by(signed, &key) {
+        format!(
+            "{WHITELIST_FILE} (gen {n}) is newer than the seal (gen {m}) but not signed by this \
+             wallet's whitelist key: wallet.json may have been rolled back across a reset, or \
+             this file is foreign. Restore the current wallet.json if you have it (zwallet keeps \
+             no copy of it); never an older {WHITELIST_FILE}"
+        )
+    } else if n == m.saturating_add(1) {
+        format!(
+            "{WHITELIST_FILE} (gen {n}) is one edit newer than the seal (gen {m}), under this \
+             wallet's whitelist key: an edit to gen {n} that never finished sealing, or \
+             wallet.json rolled back by one edit. Did the last edit you ran report gen {n}? If \
+             not, put back {WHITELIST_FILE} at gen {m}; if it did, restore the current \
+             wallet.json (zwallet keeps no copy of it)"
+        )
+    } else {
+        format!(
+            "{WHITELIST_FILE} (gen {n}) is newer than the seal (gen {m}): wallet.json was rolled \
+             back; restore the current wallet.json (zwallet keeps no copy of it), never an older \
+             {WHITELIST_FILE}"
+        )
+    })
 }
 
-/// The reason for a `whitelist.json` newer than the seal ([`newer_than_seal`]).
-fn rolled_back(signed: &SignedList, anchor: &WhitelistAnchor) -> String {
+/// What the human can do about a `whitelist.json` that does not verify and is not above the seal
+/// ([`above_seal`] says what to do then): a genuine copy at the sealed generation, which a
+/// rolled-back wallet.json would also accept, so only when that is the latest generation the
+/// human remembers. zwallet keeps no counter outside the home to check it against.
+pub fn genuine_copy_remedy(sealed_generation: u64) -> String {
+    let m = sealed_generation;
     format!(
-        "{WHITELIST_FILE} (gen {}) is newer than the seal (gen {}): wallet.json was rolled back; \
-         restore the current wallet.json (zwallet keeps no copy of it), never an older \
-         {WHITELIST_FILE}",
-        signed.list.generation, anchor.generation
+        "put back a genuine copy of {WHITELIST_FILE} at gen {m} only if gen {m} is the latest \
+         generation you remember seeing (unlock, status and `zwallet whitelist list` print it): \
+         it verifies again without a reset, because the seal pins its digest; if you remember a \
+         higher one, wallet.json was rolled back: restore the current wallet.json instead \
+         (zwallet keeps no copy of it), never an older {WHITELIST_FILE}"
     )
+}
+
+/// [`genuine_copy_remedy`] for `files` under `anchor`, or `None` when `whitelist.json` is above
+/// the seal (its reason carries what to do).
+pub fn unverified_remedy(files: &ListFiles, anchor: &WhitelistAnchor) -> Option<String> {
+    (!files.current.above(anchor)).then(|| genuine_copy_remedy(anchor.generation))
 }
 
 /// Reads a list file through the wallet's safe reader (no symlink, no FIFO, a regular file of
@@ -865,20 +912,19 @@ impl ListFileRead {
             .parsed()?
             .ok_or_else(|| WalletError::validation(format!("there is no {name}")))?;
         verify(&signed, anchor).map_err(|e| {
-            // whitelist.json is published only after the re-seal that names it: one newer than
-            // the seal means the seal was rolled back, not the list.
-            if name == WHITELIST_FILE && newer_than_seal(&signed, anchor) {
-                WalletError::validation(rolled_back(&signed, anchor))
-            } else {
-                WalletError::validation(format!("{name}: {}", e.message))
+            // whitelist.json is published only after the re-seal that names it: above the seal,
+            // the seal is the first suspect.
+            match above_seal(&signed, anchor).filter(|_| name == WHITELIST_FILE) {
+                Some(why) => WalletError::validation(why),
+                None => WalletError::validation(format!("{name}: {}", e.message)),
             }
         })?;
         Ok(signed.list)
     }
 
-    /// Whether this file holds a list newer than the seal ([`newer_than_seal`]).
-    fn newer_than(&self, anchor: &WhitelistAnchor) -> bool {
-        matches!(self.parsed(), Ok(Some(s)) if newer_than_seal(&s, anchor))
+    /// Whether this file holds a list above the seal ([`above_seal`]).
+    fn above(&self, anchor: &WhitelistAnchor) -> bool {
+        matches!(self.parsed(), Ok(Some(s)) if above_seal(&s, anchor).is_some())
     }
 
     /// The bytes read, if the file was there and readable.
@@ -971,9 +1017,9 @@ impl Fingerprint {
 }
 
 /// The list a signer may trust: `whitelist.json` if it verifies against `anchor`, else
-/// `whitelist.next.json` if that does (an edit that re-sealed wallet.json and died before its
-/// rename; the anchor's digest names exactly that file). Otherwise `VALIDATION_ERROR` with the
-/// reason, including when there is no list.
+/// `whitelist.next.json` if that does (an edit that re-sealed wallet.json and died before it
+/// published `whitelist.json`; the anchor's digest names exactly that file). Otherwise
+/// `VALIDATION_ERROR` with the reason, including when there is no list.
 pub fn load_verified(home: &Path, anchor: &WhitelistAnchor) -> Result<Whitelist> {
     match read_verified(&home.join(WHITELIST_FILE), anchor) {
         Ok(list) => Ok(list),
@@ -986,8 +1032,8 @@ pub fn load_verified(home: &Path, anchor: &WhitelistAnchor) -> Result<Whitelist>
 pub enum BaseSource {
     /// `whitelist.json` verified.
     Current,
-    /// `whitelist.json` did not verify but `whitelist.next.json` did: a committed edit whose
-    /// rename never happened.
+    /// `whitelist.json` did not verify but `whitelist.next.json` did: a committed edit that never
+    /// published `whitelist.json`.
     PromotedNext,
     /// Nothing verified (or there is no whitelist yet): an empty list with the default policy.
     Empty,
@@ -1077,7 +1123,7 @@ pub const RESET_CAVEAT: &str = "`zwallet whitelist reset` starts over with a new
 /// - no sealed anchor but a list file present: a wallet.json restored from before the first edit
 ///   (the real list is still there, and a new key at generation 1 would drop it), or a planted
 ///   file (whose values a change would seem to tighten or loosen). A crash in the first edit
-///   leaves no `whitelist.json` before the re-seal (the rename comes after it), but one between
+///   leaves no `whitelist.json` before the re-seal (publishing comes after it), but one between
 ///   staging and re-seal leaves `whitelist.next.json`: that is refused too, and `reset` (which
 ///   at that point loses nothing, the caps being the defaults) recovers it.
 ///
@@ -1098,18 +1144,11 @@ pub fn base_for_edit(
     let base = pick_base_from(files, anchor, rules);
     if let (Some(a), BaseSource::Empty) = (anchor, base.source) {
         let reason = base.discarded.map(|d| d.reason).unwrap_or_default();
-        // A list newer than the seal: the remedy is the current wallet.json (the reason says
-        // so); putting back the copy the old seal names would complete a rollback.
-        let remedy = if files.current.newer_than(a) {
-            String::new()
-        } else {
-            format!(
-                " If whitelist.json was only damaged or replaced, put back a genuine copy of \
-                 whitelist.json at the sealed generation (gen {}): it verifies again without a \
-                 reset, because the seal pins its digest.",
-                a.generation
-            )
-        };
+        // Above the seal, the reason says what to do; putting back the copy the seal names
+        // could complete a rollback.
+        let remedy = unverified_remedy(files, a)
+            .map(|r| format!(" If whitelist.json was only damaged or replaced, {r}."))
+            .unwrap_or_default();
         return Err(WalletError::validation(format!(
             "refusing to edit the whitelist: {reason}. An edit builds only on the list wallet.json \
              seals, so nothing in the whitelist changed. Check it with `zwallet whitelist list \
@@ -1165,9 +1204,9 @@ pub enum EditStage<'a> {
     NextWritten(&'a Path),
     /// wallet.json is re-sealed with the new anchor.
     Resealed(&'a Path),
-    /// The new list is in place as `whitelist.json`, written from the signed bytes after the
-    /// re-seal (the staged `whitelist.next.json` is removed right after).
-    Renamed(&'a Path),
+    /// The new list is published as `whitelist.json`, written from the signed bytes after the
+    /// re-seal (the staged `whitelist.next.json` is removed right after, best-effort).
+    Published(&'a Path),
 }
 
 /// What an edit did.
@@ -1184,6 +1223,8 @@ pub struct Edited {
     pub discarded: Option<Discarded>,
     /// A new `whitelist.key` was made (the first edit, or [`reset`]).
     pub key_created: bool,
+    /// Something the edit could not tidy up after it landed (the change itself is done).
+    pub warning: Option<String>,
 }
 
 /// `whitelist.key` on disk.
@@ -1233,8 +1274,9 @@ fn load_key(home: &Path, password: &str, anchor: &WhitelistAnchor) -> Result<Whi
 /// Runs one whitelist edit (`.prd/04-whitelist.md` §Edits, steps 2–4) with the typed
 /// `password`: under `w.lock`, decrypt wallet.json and `whitelist.key` (the first edit makes the
 /// key), pick the base ([`pick_base`]), apply `mutate`, set generation + 1, validate, sign, write
-/// `whitelist.next.json`, re-seal wallet.json with the new anchor, rename `next` over
-/// `whitelist.json`, and read it back verified. `mutate` runs before anything is written, so its
+/// `whitelist.next.json`, re-seal wallet.json with the new anchor, publish the signed bytes as
+/// `whitelist.json` (then remove `next`, best-effort: [`Edited::warning`] if that fails), and
+/// read it back verified. `mutate` runs before anything is written, so its
 /// error (or a validation error) leaves every file as it was. Stopping daemons before, and
 /// unlocking after, is the caller's. This binds nothing to what a human saw: it is for tests and
 /// seeding; the CLI uses [`edit_as_shown`].
@@ -1281,9 +1323,10 @@ pub fn edit_as_shown(
 }
 
 /// `whitelist reset`: a new key and an empty list with the default policy (every fee cap back to
-/// the built-in default, nothing allowed), at the next generation, for when `whitelist.key` is
-/// lost or damaged or the list cannot be recovered. The old list stops verifying. This binds
-/// nothing to what a human saw (tests and seeding); the CLI uses [`reset_as_shown`].
+/// the built-in default, no payee and no contract), at the next generation, for when
+/// `whitelist.key` is lost or damaged or the list cannot be recovered. The old list stops
+/// verifying. This binds nothing to what a human saw (tests and seeding); the CLI uses
+/// [`reset_as_shown`].
 pub fn reset(home: &Path, password: &str, rules: &ChainRules) -> Result<Edited> {
     reset_with_hook(home, password, rules, &|_| Ok(()))
 }
@@ -1331,19 +1374,22 @@ fn transact(
     if let Some(shown) = shown {
         shown.check(&files.fingerprint())?;
     }
-    let (key, key_created) = match (&mutate, &anchor) {
-        (Some(_), Some(a)) => (load_key(home, password, a)?, false),
-        _ => (WhitelistKey::generate()?, true),
-    };
+    // The list first: what is wrong with it (a rollback, say) explains a key that does not match
+    // the seal too, and says what to do better than the key alone would.
     let picked = match &mutate {
         Some(_) => base_for_edit(&files, anchor.as_ref(), rules)?,
         None => pick_base_from(&files, anchor.as_ref(), rules),
     };
+    let (key, key_created) = match (&mutate, &anchor) {
+        (Some(_), Some(a)) => (load_key(home, password, a)?, false),
+        _ => (WhitelistKey::generate()?, true),
+    };
     hook(EditStage::FilesRead(home))?;
     // The sealed list may still sit in `whitelist.next.json` (an edit that re-sealed and died
-    // before its rename, or an agent's copy). Staging this edit overwrites that file, so its
-    // verified bytes are first written as `whitelist.json`, by reset too; otherwise a crash
-    // after staging would leave no file the seal names, and the committed list would be lost.
+    // before it published `whitelist.json`, or an agent's copy). Staging this edit overwrites
+    // that file, so its verified bytes are first written as `whitelist.json`, by reset too;
+    // otherwise a crash after staging would leave no file the seal names, and the committed list
+    // would be lost.
     let promote = picked.source == BaseSource::PromotedNext;
     let base = if mutate.is_some() {
         picked
@@ -1398,11 +1444,18 @@ fn transact(
     lock.reseal(&opened, &policy)?;
     hook(EditStage::Resealed(&home.join(store::WALLET_FILE)))?;
     // Published from memory, as a promotion is: never whatever the staged path holds by now.
-    // The staged copy is then removed (a crash before that leaves the same verified bytes in
-    // both files; the next staging overwrites it).
+    // The change has landed here. The staged copy is then removed, best-effort: left in place
+    // (a crash, or a removal that fails) it is the same verified bytes, and the next staging
+    // overwrites it.
     lock.replace_file(WHITELIST_FILE, &staged)?;
-    hook(EditStage::Renamed(&home.join(WHITELIST_FILE)))?;
-    lock.remove_file(NEXT_FILE)?;
+    hook(EditStage::Published(&home.join(WHITELIST_FILE)))?;
+    let warning = lock.remove_file(NEXT_FILE).err().map(|e| {
+        format!(
+            "the change landed, but {NEXT_FILE} was left in place ({}); it holds the same \
+             verified list, and the next change overwrites it",
+            e.message
+        )
+    });
 
     let list = read_verified(&home.join(WHITELIST_FILE), &new_anchor).map_err(|e| {
         WalletError::validation(format!(
@@ -1416,6 +1469,7 @@ fn transact(
         base: base.source,
         discarded: base.discarded,
         key_created,
+        warning,
     })
 }
 
@@ -1953,7 +2007,10 @@ mod tests {
         for want in [
             "does not verify",
             "zwallet whitelist list --verify",
-            "put back a genuine copy of whitelist.json at the sealed generation (gen 1)",
+            "put back a genuine copy of whitelist.json at gen 1 only if gen 1 is the latest \
+             generation you remember seeing",
+            "if you remember a higher one, wallet.json was rolled back: restore the current \
+             wallet.json instead",
             "nothing in the whitelist changed",
             "zwallet whitelist reset",
             "sets every fee cap back to the built-in default and lists no payee and no contract",
@@ -2237,8 +2294,8 @@ mod tests {
         assert_eq!(nicknames(&retry.list), ["alice", "bob", "carol"]);
         assert!(!home.join(NEXT_FILE).exists());
 
-        // After the rename: done, but for the read-back.
-        let (tmp, old, new) = crash_after(|s| matches!(s, EditStage::Renamed(_)));
+        // After the publish: done, but for the read-back.
+        let (tmp, old, new) = crash_after(|s| matches!(s, EditStage::Published(_)));
         let home = tmp.path();
         assert_eq!(assert_never_invalid_and_signed(home, &old, &new), new);
         assert_eq!(
@@ -2262,7 +2319,7 @@ mod tests {
         }
     }
 
-    /// The "re-sealed, not renamed" state left by a crash: the seal names [alice, bob] at
+    /// The "re-sealed, not published" state left by a crash: the seal names [alice, bob] at
     /// generation 2, held in `whitelist.next.json`; `whitelist.json` is still [alice] at 1.
     fn promoted_by_a_crash() -> (tempfile::TempDir, Whitelist) {
         let (tmp, _, committed) = crash_after(|s| matches!(s, EditStage::Resealed(_)));
@@ -2524,10 +2581,16 @@ mod tests {
             add(Entry::new_address("bob", BOB, &["base"])),
         )
         .unwrap();
-        // wallet.json alone put back to generation 1, under the current (gen 2) list.
+        edit(home, PW, &RULES, |l| {
+            l.remove("bob");
+            Ok(())
+        })
+        .unwrap();
+        // wallet.json alone put back to generation 1, under the current (gen 3) list: two edits
+        // newer than the seal, under the sealed key, is a rollback and nothing else.
         fs::write(home.join(store::WALLET_FILE), &gen1_wallet).unwrap();
         let anchor = sealed(home).unwrap();
-        let rolled = "whitelist.json (gen 2) is newer than the seal (gen 1): wallet.json was rolled \
+        let rolled = "whitelist.json (gen 3) is newer than the seal (gen 1): wallet.json was rolled \
                       back; restore the current wallet.json (zwallet keeps no copy of it), never \
                       an older whitelist.json";
         // The daemon's reason, list --verify's and the edit's all say it.
@@ -2565,6 +2628,142 @@ mod tests {
             err.message
         );
         assert!(!err.message.contains("rolled back"), "{}", err.message);
+    }
+
+    #[test]
+    fn r5_1_a_newer_list_under_another_key_names_a_possible_rollback_and_offers_no_copy() {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        let gen1_wallet = fs::read(home.join(store::WALLET_FILE)).unwrap();
+        // A reset (a new key, gen 2) and an edit under it (gen 3); then wallet.json alone is put
+        // back to before the reset.
+        reset(home, PW, &RULES).unwrap();
+        edit(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("bob", BOB, &["base"])),
+        )
+        .unwrap();
+        fs::write(home.join(store::WALLET_FILE), &gen1_wallet).unwrap();
+        let anchor = sealed(home).unwrap();
+        let why = "whitelist.json (gen 3) is newer than the seal (gen 1) but not signed by this \
+                   wallet's whitelist key: wallet.json may have been rolled back across a reset, \
+                   or this file is foreign";
+        let reason = load_verified(home, &anchor).unwrap_err().message;
+        assert!(reason.contains(why), "{reason}");
+        assert!(reason.contains("never an older whitelist.json"), "{reason}");
+        let before = snapshot(home);
+        let err = edit(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("carol", CAROL, &["base"])),
+        )
+        .unwrap_err();
+        assert!(err.message.contains(why), "{}", err.message);
+        assert!(!err.message.contains("genuine copy"), "{}", err.message);
+        assert!(!err.message.contains("put back"), "{}", err.message);
+        assert_eq!(snapshot(home), before);
+        // One generation above the seal under another key reads the same (no "one edit").
+        reset(home, PW, &RULES).unwrap();
+        let gen2_wallet = fs::read(home.join(store::WALLET_FILE)).unwrap();
+        reset(home, PW, &RULES).unwrap();
+        fs::write(home.join(store::WALLET_FILE), &gen2_wallet).unwrap();
+        let reason = load_verified(home, &sealed(home).unwrap())
+            .unwrap_err()
+            .message;
+        assert!(
+            reason.contains("but not signed by this wallet's whitelist key"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn r5_2_one_edit_above_the_seal_under_the_sealed_key_names_both_causes() {
+        // An edit to gen 2 whose re-seal never happened: its staged copy, put in place of
+        // whitelist.json, is one edit newer than the seal and signed by the sealed key, exactly
+        // as a wallet.json rolled back by one edit would leave it.
+        let (tmp, _, _) = crash_after(|s| matches!(s, EditStage::NextWritten(_)));
+        let home = tmp.path();
+        fs::copy(home.join(NEXT_FILE), home.join(WHITELIST_FILE)).unwrap();
+        let anchor = sealed(home).unwrap();
+        assert_eq!(anchor.generation, 1);
+        let reason = load_verified(home, &anchor).unwrap_err().message;
+        for want in [
+            "whitelist.json (gen 2) is one edit newer than the seal (gen 1)",
+            "an edit to gen 2 that never finished sealing, or wallet.json rolled back by one edit",
+            "Did the last edit you ran report gen 2? If not, put back whitelist.json at gen 1; if \
+             it did, restore the current wallet.json",
+        ] {
+            assert!(reason.contains(want), "{want:?} not in {reason}");
+        }
+        assert!(!reason.contains("wallet.json was rolled back"), "{reason}");
+        let err = edit(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("carol", CAROL, &["base"])),
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("never finished sealing"),
+            "{}",
+            err.message
+        );
+        // The edit adds no second, unconditional copy remedy.
+        assert_eq!(
+            err.message.matches("put back").count(),
+            1,
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn r5_3_a_staged_file_left_after_the_publish_is_a_warning_not_a_failure() {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        // whitelist.next.json cannot be removed once whitelist.json is published: a directory
+        // with something in it stands at its path.
+        let plant = |s: EditStage| {
+            if let EditStage::Published(_) = s {
+                fs::remove_file(home.join(NEXT_FILE)).unwrap();
+                fs::create_dir(home.join(NEXT_FILE)).unwrap();
+                fs::write(home.join(NEXT_FILE).join("x"), b"x").unwrap();
+            }
+            Ok(())
+        };
+        let edited = edit_with_hook(
+            home,
+            PW,
+            &RULES,
+            add(Entry::new_address("bob", BOB, &["base"])),
+            &plant,
+        )
+        .unwrap();
+        assert_eq!(nicknames(&edited.list), ["alice", "bob"]);
+        let warning = edited.warning.unwrap();
+        assert!(
+            warning.contains("whitelist.next.json was left in place"),
+            "{warning}"
+        );
+        let anchor = sealed(home).unwrap();
+        assert_eq!(anchor.generation, 2);
+        assert_eq!(
+            nicknames(&load_verified(home, &anchor).unwrap()),
+            ["alice", "bob"]
+        );
+        // A normal edit leaves no warning.
+        fs::remove_dir_all(home.join(NEXT_FILE)).unwrap();
+        let edited = edit(home, PW, &RULES, |l| {
+            l.remove("bob");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(edited.warning, None);
     }
 
     #[test]
@@ -2705,17 +2904,18 @@ mod tests {
 
     #[test]
     fn a_crash_while_making_the_key_is_recovered_by_running_again() {
-        for stage in 0..4 {
+        // Every stage a first edit passes, in order (a first edit promotes nothing).
+        for stage in 0..5 {
             let tmp = wallet();
             let home = tmp.path();
             let hook = |s: EditStage| {
                 let at = match s {
-                    EditStage::KeyWritten(_) => 0,
-                    EditStage::NextWritten(_) => 1,
-                    EditStage::Resealed(_) => 2,
-                    EditStage::Renamed(_) => 3,
-                    EditStage::Promoted(_) => 4,
-                    EditStage::FilesRead(_) => 5,
+                    EditStage::FilesRead(_) => 0,
+                    EditStage::KeyWritten(_) => 1,
+                    EditStage::NextWritten(_) => 2,
+                    EditStage::Resealed(_) => 3,
+                    EditStage::Published(_) => 4,
+                    EditStage::Promoted(_) => 5,
                 };
                 if at == stage {
                     Err(WalletError::validation("crash"))
@@ -2726,14 +2926,25 @@ mod tests {
             edit_with_hook(home, PW, &RULES, add(alice()), &hook).unwrap_err();
             match sealed(home) {
                 // Before the re-seal: still no whitelist, so every send stays refused.
-                None => assert!(stage < 2, "{stage}"),
+                None => assert!(stage < 3, "{stage}"),
                 // From the re-seal on: the first list is the sealed one.
                 Some(a) => {
-                    assert!(stage >= 2, "{stage}");
+                    assert!(stage >= 3, "{stage}");
                     assert_eq!(nicknames(&load_verified(home, &a).unwrap()), ["alice"]);
                 }
             }
-            if stage == 1 {
+            if stage == 0 {
+                assert_eq!(
+                    fs::read_dir(home)
+                        .unwrap()
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.file_name().to_string_lossy().starts_with("whitelist"))
+                        .count(),
+                    0,
+                    "a crash before any write wrote a whitelist file"
+                );
+            }
+            if stage == 2 {
                 // Staged, not sealed: the leftover first list is refused like any list file
                 // without a sealed whitelist, and reset (losing nothing yet) clears the way.
                 let err = edit(
@@ -2760,14 +2971,62 @@ mod tests {
                 add(Entry::new_address("bob", BOB, &["base"])),
             );
             let edited = edited.unwrap();
-            let expect: &[&str] = if stage < 2 {
+            let expect: &[&str] = if stage < 3 {
                 &["bob"]
             } else {
                 &["alice", "bob"]
             };
             assert_eq!(nicknames(&edited.list), expect, "{stage}");
-            // After stage 1 the reset made the key this edit used.
-            assert_eq!(edited.key_created, stage == 0, "{stage}");
+            // Before the key was written, or after it with nothing staged, this edit is a first
+            // edit again; after stage 2 the reset made the key this edit used.
+            assert_eq!(edited.key_created, stage <= 1, "{stage}");
+            load_verified(home, &sealed(home).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_crash_at_any_stage_of_an_edit_that_promotes_is_recovered_by_running_again() {
+        // Every stage an edit passes when the sealed list is still staged: read, promote, stage,
+        // re-seal, publish.
+        let stages: [fn(&EditStage) -> bool; 5] = [
+            |s| matches!(s, EditStage::FilesRead(_)),
+            |s| matches!(s, EditStage::Promoted(_)),
+            |s| matches!(s, EditStage::NextWritten(_)),
+            |s| matches!(s, EditStage::Resealed(_)),
+            |s| matches!(s, EditStage::Published(_)),
+        ];
+        for (i, stage) in stages.into_iter().enumerate() {
+            let (tmp, committed) = promoted_by_a_crash();
+            let home = tmp.path();
+            let hook = |s: EditStage| {
+                if stage(&s) {
+                    Err(WalletError::validation("crash"))
+                } else {
+                    Ok(())
+                }
+            };
+            let carol = Entry::new_address("carol", CAROL, &["base"]);
+            let err = edit_with_hook(home, PW, &RULES, add(carol), &hook).unwrap_err();
+            assert_eq!(err.message, "crash", "{i}");
+            // The committed list until the re-seal, the new one from it: never neither.
+            let anchor = sealed(home).unwrap();
+            let trusted = load_verified(home, &anchor)
+                .unwrap_or_else(|e| panic!("{i}: nothing verifies: {}", e.message));
+            if i < 3 {
+                assert_eq!((anchor.generation, &trusted), (2, &committed), "{i}");
+            } else {
+                assert_eq!(anchor.generation, 3, "{i}");
+                assert_eq!(nicknames(&trusted), ["alice", "bob", "carol"], "{i}");
+            }
+            // The next edit continues from it.
+            let dan = Entry::new_address(
+                "dan",
+                "0x5555555555555555555555555555555555555555",
+                &["base"],
+            );
+            let edited = edit(home, PW, &RULES, add(dan)).unwrap();
+            assert_eq!(edited.list.generation, anchor.generation + 1, "{i}");
+            assert!(nicknames(&edited.list).contains(&"dan"), "{i}");
             load_verified(home, &sealed(home).unwrap()).unwrap();
         }
     }

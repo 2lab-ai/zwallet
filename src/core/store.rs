@@ -1039,8 +1039,6 @@ impl MetaLock {
         sync_dir(home)
     }
 
-    /// Renames `<home>/<from>` over `<home>/<to>` and fsyncs the directory. Same refusals as
-    /// [`MetaLock::replace_file`].
     /// Removes the plain file `name` from the home (gone already is fine), then syncs the
     /// directory.
     pub(crate) fn remove_file(&self, name: &str) -> Result<()> {
