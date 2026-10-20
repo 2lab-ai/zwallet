@@ -60,22 +60,26 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
     it), never an older whitelist.json";
   - signed by the sealed key, N = M + 1: "... is one edit newer than the seal ..., under this
     wallet's whitelist key: an edit to gen N that never finished sealing, or a rolled-back
-    wallet.json. If gen M is the highest generation you remember seeing (the edit to gen N never
-    reported), put back whitelist.json at gen M; if you remember gen N or higher, wallet.json
-    was rolled back: restore the current wallet.json ..., never an older whitelist.json" (an
-    edit whose re-seal failed leaves a staged copy that, put in place of `whitelist.json`, looks
-    the same);
+    wallet.json. If gen M is the highest generation you remember seeing since the last start at
+    gen 1 (...), the edit to gen N never reported: put back a genuine copy of whitelist.json at
+    gen M; if you remember gen N or higher, wallet.json was rolled back: restore the current
+    wallet.json ..., never an older whitelist.json" (an edit whose re-seal failed leaves a
+    staged copy that, put in place of `whitelist.json`, looks the same);
   - signed by another key: "... is newer than the seal ... but not signed by this wallet's
-    whitelist key: a wallet.json rolled back across a reset, or a foreign file. If gen M is the
-    highest generation you remember seeing, the file is foreign: put back a genuine copy of
+    whitelist key: a wallet.json rolled back across a reset, a reset that never finished
+    sealing, or a foreign file. If gen M is the highest generation you remember seeing since the
+    last start at gen 1 (...), it is one of the last two: put back a genuine copy of
     whitelist.json at gen M; if you remember a higher one, wallet.json was rolled back across a
     reset: restore the current wallet.json ..., never an older whitelist.json".
 
-  The gate is the highest generation the human remembers seeing (an edit's output, `unlock`,
-  `status` and `whitelist list` print it). The seal only moves forward, so with no rollback the
-  highest generation seen is the sealed one, M; after any rollback it is higher. Two or more
-  edits above under the sealed key are a rollback whatever the human remembers, and no copy is
-  offered. A rolled-back seal accepts the copy it names, which would complete the joint
+  The gate is the highest generation the human remembers seeing since the last start at gen 1,
+  from an edit's report, or `unlock`, `status` or `whitelist list --verify` (plain `list` prints
+  the unverified generation, so it does not count). Within one seal lineage the seal only moves
+  forward, so with no rollback the highest generation seen is the sealed one, M; after any
+  rollback it is higher. A reset or first edit made while `wallet.json` sealed no whitelist
+  starts again at gen 1, so only generations seen since then count. Two or more edits above
+  under the sealed key are a rollback whatever the human remembers, and no copy is offered in
+  the reason. A rolled-back seal accepts the copy it names, which would complete the joint
   rollback, so the copy at gen M is never offered without the gate. zwallet keeps no copy of
   `wallet.json` (`zwallet backup` prints only the recovery phrase), so restoring the current
   one needs a copy the human made after the last edit; without one, `whitelist reset` starts
@@ -86,9 +90,10 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
   outside the home: it cannot tell the rollback from damage. (A genuine copy at the sealed
   generation is not this case: it verifies, which is the joint rollback above.) The remedy it
   offers, a genuine copy of `whitelist.json` at the sealed generation, is therefore
-  conditional: only if that generation is the highest one the human remembers seeing
-  (`unlock`, `status` and `whitelist list` print it). If the human remembers a higher one,
-  `wallet.json` was rolled back: restore the current one instead.
+  conditional: only if that generation is the highest one the human remembers seeing since the
+  last start at gen 1 (an edit's report, or `unlock`, `status` or `whitelist list --verify`).
+  If the human remembers a higher one, `wallet.json` was rolled back: restore the current one
+  instead.
 - **Rollback to before the first edit.** A `wallet.json` from before the first `add` seals no
   whitelist, so the daemon sees "no whitelist yet": no payee send and no contract call is
   signed, but native self-transfers are, under the **built-in default caps**, which may be looser
@@ -188,8 +193,8 @@ reason}`; `status` reads the list again on every call. On every `sign_tx`, after
      --verify`, with **no** `command` (an edit suggested from the refused transaction would name
      an address an agent chose, and rebuild the list around it). A broken list never relaxes a
      stricter signed fee cap. A `whitelist.json` above the sealed generation gets a reason by
-     its generation and signer: a rolled-back `wallet.json`, an edit that never finished
-     sealing, or a rollback across a reset (see **Joint rollback**).
+     its generation and signer: a rolled-back `wallet.json`, an edit or reset that never
+     finished sealing, a rollback across a reset, or a foreign file (see **Joint rollback**).
 3. Decide by the decoded action:
 
 | Decoded action | Allowed only if |
@@ -264,8 +269,9 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
      list but no built-in default: "no default: every send there is refused until `fee-cap`
      sets one"), message signing, that it lists no payee and no contract, and that a genuine
      copy of `whitelist.json` at the sealed generation put back verifies without a reset, but
-     only if that is the highest generation the human remembers seeing; if they remember a
-     higher one, `wallet.json` was rolled back and is restored instead;
+     only if that is the highest generation the human remembers seeing since the last start at
+     gen 1 (see **Joint rollback**); if they remember a higher one, `wallet.json` was rolled back
+     and is restored instead;
    - both files as read (generation and entries, unverified; name lists cut at 20). A file that
      exists but cannot be read or parsed is never shown as "none": "whitelist.json is there but
      cannot be read (<reason>): its entries are unknown, and a reset drops them" (the same for
@@ -328,15 +334,16 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
      the reason says what to do, by its generation and signer (see **Joint rollback**): two or
      more edits above under the sealed key, restore the current `wallet.json` and never an older
      `whitelist.json`, which would complete a joint rollback; one edit above, or another key,
-     the highest generation the human remembers decides: the sealed generation M (an edit that
-     never finished sealing, or a foreign file) means put back `whitelist.json` at gen M, and
-     anything higher means restore the current `wallet.json`, never an older `whitelist.json`.
-     Otherwise the refusal and `list --verify` offer a genuine copy of `whitelist.json` **at the
-     sealed generation** (it verifies again without a reset, because the seal pins its digest),
-     but only if that is the highest generation the human remembers seeing; if they remember a
-     higher one, `wallet.json` was rolled back and is restored instead. zwallet keeps no copy of
-     `wallet.json` (`zwallet backup` prints only the recovery phrase), so that needs a copy the
-     human made after the last edit.
+     the highest generation the human remembers seeing since the last start at gen 1 decides:
+     the sealed generation M (an edit or reset that never finished sealing, or a foreign file)
+     means put back a genuine copy of `whitelist.json` at gen M, and anything higher means
+     restore the current `wallet.json`, never an older `whitelist.json`. Otherwise the refusal
+     and `list --verify` offer a genuine copy of `whitelist.json` **at the sealed generation**
+     (it verifies again without a reset, because the seal pins its digest), but only if that is
+     the highest generation the human remembers seeing since the last start at gen 1; if they
+     remember a higher one, `wallet.json` was rolled back and is restored instead. zwallet keeps
+     no copy of `wallet.json` (`zwallet backup` prints only the recovery phrase), so that needs a
+     copy the human made after the last edit.
      `zwallet whitelist reset` starts over, and the message says what it costs: every fee cap
      back to the built-in default, no payee and no contract (native self-transfers under the
      default caps and approve-0 revokes still sign), so `fee-cap` is set again before
@@ -348,11 +355,13 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
    change has landed. Then `whitelist.next.json` is removed, best-effort: if the removal or the
    directory sync after it fails, the change still succeeds with a `warning` ("the change
    landed, but zwallet could not remove whitelist.next.json, or could not sync its directory
-   after removing it (...). If whitelist.next.json is still there it is not needed: ..."), and
-   `--unlock` still runs. A whitelist.next.json left that way is shown by the next summary as
-   "the same list as whitelist.json (left after a change)". A crash at any point is recovered by
-   step 3 (and by the daemon's `next` fallback): either the old generation stands, or the staged
-   one is promoted. There are two exceptions, and neither loosens anything:
+   after removing it (...). If whitelist.next.json is still there it is not needed
+   (whitelist.json holds the list just signed): remove it; a later change can stage its list
+   only where there is a plain file or nothing"), and `--unlock` still runs. A
+   whitelist.next.json left that way is shown by the next summary as "a copy of whitelist.json
+   (e.g. left after a change)". A crash at any point is recovered by step 3 (and by the daemon's
+   `next` fallback): either the old generation stands, or the staged one is promoted. There are
+   two exceptions, and neither loosens anything:
    - a first edit cut off between staging and re-seal: `wallet.json` still seals no whitelist,
      so the staged `whitelist.next.json` makes every edit refuse, and `reset` is needed (it loses
      nothing, since no list was ever sealed);
@@ -506,6 +515,11 @@ From part C (CLI), with review round 1:
     "highest"; the removal warning holds whether the removal or the sync failed; a staged copy
     left after a change is labelled as such; `--unlock` follows a change that landed with a
     warning; a reset names a dropped `whitelist.next.json` (`discardedNext`).
+14. Review round 7 (text only): the gate counts generations since the last start at gen 1 (a
+    reset or first edit made with no whitelist sealed starts again there), seen in an edit's
+    report or `unlock`, `status`, `list --verify`, not plain `list`; the other-key reason also
+    names a reset that never finished sealing; the removal warning tells the human to remove
+    a leftover `whitelist.next.json`.
 
 ## Acceptance
 
@@ -518,7 +532,7 @@ From part C (CLI), with review round 1:
 | W5 | swap `whitelist.json` alone for an older signed copy; or put back an older `wallet.json` alone (two edits back, one edit back, from before a reset) | `WHITELIST_INVALID` (gen mismatch); for the older `wallet.json`, the reason, `list --verify` and every edit name, by generation and signer, a rolled-back `wallet.json` (no copy offered), an edit that never finished sealing or a rolled-back `wallet.json`, or a rollback across a reset or a foreign file (in the last two, the copy at the sealed generation only if that is the highest generation the human remembers; a human who saw a later one is sent to the current `wallet.json`) |
 | W5b | restore an older `wallet.json` and `whitelist.json` together (an older `whitelist.key` is not needed: the daemon never reads it) | accepted, as documented. `unlock` prints the older gen and entries, so the human can see it |
 | W6 | `approve(spender, 1)`; `transferFrom`; `invoke` of an unlisted contract or an unlisted selector; a token transfer to a token-contract address | each `WHITELIST_DENIED`; `approve(spender, 0)` is allowed |
-| W7 | test-hook crash after each of the edit's writes | the list is either the old gen or the promoted new gen; never invalid-and-signed; the next CLI edit continues from it (crashes also after the files are read and after a promotion). A first edit cut off between staging and re-seal leaves only `whitelist.next.json`: every edit refuses, `list` and `list --verify` name it, and `reset` starts over, losing nothing. A reset cut off after writing its key: the old list still verifies, every edit refuses at the key until `reset` runs again. A `whitelist.next.json` that cannot be removed after the publish: the change succeeds with a `warning`, `--unlock` still starts the session, and the next summary labels the file "the same list as whitelist.json (left after a change)" |
+| W7 | test-hook crash after each of the edit's writes | the list is either the old gen or the promoted new gen; never invalid-and-signed; the next CLI edit continues from it (crashes also after the files are read and after a promotion). A first edit cut off between staging and re-seal leaves only `whitelist.next.json`: every edit refuses, `list` and `list --verify` name it, and `reset` starts over, losing nothing. A reset cut off after writing its key: the old list still verifies, every edit refuses at the key until `reset` runs again. A `whitelist.next.json` that cannot be removed after the publish: the change succeeds with a `warning`, `--unlock` still starts the session, and the next summary labels the file "a copy of whitelist.json (e.g. left after a change)" |
 | W8 | edit while unlocked (tested). A signature racing the edit is not run as a test: it relies on step 1 returning only once no daemon is left | a wrong password or a refused change stops nothing; otherwise every daemon is stopped first (other homes' too) and the wallet stays locked; with `--unlock 10m` a new session runs until now + 10 min and reports the new generation |
 | W9 | fees above `maxFeeWei` (hostile RPC fixture, or a large `--max-fee-gwei`) | `FEE_CAP_EXCEEDED` from the daemon for an action the list allows; a forbidden or unlisted action over the cap is `WHITELIST_DENIED`, with no `fee-cap` command |
 | W10 | `sign-message` with `allowMessageSigning` off, then on | refused, then signed |
