@@ -1938,6 +1938,7 @@ fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
         PAYEE,
         "chains: base",
         "after the change: gen 1",
+        "after the change: the wallet stays locked",
     ] {
         assert!(summary.contains(want), "{want:?} not in {summary:?}");
     }
@@ -2197,7 +2198,7 @@ fn whitelist_verbs_change_one_generation_each_and_refuse_before_writing() {
 }
 
 #[test]
-fn w4_a_hand_edited_list_is_shown_but_the_next_edit_starts_from_empty() {
+fn w4_a_hand_edited_list_is_shown_but_an_edit_refuses_and_only_reset_starts_over() {
     let _alone = common::exclusive();
     let home = Home::new();
     home.create("main", &[]);
@@ -2233,32 +2234,86 @@ fn w4_a_hand_edited_list_is_shown_but_the_next_edit_starts_from_empty() {
     );
     assert_eq!(nicknames(&v["entries"]), ["alice", "mallory"], "{v}");
 
-    // The next edit refuses to sign it: it shows the discarded entries and starts from empty.
-    let e = whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).ok();
-    assert_eq!(e["base"], "empty", "{e}");
+    // An edit never rebuilds it from empty: refused, nothing written, a running session left
+    // alone. The message points to `list --verify` and to `reset`.
+    let pid = home.unlock("10m")["daemonPid"].as_i64().unwrap() as i32;
+    let before = files_of(&home);
+    for args in [
+        &["add", "bob", BOB, "--chains", "base"][..],
+        &["remove", "alice"],
+        &["fee-cap", "base", "0.001"],
+        &["allow-message-signing", "off"],
+    ] {
+        let msg = whitelist_edit(&home, args).err("VALIDATION_ERROR");
+        for want in [
+            "signature",
+            "zwallet whitelist list --verify",
+            "zwallet whitelist reset",
+        ] {
+            assert!(msg.contains(want), "{args:?}: {want:?} not in {msg}");
+        }
+        assert_eq!(files_of(&home), before, "{args:?} wrote something");
+    }
+    assert_eq!(
+        home.daemon_pids(),
+        vec![pid],
+        "a refused edit stopped the session"
+    );
+
+    // A deleted list is refused the same way.
+    fs::remove_file(&path).unwrap();
+    let msg = whitelist_edit(&home, &["add", "bob", BOB]).err("VALIDATION_ERROR");
+    assert!(msg.contains("there is no whitelist.json"), "{msg}");
+    assert!(msg.contains("zwallet whitelist reset"), "{msg}");
+    fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+
+    // Reset starts over: a new key and an empty list, with what it dropped.
+    let z = whitelist_edit(&home, &["reset"]).ok();
+    assert_eq!(
+        (&z["gen"], &z["keyCreated"]),
+        (&json!(2), &json!(true)),
+        "{z}"
+    );
+    assert_eq!(z["entries"], json!([]), "{z}");
     assert!(
-        e["discarded"]["reason"]
+        z["discarded"]["reason"]
             .as_str()
             .unwrap_or("")
             .contains("signature"),
-        "{e}"
+        "{z}"
     );
     assert_eq!(
-        nicknames(&e["discarded"]["entries"]),
+        nicknames(&z["discarded"]["entries"]),
         ["alice", "mallory"],
+        "{z}"
+    );
+    let e = whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).ok();
+    assert_eq!(
+        (&e["gen"], &e["base"]),
+        (&json!(3), &json!("current")),
         "{e}"
     );
-    assert_eq!(nicknames(&e["entries"]), ["bob"], "{e}");
-    assert_eq!(e["gen"], 2, "{e}");
-    let human = whitelist_edit(&home, &["remove", "bob"]);
-    assert_eq!(human.code, 0, "{} / {}", human.stdout, human.stderr);
+    assert!(e.get("discarded").is_none(), "{e}");
     let v = verify_list(&home);
     assert_eq!(
         (&v["verified"], &v["gen"]),
         (&json!(true), &json!(3)),
         "{v}"
     );
-    assert_eq!(v["entries"], json!([]), "{v}");
+    assert_eq!(nicknames(&v["entries"]), ["bob"], "{v}");
+}
+
+/// wallet.json and every whitelist file of `home`, as bytes (absent: `None`).
+fn files_of(home: &Home) -> Vec<(&'static str, Option<Vec<u8>>)> {
+    [
+        "wallet.json",
+        "whitelist.json",
+        "whitelist.next.json",
+        "whitelist.key",
+    ]
+    .into_iter()
+    .map(|f| (f, fs::read(home.path().join(f)).ok()))
+    .collect()
 }
 
 #[test]
@@ -2624,4 +2679,148 @@ fn f2_create_unlock_shows_the_whitelist_its_session_signs_under() {
             .contains("no whitelist yet"),
         "{v}"
     );
+}
+
+/// Runs `whitelist <args> --json` on a terminal: returns what the terminal showed before the
+/// password prompt, then lets `between` act, types the password, and returns the outcome.
+fn on_terminal(home: &Home, args: &[&str], between: impl FnOnce()) -> (String, serde_json::Value) {
+    let mut all = vec!["whitelist"];
+    all.extend_from_slice(args);
+    all.push("--json");
+    let pty = common::PtyChild::spawn(home.command(&all));
+    let mut before = String::new();
+    let start = std::time::Instant::now();
+    while !before.contains("Wallet password: ") {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "no prompt; saw {before:?}"
+        );
+        before.push_str(&common::drain_pty(&pty.master));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    between();
+    pty.type_line(PW);
+    let out = pty.finish();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let v = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout:?}"));
+    let shown = before[..before.find("Wallet password: ").unwrap()].to_string();
+    (shown, v)
+}
+
+#[test]
+fn c2_1_the_summary_says_what_happens_to_signing() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    // Without --unlock: the wallet stays locked, said before the prompt.
+    let (shown, v) = on_terminal(&home, &["add", "alice", PAYEE, "--chains", "base"], || {});
+    assert!(
+        shown.contains("after the change: the wallet stays locked"),
+        "{shown:?}"
+    );
+    assert!(!shown.contains("signing session"), "{shown:?}");
+    assert_eq!(v["locked"], true, "{v}");
+    // With --unlock: the new session and when it ends, said before the prompt.
+    let before = now_secs();
+    let (shown, v) = on_terminal(
+        &home,
+        &["add", "bob", BOB, "--chains", "base", "--unlock", "10m"],
+        || {},
+    );
+    assert!(
+        shown.contains("after the change: a new signing session for 10m (until"),
+        "{shown:?}"
+    );
+    let utc = zwallet::core::time::rfc3339_utc(before + 600);
+    let utc_next = zwallet::core::time::rfc3339_utc(before + 601);
+    assert!(
+        shown.contains(&utc[..16]) || shown.contains(&utc_next[..16]),
+        "{utc} not in {shown:?}"
+    );
+    assert!(!shown.contains("stays locked"), "{shown:?}");
+    assert_eq!(v["locked"], false, "{v}");
+    // With --password-stdin the same lines go to stderr.
+    let r = whitelist_edit(&home, &["remove", "bob"]);
+    assert!(
+        r.stderr
+            .contains("after the change: the wallet stays locked"),
+        "{}",
+        r.stderr
+    );
+    r.ok();
+    let r = whitelist_edit(&home, &["remove", "alice", "--unlock", "1h"]);
+    assert!(
+        r.stderr
+            .contains("after the change: a new signing session for 1h (until"),
+        "{}",
+        r.stderr
+    );
+    r.ok();
+}
+
+#[test]
+fn c2_2_the_change_lands_on_exactly_the_list_shown_or_nothing_changes() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).ok();
+    let path = home.path().join("whitelist.json");
+    let genuine = fs::read(&path).unwrap();
+
+    // The list shown is rewritten while the human types (the same signed content, other bytes):
+    // the change is refused before anything is written.
+    let before = files_of(&home);
+    let compact = {
+        let v: serde_json::Value = serde_json::from_slice(&genuine).unwrap();
+        serde_json::to_vec(&v).unwrap()
+    };
+    assert_ne!(compact, genuine);
+    let (_, v) = on_terminal(&home, &["remove", "bob"], || {
+        fs::write(&path, &compact).unwrap();
+    });
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
+    let msg = v["error"].as_str().unwrap();
+    assert!(
+        msg.contains("whitelist.json changed after it was shown; nothing changed"),
+        "{msg}"
+    );
+    fs::write(&path, &genuine).unwrap();
+    assert_eq!(
+        files_of(&home),
+        before,
+        "the refused change wrote something"
+    );
+
+    // A forged list is shown (bob moved to another address), the genuine one put back before the
+    // password: the list shown does not verify, so nothing changes either.
+    let mut forged: serde_json::Value = serde_json::from_slice(&genuine).unwrap();
+    forged["entries"][1]["address"] = json!("0x6666666666666666666666666666666666666666");
+    fs::write(&path, serde_json::to_vec_pretty(&forged).unwrap()).unwrap();
+    let (shown, v) = on_terminal(&home, &["remove", "bob"], || {
+        fs::write(&path, &genuine).unwrap();
+    });
+    assert!(
+        shown.contains("0x6666666666666666666666666666666666666666"),
+        "{shown:?}"
+    );
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
+    assert_eq!(
+        files_of(&home),
+        before,
+        "the refused change wrote something"
+    );
+
+    // An unfinished edit in whitelist.next.json is shown too.
+    fs::copy(&path, home.path().join("whitelist.next.json")).unwrap();
+    let r = whitelist_edit(&home, &["remove", "bob"]);
+    assert!(
+        r.stderr
+            .contains("whitelist.next.json: gen 2, 2 entries (alice, bob), an unfinished edit"),
+        "{}",
+        r.stderr
+    );
+    let e = r.ok();
+    assert_eq!(e["gen"], 3, "{e}");
+    assert_eq!(nicknames(&e["entries"]), ["alice"], "{e}");
 }

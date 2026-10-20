@@ -2,14 +2,17 @@
 //! (`.prd/04-whitelist.md` §Edits, §CLI).
 //!
 //! A change runs only with a typed password, and in this order:
-//! 0. the arguments are checked, and the change is shown on the channel the password is read
-//!    from (the terminal, or stderr with `--password-stdin`), so the human sees what the password
-//!    authorizes; then the password is read and checked against wallet.json, and the change is
-//!    tried on the list the edit would start from. A wrong password or a refused change stops
+//! 0. the arguments are checked; `whitelist.json` and `whitelist.next.json` are read once and
+//!    the change is shown, with those files and what happens to signing, on the channel the
+//!    password is read from (the terminal, or stderr with `--password-stdin`), so the human sees
+//!    what the password authorizes; then the password is read and checked against wallet.json,
+//!    and the change is tried on the list it builds on, from the same bytes. A wrong password, a
+//!    list shown that does not verify (only `reset` starts over), or a refused change stops
 //!    nothing;
 //! 1. every zwallet daemon of this user is stopped (the `zwallet lock` path, which returns only
 //!    once none is left): nothing is signed while the list changes;
-//! 2. to 4. [`whitelist::edit`] (or [`whitelist::reset`]) under `w.lock`: the verified base,
+//! 2. to 4. [`whitelist::edit_as_shown`] (or [`whitelist::reset_as_shown`]) under `w.lock`:
+//!    the files read again once and refused unless they are the bytes shown, the verified base,
 //!    the change at the next generation, signed, staged, re-sealed, renamed;
 //! 5. the wallet stays locked, unless `--unlock <duration>` starts a new session for that
 //!    duration with the password just typed (the staged unlock `zwallet unlock` uses). No
@@ -27,15 +30,16 @@ use crate::core::error::{Result, WalletError};
 use crate::core::password::read_password;
 use crate::core::protocol::{self, DaemonExe};
 use crate::core::store::{self, WhitelistAnchor};
-use crate::core::time::parse_duration;
+use crate::core::time::{parse_duration, rfc3339_utc, unix_secs};
 use crate::core::whitelist::{
-    self, ANY_CHAIN, Base, BaseSource, Edited, Entry, EntryKind, NEXT_FILE, WHITELIST_FILE,
-    Whitelist,
+    self, ANY_CHAIN, Base, BaseSource, Edited, Entry, EntryKind, ListFiles, NEXT_FILE,
+    WHITELIST_FILE, Whitelist,
 };
 use alloy::hex;
 use alloy::primitives::U256;
 use serde_json::{Value, json};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 const LIST_HINT: &str = "see `zwallet whitelist list`";
 const FIRST_ADD: &str = "`zwallet whitelist add <nick> <addr> --chains <chain>` creates it";
@@ -247,28 +251,42 @@ async fn edit(home: &Path, change: Change, opts: &WhitelistEditArgs) -> Result<O
             Some((d.trim().to_string(), ttl, DaemonExe::resolve()?))
         }
     };
-    // 0. What the password authorizes, where the password is read.
-    let shown = summary(home, &change);
+    // 0. What the password authorizes, where the password is read. The list files are read once
+    // here; the edit is bound to these bytes.
+    let files = ListFiles::read(home);
+    let fingerprint = files.fingerprint();
+    let told = summary(
+        &files,
+        &change,
+        unlock.as_ref().map(|(d, ttl, _)| (d.as_str(), *ttl)),
+    );
     let password = if opts.password.password_stdin {
-        eprintln!("{shown}");
+        eprintln!("{told}");
         read_password(true, "", false)?
     } else {
-        read_password(false, &format!("{shown}\nWallet password: "), false)?
+        read_password(false, &format!("{told}\nWallet password: "), false)?
     };
-    // A wrong password is refused here, before anything is stopped.
+    // A wrong password, a list shown that does not verify, or a change the list refuses is
+    // refused here, before anything is stopped.
     let anchor = store::unlock(home, &password, &chains::derive_addresses)?
         .0
         .whitelist_anchor()?;
-    let base = whitelist::pick_base(home, anchor.as_ref(), &WHITELIST_RULES);
-    if !matches!(change, Change::Reset) {
-        try_change(&change, &base)?;
-    }
+    let base = match change {
+        Change::Reset => whitelist::pick_base_from(&files, anchor.as_ref(), &WHITELIST_RULES),
+        _ => {
+            let base = whitelist::base_for_edit(&files, anchor.as_ref(), &WHITELIST_RULES)?;
+            try_change(&change, &base)?;
+            base
+        }
+    };
     // 1.
     let stopped = protocol::stop_all_daemons()?;
     // 2. to 4.
     let edited = match &change {
-        Change::Reset => whitelist::reset(home, &password, &WHITELIST_RULES),
-        _ => whitelist::edit(home, &password, &WHITELIST_RULES, |list| change.apply(list)),
+        Change::Reset => whitelist::reset_as_shown(home, &password, &WHITELIST_RULES, &fingerprint),
+        _ => whitelist::edit_as_shown(home, &password, &WHITELIST_RULES, &fingerprint, |list| {
+            change.apply(list)
+        }),
     }
     .map_err(|e| {
         WalletError::new(
@@ -294,16 +312,19 @@ async fn edit(home: &Path, change: Change, opts: &WhitelistEditArgs) -> Result<O
     Ok(Out::with_text(out, text))
 }
 
-/// Step 0: the change the password is about to authorize, from the arguments and whitelist.json
-/// as it is on disk. That file is unverified here (only the password opens the seal that says
-/// whether it is the signed list), so the text says what happens if it is not. Every value read
-/// from the file is escaped ([`shown`], [`printable`]).
-fn summary(home: &Path, change: &Change) -> String {
-    let current = whitelist::read_list(&home.join(WHITELIST_FILE));
+/// Step 0: the change the password is about to authorize, from the arguments and the list files
+/// as read once (`files`, the bytes the edit is then bound to), and what happens to signing.
+/// Those files are unverified here (only the password opens the seal that says whether one is
+/// the signed list), so the text says what happens if neither is. Every value read from a file
+/// is escaped ([`shown`], [`printable`]).
+fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>) -> String {
+    let current = files.current.parsed();
+    let next = files.next.parsed();
     let on_disk = match &current {
         Ok(Some(s)) => Some(&s.list),
         _ => None,
     };
+    let reset = matches!(change, Change::Reset);
     let mut lines = vec!["The password authorizes this whitelist change:".to_string()];
     match change {
         Change::Add(e) => {
@@ -315,37 +336,18 @@ fn summary(home: &Path, change: &Change) -> String {
             }
         }
         Change::Remove(nickname) => {
-            let what = match on_disk.and_then(|l| l.by_nickname(nickname)) {
-                Some(e) => format!(
-                    "whitelist.json lists it as {} {} on {}",
-                    match e.kind {
-                        EntryKind::Address => "a payee",
-                        EntryKind::Contract => "a contract",
-                    },
-                    checksummed(&e.address),
-                    chains_text(&e.chains)
-                ),
+            let what = match on_disk {
+                Some(l) => entry_text(l, nickname, "whitelist.json"),
                 None => "whitelist.json has no entry by that name".to_string(),
             };
             lines.push(format!("  remove {nickname}: {what}"));
         }
         Change::FeeCap { chain, wei } => {
             let old = match &current {
-                Ok(Some(s)) => s.list.policy.max_fee_wei.get(chain.key).cloned(),
+                Ok(Some(s)) => cap_text(&s.list, chain),
                 // A first edit starts from the default caps.
-                Ok(None) => WHITELIST_RULES
-                    .default_fee_caps_wei
-                    .iter()
-                    .find(|(k, _)| *k == chain.key)
-                    .map(|(_, v)| v.to_string()),
-                Err(_) => None,
-            };
-            let old = match old {
-                Some(v) => match U256::from_str_radix(&v, 10) {
-                    Ok(w) => fee_text(chain, w),
-                    Err(_) => format!("{} (unreadable)", shown(&v)),
-                },
-                None => "none".to_string(),
+                Ok(None) => cap_text(&Whitelist::empty(&WHITELIST_RULES), chain),
+                Err(_) => "unknown".to_string(),
             };
             lines.push(format!(
                 "  fee-cap {}: {old} -> {}",
@@ -374,38 +376,172 @@ fn summary(home: &Path, change: &Change) -> String {
             ));
         }
     }
+    let unverified = if reset {
+        "not verified yet; the reset replaces it either way"
+    } else {
+        "not verified yet; if it is not the list wallet.json seals, nothing changes"
+    };
     match &current {
+        Ok(Some(s)) => lines.push(format!(
+            "  whitelist.json now: {}, {unverified}",
+            gen_entries(&s.list)
+        )),
+        Ok(None) => lines.push("  whitelist.json: none yet".to_string()),
+        Err(e) => lines.push(format!(
+            "  whitelist.json: unreadable ({})",
+            printable(&e.message)
+        )),
+    }
+    let staged = match &next {
         Ok(Some(s)) => {
-            let n = s.list.entries.len();
-            lines.push(format!(
-                "  whitelist.json now: gen {}, {n} {} ({}), not verified yet; if it is not the \
-                 sealed list, the change starts from an empty list instead",
-                s.list.generation,
-                if n == 1 { "entry" } else { "entries" },
-                list_names(&s.list)
-            ));
-            lines.push(format!(
-                "  after the change: gen {}",
-                s.list.generation.saturating_add(1)
-            ));
-        }
-        Ok(None) => {
-            lines.push("  whitelist.json: none yet".to_string());
-            lines.push(
-                "  after the change: gen 1 with a new whitelist key (the sealed generation + 1 \
-                 if wallet.json already seals a whitelist)"
-                    .to_string(),
+            let mut line = format!(
+                "  whitelist.next.json: {}, an unfinished edit; if it is the list wallet.json \
+                 seals, the change builds on it",
+                gen_entries(&s.list)
             );
+            if let Some(about) = staged_about(&s.list, change) {
+                line.push_str(&format!(" ({about})"));
+            }
+            lines.push(line);
+            Some(s.list.generation)
         }
+        Ok(None) => None,
         Err(e) => {
             lines.push(format!(
-                "  whitelist.json: unreadable ({}); the change starts from an empty list",
+                "  whitelist.next.json: unreadable ({})",
                 printable(&e.message)
             ));
-            lines.push("  after the change: the sealed generation + 1".to_string());
+            None
         }
-    }
+    };
+    lines.push(generation_text(on_disk, staged, reset));
+    lines.push(
+        "  every zwallet daemon of this user is stopped first, as `zwallet lock` does".to_string(),
+    );
+    lines.push(match unlock {
+        None => "  after the change: the wallet stays locked".to_string(),
+        Some((duration, ttl)) => {
+            let until = unix_secs(SystemTime::now()).saturating_add(ttl.as_secs());
+            let utc = rfc3339_utc(until);
+            format!(
+                "  after the change: a new signing session for {duration} (until about {})",
+                match local_time(until) {
+                    Some(local) => format!("{local}, {utc}"),
+                    None => utc,
+                }
+            )
+        }
+    });
     lines.join("\n")
+}
+
+/// `gen G, n entries (names)` of a list read from a file.
+fn gen_entries(list: &Whitelist) -> String {
+    let n = list.entries.len();
+    format!(
+        "gen {}, {n} {} ({})",
+        list.generation,
+        if n == 1 { "entry" } else { "entries" },
+        list_names(list)
+    )
+}
+
+/// What `file` says about the entry `nickname`.
+fn entry_text(list: &Whitelist, nickname: &str, file: &str) -> String {
+    match list.by_nickname(nickname) {
+        Some(e) => format!(
+            "{file} lists it as {} {} on {}",
+            match e.kind {
+                EntryKind::Address => "a payee",
+                EntryKind::Contract => "a contract",
+            },
+            checksummed(&e.address),
+            chains_text(&e.chains)
+        ),
+        None => format!("{file} has no entry by that name"),
+    }
+}
+
+/// A list's fee cap on `chain`, in its coin and in wei.
+fn cap_text(list: &Whitelist, chain: &Chain) -> String {
+    match list.policy.max_fee_wei.get(chain.key) {
+        Some(v) => match U256::from_str_radix(v, 10) {
+            Ok(w) => fee_text(chain, w),
+            Err(_) => format!("{} (unreadable)", shown(v)),
+        },
+        None => "none".to_string(),
+    }
+}
+
+/// For an unfinished edit in whitelist.next.json: what it says about the value the change
+/// replaces, when that is not the same as in whitelist.json.
+fn staged_about(list: &Whitelist, change: &Change) -> Option<String> {
+    match change {
+        Change::Remove(nickname) => Some(entry_text(list, nickname, "it")),
+        Change::FeeCap { chain, .. } => Some(format!(
+            "its fee cap on {}: {}",
+            chain.key,
+            cap_text(list, chain)
+        )),
+        Change::MessageSigning(_) => Some(format!(
+            "its message signing: {}",
+            on_off(list.policy.allow_message_signing)
+        )),
+        Change::Add(_) | Change::Reset => None,
+    }
+}
+
+/// The generation after the change, as far as the unverified files tell.
+fn generation_text(current: Option<&Whitelist>, staged: Option<u64>, reset: bool) -> String {
+    let after = |g: u64| g.saturating_add(1);
+    match (current, staged, reset) {
+        (Some(l), None, false) => format!("  after the change: gen {}", after(l.generation)),
+        (Some(l), Some(n), false) => format!(
+            "  after the change: gen {} (gen {} if it builds on whitelist.next.json)",
+            after(l.generation),
+            after(n)
+        ),
+        (None, Some(n), false) => format!(
+            "  after the change: gen {} if it builds on whitelist.next.json; otherwise nothing \
+             changes",
+            after(n)
+        ),
+        (None, None, false) => "  after the change: gen 1 with a new whitelist key if this \
+                                wallet has no whitelist yet; otherwise nothing changes"
+            .to_string(),
+        (Some(l), _, true) => format!(
+            "  after the change: gen {} with a new whitelist key (if whitelist.json is not the \
+             sealed list: the sealed generation + 1)",
+            after(l.generation)
+        ),
+        (None, _, true) => "  after the change: a new whitelist key at gen 1, or at the sealed \
+                             generation + 1 if wallet.json seals a whitelist"
+            .to_string(),
+    }
+}
+
+/// `secs` as local time with its UTC offset (`2026-10-21 01:40:12 +0900`), from the system's
+/// time zone; `None` if it cannot be converted.
+fn local_time(secs: u64) -> Option<String> {
+    let t = libc::time_t::try_from(secs).ok()?;
+    // SAFETY: `tm` is plain data owned here; localtime_r only reads `t` and writes `tm`.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return None;
+    }
+    let offset = tm.tm_gmtoff / 60;
+    Some(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} {}{:02}{:02}",
+        i64::from(tm.tm_year) + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+        if offset < 0 { '-' } else { '+' },
+        offset.abs() / 60,
+        offset.abs() % 60
+    ))
 }
 
 fn kind_text(kind: EntryKind) -> String {
@@ -559,11 +695,9 @@ fn edit_output(
         Change::MessageSigning(on) => out["allowMessageSigning"] = json!(on),
         Change::Reset => out["dropped"] = json!(nicknames(&base.list)),
     }
-    let discarded = edited.discarded.as_ref().or(match change {
-        Change::Reset => base.discarded.as_ref(),
-        _ => None,
-    });
-    if let Some(d) = discarded {
+    // What a reset dropped without it having verified, or a whitelist.json found before there
+    // was any whitelist; an edit with an anchor never builds on an unverified list.
+    if let Some(d) = &edited.discarded {
         out["discarded"] = json!({ "reason": d.reason, "entries": d.entries });
     }
     session.report(&mut out);
@@ -1051,13 +1185,14 @@ mod tests {
     fn the_summary_says_what_the_password_authorizes() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
+        let at = |home: &Path, change: &Change| summary(&ListFiles::read(home), change, None);
         let base = chains::find("base").unwrap();
         let alice = Entry::new_address(
             "alice",
             "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
             &["*"],
         );
-        let text = summary(home, &Change::Add(alice));
+        let text = at(home, &Change::Add(alice));
         for want in [
             "The password authorizes this whitelist change:",
             "add alice: a payee",
@@ -1065,40 +1200,84 @@ mod tests {
             "chains: every chain (*)",
             "whitelist.json: none yet",
             "after the change: gen 1",
+            "every zwallet daemon of this user is stopped first",
+            "after the change: the wallet stays locked",
         ] {
             assert!(text.contains(want), "{want:?} not in {text}");
         }
+        assert!(
+            text.ends_with("after the change: the wallet stays locked"),
+            "{text}"
+        );
         let cap = Change::FeeCap {
             chain: base,
             wei: U256::from(1_000_000_000_000_000u64),
         };
-        let text = summary(home, &cap);
+        let text = at(home, &cap);
         assert!(
             text.contains("fee-cap base: 0.0005 ETH (500000000000000 wei) -> 0.001 ETH"),
             "{text}"
         );
+        // With --unlock: the session and when it ends.
+        let text = summary(
+            &ListFiles::read(home),
+            &cap,
+            Some(("24h", Duration::from_secs(86_400))),
+        );
+        let until = rfc3339_utc(unix_secs(SystemTime::now()) + 86_400);
+        assert!(
+            text.contains("after the change: a new signing session for 24h (until about "),
+            "{text}"
+        );
+        assert!(text.contains(&until[..13]), "{until} not in {text}");
+        assert!(!text.contains("stays locked"), "{text}");
+
         let tmp = home_with(&[Entry::new_address(
             "bob",
             "0x3333333333333333333333333333333333333333",
             &["base"],
         )]);
-        let text = summary(tmp.path(), &Change::MessageSigning(true));
+        let text = at(tmp.path(), &Change::MessageSigning(true));
         assert!(text.contains("allow-message-signing: off -> on"), "{text}");
         assert!(
-            text.contains("now: gen 1, 1 entry (bob), not verified yet"),
+            text.contains(
+                "now: gen 1, 1 entry (bob), not verified yet; if it is not the list wallet.json \
+                 seals, nothing changes"
+            ),
             "{text}"
         );
         assert!(text.contains("after the change: gen 2"), "{text}");
-        let text = summary(tmp.path(), &Change::Reset);
+        let text = at(tmp.path(), &Change::Reset);
         assert!(text.contains("every entry is dropped: bob"), "{text}");
-        let text = summary(tmp.path(), &Change::Remove("bob".into()));
+        assert!(text.contains("the reset replaces it either way"), "{text}");
+        let text = at(tmp.path(), &Change::Remove("bob".into()));
         assert!(
             text.contains("remove bob: whitelist.json lists it as a payee 0x3333333333333333333333333333333333333333 on base"),
             "{text}"
         );
+        // An unfinished edit is shown with what it says about the value changed.
+        let staged = home_with(&[Entry::new_address(
+            "bob",
+            "0x4444444444444444444444444444444444444444",
+            &["*"],
+        )]);
+        std::fs::copy(
+            staged.path().join(WHITELIST_FILE),
+            tmp.path().join(NEXT_FILE),
+        )
+        .unwrap();
+        let text = at(tmp.path(), &Change::Remove("bob".into()));
+        assert!(
+            text.contains(
+                "whitelist.next.json: gen 1, 1 entry (bob), an unfinished edit; if it is the list \
+                 wallet.json seals, the change builds on it (it lists it as a payee \
+                 0x4444444444444444444444444444444444444444 on every chain (*))"
+            ),
+            "{text}"
+        );
         // An unreadable file: its reason, escaped.
         std::fs::write(tmp.path().join(WHITELIST_FILE), "{\"x\u{1b}\": 1}").unwrap();
-        let text = summary(tmp.path(), &Change::Reset);
+        let text = at(tmp.path(), &Change::Reset);
         assert!(text.contains("whitelist.json: unreadable"), "{text}");
         assert!(!text.contains('\u{1b}'), "{text:?}");
     }
