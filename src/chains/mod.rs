@@ -17,7 +17,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::RangeInclusive;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -635,7 +635,8 @@ impl SendLock {
 }
 
 /// The send journal of one account on one chain: `<home>/sends-<chainId>-<address>.jsonl`, one
-/// JSON line `{ ts, chain, from, nonce, txHash, to, value, kind, token? }` per transaction,
+/// JSON line `{ ts, chain, from, nonce, txHash, to, value, amountRaw, kind, token? }` per
+/// transaction,
 /// appended and fsynced right before it is broadcast. If the process dies after the broadcast,
 /// this is where the transaction is still named. Not secret, but created 0600 like every file in
 /// the home.
@@ -656,13 +657,18 @@ pub const DUPLICATE_WINDOW_SECS: u64 = 600;
 
 /// What a send does, as its journal line records it and the duplicate check compares it:
 /// `kind` (`transfer`, `token-transfer`, `invoke`), `to` (the recipient, or the contract for
-/// `invoke`), `value` (the amount with its symbol, e.g. `0.01 ETH`), and `token` (the token
+/// `invoke`), `value` (the amount with its symbol, e.g. `0.01 ETH`, for people), `amount_raw`
+/// (the same amount in base units: wei, or the token's smallest unit), and `token` (the token
 /// contract of a token transfer).
+///
+/// The duplicate check compares `amount_raw`, never `value`: a token's symbol comes from the
+/// node, and a `symbol()` call that fails once (`?`) must not make a repeat look new.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendSummary {
     pub kind: String,
     pub to: String,
     pub value: String,
+    pub amount_raw: Option<String>,
     pub token: Option<String>,
 }
 
@@ -688,70 +694,130 @@ impl SendJournal {
         self.path.display().to_string()
     }
 
-    /// Appends `entry` as one line and fsyncs it (and the home, when the file is new). Never
-    /// follows a symlink.
+    /// Opens the journal with `opts` plus `O_NOFOLLOW | O_NONBLOCK` (a symlink is refused, and a
+    /// FIFO planted in its place cannot block the open), then requires a regular file owned by
+    /// this user, as `wallet.json` is read. Returns the file and its length.
+    fn open_checked(
+        &self,
+        opts: &mut OpenOptions,
+    ) -> std::result::Result<(File, u64), JournalOpen> {
+        let f = opts
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&self.path)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => JournalOpen::Missing,
+                _ if e.raw_os_error() == Some(libc::ELOOP) => {
+                    JournalOpen::Refused("it is a symbolic link".into())
+                }
+                _ => JournalOpen::Refused(e.to_string()),
+            })?;
+        let meta = f
+            .metadata()
+            .map_err(|e| JournalOpen::Refused(format!("cannot inspect it: {e}")))?;
+        if !meta.file_type().is_file() {
+            return Err(JournalOpen::Refused("it is not a regular file".into()));
+        }
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        if meta.uid() != me {
+            return Err(JournalOpen::Refused(format!(
+                "it is owned by uid {}, not this user",
+                meta.uid()
+            )));
+        }
+        Ok((f, meta.len()))
+    }
+
+    /// Appends `entry` as one line and fsyncs it (and the home, when the file is new). The file
+    /// is opened as [`Self::open_checked`] says. If it does not end in a newline (a run killed in
+    /// the middle of an append), a newline goes first, so that the cut-off record cannot swallow
+    /// this one. Any failure, including reading that last byte, is an error: the caller then
+    /// broadcasts nothing.
     pub fn append(&self, entry: &Value) -> Result<()> {
-        let fail = |e: std::io::Error| {
+        let fail = |why: String| {
             WalletError::validation(format!(
-                "cannot write the send journal {}: {e}",
+                "cannot write the send journal {}: {why}",
                 self.display()
             ))
         };
-        let mut f = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(store::FILE_MODE)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&self.path)
-            .map_err(fail)?;
+        let io = |e: std::io::Error| fail(e.to_string());
+        let (f, len) = self
+            .open_checked(
+                OpenOptions::new()
+                    .read(true)
+                    .append(true)
+                    .create(true)
+                    .mode(store::FILE_MODE),
+            )
+            .map_err(|e| fail(e.why()))?;
         f.set_permissions(std::fs::Permissions::from_mode(store::FILE_MODE))
-            .map_err(fail)?;
-        let fresh = f.metadata().map_err(fail)?.len() == 0;
-        let mut line = entry.to_string();
+            .map_err(io)?;
+        let mut line = String::new();
+        if len > 0 {
+            let mut last = [0u8; 1];
+            f.read_exact_at(&mut last, len - 1)
+                .map_err(|e| fail(format!("cannot read its last byte: {e}")))?;
+            if last[0] != b'\n' {
+                line.push('\n');
+            }
+        }
+        line.push_str(&entry.to_string());
         line.push('\n');
-        f.write_all(line.as_bytes()).map_err(fail)?;
-        f.sync_all().map_err(fail)?;
-        if fresh && let Some(dir) = self.path.parent() {
-            File::open(dir).and_then(|d| d.sync_all()).map_err(fail)?;
+        (&f).write_all(line.as_bytes()).map_err(io)?;
+        f.sync_all().map_err(io)?;
+        if len == 0
+            && let Some(dir) = self.path.parent()
+        {
+            File::open(dir).and_then(|d| d.sync_all()).map_err(io)?;
         }
         Ok(())
     }
 
-    /// The journal's entries, oldest first, read tolerantly: only its last [`JOURNAL_TAIL`] bytes
-    /// (from the first whole line in them), skipping lines that are not JSON objects. A missing
-    /// or unreadable journal reads as empty. Never follows a symlink.
-    fn entries(&self) -> Vec<Value> {
+    /// The journal's entries, oldest first: at most its last [`JOURNAL_TAIL`] bytes (from the
+    /// first whole line in them; the read stops there even if the file grows meanwhile), skipping
+    /// lines that are not JSON objects. A missing journal has none. It is opened as
+    /// [`Self::open_checked`] says; anything else wrong with it is an error, so that a check
+    /// relying on it fails closed instead of seeing no earlier sends.
+    fn entries(&self) -> Result<Vec<Value>> {
         use std::io::{Read, Seek, SeekFrom};
-        let Ok(mut f) = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&self.path)
-        else {
-            return Vec::new();
+        let fail = |why: String| {
+            WalletError::validation(format!(
+                "cannot read the send journal {}: {why}",
+                self.display()
+            ))
         };
-        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        let (mut f, len) = match self.open_checked(OpenOptions::new().read(true)) {
+            Ok(opened) => opened,
+            Err(JournalOpen::Missing) => return Ok(Vec::new()),
+            Err(e) => return Err(fail(e.why())),
+        };
         let start = len.saturating_sub(JOURNAL_TAIL);
         let mut bytes = Vec::new();
-        if f.seek(SeekFrom::Start(start)).is_err() || f.read_to_end(&mut bytes).is_err() {
-            return Vec::new();
-        }
+        f.seek(SeekFrom::Start(start))
+            .and_then(|_| f.take(JOURNAL_TAIL).read_to_end(&mut bytes))
+            .map_err(|e| fail(e.to_string()))?;
         // Mid-file, the first line is cut: drop it.
         let whole = match (start > 0, bytes.iter().position(|&b| b == b'\n')) {
             (false, _) => &bytes[..],
             (true, Some(i)) => &bytes[i + 1..],
             (true, None) => &[][..],
         };
-        String::from_utf8_lossy(whole)
+        Ok(String::from_utf8_lossy(whole)
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .filter(Value::is_object)
-            .collect()
+            .collect())
     }
 
     /// The entries whose nonce is in `nonces`, oldest first, minus the one for `except` (a hash
-    /// known not to be the one sought). Best effort, as [`Self::entries`].
-    pub fn entries_at(&self, nonces: RangeInclusive<u64>, except: Option<&str>) -> Vec<Value> {
-        self.entries()
+    /// known not to be the one sought). An error as [`Self::entries`].
+    pub fn entries_at(
+        &self,
+        nonces: RangeInclusive<u64>,
+        except: Option<&str>,
+    ) -> Result<Vec<Value>> {
+        Ok(self
+            .entries()?
             .into_iter()
             .filter(|e| e["nonce"].as_u64().is_some_and(|n| nonces.contains(&n)))
             .filter(|e| {
@@ -761,19 +827,30 @@ impl SendJournal {
                         .is_some_and(|t| t.eq_ignore_ascii_case(h))
                 })
             })
-            .collect()
+            .collect())
     }
 
     /// Where to find the earlier transactions at `nonces`, as one sentence for an error message
     /// (no final period): the journal's newest entries there (minus `except`), or that it has
-    /// none and where else to look. Also returns the entries, for the error's `--json` fields.
+    /// none (or cannot be read) and where else to look. Also returns the entries, for the error's
+    /// `--json` fields.
     pub fn pointer(
         &self,
         nonces: RangeInclusive<u64>,
         except: Option<&str>,
     ) -> (String, Vec<Value>) {
-        let entries = self.entries_at(nonces.clone(), except);
         let at = nonce_label(&nonces);
+        let entries = match self.entries_at(nonces.clone(), except) {
+            Ok(entries) => entries,
+            Err(e) => {
+                let text = format!(
+                    "{}, so it cannot name the transaction at {at}; find it on the explorer: {}",
+                    e.message,
+                    self.chain.explorer_address_url(&self.address)
+                );
+                return (text, Vec::new());
+            }
+        };
         if entries.is_empty() {
             let text = format!(
                 "The send journal {} has no {}entry at {at}; find it on the explorer: {}",
@@ -799,16 +876,29 @@ impl SendJournal {
     }
 
     /// The entries from the last [`DUPLICATE_WINDOW_SECS`] before `now` (UNIX seconds) that do
-    /// what `send` does: same chain, kind, `to` and value, and the same token contract (or none
-    /// on both). Addresses compare without case. An entry stamped after `now` (a clock set back)
-    /// counts as recent; one whose time does not parse does not.
-    pub fn recent_duplicates(&self, send: &SendSummary, now: u64) -> Vec<Value> {
+    /// what `send` does: same chain, kind and `to`, the same amount in base units (`amountRaw`;
+    /// a line written before zwallet journaled it compares its `value` text instead), and the
+    /// same token contract (or none on both). Addresses compare without case. An entry stamped after `now` (a clock set back)
+    /// counts as recent; one whose time does not parse does not. A journal that cannot be read
+    /// is an error that says nothing was signed: without it a repeat would go unnoticed.
+    pub fn recent_duplicates(&self, send: &SendSummary, now: u64) -> Result<Vec<Value>> {
         let same_addr = |v: &Value, want: Option<&str>| match (v.as_str(), want) {
             (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
             (None, None) => v.is_null(),
             _ => false,
         };
-        self.entries()
+        let entries = self.entries().map_err(|e| {
+            WalletError::new(
+                e.code,
+                format!(
+                    "{}; the check for a repeat of a recent send needs it (it must be a regular \
+                     file owned by this user), so nothing was signed",
+                    e.message
+                ),
+            )
+            .with_detail("journal", self.display())
+        })?;
+        Ok(entries
             .into_iter()
             .filter(|e| {
                 e["ts"]
@@ -817,13 +907,17 @@ impl SendJournal {
                     .is_some_and(|ts| now.saturating_sub(ts) <= DUPLICATE_WINDOW_SECS)
             })
             .filter(|e| {
+                let same_amount = match (e["amountRaw"].as_str(), send.amount_raw.as_deref()) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => e["value"] == send.value.as_str(),
+                };
                 e["chain"] == self.chain.key
                     && e["kind"] == send.kind.as_str()
-                    && e["value"] == send.value.as_str()
+                    && same_amount
                     && same_addr(&e["to"], Some(&send.to))
                     && same_addr(&e["token"], send.token.as_deref())
             })
-            .collect()
+            .collect())
     }
 
     /// The refusal of a send without `--nonce` that repeats `duplicates` (from
@@ -856,6 +950,23 @@ impl SendJournal {
         ))
         .with_detail("duplicateSends", Value::Array(duplicates))
         .with_detail("journal", self.display())
+    }
+}
+
+/// Why [`SendJournal::open_checked`] did not open the journal.
+enum JournalOpen {
+    /// There is no journal yet.
+    Missing,
+    /// It cannot or must not be used (the text says why).
+    Refused(String),
+}
+
+impl JournalOpen {
+    fn why(self) -> String {
+        match self {
+            Self::Missing => "it does not exist".to_string(),
+            Self::Refused(why) => why,
+        }
     }
 }
 
@@ -905,6 +1016,9 @@ impl SendRecord {
             "value": send.value,
             "kind": send.kind,
         });
+        if let Some(raw) = &send.amount_raw {
+            entry["amountRaw"] = json!(raw);
+        }
         if let Some(token) = &send.token {
             entry["token"] = json!(token);
         }
@@ -1545,7 +1659,7 @@ mod tests {
             journal.path(),
             home.path().join("sends-8453-0xabc.jsonl").as_path()
         );
-        assert!(journal.entries_at(0..=9, None).is_empty());
+        assert!(journal.entries_at(0..=9, None).unwrap().is_empty());
         let signed = SignedTx {
             raw: "0x02".into(),
             tx_hash: "0x11".into(),
@@ -1556,6 +1670,7 @@ mod tests {
             kind: "transfer".into(),
             to: "0xB0B".into(),
             value: "0.5 ETH".into(),
+            amount_raw: Some("500000000000000000".into()),
             token: None,
         };
         let record = SendRecord::new(journal.clone(), &signed, &summary);
@@ -1579,14 +1694,15 @@ mod tests {
             ("txHash", json!("0x11")),
             ("to", json!("0xB0B")),
             ("value", json!("0.5 ETH")),
+            ("amountRaw", json!("500000000000000000")),
             ("kind", json!("transfer")),
         ] {
             assert_eq!(first[k], want, "{k}: {first}");
         }
         assert!(first["ts"].as_str().unwrap().ends_with('Z'), "{first}");
-        assert_eq!(journal.entries_at(3..=3, None).len(), 1);
-        assert_eq!(journal.entries_at(3..=5, None).len(), 2);
-        assert!(journal.entries_at(3..=5, Some("0X11")).len() == 1);
+        assert_eq!(journal.entries_at(3..=3, None).unwrap().len(), 1);
+        assert_eq!(journal.entries_at(3..=5, None).unwrap().len(), 2);
+        assert!(journal.entries_at(3..=5, Some("0X11")).unwrap().len() == 1);
         let (text, _) = journal.pointer(4..=4, None);
         assert!(text.contains("has no entry at nonce 4"), "{text}");
         assert!(
@@ -1637,6 +1753,7 @@ mod tests {
         let hashes = |send: &SendSummary| -> Vec<String> {
             journal
                 .recent_duplicates(send, now)
+                .unwrap()
                 .iter()
                 .map(|e| e["txHash"].as_str().unwrap().to_string())
                 .collect()
@@ -1645,6 +1762,7 @@ mod tests {
             kind: "transfer".into(),
             to: "0xB0B".into(),
             value: "1 ETH".into(),
+            amount_raw: None,
             token: None,
         };
         assert_eq!(hashes(&native), ["0x01", "0x03"]);
@@ -1655,7 +1773,7 @@ mod tests {
             ..native.clone()
         };
         assert_eq!(hashes(&token), ["0x06"]);
-        let e = journal.duplicate_error(journal.recent_duplicates(&native, now));
+        let e = journal.duplicate_error(journal.recent_duplicates(&native, now).unwrap());
         assert_eq!(e.code, ErrorCode::ValidationError);
         assert!(
             e.message.starts_with(
@@ -1669,6 +1787,194 @@ mod tests {
         let v = e.to_json();
         assert_eq!(v["duplicateSends"].as_array().unwrap().len(), 2);
         assert_eq!(v["journal"], journal.display());
+    }
+
+    #[test]
+    fn recent_duplicates_key_on_base_units_not_on_the_display_value() {
+        use crate::core::time::rfc3339_utc;
+        let home = temp_home();
+        let chain = find("ethereum").unwrap();
+        let journal = SendJournal::new(home.path(), chain, "0xF00");
+        let now = 1_800_000_000;
+        let usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+        let line = |hash: &str, kind: &str, value: &str, raw: Option<&str>, token: Option<&str>| {
+            let mut e = json!({
+                "ts": rfc3339_utc(now - 5), "chain": "ethereum", "nonce": 1, "txHash": hash,
+                "to": "0xb0b", "value": value, "kind": kind,
+            });
+            if let Some(r) = raw {
+                e["amountRaw"] = json!(r);
+            }
+            if let Some(t) = token {
+                e["token"] = json!(t);
+            }
+            e
+        };
+        for e in [
+            // Written while symbol() answered.
+            line(
+                "0x01",
+                "token-transfer",
+                "0.5 USDC",
+                Some("500000"),
+                Some(usdc),
+            ),
+            // Same display text, other base units (a token with other decimals): not the same.
+            line("0x02", "token-transfer", "0.5 USDC", Some("5"), Some(usdc)),
+            // Native: the wei decide.
+            line(
+                "0x03",
+                "transfer",
+                "1 ETH",
+                Some("1000000000000000000"),
+                None,
+            ),
+            // A line from before amountRaw was journaled: its value text decides.
+            line("0x04", "transfer", "2 ETH", None, None),
+        ] {
+            journal.append(&e).unwrap();
+        }
+        let hashes = |send: &SendSummary| -> Vec<String> {
+            journal
+                .recent_duplicates(send, now)
+                .unwrap()
+                .iter()
+                .map(|e| e["txHash"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let send = |kind: &str, value: &str, raw: &str, token: Option<&str>| SendSummary {
+            kind: kind.into(),
+            to: "0xB0B".into(),
+            value: value.into(),
+            amount_raw: Some(raw.into()),
+            token: token.map(str::to_string),
+        };
+        // symbol() failed this time: "0.5 ?" still matches on the token and base units.
+        assert_eq!(
+            hashes(&send("token-transfer", "0.5 ?", "500000", Some(usdc))),
+            ["0x01"]
+        );
+        assert_eq!(
+            hashes(&send("transfer", "1 ETH", "1000000000000000000", None)),
+            ["0x03"]
+        );
+        assert!(hashes(&send("transfer", "1 ETH", "1000000000000000001", None)).is_empty());
+        assert_eq!(
+            hashes(&send("transfer", "2 ETH", "2000000000000000000", None)),
+            ["0x04"]
+        );
+    }
+
+    #[test]
+    fn a_partial_trailing_record_does_not_swallow_the_next_send() {
+        // A run killed mid-append left a record without its newline; the next send's line must
+        // still be a line of its own, or the duplicate check never sees it.
+        let home = temp_home();
+        let chain = find("ethereum").unwrap();
+        let journal = SendJournal::new(home.path(), chain, "0xF00");
+        let fragment = r#"{"ts":"2026-10-20T00:00:00Z","chain":"ethe"#;
+        std::fs::write(journal.path(), fragment).unwrap();
+        let signed = SignedTx {
+            raw: "0x02".into(),
+            tx_hash: "0x77".into(),
+            signer: "0xF00".into(),
+            nonce: Some(9),
+        };
+        let summary = SendSummary {
+            kind: "transfer".into(),
+            to: "0xB0B".into(),
+            value: "1 ETH".into(),
+            amount_raw: None,
+            token: None,
+        };
+        SendRecord::new(journal.clone(), &signed, &summary)
+            .write()
+            .unwrap();
+        let now = crate::core::time::unix_secs(std::time::SystemTime::now());
+        let found = journal.recent_duplicates(&summary, now).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0]["txHash"], "0x77");
+        // The fragment stays as a line of its own (skipped as malformed), then the new record.
+        let text = std::fs::read_to_string(journal.path()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text:?}");
+        assert_eq!(lines[0], fragment);
+        assert!(serde_json::from_str::<Value>(lines[1]).is_ok(), "{text:?}");
+        assert!(text.ends_with('\n'));
+        // A journal that ends in a newline gets nothing extra.
+        SendRecord::new(journal.clone(), &signed, &summary)
+            .write()
+            .unwrap();
+        let text = std::fs::read_to_string(journal.path()).unwrap();
+        assert_eq!(text.lines().count(), 3, "{text:?}");
+        assert!(!text.contains("\n\n"), "{text:?}");
+    }
+
+    #[test]
+    fn a_journal_that_is_not_a_regular_file_fails_closed_without_blocking() {
+        let home = temp_home();
+        let chain = find("ethereum").unwrap();
+        let journal = SendJournal::new(home.path(), chain, "0xF00");
+        // Read and append on another thread: a blocking open would never return.
+        let check = |journal: &SendJournal| -> (Result<Vec<Value>>, Result<()>) {
+            let j = journal.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send((j.entries(), j.append(&json!({ "nonce": 1 }))));
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the journal open blocked")
+        };
+        let c = std::ffi::CString::new(journal.path().as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: mkfifo with a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (read, append) = check(&journal);
+        let e = read.unwrap_err();
+        assert!(e.message.contains("is not a regular file"), "{}", e.message);
+        assert!(e.message.contains(&journal.display()), "{}", e.message);
+        assert!(append.is_err());
+        // The duplicate check refuses rather than seeing no earlier sends; the pointer in an
+        // error message says it cannot read the journal.
+        let summary = SendSummary {
+            kind: "transfer".into(),
+            to: "0xB0B".into(),
+            value: "1 ETH".into(),
+            amount_raw: None,
+            token: None,
+        };
+        let e = journal.recent_duplicates(&summary, 0).unwrap_err();
+        assert!(
+            e.message.ends_with("so nothing was signed"),
+            "{}",
+            e.message
+        );
+        assert_eq!(e.to_json()["journal"], journal.display());
+        let (text, entries) = journal.pointer(4..=4, None);
+        assert!(text.contains("cannot read the send journal"), "{text}");
+        assert!(
+            text.contains("https://etherscan.io/address/0xF00"),
+            "{text}"
+        );
+        assert!(entries.is_empty());
+        // A directory, or a symlink (even to a good journal), is refused the same way.
+        std::fs::remove_file(journal.path()).unwrap();
+        std::fs::create_dir(journal.path()).unwrap();
+        let (read, append) = check(&journal);
+        assert!(read.is_err() && append.is_err());
+        std::fs::remove_dir(journal.path()).unwrap();
+        let real = home.path().join("real.jsonl");
+        std::fs::write(&real, "{\"nonce\":1}\n").unwrap();
+        std::os::unix::fs::symlink(&real, journal.path()).unwrap();
+        let (read, append) = check(&journal);
+        assert!(
+            read.unwrap_err().message.contains("symbolic link"),
+            "symlink followed"
+        );
+        assert!(append.is_err());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "{\"nonce\":1}\n");
+        // No journal yet: no entries, not an error.
+        std::fs::remove_file(journal.path()).unwrap();
+        assert!(journal.entries().unwrap().is_empty());
     }
 
     #[test]
@@ -1687,13 +1993,14 @@ mod tests {
         std::fs::write(journal.path(), text).unwrap();
         let found: Vec<u64> = journal
             .entries()
+            .unwrap()
             .iter()
             .map(|e| e["nonce"].as_u64().unwrap())
             .collect();
         assert_eq!(found, [2]);
         // A short journal is read whole, its first line included.
         std::fs::write(journal.path(), format!("{}\n{}", line(1), line(2))).unwrap();
-        assert_eq!(journal.entries().len(), 2);
+        assert_eq!(journal.entries().unwrap().len(), 2);
     }
 
     #[test]

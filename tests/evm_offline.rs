@@ -1075,6 +1075,7 @@ fn the_journal_line_is_on_disk_before_the_node_sees_the_raw_tx() {
         ("txHash", json!(hash)),
         ("to", json!(OTHER)),
         ("value", json!("0.01 ETH")),
+        ("amountRaw", json!("10000000000000000")),
         ("kind", json!("transfer")),
     ] {
         assert_eq!(line[k], want, "{k}: {line}");
@@ -1116,6 +1117,7 @@ fn the_journal_line_is_on_disk_before_the_node_sees_the_raw_tx() {
     let last: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
     assert_eq!(last["kind"], "invoke");
     assert_eq!(last["value"], "0.5 ETH");
+    assert_eq!(last["amountRaw"], "500000000000000000");
     assert_eq!(last["txHash"], inv["txHash"]);
 }
 
@@ -1556,4 +1558,124 @@ fn token_transfers_match_on_the_token_contract() {
     // A native transfer of 0.5 is not a token transfer of 0.5.
     home.run(&transfer_amount(&rpc.url, "0.5", &[])).ok();
     assert_eq!(rpc.sent().len(), 3);
+}
+
+#[test]
+fn a_send_after_a_cut_off_journal_append_is_still_seen_as_a_repeat() {
+    let (home, me) = unlocked();
+    let rpc = mining_node();
+    // A run killed in the middle of appending its journal line.
+    std::fs::write(
+        journal_path(&home, &me),
+        r#"{"ts":"2026-10-20T00:00:00Z","chain":"ethereum","from":"0x"#,
+    )
+    .unwrap();
+    let args = transfer(&rpc.url, &[]);
+    let first = home.run(&args).ok();
+    // Run again: the first send's line must be readable, so this is a repeat.
+    let v = home.run(&args).json();
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v:#}");
+    assert_eq!(v["duplicateSends"][0]["txHash"], first["txHash"], "{v:#}");
+    assert_eq!(rpc.sent().len(), 1, "the repeat was broadcast");
+}
+
+/// Runs `args` like [`Home::run`], but kills the command if it has not finished within `limit`
+/// (`None` then): a command stuck on a FIFO must fail the test, not hang it.
+fn run_bounded(home: &Home, args: &[&str], limit: Duration) -> Option<common::Run> {
+    use std::process::Stdio;
+    let mut child = home
+        .command(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + limit;
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out = child.wait_with_output().unwrap();
+    Some(common::Run {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
+}
+
+#[test]
+fn a_fifo_in_place_of_the_journal_refuses_the_send_without_hanging() {
+    let (home, me) = unlocked();
+    let rpc = MockRpc::start(healthy);
+    let path = journal_path(&home, &me);
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: mkfifo with a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    for extra in [&["--dry-run"][..], &[]] {
+        let r = run_bounded(&home, &transfer(&rpc.url, extra), Duration::from_secs(20))
+            .unwrap_or_else(|| panic!("{extra:?}: the send hung on the FIFO journal"));
+        let msg = r.err("VALIDATION_ERROR");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert!(msg.contains("not a regular file"), "{msg}");
+        assert!(msg.contains("nothing was signed"), "{msg}");
+    }
+    // A directory in its place: refused the same way.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let msg = home.run(&transfer(&rpc.url, &[])).err("VALIDATION_ERROR");
+    assert!(msg.contains("not a regular file"), "{msg}");
+    assert!(rpc.sent().is_empty(), "sent with an unreadable journal");
+}
+
+#[test]
+fn a_token_repeat_is_refused_even_when_symbol_fails_the_second_time() {
+    let (home, me) = unlocked();
+    // `symbol()` answers once (the first run), then fails: the second run sees symbol "?".
+    let symbol_ok = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let (ok, a) = (symbol_ok.clone(), accepted.clone());
+    let rpc =
+        MockRpc::start(move |m, p| match m {
+            "eth_getTransactionCount" => Reply::Result(hex(
+                u128::from(PENDING_NONCE) + a.load(Ordering::SeqCst) as u128
+            )),
+            "eth_sendRawTransaction" => {
+                a.fetch_add(1, Ordering::SeqCst);
+                healthy(m, p)
+            }
+            "eth_call" => {
+                let tx = &p[0];
+                let data = tx["input"].as_str().or(tx["data"].as_str()).unwrap_or("");
+                let word = |n: u128| format!("{n:064x}");
+                match &data[..10.min(data.len())] {
+                    "0x313ce567" => Reply::Result(json!(format!("0x{}", word(6)))),
+                    "0x70a08231" => Reply::Result(json!(format!("0x{}", word(10u128.pow(12))))),
+                    "0x95d89b41" if ok.swap(false, Ordering::SeqCst) => Reply::Result(json!(
+                        format!("0x{}{}{:0<64}", word(32), word(4), "55534443")
+                    )),
+                    "0x95d89b41" => Reply::Error("execution reverted"),
+                    other => panic!("mock: unexpected eth_call {other}"),
+                }
+            }
+            _ => healthy(m, p),
+        });
+    let mut args = transfer(&rpc.url, &["--token", USDC]);
+    args[6] = "0.5";
+    let first = home.run(&args).ok();
+    assert_eq!(first["symbol"], "USDC");
+    let text = std::fs::read_to_string(journal_path(&home, &me)).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    // The raw amount is journaled next to the display value.
+    assert_eq!(entry["amountRaw"], "500000", "{entry}");
+    assert_eq!(entry["value"], "0.5 USDC", "{entry}");
+    // The same transfer again, but the node no longer answers symbol(): still a repeat.
+    let r = home.run(&args);
+    let v = r.json();
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v:#}");
+    assert_eq!(v["duplicateSends"][0]["txHash"], first["txHash"], "{v:#}");
+    assert_eq!(rpc.sent().len(), 1, "the repeat was broadcast");
 }
