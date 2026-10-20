@@ -139,10 +139,11 @@ Commands that act on a key take `--key <name>` (default: the active key).
     `WHITELIST_INVALID` for everything but a self-transfer. Each refusal names the exact
     `zwallet whitelist …` command that would allow it (details `command`, `counterparty`,
     `chain`).
-  - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false`.
-    `--verify` (password) checks it against the seal: `verified: true` with `source` and
-    `sealedGen`, or `verified: false` with the `reason`. `unlock` and `status` show what the
-    daemon trusts: `whitelist: { gen, verified, entries: [nicknames], reason? }`.
+  - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false` (human
+    output shows a value from the file as is only when it is short printable ASCII, else quoted
+    with escapes). `--verify` (password) checks it against the seal: `verified: true` with
+    `source` and `sealedGen`, or `verified: false` with the `reason`. `unlock` and `status` show
+    what the daemon trusts: `whitelist: { gen, verified, entries: [nicknames], reason? }`.
   - **Changes** (`add`, `remove`, `fee-cap`, `allow-message-signing on|off`, `reset`) ask for the
     password (terminal prompt, or `--password-stdin`). A wrong password, or a change the current
     list refuses, stops nothing. Otherwise the change remembers the session's `expiresAt`, stops
@@ -154,9 +155,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
     [nicknames], verified: true, stoppedDaemons, discarded?, locked, previousExpiresAt?,
     expiresAt?, daemonPid?, rewarm? }` plus the change's own fields. A `whitelist.json` that does
     not verify is never signed again: the change shows it as `discarded` (the reason and its
-    unverified entries) and starts from an empty list (`base: "empty"`). The first `add` creates
-    `whitelist.key` (`keyCreated: true`); `reset` makes a new key and an empty list with the
-    default caps, for a lost or damaged `whitelist.key`.
+    unverified entries, as JSON) and starts from an empty list (`base: "empty"`). The first `add`
+    creates `whitelist.key` (`keyCreated: true`); `reset` makes a new key and an empty list with
+    the default caps, for a lost or damaged `whitelist.key`.
   - **`@nick`**: `transfer --to @alice` and `invoke --to @router` take the address from
     `whitelist.json` as it is, unverified (the daemon decides anyway), and add `toNickname`. An
     unknown nickname is `VALIDATION_ERROR` naming `zwallet whitelist list`.
@@ -398,8 +399,10 @@ data).
 - **`whitelist.json`, `whitelist.key`** (0600, next to `wallet.json`): the signed list in plain
   JSON, and its ed25519 signing key sealed like the seed (AES-256-GCM under its own scrypt salt
   and nonce, same password, its own associated data so the two ciphertexts cannot be swapped).
-  Only `whitelist` changes write them (under `w.lock`); `whitelist.next.json` exists while a
-  change is being published, or after one was cut off (see **Known limits**).
+  Only `whitelist` changes write them, under `w.lock`, which orders zwallet's own writers but
+  cannot stop a same-user process that ignores it: what exposes such a write is the signature
+  and the seal. `whitelist.next.json` exists while a change is being published, or after one was
+  cut off (see **Known limits**).
 - **Password**: held by the human only, at least 12 characters. There is no password file and no
   password env variable; it is typed at a terminal prompt (no echo) or piped with
   `--password-stdin`, and read with raw reads into one wiped buffer. Nothing on disk decrypts the
@@ -545,9 +548,12 @@ signs for such an agent. What it does not do:
 - **Listed contracts.** A contract entry lets the agent call its listed selectors with any
   arguments and native value, and the contract may forward value or act on those arguments. List
   only contracts and selectors whose effects you accept from any caller.
-- **Joint rollback.** Restoring an older `wallet.json`, `whitelist.json` and `whitelist.key`
+- **Joint rollback.** The seal is authenticated but not fresh: an older `wallet.json` still opens
+  with the password. Restoring an older `wallet.json`, `whitelist.json` and `whitelist.key`
   together brings back the older list, revoked entries included; nothing stored in the home can
   tell. `unlock`, `status` and `whitelist list` show the generation and the entries: check them.
+  Restoring `wallet.json` alone fails closed: the older anchor does not match the list, or (from
+  before the first `whitelist add`) there is none, and every value-moving signature is refused.
 - **Same password.** `whitelist.key` is encrypted under the wallet password, so the whitelist
   adds no second factor: whoever has the password can change the list. What it buys is that the
   daemon never holds the key that signs the list.

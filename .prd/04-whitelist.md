@@ -31,10 +31,14 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
   payee.
 - **What a listed contract does.** A listed contract can forward value or act on its arguments;
   a contract entry delegates that authority.
-- **Joint rollback.** Restoring an older `wallet.json`, `whitelist.json` and `whitelist.key`
-  together resurrects revoked entries. No same-user storage can stop that; a counter outside the
-  home, such as the Secure Enclave, would be needed. The mitigation is visibility: `unlock`,
-  `status` and `whitelist list` print the generation and the entries.
+- **Joint rollback.** The seal is authenticated (AES-GCM) but not fresh: an older `wallet.json`
+  still opens with the password. Restoring an older `wallet.json`, `whitelist.json` and
+  `whitelist.key` together therefore resurrects revoked entries. No same-user storage can stop
+  that; a counter outside the home, such as the Secure Enclave, would be needed. The mitigation
+  is visibility: `unlock`, `status` and `whitelist list` print the generation and the entries.
+  Rolling back `wallet.json` alone fails closed: an older anchor does not match the current list
+  (`WHITELIST_INVALID`), and a `wallet.json` from before the first `add` seals `{}`, no
+  whitelist, so every value-moving signature is refused.
 - **Independence from the password.** The separate key adds no second factor in v0.1: it is
   encrypted under the same password. What it buys is that the daemon never holds policy-signing
   authority, and that the key can later move to the Secure Enclave or to hardware.
@@ -82,7 +86,14 @@ canonical encoding of `{version, gen, entries, policy}`: keys sorted, no whitesp
 stored, wei amounts as decimal strings, `gen` and `version` as numbers. The encoder is written by
 hand and pinned by a golden-bytes test. The signature binds the list to this wallet because only
 this wallet's sealed public key verifies it; there is no separate wallet id. Verification does
-not re-check the registry; the daemon's action table does.
+not re-check the registry; the daemon's action table does. What each part guarantees:
+- the **signature** says the list was made by whoever holds the key in `whitelist.key`: the
+  editor, with the wallet password. The daemon only ever holds the public key, so it can check
+  lists but never make one;
+- the sealed **digest** says this is the one list committed at the sealed generation, so a list
+  the key signed for an edit that never committed is not accepted in its place;
+- the sealed **generation** names that commit for humans (`unlock`, `status` and `whitelist
+  list` show it) and makes an older copy fail with a plain reason.
 
 **Registry tokens.** Built in, 19 issuer-endorsed deployments of USDC, USDT, DAI and WETH, keyed by
 (chainId, address), each with its source URL (`src/chains/evm/registry.rs`; Avalanche's Tether
@@ -134,13 +145,16 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
 1. Remember the current session's `expiresAt`, then **stop every zwallet daemon of this user**
    (the `zwallet lock` path, all homes) and confirm none is left. Nothing can be signed while the
    list changes.
-2. Take `w.lock`, decrypt `wallet.json` and `whitelist.key`.
+2. Take `w.lock`, decrypt `wallet.json` and `whitelist.key`. `w.lock` orders zwallet's own
+   writers; it is a cooperative boundary, and a same-user process that ignores it can still
+   write these files. What makes such a write visible is the signature and the seal, not the
+   lock.
 3. **Pick the base.** The current list is the base only if it verifies against the anchor.
-   - If it doesn't, and `whitelist.next.json` does, promote that file: it is a committed but
-     unrenamed edit.
+   - If it doesn't, and `whitelist.next.json` does, promote that file (renamed into place before
+     the change is staged): it is a committed but unrenamed edit.
    - If neither verifies, **never sign it.** The output shows it as `discarded` (the reason and
-     its unverified entries), and the edit starts from an empty list with the default policy, so
-     the human re-adds deliberately.
+     its unverified entries as JSON), and the edit starts from an empty list with the default
+     policy, so the human re-adds deliberately.
 4. Apply the change at `gen' = gen + 1`, validate, sign, and write `whitelist.next.json`. Re-seal
    `wallet.json` with the new anchor (refused if its ciphertext changed since step 2). Then rename
    `next` to `whitelist.json`. A crash at any point is recovered by step 3 (and by the daemon's
@@ -162,10 +176,12 @@ previousExpiresAt?, expiresAt?, daemonPid?, rewarm? }`.
 
 **CLI.**
 - `whitelist list` works while locked and prints `gen`, the entries and the policy of
-  `whitelist.json` as it is, with `verified: false`. With `--verify` (password) it checks the
-  list locally and prints `verified: true` with `source` (`whitelist.json`, or
-  `whitelist.next.json` after an interrupted edit) and `sealedGen`, or `verified: false` with the
-  `reason`.
+  `whitelist.json` as it is, with `verified: false`. Human output shows a value from the file as
+  is only when it is short printable ASCII, else quoted with escapes and cut after 64
+  characters; messages that echo file values are escaped by the core the same way. With
+  `--verify` (password) it checks the list locally and prints `verified: true` with `source`
+  (`whitelist.json`, or `whitelist.next.json` after an interrupted edit) and `sealedGen`, or
+  `verified: false` with the `reason`.
 - `transfer --to` and `invoke --to` also accept `@nickname`, resolved through `whitelist.json`
   as it is on disk (unverified; it only saves typing, the daemon decides). An unknown nickname
   is `VALIDATION_ERROR` naming `zwallet whitelist list`. The output adds `toNickname`.
@@ -212,6 +228,8 @@ From part C (CLI):
 4. `--chains` defaults to `ethereum`, the CLI's default chain (`--chain` is an alias); `fee-cap`
    refuses 0.
 5. The dry-run pre-check is not wired yet (see **CLI**).
+6. Human output escapes values read from `whitelist.json` (a hand-edited file could otherwise
+   put terminal control sequences on the screen).
 
 ## Acceptance
 
