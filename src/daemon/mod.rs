@@ -25,12 +25,13 @@
 //! daemon reads `whitelist.json` (or a staged `whitelist.next.json`) through the safe reader and
 //! trusts it only if it verifies against that anchor (`.prd/04-whitelist.md`). That read runs on a
 //! thread of its own with the session unlocked and a bounded wait (`LIST_WAIT`); the session is
-//! checked again after it, and a read that ends after lock, expiry or a re-seal signs nothing.
-//! Each connection is served in its own task with I/O timeouts, while the main loop keeps the
-//! clock: on `lock`, on expiry (wall clock, so system sleep counts), on SIGTERM/SIGINT, or as soon
-//! as wallet.json's ciphertext changes or `d.sock` is no longer its socket (checked every tick and
-//! on every request), it drops the seed (zeroized) and exits, even while connections are open. A
-//! daemon process exists only while the wallet is unlocked.
+//! checked again after it, and a read that ends after lock, expiry or a re-seal signs nothing. At
+//! most `MAX_READERS` reads are in flight; past the wait the list counts as untrusted, which signs
+//! nothing. Each connection is served in its own task with I/O timeouts, while the main loop keeps
+//! the clock: on `lock`, on expiry (wall clock, so system sleep counts), on SIGTERM/SIGINT, or as
+//! soon as wallet.json's ciphertext changes or `d.sock` is no longer its socket (checked every
+//! tick and on every request), it drops the seed (zeroized) and exits, even while connections are
+//! open. A daemon process exists only while the wallet is unlocked.
 
 use crate::chains;
 use crate::chains::evm::policy::{self, ListView};
@@ -54,7 +55,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
 /// How long a new daemon waits for the previous one to release `d.lock`.
 const LOCK_WAIT: Duration = Duration::from_secs(5);
@@ -138,6 +139,9 @@ type ListReader = Arc<dyn Fn(&Path, &WhitelistAnchor) -> Result<Whitelist> + Sen
 
 /// How long a request waits for the list to be read before deciding without it.
 const LIST_WAIT: Duration = Duration::from_secs(2);
+/// The most list reads in flight at once. A read holds its permit until it really returns, so
+/// stalled reads (a home on a hung mount) cannot pile up threads past this.
+const MAX_READERS: usize = 4;
 
 /// What the main loop and the connection tasks share.
 struct Shared {
@@ -151,6 +155,8 @@ struct Shared {
     reader: ListReader,
     /// [`LIST_WAIT`] (shorter in tests).
     list_wait: Duration,
+    /// [`MAX_READERS`] permits, one per list read in flight.
+    readers: Arc<Semaphore>,
 }
 
 impl Shared {
@@ -163,6 +169,9 @@ impl Shared {
             Some(s) if !self.wallet_unchanged(&s.sealed) => {
                 Some("wallet.json changed since unlock")
             }
+            // Again after reading wallet.json, so the last time sample is the final check
+            // before a signature.
+            Some(s) if SystemTime::now() >= s.expires_at => Some("the unlock expired"),
             Some(_) => None,
         };
         if reason.is_some() {
@@ -186,33 +195,47 @@ impl Shared {
 
     /// The list `anchor` names, read on a thread of its own and waited for at most
     /// `list_wait`. Never called with the session locked: a stalled read must not hold up
-    /// `lock`, expiry or the tamper checks. A read still running after the wait is abandoned; it
-    /// holds no lock and no secret, and being detached (not tokio's blocking pool, which the
-    /// runtime waits for on drop) it cannot keep the daemon from exiting.
+    /// `lock`, expiry or the tamper checks. The read first takes one of [`MAX_READERS`] permits
+    /// (waiting for it counts against the same deadline) and keeps it until the read returns. A
+    /// read still running after the wait is abandoned; it holds no lock and no secret, and being
+    /// detached (not tokio's blocking pool, which the runtime waits for on drop) it cannot keep
+    /// the daemon from exiting.
     async fn load(&self, anchor: &Anchor) -> Loaded {
         let anchor = match anchor {
             Anchor::Sealed(a) => *a,
             Anchor::None => return Loaded::NoList,
             Anchor::Malformed(reason) => return Loaded::Untrusted(reason.clone()),
         };
+        let deadline = tokio::time::Instant::now() + self.list_wait;
+        let late = || {
+            Loaded::Untrusted(format!(
+                "the whitelist could not be read in time ({} ms)",
+                self.list_wait.as_millis()
+            ))
+        };
+        let permit =
+            match tokio::time::timeout_at(deadline, self.readers.clone().acquire_owned()).await {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) | Err(_) => return late(),
+            };
         let (home, reader) = (self.home.clone(), self.reader.clone());
         let (tx, rx) = tokio::sync::oneshot::channel();
         let spawned = std::thread::Builder::new()
             .name("whitelist-read".into())
             .spawn(move || {
-                let _ = tx.send(reader(&home, &anchor));
+                let read = reader(&home, &anchor);
+                // Released only now that the read has returned, timed out or not.
+                drop(permit);
+                let _ = tx.send(read);
             });
         if spawned.is_err() {
             return Loaded::Untrusted("the whitelist could not be read (no thread)".into());
         }
-        match tokio::time::timeout(self.list_wait, rx).await {
+        match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(Ok(list))) => Loaded::Verified(list),
             Ok(Ok(Err(e))) => Loaded::Untrusted(e.message),
             Ok(Err(_)) => Loaded::Untrusted("the whitelist could not be read".into()),
-            Err(_) => Loaded::Untrusted(format!(
-                "the whitelist could not be read in time ({} ms)",
-                self.list_wait.as_millis()
-            )),
+            Err(_) => late(),
         }
     }
 }
@@ -330,6 +353,7 @@ async fn start(home: &Path) -> Result<Started> {
         stop: Notify::new(),
         reader: Arc::new(whitelist::load_verified),
         list_wait: LIST_WAIT,
+        readers: Arc::new(Semaphore::new(MAX_READERS)),
     });
     let ready = json!({
         "locked": false,
@@ -621,8 +645,7 @@ mod tests {
     use crate::core::store::{KDF_MIN_LOG_N, KdfParams, MasterOptions, MetaLock};
     use crate::core::whitelist::Entry;
     use alloy::primitives::{U128, U256};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
     const PW: &str = "correct horse battery staple";
@@ -679,6 +702,7 @@ mod tests {
             stop: Notify::new(),
             reader,
             list_wait,
+            readers: Arc::new(Semaphore::new(MAX_READERS)),
         });
         Fixture {
             shared,
@@ -723,42 +747,61 @@ mod tests {
         serde_json::to_vec(&Request::Lock).unwrap()
     }
 
-    /// A reader that returns [`list`] once released (or after 10 s), and says when it started.
+    /// A list reader that blocks until released (or 30 s), counting the reads that entered,
+    /// are in flight now (and the most ever at once), and have returned.
     struct Gate {
-        entered: AtomicBool,
-        release: Mutex<mpsc::Sender<()>>,
-    }
-
-    fn gated() -> (ListReader, Arc<Gate>) {
-        let (tx, rx) = mpsc::channel::<()>();
-        let gate = Arc::new(Gate {
-            entered: AtomicBool::new(false),
-            release: Mutex::new(tx),
-        });
-        let (g, rx) = (gate.clone(), Mutex::new(rx));
-        let reader: ListReader = Arc::new(move |_, _| {
-            g.entered.store(true, Ordering::SeqCst);
-            let _ = rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
-            Ok(list())
-        });
-        (reader, gate)
+        open: Mutex<bool>,
+        cv: std::sync::Condvar,
+        entered: AtomicUsize,
+        live: AtomicUsize,
+        max_live: AtomicUsize,
+        finished: AtomicUsize,
     }
 
     impl Gate {
-        /// Waits (bounded) until the reader has started, yielding to the runtime meanwhile.
-        async fn wait_entered(&self) {
-            let start = Instant::now();
-            while !self.entered.load(Ordering::SeqCst) {
-                assert!(
-                    start.elapsed() < Duration::from_secs(10),
-                    "reader never ran"
-                );
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                open: Mutex::new(false),
+                cv: std::sync::Condvar::new(),
+                entered: AtomicUsize::new(0),
+                live: AtomicUsize::new(0),
+                max_live: AtomicUsize::new(0),
+                finished: AtomicUsize::new(0),
+            })
+        }
+
+        fn reader(self: &Arc<Self>) -> ListReader {
+            let g = self.clone();
+            Arc::new(move |_, _| {
+                g.entered.fetch_add(1, Ordering::SeqCst);
+                let live = g.live.fetch_add(1, Ordering::SeqCst) + 1;
+                g.max_live.fetch_max(live, Ordering::SeqCst);
+                let open = g.open.lock().unwrap();
+                let _ =
+                    g.cv.wait_timeout_while(open, Duration::from_secs(30), |open| !*open)
+                        .unwrap();
+                g.live.fetch_sub(1, Ordering::SeqCst);
+                g.finished.fetch_add(1, Ordering::SeqCst);
+                Ok(list())
+            })
         }
 
         fn release(&self) {
-            let _ = self.release.lock().unwrap().send(());
+            *self.open.lock().unwrap() = true;
+            self.cv.notify_all();
+        }
+
+        fn count(&self, n: &AtomicUsize) -> usize {
+            n.load(Ordering::SeqCst)
+        }
+
+        /// Waits (bounded, yielding to the runtime) until `counter` reaches `n`.
+        async fn wait(&self, counter: &AtomicUsize, n: usize) {
+            let start = Instant::now();
+            while counter.load(Ordering::SeqCst) < n {
+                assert!(start.elapsed() < Duration::from_secs(20), "stuck below {n}");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         }
     }
 
@@ -773,12 +816,33 @@ mod tests {
         assert!(resp.result.is_none(), "{resp:?}");
     }
 
+    /// A refusal because the list could not be read before the wait ran out.
+    fn assert_late(resp: &Response) {
+        assert!(!resp.ok, "signed: {resp:?}");
+        assert_eq!(
+            resp.error_code,
+            Some(ErrorCode::WhitelistInvalid),
+            "{resp:?}"
+        );
+        assert!(
+            resp.error
+                .as_deref()
+                .unwrap()
+                .contains("could not be read in time"),
+            "{resp:?}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn control_a_released_read_signs() {
-        let (reader, gate) = gated();
-        let f = fixture(reader, Duration::from_secs(10), Duration::from_secs(60));
+        let gate = Gate::new();
+        let f = fixture(
+            gate.reader(),
+            Duration::from_secs(10),
+            Duration::from_secs(60),
+        );
         let sign = spawn_handle(&f.shared, sign_tx(BOB));
-        gate.wait_entered().await;
+        gate.wait(&gate.entered, 1).await;
         gate.release();
         let resp = sign.await.unwrap();
         assert!(resp.ok, "{resp:?}");
@@ -787,11 +851,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn lock_is_answered_while_a_list_read_is_stalled_and_the_late_read_signs_nothing() {
-        let (reader, gate) = gated();
-        let f = fixture(reader, Duration::from_secs(10), Duration::from_secs(60));
+        let gate = Gate::new();
+        let f = fixture(
+            gate.reader(),
+            Duration::from_secs(10),
+            Duration::from_secs(60),
+        );
         let start = Instant::now();
         let sign = spawn_handle(&f.shared, sign_tx(BOB));
-        gate.wait_entered().await;
+        gate.wait(&gate.entered, 1).await;
         let (resp, stop) = handle(&f.shared, &lock_request()).await;
         let locked_after = start.elapsed();
         assert!(resp.ok && stop, "{resp:?}");
@@ -807,11 +875,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_read_that_ends_after_expiry_signs_nothing() {
-        let (reader, gate) = gated();
-        let f = fixture(reader, Duration::from_secs(10), Duration::from_millis(400));
+        let gate = Gate::new();
+        let f = fixture(
+            gate.reader(),
+            Duration::from_secs(10),
+            Duration::from_millis(400),
+        );
         let start = Instant::now();
         let sign = spawn_handle(&f.shared, sign_tx(BOB));
-        gate.wait_entered().await;
+        gate.wait(&gate.entered, 1).await;
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert!(
             start.elapsed() < Duration::from_secs(5),
@@ -841,40 +913,55 @@ mod tests {
     }
 
     #[test]
-    fn a_read_still_stalled_does_not_keep_the_daemon_from_exiting() {
-        // After `lock` or expiry the daemon's runtime is dropped as the process ends; an
-        // abandoned read must not hold that up (tokio waits for its blocking pool on drop).
-        let reader: ListReader = Arc::new(|_, _| {
-            std::thread::sleep(Duration::from_secs(6));
-            Ok(list())
-        });
-        let f = fixture(reader, Duration::from_millis(100), Duration::from_secs(60));
+    fn dropping_the_runtime_does_not_wait_for_a_reader_still_blocked() {
+        // After `lock` or expiry the daemon's runtime is dropped as the process ends. A reader
+        // abandoned after the wait, and still blocked in its read, must not hold that up.
+        let gate = Gate::new();
+        let f = fixture(
+            gate.reader(),
+            Duration::from_millis(100),
+            Duration::from_secs(60),
+        );
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let (resp, _) = rt.block_on(handle(&f.shared, &sign_tx(BOB)));
+        assert_late(&resp);
+        assert_eq!(gate.count(&gate.entered), 1);
         assert_eq!(
-            resp.error_code,
-            Some(ErrorCode::WhitelistInvalid),
-            "{resp:?}"
+            gate.count(&gate.finished),
+            0,
+            "the read was not still blocked"
         );
         let start = Instant::now();
         drop(rt);
         assert!(
             start.elapsed() < Duration::from_secs(3),
-            "the runtime waited {:?} for the abandoned read",
+            "the runtime waited {:?} for the blocked reader",
             start.elapsed()
         );
+        assert_eq!(
+            gate.count(&gate.finished),
+            0,
+            "the reader finished before the runtime was dropped"
+        );
+        gate.release();
+        let start = Instant::now();
+        while gate.count(&gate.finished) < 1 && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(gate.count(&gate.finished), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_read_past_the_wait_is_an_untrusted_list() {
-        let reader: ListReader = Arc::new(|_, _| {
-            std::thread::sleep(Duration::from_secs(6));
-            Ok(list())
-        });
-        let f = fixture(reader, Duration::from_millis(200), Duration::from_secs(60));
+    async fn a_read_past_the_wait_refuses_everything_until_the_list_reads_again() {
+        let gate = Gate::new();
+        let f = fixture(
+            gate.reader(),
+            Duration::from_millis(200),
+            Duration::from_secs(60),
+        );
         let start = Instant::now();
         let (resp, stop) = handle(&f.shared, &sign_tx(BOB)).await;
         assert!(
@@ -882,22 +969,77 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
-        assert!(!stop && !resp.ok, "{resp:?}");
-        assert_eq!(
-            resp.error_code,
-            Some(ErrorCode::WhitelistInvalid),
-            "{resp:?}"
-        );
-        assert!(
-            resp.error.as_deref().unwrap().contains("could not be read"),
-            "{resp:?}"
-        );
+        assert!(!stop);
+        assert_late(&resp);
         // An unreadable list is an untrusted one: the key's own address too (P-1).
-        let (resp, _) = handle(&f.shared, &sign_tx(&f.me)).await;
-        assert_eq!(
-            resp.error_code,
-            Some(ErrorCode::WhitelistInvalid),
-            "{resp:?}"
+        let (resp, stop) = handle(&f.shared, &sign_tx(&f.me)).await;
+        assert!(!stop);
+        assert_late(&resp);
+        // The session is untouched: once reads return, signing works again.
+        gate.release();
+        gate.wait(&gate.finished, gate.count(&gate.entered)).await;
+        let (resp, _) = handle(&f.shared, &sign_tx(BOB)).await;
+        assert!(resp.ok, "{resp:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn outstanding_list_readers_are_bounded_and_signing_resumes_after_release() {
+        let gate = Gate::new();
+        let f = fixture(
+            gate.reader(),
+            Duration::from_millis(300),
+            Duration::from_secs(60),
         );
+        // One after another, then all at once: every one is refused in time, and no more than
+        // MAX_READERS reads are ever outstanding.
+        for _ in 0..MAX_READERS + 2 {
+            let (resp, stop) = handle(&f.shared, &sign_tx(BOB)).await;
+            assert!(!stop);
+            assert_late(&resp);
+        }
+        let parallel: Vec<_> = (0..MAX_READERS * 3)
+            .map(|_| spawn_handle(&f.shared, sign_tx(BOB)))
+            .collect();
+        for h in parallel {
+            assert_late(&h.await.unwrap());
+        }
+        assert_eq!(gate.count(&gate.entered), MAX_READERS, "readers started");
+        assert!(gate.count(&gate.max_live) <= MAX_READERS);
+        assert_eq!(gate.count(&gate.finished), 0);
+        // Released: the stalled reads return, their permits come back, and signing works.
+        gate.release();
+        gate.wait(&gate.finished, MAX_READERS).await;
+        let (resp, _) = handle(&f.shared, &sign_tx(BOB)).await;
+        assert!(resp.ok, "{resp:?}");
+        assert!(gate.count(&gate.max_live) <= MAX_READERS);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lock_is_answered_while_every_reader_is_stalled() {
+        let gate = Gate::new();
+        let f = fixture(
+            gate.reader(),
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+        );
+        let pending: Vec<_> = (0..MAX_READERS * 2)
+            .map(|_| spawn_handle(&f.shared, sign_tx(BOB)))
+            .collect();
+        gate.wait(&gate.entered, MAX_READERS).await;
+        let start = Instant::now();
+        let (resp, stop) = handle(&f.shared, &lock_request()).await;
+        assert!(resp.ok && stop, "{resp:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "lock waited {:?}",
+            start.elapsed()
+        );
+        assert!(f.shared.session().is_none(), "the seed outlived lock");
+        gate.release();
+        for h in pending {
+            let resp = h.await.unwrap();
+            assert!(!resp.ok, "signed after lock: {resp:?}");
+        }
+        assert!(gate.count(&gate.max_live) <= MAX_READERS);
     }
 }
