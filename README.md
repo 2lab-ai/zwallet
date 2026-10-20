@@ -218,7 +218,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   to, amount, amountRaw, symbol, decimals, token?, chainId, nonce, pendingNonces, pendingRange,
   pendingCount, duplicateSends?, gasLimit, gasEstimate, gasLimitSource, type, maxFeePerGas,
   maxPriorityFeePerGas, gasPrice, maxGasCost, l1Fee, nativeBalance, sufficientFunds, shortfall,
-  signerDecoded, txHash, recoveredFrom }`. It has no `rawTx`: a dry-run never hands out bytes that
+  whitelist, signerDecoded, txHash, recoveredFrom }` (without the last three when the whitelist
+  refuses, see **The whitelist**). It has no `rawTx`: a dry-run never hands out bytes that
   could be broadcast without zwallet. `recoveredFrom` is recovered from the signed raw bytes,
   `signerDecoded` is what the key daemon decoded from the bytes it signed, and an empty wallet can
   be dry-run. `pendingNonces` lists the key's nonces that are pending (between its mined count and
