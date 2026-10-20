@@ -59,7 +59,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
   check the cache against the key daemon's own derivation from the seed and fail with
   `VALIDATION_ERROR` on a mismatch; their output carries `verified: true`. While locked they print
   the cache with `verified: false` (and a note in human output). `unlock` and `create --unlock`
-  print the address the new daemon derived from the decrypted seed, and `unlock` adds `daemonPid`.
+  print the address the new daemon derived from the decrypted seed, and both add `daemonPid`.
 - **`call` / `invoke` signatures** are `name(argTypes)(returnTypes)`, e.g.
   `balanceOf(address)(uint256)` or `getReserves()(uint112,uint112,uint32)`. Return types are
   optional (without them `result` is null and `raw` has the hex). Arrays are written `[1,2]`,
