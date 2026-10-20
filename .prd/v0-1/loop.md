@@ -15,7 +15,17 @@ acceptance A1–A12. This file holds only open work.
 - **Review round 2** (4× gpt6 + 2× opus): all CHANGES_REQUESTED. Main items: `verified:true` was forgeable; `lock` could be defeated by a socket-identity race; retry messages nudged a double send; the legacy fee ceiling was vacuous; ERC-721 selector collisions.
 - **Fixed:** custody K1–K12 (2597115) and EVM V1–V11 (fix/2-evm, merged at 5b98d8d), then P1 fail-fast send lock (fba95ef), P2 index < 2^31 (39daf9f), P3 README (53fa390). V4 (the `uint` alias) did not reproduce on alloy 1.7.3 and is pinned by a test.
 - **Dispatcher rerun** on 5b98d8d: gate rc=0 (99 lib + 37 CLI + 16 evm_offline), CLI 5/5 repeats, live 8/8.
-- **Next:** review round 3 on the round-2 delta. |
+- **Review round 3** (4× gpt6 + 2× opus, on the round-2 delta): tx/abi and store were conditional-approve. Blockers:
+  - Linux pipe reopen via `/proc`, which exposed the password and allowed a fake `verified` readiness line;
+  - the nonce-taken message pointed at the refused hash and said "next nonce";
+  - no record of a broadcast if the process died after it;
+  - the serde error leaked an escaped key echo.
+- **The macOS exe check→exec race** was judged the same class as the documented binary-swap limit and documented, not fixed (no `fexecve`).
+- **Fixed:** custody R1–R8 (fcf9e66 … a90b4f8) and send S1–S10 (fix/3-evm, merged at 6a1f934).
+  - Linux tests ran in Docker `rust:1.97-bookworm` as uid 1001: 108 lib + 46 CLI + 16 evm_offline.
+  - Only the Linux run covers the `cfg(linux)` code with clippy.
+- **Dispatcher rerun** on 6a1f934: gate rc=0 (114 lib + 44 CLI + 24 evm_offline), cli+evm_offline 3/3 repeats, live 8/8.
+- **Next:** review round 4 on the round-3 delta. |
 | WU1b | zwallet · `feat/3-signing-policy` (after WU1 merge) | daemon-side signing policy per 02-architecture §Resistance: authenticated policy in the encrypted store, rolling-24h native cap, approve/permit deny unless the spender is allowlisted, per-token caps with unknown tokens denied, `zwallet policy` view (locked) and edit (password), defaults shown at `create` | opus-coder, brief written after WU1's gate rerun (protocol/store as landed) | planned |
 | WU2 | zwallet · `feat/2-distribution` | `ci.yml`/`preview.yml`/`release.yml` from harn's, version line `zwallet <ver> (<channel> <rev12>)` (the preview formula test greps `preview`), MIT `LICENSE` file | after WU1 merge | planned |
 | WU3 | homebrew-tap · `feat/zwallet-formulae` · `.worktrees/feat-zwallet-formulae` | `Formula/zwallet.rb.tmpl` and `zwallet-preview.rb.tmpl`, `bump-zwallet` and `bump-zwallet-preview` jobs, README rows (mirror of harn commit 2a3af89) | opus-coder | committed 5468a0a + ed9150e (desc ≤80). The diff is name-only against the harn jobs; tap `scripts/test-*.sh` pass 8/8; actionlint clean. **Hold the merge until zwallet is public (WU5)**: the preview job's `gh release list` has no `\|\| true`, so it goes red on a private repo |

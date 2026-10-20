@@ -46,8 +46,8 @@ seed, so the wallet file and the daemon protocol do not change.
   through the unlocked daemon, or through a one-off password prompt.
 - **Password**: held by the human only, at least 12 characters. There is no password file and no
   env variable. It is typed at a TTY prompt or piped with `--password-stdin` (scripts and tests),
-  and read with raw `read(2)` into a `Zeroizing` buffer. Core dumps are disabled in `create`,
-  `unlock`, `backup` and the daemon.
+  and read with raw `read(2)` into a `Zeroizing` buffer. Core dumps are disabled (and on Linux the
+  process made non-dumpable) on the first line of `main_entry`, for every command.
 - **KDF**: scrypt `log_n = 18`, `r = 8`, `p = 1` (256 MiB). On decrypt, only `r = 8`, `p = 1` and
   `15 ≤ log_n ≤ 18` are accepted, checked before anything is allocated. A tampered header cannot
   demand gigabytes.
@@ -64,29 +64,42 @@ seed, so the wallet file and the daemon protocol do not change.
 
 ## Process model: the daemon holds only the key
 
-- **Unlock** (staged; review rounds 1–2, 2026-10-20). `zwallet unlock <dur>` never sends the
+- **Unlock** (staged; review rounds 1–3, 2026-10-20). `zwallet unlock <dur>` never sends the
   password over the socket: in round 1, a same-user listener on `d.sock` received it.
-  1. Before prompting, the CLI pins the daemon executable. Linux spawns `/proc/self/exe`; macOS
-     records the (dev, ino) of `current_exe` and re-checks it right before the spawn.
-  2. It spawns its **own** `zwallet daemon --home <canonical home>` child (setsid, every fd ≥ 3
-     close-on-exec). Concurrent unlocks take turns on `u.lock`.
-  3. The child disables core dumps, then says `{"stage":"input"}`. Only after that does the CLI
-     write the TTL and password to the child's stdin pipe.
-  4. The child decrypts **without** `d.lock` and says `decrypted`. A wrong password stops here and
+  1. Linux only: the CLI refuses when `kernel.yama.ptrace_scope` is 0 or missing, because then any
+     same-user process can attach to the daemon during start-up. `--allow-ptrace-scope-0`
+     overrides this (needed in containers without Yama).
+  2. Before prompting, the CLI pins the daemon executable. Linux spawns `/proc/self/exe`; macOS
+     records the (dev, ino) of `current_exe` and re-checks it right before the spawn. macOS has no
+     `fexecve`, so a swap racing check→exec is part of the binary-swap limit.
+  3. It spawns its **own** `zwallet daemon --home <canonical home>` child, with setsid. Every other
+     open fd is marked close-on-exec: macOS lists them with `PROC_PIDLISTFDS`, Linux uses
+     `close_range` and falls back to `/proc/self/fd`. Concurrent unlocks take turns on `u.lock`.
+  4. The channel is one end of a `UnixStream::pair()` as the child's fds 0 and 1, not pipes. In
+     round 3, a pipe was shown to be reopenable through `/proc/<pid>/fd` before the child turns
+     non-dumpable; a socket returns ENXIO. The Linux daemon refuses to start unless fds 0 and 1
+     are sockets.
+  5. The child says `{"stage":"input"}`. Only after that does the CLI write the TTL and password.
+  6. The child decrypts **without** `d.lock` and says `decrypted`. A wrong password stops here and
      leaves any running session untouched.
-  5. The CLI stops the old daemons. It sends a polite socket `Lock`, then uses the process table.
-  6. It sends a go byte. The child takes `d.lock` (5 s wait), unlinks `d.sock`, binds, and writes
-     `{expiresAt, active, index, address, pid}`, with the address derived from the seed.
-  7. The CLI reports success only after that line arrives. On an error or timeout it kills its child.
+  7. The CLI stops this home's old daemons. It sends a polite socket `Lock`, then uses the
+     process table.
+  8. It sends a go byte. The child takes `d.lock` (5 s wait), unlinks `d.sock`, binds, and writes
+     `{expiresAt, active, index, address, pid}`, with the address derived from the seed. If that
+     write fails because the CLI died, the child wipes the seed and exits.
+  9. The CLI reports success only after that line arrives. On an error or timeout it kills its child.
 
   The password and seed never travel through argv, env, or the socket.
-- **Lock by process table, not by filename** (round 2). A same-user process can rename the real
-  socket and put a fake one at `d.sock`, or replace `d.lock`. So `zwallet lock`, and the start of
-  `unlock`:
-  1. find every process whose argv is a zwallet `daemon --home <this home>` (macOS `KERN_PROCARGS2`,
-     Linux `/proc/<pid>/cmdline`);
-  2. SIGTERM them, then SIGKILL any still alive after 2 s;
-  3. report success only when none remain, otherwise an error naming the pids.
+- **Lock by process table, not by filename** (rounds 2–3). A same-user process can rename the real
+  socket and put a fake one at `d.sock`, replace `d.lock`, or repoint a symlink in the home path.
+  - `zwallet lock` is the panic button. It finds **every** process of this uid whose argv is
+    `<any> daemon --home <absolute path>`, whatever the home (macOS `KERN_PROCARGS2`, Linux
+    `/proc/<pid>/cmdline`). It SIGTERMs them and SIGKILLs any still alive after 2 s. It reports
+    `stopped: [pids]`, and succeeds only when none remain.
+  - `unlock` stops only its own home's daemons. It matches by name first, then by inode. The stats
+    run on helper threads, bounded to 1 s and cached, so a FUSE path in another process's argv
+    cannot hang it.
+  - `status.locked` comes from the process table (`daemonPids`), not from the socket's answer.
 
   A fake process that copies that argv gets killed too, which is harmless.
 - **The daemon holds the seed in memory**, zeroizes it on `lock` or expiry, and exits at expiry.
@@ -170,6 +183,10 @@ for, and an EOA cannot sweep ERC-20 and ETH atomically.
 - A Secure Enclave biometric approval app for out-of-policy actions.
 - Holding only child keys in daemon memory.
 
+A Homebrew-installed binary is writable by the user, so the binary-swap limit applies to it in
+full. Real protection means installing zwallet where the agent cannot write, or running the agent
+as a different OS user (README §Known limits).
+
 Until these exist, a process running as the same user can still swap the zwallet binary, fake the
 unlock prompt to capture the password, or talk to the socket within policy. Root defeats everything
 local. The policy stops a prompt-injected agent that uses zwallet as intended. It does not stop
@@ -188,21 +205,38 @@ stdout and exits 1. Codes: `VALIDATION_ERROR`, `WALLET_EXISTS`, `WALLET_NOT_FOUN
 **Send safety** (review rounds 1–2). No message or code may nudge an agent into a second send of
 the same payment.
 - **One send per key and chain at a time.** A send holds `nonce-<chainId>-<addr>.lock` from before
-  `prepare` until broadcast returns. A second send while it is held fails at once (nothing signed),
-  so a duplicate attempt at the same payment cannot slip in at nonce N+1.
+  `prepare` until the command returns, including `--wait` (`--wait-timeout`, default 90 s). A
+  second send while the lock is held fails at once with nothing signed.
+- **Send journal** (round 3). Right before `eth_sendRawTransaction`, one line is appended and
+  fsynced to `sends-<chainId>-<addr>.jsonl` (0600): `{ts, chain, from, nonce, txHash, to, value,
+  kind, token?}`. The same fields go to stderr as "broadcasting …". If the journal write fails,
+  nothing is broadcast. A process killed after the broadcast therefore still leaves a record.
+- **Fresh-send guards** (round 3; a send without `--nonce`, live only; a dry-run reports instead):
+  - **Pending guard:** refused if the account's pending nonce exceeds its mined nonce, i.e. a tx
+    from this key is still in the pool. The error names the pending nonces and their journal
+    entries. `--allow-pending` overrides.
+  - **Duplicate guard:** refused if the journal has the same chain, kind, `to`, value (and token)
+    from the last 10 minutes. This catches "my first attempt was killed, re-run" even when that
+    attempt has already been mined. `--allow-duplicate` overrides.
 - **Before the send:** an error is `RPC_ERROR` "nothing was broadcast — if you retry, pass
   `--nonce N`".
 - **After the send:** the computed hash is polled.
   - If it is known, that is success (with `broadcastWarning` / `rpcTxHash` where relevant).
   - "Nonce too low" and "replacement underpriced" are looked up by hash first. If not found, the
     result is "nonce N is taken by another transaction": `BROADCAST_UNCERTAIN` if `--nonce` was
-    given, otherwise `RPC_ERROR`, with guidance to look up the earlier txHash before sending again.
+    given, otherwise `RPC_ERROR`. The refused hash goes in `refusedTxHash`, never `txHash`, and
+    the message points at the earlier send's hash (and its journal entries). It never says "next
+    nonce".
+  - Plain "transaction underpriced" (below the pool minimum) is a definitive rejection.
   - A wrong hash returned by the RPC is reconciled by the computed hash, falling back to
     `BROADCAST_UNCERTAIN`.
   - `--nonce` below the mined count says the nonce is already mined and tells the agent to look up
     that send. It never suggests "the next free nonce".
-- **Replacement:** `--nonce N` with `--bump <1.1–3>` (default 1.25), and `--replace <txHash>`, which
-  bumps from the original's fees.
+- **Replacement:** `--nonce N` below the pending nonce requires `--replace <txHash>`, so a retry
+  can never silently evict a different payment. `--bump <1.1–3>` (default 1.25) always applies
+  when given. `--replace` bumps from the original's fees. Every hint after a send says
+  `--nonce N --replace <txHash>`. A `--wait` timeout prints a hint that a run without `--nonce`
+  is a second payment.
 - `--dry-run` never prints the signed raw tx.
 - **Fee ceiling**, unless `--max-fee-gwei` is given:
   - EIP-1559: tip ≤ 2×reference and price ≤ 6×reference, where reference = `max(baseFee,
@@ -218,7 +252,12 @@ the same payment.
   - Integers must be plain decimal or `0x` hex.
   - `bytes*` and `function` values need `0x`.
   - Top-level strings are taken verbatim.
-- **RPC errors:** URLs are redacted, and HTTP error bodies are never printed.
+- **RPC errors:**
+  - URLs are redacted, including key-like host labels.
+  - HTTP error bodies are never printed.
+  - serde errors print only a fixed text with the line and column.
+  - JSON-RPC `data` is printed only when it is a string, and then scrubbed.
+  - Human-mode errors print `txHash`/`refusedTxHash`/`nonce`/`from`/`journal`.
 
 RPC endpoint precedence: `--rpc` flag, then `ZWALLET_RPC_<KEY>` env, then the default public node
 (publicnode.com per chain).
