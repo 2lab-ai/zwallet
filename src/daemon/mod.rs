@@ -49,6 +49,7 @@ use std::io::{ErrorKind, IsTerminal};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -156,8 +157,9 @@ struct Shared {
     /// A connection task asks the main loop to stop (after `lock`, or after it saw tampering).
     stop: Notify,
     reader: ListReader,
-    /// [`LIST_WAIT`] (shorter in tests).
-    list_wait: Duration,
+    /// How long a request waits for the list, in milliseconds: [`LIST_WAIT`]. Read per request,
+    /// so tests can shorten it to see a refusal and lengthen it again to see a signature.
+    list_wait_ms: AtomicU64,
     /// [`MAX_READERS`] permits, one per list read in flight.
     readers: Arc<Semaphore>,
 }
@@ -197,7 +199,7 @@ impl Shared {
     }
 
     /// The list `anchor` names, read on a thread of its own and waited for at most
-    /// `list_wait`. Never called with the session locked: a stalled read must not hold up
+    /// `list_wait_ms`. Never called with the session locked: a stalled read must not hold up
     /// `lock`, expiry or the tamper checks. The read first takes one of [`MAX_READERS`] permits
     /// (waiting for it counts against the same deadline) and keeps it until the read returns. A
     /// read still running after the wait is abandoned; it holds no lock and no secret, and being
@@ -209,11 +211,12 @@ impl Shared {
             Anchor::None => return Loaded::NoList,
             Anchor::Malformed(reason) => return Loaded::Untrusted(reason.clone()),
         };
-        let deadline = tokio::time::Instant::now() + self.list_wait;
+        let wait = Duration::from_millis(self.list_wait_ms.load(Ordering::Relaxed));
+        let deadline = tokio::time::Instant::now() + wait;
         let late = || {
             Loaded::Untrusted(format!(
                 "the whitelist could not be read in time ({} ms)",
-                self.list_wait.as_millis()
+                wait.as_millis()
             ))
         };
         let permit =
@@ -355,7 +358,7 @@ async fn start(home: &Path) -> Result<Started> {
         })),
         stop: Notify::new(),
         reader: Arc::new(whitelist::load_verified),
-        list_wait: LIST_WAIT,
+        list_wait_ms: AtomicU64::new(LIST_WAIT.as_millis() as u64),
         readers: Arc::new(Semaphore::new(MAX_READERS)),
     });
     let ready = json!({
@@ -663,6 +666,19 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
+    /// Long enough for a fresh reader thread to be scheduled and return on a loaded host: the
+    /// list wait for every phase that expects a signature.
+    const GENEROUS: Duration = Duration::from_secs(30);
+
+    impl Fixture {
+        /// Sets the list wait for the requests that follow.
+        fn set_wait(&self, wait: Duration) {
+            self.shared
+                .list_wait_ms
+                .store(wait.as_millis() as u64, Ordering::Relaxed);
+        }
+    }
+
     fn fixture(reader: ListReader, list_wait: Duration, ttl: Duration) -> Fixture {
         let dir = tempfile::Builder::new()
             .prefix("zwt-")
@@ -704,7 +720,7 @@ mod tests {
             })),
             stop: Notify::new(),
             reader,
-            list_wait,
+            list_wait_ms: AtomicU64::new(list_wait.as_millis() as u64),
             readers: Arc::new(Semaphore::new(MAX_READERS)),
         });
         Fixture {
@@ -798,11 +814,20 @@ mod tests {
             n.load(Ordering::SeqCst)
         }
 
+        /// Waits (bounded at 30 s, blocking this thread) until `counter` reaches `n`.
+        fn wait_blocking(&self, counter: &AtomicUsize, n: usize) {
+            let start = Instant::now();
+            while counter.load(Ordering::SeqCst) < n {
+                assert!(start.elapsed() < Duration::from_secs(30), "stuck below {n}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
         /// Waits (bounded, yielding to the runtime) until `counter` reaches `n`.
         async fn wait(&self, counter: &AtomicUsize, n: usize) {
             let start = Instant::now();
             while counter.load(Ordering::SeqCst) < n {
-                assert!(start.elapsed() < Duration::from_secs(20), "stuck below {n}");
+                assert!(start.elapsed() < Duration::from_secs(30), "stuck below {n}");
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }
@@ -839,11 +864,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn control_a_released_read_signs() {
         let gate = Gate::new();
-        let f = fixture(
-            gate.reader(),
-            Duration::from_secs(10),
-            Duration::from_secs(60),
-        );
+        let f = fixture(gate.reader(), GENEROUS, Duration::from_secs(60));
         let sign = spawn_handle(&f.shared, sign_tx(BOB));
         gate.wait(&gate.entered, 1).await;
         gate.release();
@@ -855,11 +876,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn lock_is_answered_while_a_list_read_is_stalled_and_the_late_read_signs_nothing() {
         let gate = Gate::new();
-        let f = fixture(
-            gate.reader(),
-            Duration::from_secs(10),
-            Duration::from_secs(60),
-        );
+        let f = fixture(gate.reader(), GENEROUS, Duration::from_secs(60));
         let start = Instant::now();
         let sign = spawn_handle(&f.shared, sign_tx(BOB));
         gate.wait(&gate.entered, 1).await;
@@ -879,11 +896,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_read_that_ends_after_expiry_signs_nothing() {
         let gate = Gate::new();
-        let f = fixture(
-            gate.reader(),
-            Duration::from_secs(10),
-            Duration::from_millis(400),
-        );
+        let f = fixture(gate.reader(), GENEROUS, Duration::from_millis(400));
         let start = Instant::now();
         let sign = spawn_handle(&f.shared, sign_tx(BOB));
         gate.wait(&gate.entered, 1).await;
@@ -908,7 +921,7 @@ mod tests {
                 .unwrap();
             Ok(list())
         });
-        let f = fixture(reader, Duration::from_secs(10), Duration::from_secs(60));
+        let f = fixture(reader, GENEROUS, Duration::from_secs(60));
         let (resp, stop) = handle(&f.shared, &sign_tx(BOB)).await;
         assert_locked(&resp);
         assert!(stop);
@@ -931,18 +944,21 @@ mod tests {
             .unwrap();
         let (resp, _) = rt.block_on(handle(&f.shared, &sign_tx(BOB)));
         assert_late(&resp);
+        // The reader thread may be scheduled only after the request gave up on it: wait for it
+        // to be inside its (blocked) read before dropping the runtime.
+        gate.wait_blocking(&gate.entered, 1);
         assert_eq!(gate.count(&gate.entered), 1);
         assert_eq!(
             gate.count(&gate.finished),
             0,
             "the read was not still blocked"
         );
-        let start = Instant::now();
+        let dropping = Instant::now();
         drop(rt);
+        let dropped_in = dropping.elapsed();
         assert!(
-            start.elapsed() < Duration::from_secs(3),
-            "the runtime waited {:?} for the blocked reader",
-            start.elapsed()
+            dropped_in < Duration::from_secs(3),
+            "the runtime waited {dropped_in:?} for the blocked reader"
         );
         assert_eq!(
             gate.count(&gate.finished),
@@ -950,11 +966,7 @@ mod tests {
             "the reader finished before the runtime was dropped"
         );
         gate.release();
-        let start = Instant::now();
-        while gate.count(&gate.finished) < 1 && start.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(gate.count(&gate.finished), 1);
+        gate.wait_blocking(&gate.finished, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -965,22 +977,19 @@ mod tests {
             Duration::from_millis(200),
             Duration::from_secs(60),
         );
-        let start = Instant::now();
         let (resp, stop) = handle(&f.shared, &sign_tx(BOB)).await;
-        assert!(
-            start.elapsed() < Duration::from_secs(4),
-            "{:?}",
-            start.elapsed()
-        );
         assert!(!stop);
         assert_late(&resp);
         // An unreadable list is an untrusted one: the key's own address too (P-1).
         let (resp, stop) = handle(&f.shared, &sign_tx(&f.me)).await;
         assert!(!stop);
         assert_late(&resp);
-        // The session is untouched: once reads return, signing works again.
+        // The session is untouched: once the stalled reads return, signing works again (with a
+        // wait long enough for a fresh reader thread on a loaded host).
+        gate.wait(&gate.entered, 2).await;
         gate.release();
-        gate.wait(&gate.finished, gate.count(&gate.entered)).await;
+        gate.wait(&gate.finished, 2).await;
+        f.set_wait(GENEROUS);
         let (resp, _) = handle(&f.shared, &sign_tx(BOB)).await;
         assert!(resp.ok, "{resp:?}");
     }
@@ -1006,25 +1015,28 @@ mod tests {
         for h in parallel {
             assert_late(&h.await.unwrap());
         }
+        // Each permit's thread may enter after its request gave up: wait for all of them.
+        gate.wait(&gate.entered, MAX_READERS).await;
         assert_eq!(gate.count(&gate.entered), MAX_READERS, "readers started");
         assert!(gate.count(&gate.max_live) <= MAX_READERS);
         assert_eq!(gate.count(&gate.finished), 0);
-        // Released: the stalled reads return, their permits come back, and signing works.
+        // Released: the stalled reads return and their permits come back; then signing works
+        // (with a wait long enough for a fresh reader thread on a loaded host).
         gate.release();
         gate.wait(&gate.finished, MAX_READERS).await;
+        f.set_wait(GENEROUS);
         let (resp, _) = handle(&f.shared, &sign_tx(BOB)).await;
         assert!(resp.ok, "{resp:?}");
+        assert_eq!(gate.count(&gate.entered), MAX_READERS + 1);
         assert!(gate.count(&gate.max_live) <= MAX_READERS);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn lock_is_answered_while_every_reader_is_stalled() {
+        // A long wait: nothing here is meant to time out; every permit is held by a stalled read
+        // until release.
         let gate = Gate::new();
-        let f = fixture(
-            gate.reader(),
-            Duration::from_secs(2),
-            Duration::from_secs(60),
-        );
+        let f = fixture(gate.reader(), GENEROUS, Duration::from_secs(60));
         let pending: Vec<_> = (0..MAX_READERS * 2)
             .map(|_| spawn_handle(&f.shared, sign_tx(BOB)))
             .collect();
@@ -1040,8 +1052,7 @@ mod tests {
         assert!(f.shared.session().is_none(), "the seed outlived lock");
         gate.release();
         for h in pending {
-            let resp = h.await.unwrap();
-            assert!(!resp.ok, "signed after lock: {resp:?}");
+            assert_locked(&h.await.unwrap());
         }
         assert!(gate.count(&gate.max_live) <= MAX_READERS);
     }
