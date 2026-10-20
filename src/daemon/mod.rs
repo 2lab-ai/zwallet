@@ -1,256 +1,400 @@
 //! The key holder (`zwallet daemon`, hidden).
 //!
-//! Started detached by `zwallet unlock`. It decrypts `wallet.json` itself, keeps only the master
-//! seed in memory, derives keys and signs on request, and nothing else: it makes no network
-//! request. On `lock`, on expiry (wall clock, so system sleep counts), or on SIGTERM/SIGINT it
-//! drops the seed (zeroized) and exits. A fresh daemon that is not unlocked within a short grace
-//! period exits too, so a daemon process exists only while the wallet is unlocked.
+//! Started by `zwallet unlock` (or `create --unlock`) as that process's own child, through
+//! [`protocol::start_daemon`]. Startup, in order:
+//! 1. read the TTL and the password from the stdin pipe (raw read(2) into one zeroized buffer),
+//! 2. take an exclusive flock on `<home>/d.lock`, held for the daemon's whole life, so one home
+//!    has at most one daemon,
+//! 3. decrypt wallet.json and derive the active key's address from the seed,
+//! 4. replace whatever is at `d.sock` and bind it (a squatter there is a visible failure, never a
+//!    leak: no secret ever goes over the socket),
+//! 5. report `{ expiresAt, active, index, address, pid }` on the stdout pipe, then serve.
+//!
+//! It keeps only the master seed in memory, derives keys and signs on request, and nothing else:
+//! it makes no network request and writes no file. Each connection is served in its own task
+//! with I/O timeouts, while the main loop keeps the clock: on `lock`, on expiry (wall clock, so
+//! system sleep counts), on SIGTERM/SIGINT, or as soon as wallet.json's ciphertext changes or
+//! `d.sock` is no longer its socket (checked every tick and on every request), it drops the seed
+//! (zeroized) and exits, even while connections are open. A daemon process exists only while the
+//! wallet is unlocked.
 
 use crate::chains;
-use crate::core::error::{Result, WalletError};
+use crate::core::error::{ErrorCode, Result, WalletError};
+use crate::core::password::{MAX_SECRET, disable_core_dumps, into_password, read_secret};
 use crate::core::protocol::{self, MAX_MESSAGE, Request, Response};
 use crate::core::seed::Seed;
-use crate::core::store;
+use crate::core::store::{self, FILE_MODE};
 use crate::core::time::{rfc3339_utc, unix_secs};
 use alloy::hex;
 use serde_json::{Value, json};
 use std::fs;
-use std::io::ErrorKind;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::PathBuf;
+use std::io::{ErrorKind, IsTerminal};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
-use zeroize::Zeroizing;
+use tokio::sync::Notify;
 
-/// A daemon that receives no successful unlock within this window exits.
-const STARTUP_GRACE: Duration = Duration::from_secs(30);
-/// Longest sleep between expiry checks.
-const MAX_TICK: Duration = Duration::from_secs(30);
+/// How long a new daemon waits for the previous one to release `d.lock`.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+/// Longest sleep between expiry and tamper checks.
+const TICK: Duration = Duration::from_secs(1);
+/// Per-connection read and write budget.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Session {
     seed: Seed,
     expires_at: SystemTime,
-    /// Ciphertext of the wallet.json this seed came from; if the file is replaced, lock.
+    /// Ciphertext of the wallet.json this seed came from.
     sealed: String,
 }
 
-struct State {
+/// What the main loop and the connection tasks share.
+struct Shared {
     home: PathBuf,
-    session: Option<Session>,
-    started: SystemTime,
-    done: bool,
+    sock: PathBuf,
+    /// `(dev, ino)` of the socket this daemon bound.
+    sock_id: (u64, u64),
+    session: Mutex<Option<Session>>,
+    /// A connection task asks the main loop to stop (after `lock`, or after it saw tampering).
+    stop: Notify,
 }
 
-impl State {
-    fn expire_if_due(&mut self) {
-        let now = SystemTime::now();
-        match &self.session {
-            Some(s) if now >= s.expires_at => {
-                self.session = None;
-                self.done = true;
+impl Shared {
+    /// Whether the session must end now, and why. Ends it (zeroizing the seed) if so.
+    fn check(&self, session: &mut Option<Session>) -> Option<&'static str> {
+        let reason = match session.as_ref() {
+            None => Some("the wallet is locked"),
+            Some(s) if SystemTime::now() >= s.expires_at => Some("the unlock expired"),
+            Some(_) if !self.socket_is_ours() => Some("the daemon socket was replaced or removed"),
+            Some(s) if !self.wallet_unchanged(&s.sealed) => {
+                Some("wallet.json changed since unlock")
             }
-            None if now >= self.started + STARTUP_GRACE => self.done = true,
-            _ => {}
+            Some(_) => None,
+        };
+        if reason.is_some() {
+            *session = None;
         }
+        reason
     }
 
-    fn next_tick(&self) -> Duration {
-        let target = self
-            .session
-            .as_ref()
-            .map(|s| s.expires_at)
-            .unwrap_or(self.started + STARTUP_GRACE);
-        target
-            .duration_since(SystemTime::now())
-            .unwrap_or(Duration::ZERO)
-            .clamp(Duration::from_millis(5), MAX_TICK)
+    fn socket_is_ours(&self) -> bool {
+        fs::symlink_metadata(&self.sock)
+            .is_ok_and(|m| m.file_type().is_socket() && (m.dev(), m.ino()) == self.sock_id)
     }
 
-    fn status(&self) -> Value {
-        match &self.session {
-            Some(s) => json!({
-                "locked": false,
-                "expiresAt": rfc3339_utc(unix_secs(s.expires_at)),
-                "pid": std::process::id(),
-            }),
-            None => json!({ "locked": true, "pid": std::process::id() }),
-        }
+    fn wallet_unchanged(&self, sealed: &str) -> bool {
+        store::read_wallet_file(&self.home).is_ok_and(|f| f.crypto.ciphertext == sealed)
     }
 
-    /// The seed, provided the session is live and wallet.json is still the file it came from.
-    fn seed(&mut self) -> Result<&Seed> {
-        let current = store::read_wallet_file(&self.home)
-            .ok()
-            .map(|f| f.crypto.ciphertext);
-        let unchanged = matches!(
-            (&self.session, current),
-            (Some(s), Some(c)) if s.sealed == c
-        );
-        if self.session.is_some() && !unchanged {
-            self.session = None;
-            self.done = true;
-            return Err(WalletError::new(
-                crate::core::error::ErrorCode::WalletLocked,
-                "wallet.json changed since unlock; locked. A human must run `zwallet unlock 24h`",
-            ));
-        }
-        self.session
-            .as_ref()
-            .map(|s| &s.seed)
-            .ok_or_else(WalletError::locked)
-    }
-}
-
-fn disable_core_dumps() {
-    let zero = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: setrlimit reads a valid rlimit struct; failure is harmless (best effort).
-    unsafe {
-        libc::setrlimit(libc::RLIMIT_CORE, &zero);
+    fn session(&self) -> std::sync::MutexGuard<'_, Option<Session>> {
+        self.session.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 pub async fn run(home: PathBuf) -> Result<()> {
-    let path = protocol::socket_path(&home)?;
-    if protocol::status(&home).await?.is_some() {
-        return Ok(()); // another daemon already serves this home
-    }
     disable_core_dumps();
-    let fail = |what: &'static str| {
-        move |e: std::io::Error| WalletError::validation(format!("{what}: {e}"))
-    };
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(fail("cannot remove stale socket")(e)),
+    // SAFETY: umask(2) only changes this process's file-creation mask.
+    unsafe {
+        libc::umask(0o077);
     }
-    let listener = UnixListener::bind(&path).map_err(fail("cannot bind daemon socket"))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(store::FILE_MODE))
-        .map_err(fail("cannot restrict daemon socket"))?;
-    let inode = fs::metadata(&path).map(|m| m.ino()).ok();
-
-    let mut term = signal(SignalKind::terminate()).map_err(fail("signal setup"))?;
-    let mut int = signal(SignalKind::interrupt()).map_err(fail("signal setup"))?;
-    // No controlling terminal after setsid, but ignore a stray SIGHUP rather than die.
-    let _hup = signal(SignalKind::hangup()).map_err(fail("signal setup"))?;
-
-    let uid = protocol::current_uid();
-    let mut state = State {
-        home,
-        session: None,
-        started: SystemTime::now(),
-        done: false,
-    };
-    while !state.done {
-        tokio::select! {
-            accepted = listener.accept() => {
-                if let Ok((stream, _)) = accepted {
-                    serve(&mut state, stream, uid).await;
-                }
-            }
-            _ = tokio::time::sleep(state.next_tick()) => {}
-            _ = term.recv() => state.done = true,
-            _ = int.recv() => state.done = true,
+    let started = match start(&home).await {
+        Ok(s) => s,
+        Err(e) => {
+            report(&Response::err(&e));
+            return Err(e);
         }
-        state.expire_if_due();
+    };
+    let Started {
+        listener,
+        shared,
+        ready,
+        _lock,
+    } = started;
+    // Readiness goes out only now that the socket serves. If the unlocking CLI is gone (it
+    // timed out or was killed), nobody is waiting for this key: wipe it and leave.
+    if !report(&Response::ok(ready)) {
+        *shared.session() = None;
+        remove_own_socket(&shared);
+        return Err(WalletError::validation("the unlocking process went away"));
     }
-    state.session = None; // zeroizes the seed
-    drop(listener);
-    if fs::metadata(&path).map(|m| m.ino()).ok() == inode {
-        let _ = fs::remove_file(&path);
-    }
+    serve_until_done(listener, &shared).await;
+    *shared.session() = None; // zeroizes the seed
+    remove_own_socket(&shared);
     Ok(())
 }
 
-async fn serve(state: &mut State, stream: UnixStream, uid: u32) {
+struct Started {
+    listener: UnixListener,
+    shared: Arc<Shared>,
+    ready: Value,
+    /// Held for the daemon's whole life.
+    _lock: fs::File,
+}
+
+async fn start(home: &Path) -> Result<Started> {
+    let sock = protocol::socket_path(home)?;
+    let (ttl, password) = read_unlock_input()?;
+    store::read_wallet_file(home)?;
+    let lock = store::lock_exclusive(
+        &home.join(protocol::LOCK_NAME),
+        LOCK_WAIT,
+        "another zwallet daemon serves this wallet",
+    )?;
+    let (unsealed, file) = store::unlock(home, &password, &chains::derive_addresses)?;
+    drop(password);
+    // The TTL counts from now, not from before the KDF ran.
+    let expires_at = SystemTime::now()
+        .checked_add(ttl)
+        .ok_or_else(|| WalletError::validation("invalid unlock duration"))?;
+    let key = file.key(None)?;
+    let primary = chains::find(chains::PRIMARY_CHAIN)?;
+    let address = primary
+        .family
+        .keys()
+        .derive_address(&unsealed.seed, key.index)?;
+
+    let fail = |what: &'static str| {
+        move |e: std::io::Error| WalletError::validation(format!("{what}: {e}"))
+    };
+    match fs::remove_file(&sock) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(fail("cannot remove the old daemon socket")(e)),
+    }
+    let listener = UnixListener::bind(&sock).map_err(fail("cannot bind daemon socket"))?;
+    fs::set_permissions(&sock, fs::Permissions::from_mode(FILE_MODE))
+        .map_err(fail("cannot restrict daemon socket"))?;
+    let meta = fs::symlink_metadata(&sock).map_err(fail("cannot inspect daemon socket"))?;
+    let ready = json!({
+        "locked": false,
+        "expiresAt": rfc3339_utc(unix_secs(expires_at)),
+        "active": file.active,
+        "index": key.index,
+        "address": address,
+        "pid": std::process::id(),
+    });
+    let shared = Arc::new(Shared {
+        home: home.to_path_buf(),
+        sock,
+        sock_id: (meta.dev(), meta.ino()),
+        session: Mutex::new(Some(Session {
+            seed: unsealed.seed,
+            expires_at,
+            sealed: file.crypto.ciphertext.clone(),
+        })),
+        stop: Notify::new(),
+    });
+    Ok(Started {
+        listener,
+        shared,
+        ready,
+        _lock: lock,
+    })
+}
+
+/// The TTL and password from stdin (written by `start_daemon`), after which stdin is closed.
+fn read_unlock_input() -> Result<(Duration, zeroize::Zeroizing<String>)> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(WalletError::validation(
+            "`zwallet daemon` is started by `zwallet unlock`, not by hand",
+        ));
+    }
+    // A maximal password plus the TTL line (at most 20 digits and a newline).
+    let raw = read_secret(stdin.as_raw_fd(), false, MAX_SECRET + 21)
+        .map_err(|e| WalletError::validation(format!("cannot read the unlock input: {e}")))?;
+    redirect_to_null(libc::STDIN_FILENO);
+    let (ttl, password) = protocol::decode_unlock_input(raw)?;
+    Ok((ttl, into_password(password)?))
+}
+
+/// Writes the readiness line to stdout (the unlocking CLI's pipe), then points stdout at
+/// /dev/null so the pipe closes. Returns whether the line was delivered.
+fn report(resp: &Response) -> bool {
+    let mut line = serde_json::to_vec(resp).unwrap_or_default();
+    line.push(b'\n');
+    let mut rest = line.as_slice();
+    let mut ok = true;
+    while !rest.is_empty() {
+        // SAFETY: writes from a valid slice to fd 1.
+        let n = unsafe { libc::write(libc::STDOUT_FILENO, rest.as_ptr().cast(), rest.len()) };
+        if n < 0 {
+            if std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            ok = false;
+            break;
+        }
+        rest = &rest[n as usize..];
+    }
+    redirect_to_null(libc::STDOUT_FILENO);
+    ok
+}
+
+fn redirect_to_null(fd: libc::c_int) {
+    if let Ok(null) = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+    {
+        // SAFETY: dup2 onto a standard fd this process owns; `null` stays open for the call.
+        unsafe {
+            libc::dup2(null.as_raw_fd(), fd);
+        }
+    }
+}
+
+fn remove_own_socket(shared: &Shared) {
+    if shared.socket_is_ours() {
+        let _ = fs::remove_file(&shared.sock);
+    }
+}
+
+async fn serve_until_done(listener: UnixListener, shared: &Arc<Shared>) {
+    let fail = |e: std::io::Error| WalletError::validation(format!("signal setup: {e}"));
+    let (Ok(mut term), Ok(mut int), Ok(_hup)) = (
+        signal(SignalKind::terminate()).map_err(fail),
+        signal(SignalKind::interrupt()).map_err(fail),
+        // No controlling terminal after setsid, but ignore a stray SIGHUP rather than die.
+        signal(SignalKind::hangup()).map_err(fail),
+    ) else {
+        return;
+    };
+    let uid = protocol::current_uid();
+    loop {
+        let wait = {
+            let mut session = shared.session();
+            if shared.check(&mut session).is_some() {
+                return;
+            }
+            let expires_at = session.as_ref().map_or(SystemTime::now(), |s| s.expires_at);
+            expires_at
+                .duration_since(SystemTime::now())
+                .unwrap_or(Duration::ZERO)
+                .clamp(Duration::from_millis(5), TICK)
+        };
+        tokio::select! {
+            accepted = listener.accept() => {
+                if let Ok((stream, _)) = accepted {
+                    tokio::spawn(serve(shared.clone(), stream, uid));
+                }
+            }
+            _ = tokio::time::sleep(wait) => {}
+            _ = shared.stop.notified() => return,
+            _ = term.recv() => return,
+            _ = int.recv() => return,
+        }
+    }
+}
+
+async fn serve(shared: Arc<Shared>, stream: UnixStream, uid: u32) {
     match stream.peer_cred() {
         Ok(cred) if cred.uid() == uid => {}
         _ => return,
     }
-    let (reader, mut writer) = stream.into_split();
-    let mut buf = Zeroizing::new(Vec::new());
-    let mut reader = BufReader::new(reader.take(MAX_MESSAGE));
-    match tokio::time::timeout(IO_TIMEOUT, reader.read_until(b'\n', &mut buf)).await {
-        Ok(Ok(n)) if n > 0 => {}
+    let (mut reader, mut writer) = stream.into_split();
+    let request = match tokio::time::timeout(IO_TIMEOUT, read_request(&mut reader)).await {
+        Ok(Ok(bytes)) if !bytes.is_empty() => bytes,
         _ => return,
-    }
-    let response = match serde_json::from_slice::<Request>(&buf) {
-        Ok(req) => match handle(state, &req) {
-            Ok(v) => Response::ok(v),
-            Err(e) => Response::err(&e),
-        },
-        Err(_) => Response::err(&WalletError::validation("malformed daemon request")),
     };
+    let (response, stop) = handle(&shared, &request);
     let mut out = serde_json::to_vec(&response).unwrap_or_default();
     out.push(b'\n');
-    let _ = tokio::time::timeout(IO_TIMEOUT, writer.write_all(&out)).await;
-    let _ = writer.shutdown().await;
+    let _ = tokio::time::timeout(IO_TIMEOUT, async {
+        writer.write_all(&out).await?;
+        writer.shutdown().await
+    })
+    .await;
+    if stop {
+        shared.stop.notify_one();
+    }
 }
 
-fn handle(state: &mut State, req: &Request) -> Result<Value> {
-    state.expire_if_due();
-    match req {
-        Request::Unlock { password, ttl_secs } => {
-            let expires_at = (*ttl_secs > 0)
-                .then(|| SystemTime::now().checked_add(Duration::from_secs(*ttl_secs)))
-                .flatten()
-                .ok_or_else(|| WalletError::validation("invalid unlock duration"))?;
-            match store::unlock(&state.home, password, &chains::derive_addresses) {
-                Ok((unsealed, file)) => {
-                    state.session = Some(Session {
-                        seed: unsealed.seed,
-                        expires_at,
-                        sealed: file.crypto.ciphertext.clone(),
-                    });
-                    state.done = false;
-                    let mut status = state.status();
-                    status["active"] = json!(file.active);
-                    Ok(status)
-                }
-                Err(e) => {
-                    // A daemon that never unlocked has no reason to stay.
-                    if state.session.is_none() {
-                        state.done = true;
-                    }
-                    Err(e)
-                }
+/// One request line (or everything up to EOF), at most [`MAX_MESSAGE`] bytes. Requests carry
+/// no secret.
+async fn read_request(reader: &mut OwnedReadHalf) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(buf);
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() as u64 > MAX_MESSAGE {
+            return Err(std::io::Error::other("request too large"));
+        }
+        if chunk[..n].contains(&b'\n') {
+            return Ok(buf);
+        }
+    }
+}
+
+/// Answers one request; the flag says the daemon must stop afterwards.
+fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
+    let Ok(req) = serde_json::from_slice::<Request>(bytes) else {
+        let e = WalletError::validation("malformed daemon request");
+        return (Response::err(&e), false);
+    };
+    let pid = std::process::id();
+    let mut session = shared.session();
+    if let Some(reason) = shared.check(&mut session) {
+        let resp = match req {
+            Request::Status => {
+                Response::ok(json!({ "locked": true, "pid": pid, "reason": reason }))
             }
-        }
+            Request::Lock => Response::ok(json!({ "locked": true, "wasUnlocked": false })),
+            _ => Response::err(&WalletError::new(
+                ErrorCode::WalletLocked,
+                format!("{reason}; locked. A human must run `zwallet unlock 24h` (any duration)"),
+            )),
+        };
+        return (resp, true);
+    }
+    let Some(s) = session.as_ref() else {
+        return (Response::err(&WalletError::locked()), true);
+    };
+    let result = match &req {
         Request::Lock => {
-            let was_unlocked = state.session.take().is_some();
-            state.done = true;
-            Ok(json!({ "locked": true, "wasUnlocked": was_unlocked }))
+            *session = None;
+            return (
+                Response::ok(json!({ "locked": true, "wasUnlocked": true })),
+                true,
+            );
         }
-        Request::Status => Ok(state.status()),
-        Request::Address { chain, index } => {
-            let chain = chains::find(chain)?;
-            let seed = state.seed()?;
-            let address = chain.family.keys().derive_address(seed, *index)?;
+        Request::Status => Ok(json!({
+            "locked": false,
+            "expiresAt": rfc3339_utc(unix_secs(s.expires_at)),
+            "pid": pid,
+        })),
+        Request::Address { chain, index } => chains::find(chain).and_then(|chain| {
+            let address = chain.family.keys().derive_address(&s.seed, *index)?;
             Ok(json!({ "chain": chain.key, "index": index, "address": address }))
-        }
+        }),
         Request::SignMessage {
             chain,
             index,
             message_hex,
-        } => {
-            let chain = chains::find(chain)?;
+        } => chains::find(chain).and_then(|chain| {
             let message = hex::decode(message_hex)
                 .map_err(|_| WalletError::validation("message_hex is not hex"))?;
-            let seed = state.seed()?;
             chain
                 .family
                 .keys()
-                .sign_message(seed, *index, chain, &message)
-        }
-        Request::SignTx { chain, index, tx } => {
-            let chain = chains::find(chain)?;
-            let seed = state.seed()?;
-            chain.family.keys().sign_tx(seed, *index, chain, tx)
-        }
-    }
+                .sign_message(&s.seed, *index, chain, &message)
+        }),
+        Request::SignTx { chain, index, tx } => chains::find(chain)
+            .and_then(|chain| chain.family.keys().sign_tx(&s.seed, *index, chain, tx)),
+    };
+    let resp = match result {
+        Ok(v) => Response::ok(v),
+        Err(e) => Response::err(&e),
+    };
+    (resp, false)
 }

@@ -3,6 +3,10 @@
 //! The file is chain-agnostic: a versioned envelope holding the BIP39 mnemonic encrypted with
 //! AES-256-GCM under a scrypt key derived from a human-held password, plus a non-secret cache of
 //! addresses per chain key. No other file on disk can decrypt it. Home is 0700, the file 0600.
+//!
+//! Every write of wallet.json holds an exclusive flock on `<home>/w.lock` across read, check,
+//! mutate and publish, so concurrent writers serialize instead of losing each other's keys. The
+//! lock files (`w.lock`, and the daemon's `d.lock`) are empty and never unlinked while in use.
 
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
@@ -14,17 +18,20 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 pub const WALLET_FILE: &str = "wallet.json";
+/// Writers of wallet.json serialize on an exclusive flock of this file.
+pub const WRITE_LOCK: &str = "w.lock";
 pub const STORE_VERSION: u32 = 1;
-pub const MIN_PASSWORD_LEN: usize = 8;
+pub const MIN_PASSWORD_LEN: usize = 12;
 const CIPHER: &str = "aes-256-gcm";
 const KDF: &str = "scrypt";
 const KEY_LEN: usize = 32;
@@ -33,6 +40,8 @@ const NONCE_LEN: usize = 12;
 const AAD: &[u8] = b"zwallet/wallet.json/v1";
 pub const DIR_MODE: u32 = 0o700;
 pub const FILE_MODE: u32 = 0o600;
+/// How long a writer waits for another writer's `w.lock` before giving up.
+const WRITE_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Resolves the wallet home: `$ZWALLET_HOME` if set and non-empty, else `<user home>/.zwallet`.
 /// `user_home` is supplied by the caller (`std::env::home_dir`) so this stays testable.
@@ -76,14 +85,35 @@ pub struct KdfParams {
     pub p: u32,
 }
 
+/// The only scrypt parameters zwallet writes or reads: r = 8, p = 1 and
+/// 2^15 <= N <= 2^18. Checked before any key derivation, so a tampered wallet.json can make a
+/// process allocate at most 128 * r * N = 256 MiB before the GCM tag rejects it.
+pub const KDF_R: u32 = 8;
+pub const KDF_P: u32 = 1;
+pub const KDF_MIN_LOG_N: u8 = 15;
+pub const KDF_MAX_LOG_N: u8 = 18;
+
 impl Default for KdfParams {
-    /// N = 2^15, r = 8, p = 1: 32 MiB, roughly 0.1 s per unlock in an optimized build.
+    /// N = 2^18, r = 8, p = 1: 256 MiB, roughly 0.5 s per unlock in an optimized build.
     fn default() -> Self {
         Self {
-            log_n: 15,
-            r: 8,
-            p: 1,
+            log_n: KDF_MAX_LOG_N,
+            r: KDF_R,
+            p: KDF_P,
         }
+    }
+}
+
+impl KdfParams {
+    /// Accepts only the parameters described at [`KDF_R`]; anything else is `VALIDATION_ERROR`.
+    pub fn checked(log_n: u8, r: u32, p: u32) -> Result<Self> {
+        if r != KDF_R || p != KDF_P || !(KDF_MIN_LOG_N..=KDF_MAX_LOG_N).contains(&log_n) {
+            return Err(WalletError::validation(format!(
+                "wallet.json is corrupt: scrypt parameters log_n={log_n} r={r} p={p} are outside \
+                 the accepted range (r={KDF_R}, p={KDF_P}, log_n {KDF_MIN_LOG_N}..={KDF_MAX_LOG_N})"
+            )));
+        }
+        Ok(Self { log_n, r, p })
     }
 }
 
@@ -169,6 +199,7 @@ pub struct StoredKdfParams {
 }
 
 fn derive_key(password: &str, salt: &[u8], kdf: &KdfParams) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    let kdf = KdfParams::checked(kdf.log_n, kdf.r, kdf.p)?;
     let params = scrypt::Params::new(kdf.log_n, kdf.r, kdf.p, KEY_LEN)
         .map_err(|_| WalletError::validation("invalid scrypt parameters"))?;
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
@@ -250,12 +281,9 @@ pub fn decrypt(sealed: &CryptoBox, password: &str) -> Result<Unsealed> {
         return Err(corrupt("unsupported cipher or kdf"));
     }
     let k = &sealed.kdfparams;
-    // Bounds keep a tampered file from demanding gigabytes of memory.
-    if !(10..=20).contains(&k.log_n)
-        || !(1..=32).contains(&k.r)
-        || !(1..=16).contains(&k.p)
-        || k.dklen as usize != KEY_LEN
-    {
+    // Before anything allocates: bounds the memory a tampered file can demand.
+    let kdf = KdfParams::checked(k.log_n, k.r, k.p)?;
+    if k.dklen as usize != KEY_LEN {
         return Err(corrupt("kdf parameters out of range"));
     }
     let salt = hex::decode(&k.salt).map_err(|_| corrupt("salt is not hex"))?;
@@ -265,15 +293,7 @@ pub fn decrypt(sealed: &CryptoBox, password: &str) -> Result<Unsealed> {
     if salt.len() < 16 || nonce.len() != NONCE_LEN {
         return Err(corrupt("bad salt or nonce length"));
     }
-    let key = derive_key(
-        password,
-        &salt,
-        &KdfParams {
-            log_n: k.log_n,
-            r: k.r,
-            p: k.p,
-        },
-    )?;
+    let key = derive_key(password, &salt, &kdf)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
     let plain = Zeroizing::new(
         cipher
@@ -311,16 +331,25 @@ pub type AddressDeriver<'a> = &'a dyn Fn(&Seed, u32) -> Result<BTreeMap<String, 
 
 /// Reads `wallet.json` metadata without decrypting.
 pub fn read_wallet_file(home: &Path) -> Result<WalletFile> {
-    let path = home.join(WALLET_FILE);
-    let bytes = match fs::read(&path) {
+    match parse_wallet_file(&home.join(WALLET_FILE)) {
+        Err(e) if e.code == ErrorCode::WalletNotFound => Err(WalletError::new(
+            ErrorCode::WalletNotFound,
+            format!(
+                "no wallet found in {} (a human runs `zwallet create <name>`)",
+                home.display()
+            ),
+        )),
+        other => other,
+    }
+}
+
+fn parse_wallet_file(path: &Path) -> Result<WalletFile> {
+    let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == ErrorKind::NotFound => {
             return Err(WalletError::new(
                 ErrorCode::WalletNotFound,
-                format!(
-                    "no wallet found in {} (a human runs `zwallet wallet create`)",
-                    home.display()
-                ),
+                format!("{} does not exist", path.display()),
             ));
         }
         Err(e) => {
@@ -353,16 +382,31 @@ pub fn unlock(
     Ok((unsealed, file))
 }
 
+/// Every key has a distinct name and index, and every cached address is the one the seed
+/// derives at that index.
 fn verify_key_cache(file: &WalletFile, seed: &Seed, derive: AddressDeriver<'_>) -> Result<()> {
+    let inconsistent =
+        |what: String| WalletError::validation(format!("wallet.json is inconsistent: {what}"));
+    let (mut names, mut indices) = (BTreeSet::new(), BTreeSet::new());
+    for key in &file.keys {
+        if !names.insert(key.name.as_str()) {
+            return Err(inconsistent(format!("two keys are named '{}'", key.name)));
+        }
+        if !indices.insert(key.index) {
+            return Err(inconsistent(format!(
+                "key '{}' reuses derivation index {}",
+                key.name, key.index
+            )));
+        }
+    }
     for key in &file.keys {
         let derived = derive(seed, key.index)?;
         for (chain, cached) in &key.addresses {
             if let Some(actual) = derived.get(chain)
                 && !actual.eq_ignore_ascii_case(cached)
             {
-                return Err(WalletError::validation(format!(
-                    "wallet.json is inconsistent: cached {chain} address of key '{}' does not \
-                     match the master seed",
+                return Err(inconsistent(format!(
+                    "cached {chain} address of key '{}' does not match the master seed",
                     key.name
                 )));
             }
@@ -387,37 +431,46 @@ impl Default for MasterOptions {
     }
 }
 
-/// Points in [`create_master`] where tests can inject a failure.
+/// Points in [`create_master`] where tests can inject a failure (or tamper with a file).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CreateStage {
-    WalletWritten,
+pub enum CreateStage<'a> {
+    /// The temp file is written and fsynced, not yet read back or published.
+    TempWritten(&'a Path),
+    /// wallet.json is in place (linked from the verified temp file).
+    Published(&'a Path),
 }
 
-/// Paths this invocation created; on failure exactly these are removed, nothing else.
+/// Paths this invocation created. On a failure before publication exactly these are removed: its
+/// temp files, and the home directory (with its lock file) only if this call created it.
 #[derive(Default)]
 struct Journal {
-    files: Vec<PathBuf>,
+    temps: Vec<PathBuf>,
     dir: Option<PathBuf>,
 }
 
 impl Journal {
     fn rollback(&self) {
-        for f in self.files.iter().rev() {
+        for f in self.temps.iter().rev() {
             let _ = fs::remove_file(f);
         }
         if let Some(d) = &self.dir {
-            // Only succeeds if empty, which is what we want.
+            // Nobody else can have published into a home this call created and still holds:
+            // remove_dir only succeeds once it is empty again.
+            let _ = fs::remove_file(d.join(WRITE_LOCK));
             let _ = fs::remove_dir(d);
         }
     }
 }
 
 /// Creates the master seed in `home`, encrypted under `password`, with its first key
-/// `first_key` at index 0 (active).
+/// `first_key` at index 0 (active). The returned file's addresses were derived from the
+/// in-memory seed this call generated.
 ///
-/// Writes `wallet.json` atomically, then reads it back from disk, decrypts it with the same
-/// password, and checks the derived addresses before reporting success. On any failure only the
-/// paths this call created are removed. Refuses if `wallet.json` already exists.
+/// Writes a temp file, reads it back from disk, decrypts it with the same password, checks the
+/// derived addresses and the phrase, and only then links it into place as `wallet.json` (link,
+/// unlike rename, never clobbers a concurrent wallet). A failure before that removes only what
+/// this call created. Once published, wallet.json is never removed: a later failure returns an
+/// error naming the file and saying recovery is needed. Refuses if `wallet.json` already exists.
 pub fn create_master(
     home: &Path,
     password: &str,
@@ -434,16 +487,39 @@ pub fn create_master_with_hook(
     first_key: &str,
     opts: MasterOptions,
     derive: AddressDeriver<'_>,
-    hook: &dyn Fn(CreateStage) -> Result<()>,
+    hook: &dyn Fn(CreateStage<'_>) -> Result<()>,
 ) -> Result<WalletFile> {
     validate_key_name(first_key)?;
     validate_new_password(password)?;
     let mut journal = Journal::default();
-    let result = create_steps(home, password, first_key, opts, derive, hook, &mut journal);
-    if result.is_err() {
-        journal.rollback();
+    let wallet_path = home.join(WALLET_FILE);
+    match create_steps(home, password, first_key, opts, derive, hook, &mut journal) {
+        Ok(file) => Ok(file),
+        Err(Failure::Before(e)) => {
+            journal.rollback();
+            Err(e)
+        }
+        Err(Failure::After(e)) => Err(published_but_failed(&wallet_path, &e)),
     }
-    result
+}
+
+/// Where a create failed relative to publishing wallet.json.
+enum Failure {
+    Before(WalletError),
+    After(WalletError),
+}
+
+fn published_but_failed(path: &Path, cause: &WalletError) -> WalletError {
+    WalletError::new(
+        cause.code,
+        format!(
+            "{} was published, then create failed: {}. The file was left in place; recovery \
+             is needed: check it with `zwallet list` and `zwallet unlock`, or move it aside \
+             before creating again",
+            path.display(),
+            cause.message
+        ),
+    )
 }
 
 fn create_steps(
@@ -452,16 +528,21 @@ fn create_steps(
     first_key: &str,
     opts: MasterOptions,
     derive: AddressDeriver<'_>,
-    hook: &dyn Fn(CreateStage) -> Result<()>,
+    hook: &dyn Fn(CreateStage<'_>) -> Result<()>,
     journal: &mut Journal,
-) -> Result<WalletFile> {
+) -> std::result::Result<WalletFile, Failure> {
     let wallet_path = home.join(WALLET_FILE);
     if fs::symlink_metadata(&wallet_path).is_ok() {
-        return Err(wallet_exists(home));
+        return Err(Failure::Before(wallet_exists(home)));
     }
-    ensure_home_dir(home, journal)?;
+    ensure_home_dir(home, journal).map_err(Failure::Before)?;
+    let _lock = MetaLock::acquire(home).map_err(Failure::Before)?;
+    let before = |e| Failure::Before(e);
+    if fs::symlink_metadata(&wallet_path).is_ok() {
+        return Err(before(wallet_exists(home)));
+    }
 
-    let seed = Seed::generate(opts.words)?;
+    let seed = Seed::generate(opts.words).map_err(before)?;
     let created_at = time::now_rfc3339();
     let file = WalletFile {
         version: STORE_VERSION,
@@ -472,37 +553,65 @@ fn create_steps(
             name: first_key.to_string(),
             index: 0,
             created_at,
-            addresses: derive(&seed, 0)?,
+            addresses: derive(&seed, 0).map_err(before)?,
         }],
         crypto: encrypt(
             &seed,
             &Value::Object(Default::default()),
             password,
             opts.kdf,
-        )?,
+        )
+        .map_err(before)?,
     };
-    drop(seed);
-    publish_new_file(home, &wallet_path, &to_json_bytes(&file)?, journal)?;
-    hook(CreateStage::WalletWritten)?;
+    let bytes = to_json_bytes(&file).map_err(before)?;
+    let tmp = temp_path(home);
+    write_new_file(&tmp, &bytes, journal).map_err(before)?;
+    hook(CreateStage::TempWritten(&tmp)).map_err(before)?;
 
-    // Verify exactly what a later process will see: the file as read back from disk.
+    // Verify exactly what a later process will see, before it can see it: the temp file as read
+    // back from disk.
     let verify = || -> Result<()> {
-        let (Unsealed { seed, .. }, on_disk) = unlock(home, password, derive)?;
-        if on_disk.keys != file.keys || seed.word_count() != opts.words {
+        let on_disk = parse_wallet_file(&tmp)?;
+        let opened = decrypt(&on_disk.crypto, password)?;
+        verify_key_cache(&on_disk, &opened.seed, derive)?;
+        if on_disk.keys != file.keys
+            || on_disk.active != file.active
+            || opened.seed.phrase() != seed.phrase()
+        {
             return Err(WalletError::validation("read-back mismatch"));
         }
         Ok(())
     };
     verify().map_err(|e| {
-        WalletError::validation(format!(
+        before(WalletError::validation(format!(
             "post-write verification failed, wallet not kept: {}",
             e.message
-        ))
+        )))
     })?;
-    Ok(file)
+    drop(seed);
+
+    publish_new_file(home, &tmp, &wallet_path).map_err(before)?;
+    // Published: from here on wallet.json is never removed, whatever fails.
+    let after = |e| Failure::After(e);
+    if let Some(pos) = journal.temps.iter().position(|t| *t == tmp) {
+        journal.temps.remove(pos);
+        let _ = fs::remove_file(&tmp);
+    }
+    sync_dir(home).map_err(after)?;
+    hook(CreateStage::Published(&wallet_path)).map_err(after)?;
+    match fs::read(&wallet_path) {
+        Ok(b) if b == bytes => Ok(file),
+        Ok(_) => Err(after(WalletError::validation(
+            "wallet.json changed right after it was written",
+        ))),
+        Err(e) => Err(after(WalletError::validation(format!(
+            "cannot read it back: {e}"
+        )))),
+    }
 }
 
-/// The derivation index the next [`add_key`] will use, after checking the name is free.
+/// The derivation index the next [`add_key`] will use, after checking the name is free: past
+/// both `nextIndex` and every index in use, so a hand-edited counter can never reuse a key.
 pub fn plan_new_key(file: &WalletFile, name: &str) -> Result<u32> {
     validate_key_name(name)?;
     if file.keys.iter().any(|k| k.name == name) {
@@ -511,78 +620,163 @@ pub fn plan_new_key(file: &WalletFile, name: &str) -> Result<u32> {
             format!("a key named '{name}' already exists"),
         ));
     }
-    Ok(file.next_index)
+    let past_used = match file.keys.iter().map(|k| k.index).max() {
+        Some(i) => i
+            .checked_add(1)
+            .ok_or_else(|| WalletError::validation("no derivation index left"))?,
+        None => 0,
+    };
+    Ok(file.next_index.max(past_used))
 }
 
-/// Adds key `name` at `index` (from [`plan_new_key`]) with its derived addresses and makes it
-/// active. The encrypted master is carried over byte-for-byte.
+/// Exclusive writer lock on `<home>/w.lock`, held across read → check → mutate → publish.
+pub struct MetaLock {
+    home: PathBuf,
+    _file: File,
+}
+
+impl MetaLock {
+    /// Waits (bounded) for the lock. `home` must exist.
+    pub fn acquire(home: &Path) -> Result<Self> {
+        let file = lock_exclusive(
+            &home.join(WRITE_LOCK),
+            WRITE_LOCK_WAIT,
+            "another zwallet is writing wallet.json",
+        )?;
+        Ok(Self {
+            home: home.to_path_buf(),
+            _file: file,
+        })
+    }
+
+    /// wallet.json as of now; it cannot change under this lock except by a process that ignores
+    /// it.
+    pub fn read(&self) -> Result<WalletFile> {
+        read_wallet_file(&self.home)
+    }
+
+    /// Adds key `name` at `index` (planned with [`plan_new_key`] under this lock) with its
+    /// derived addresses and makes it active. The encrypted master is carried over byte-for-byte.
+    pub fn add_key(
+        &self,
+        name: &str,
+        index: u32,
+        addresses: BTreeMap<String, String>,
+    ) -> Result<WalletFile> {
+        self.update(|file| {
+            if plan_new_key(file, name)? != index {
+                return Err(WalletError::validation(
+                    "wallet.json changed while the key was being derived; retry",
+                ));
+            }
+            file.keys.push(KeyEntry {
+                name: name.to_string(),
+                index,
+                created_at: time::now_rfc3339(),
+                addresses: addresses.clone(),
+            });
+            file.next_index = index + 1;
+            file.active = name.to_string();
+            Ok(())
+        })
+    }
+
+    /// Makes `name` the active key (`KEY_NOT_FOUND` if there is none).
+    pub fn set_active(&self, name: &str) -> Result<WalletFile> {
+        self.update(|file| {
+            file.key(Some(name))?;
+            file.active = name.to_string();
+            Ok(())
+        })
+    }
+
+    /// Read-modify-write of the non-secret metadata. The crypto box must come out unchanged,
+    /// and the new file replaces the old one atomically (temp file + rename), so the encrypted
+    /// master is never at risk even if this process dies midway.
+    fn update(&self, mutate: impl FnOnce(&mut WalletFile) -> Result<()>) -> Result<WalletFile> {
+        let home = &self.home;
+        let mut file = read_wallet_file(home)?;
+        let crypto_before = serde_json::to_value(&file.crypto).ok();
+        mutate(&mut file)?;
+        if serde_json::to_value(&file.crypto).ok() != crypto_before {
+            return Err(WalletError::validation(
+                "refusing to rewrite the encrypted master",
+            ));
+        }
+        let path = home.join(WALLET_FILE);
+        let tmp = temp_path(home);
+        let mut journal = Journal::default();
+        let written = write_new_file(&tmp, &to_json_bytes(&file)?, &mut journal).and_then(|()| {
+            fs::rename(&tmp, &path).map_err(|e| {
+                WalletError::validation(format!("cannot replace {}: {e}", path.display()))
+            })
+        });
+        if written.is_err() {
+            journal.rollback();
+        }
+        written?;
+        sync_dir(home)?;
+        let on_disk = read_wallet_file(home)?;
+        if on_disk.keys != file.keys || on_disk.active != file.active {
+            return Err(WalletError::validation(
+                "wallet.json read-back mismatch after update",
+            ));
+        }
+        Ok(on_disk)
+    }
+}
+
+/// [`MetaLock::add_key`] under a lock taken for just this call.
 pub fn add_key(
     home: &Path,
     name: &str,
     index: u32,
     addresses: BTreeMap<String, String>,
 ) -> Result<WalletFile> {
-    update_metadata(home, |file| {
-        if plan_new_key(file, name)? != index {
-            return Err(WalletError::validation(
-                "wallet.json changed while the key was being derived; retry",
-            ));
-        }
-        file.keys.push(KeyEntry {
-            name: name.to_string(),
-            index,
-            created_at: time::now_rfc3339(),
-            addresses: addresses.clone(),
-        });
-        file.next_index = index + 1;
-        file.active = name.to_string();
-        Ok(())
-    })
+    read_wallet_file(home)?;
+    MetaLock::acquire(home)?.add_key(name, index, addresses)
 }
 
-/// Makes `name` the active key (`KEY_NOT_FOUND` if there is none).
+/// [`MetaLock::set_active`] under a lock taken for just this call.
 pub fn set_active(home: &Path, name: &str) -> Result<WalletFile> {
-    update_metadata(home, |file| {
-        file.key(Some(name))?;
-        file.active = name.to_string();
-        Ok(())
-    })
+    read_wallet_file(home)?;
+    MetaLock::acquire(home)?.set_active(name)
 }
 
-/// Read-modify-write of the non-secret metadata. The crypto box must come out unchanged, and the
-/// new file replaces the old one atomically (temp file + rename), so the encrypted master is never
-/// at risk even if this process dies midway.
-fn update_metadata(
-    home: &Path,
-    mutate: impl FnOnce(&mut WalletFile) -> Result<()>,
-) -> Result<WalletFile> {
-    let mut file = read_wallet_file(home)?;
-    let crypto_before = serde_json::to_value(&file.crypto).ok();
-    mutate(&mut file)?;
-    if serde_json::to_value(&file.crypto).ok() != crypto_before {
-        return Err(WalletError::validation(
-            "refusing to rewrite the encrypted master",
-        ));
+/// Opens (creating 0600 if needed, never following a symlink) and exclusively flocks `path`,
+/// retrying until `wait` runs out. The lock lasts as long as the returned file is open.
+pub fn lock_exclusive(path: &Path, wait: Duration, busy: &str) -> Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(FILE_MODE)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| WalletError::validation(format!("cannot open {}: {e}", path.display())))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(WalletError::validation(format!(
+                    "{busy}: {} is locked (waited {}s)",
+                    path.display(),
+                    wait.as_secs()
+                )));
+            }
+            Err(TryLockError::Error(e)) => {
+                return Err(WalletError::validation(format!(
+                    "cannot lock {}: {e}",
+                    path.display()
+                )));
+            }
+        }
     }
-    let path = home.join(WALLET_FILE);
-    let tmp = temp_path(home);
-    let mut journal = Journal::default();
-    let written = write_new_file(&tmp, &to_json_bytes(&file)?, &mut journal).and_then(|()| {
-        fs::rename(&tmp, &path)
-            .map_err(|e| WalletError::validation(format!("cannot replace {}: {e}", path.display())))
-    });
-    if written.is_err() {
-        journal.rollback();
-    }
-    written?;
-    sync_dir(home);
-    let on_disk = read_wallet_file(home)?;
-    if on_disk.keys != file.keys || on_disk.active != file.active {
-        return Err(WalletError::validation(
-            "wallet.json read-back mismatch after update",
-        ));
-    }
-    Ok(on_disk)
 }
 
 fn to_json_bytes(file: &WalletFile) -> Result<Vec<u8>> {
@@ -600,10 +794,11 @@ fn temp_path(home: &Path) -> PathBuf {
     ))
 }
 
-fn sync_dir(dir: &Path) {
-    if let Ok(d) = fs::File::open(dir) {
-        let _ = d.sync_all();
-    }
+/// fsyncs a directory so a new or renamed entry in it survives a crash.
+fn sync_dir(dir: &Path) -> Result<()> {
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| WalletError::validation(format!("cannot sync {}: {e}", dir.display())))
 }
 
 fn wallet_exists(home: &Path) -> WalletError {
@@ -616,7 +811,8 @@ fn wallet_exists(home: &Path) -> WalletError {
     )
 }
 
-/// Creates `home` with 0700 (recording it if new) or tightens an existing one to 0700.
+/// Creates `home` with 0700 (recording it if new, and syncing its parent so the new entry is
+/// durable) or tightens an existing one to 0700.
 fn ensure_home_dir(home: &Path, journal: &mut Journal) -> Result<()> {
     let fail = |e: std::io::Error| {
         WalletError::validation(format!(
@@ -645,6 +841,9 @@ fn ensure_home_dir(home: &Path, journal: &mut Journal) -> Result<()> {
             journal.dir = Some(home.to_path_buf());
             // umask can only clear bits; set the mode explicitly anyway.
             fs::set_permissions(home, fs::Permissions::from_mode(DIR_MODE)).map_err(fail)?;
+            if let Some(parent) = home.parent() {
+                sync_dir(parent)?;
+            }
         }
         Err(e) => return Err(fail(e)),
     }
@@ -662,7 +861,7 @@ fn write_new_file(path: &Path, bytes: &[u8], journal: &mut Journal) -> Result<()
         .mode(FILE_MODE)
         .open(path)
         .map_err(fail)?;
-    journal.files.push(path.to_path_buf());
+    journal.temps.push(path.to_path_buf());
     f.set_permissions(fs::Permissions::from_mode(FILE_MODE))
         .map_err(fail)?;
     f.write_all(bytes).map_err(fail)?;
@@ -670,31 +869,19 @@ fn write_new_file(path: &Path, bytes: &[u8], journal: &mut Journal) -> Result<()
     Ok(())
 }
 
-/// Atomic publish: write a temp file, then link(2) it into place. Unlike rename(2), link fails
-/// instead of clobbering if `final_path` appeared concurrently.
-fn publish_new_file(
-    home: &Path,
-    final_path: &Path,
-    bytes: &[u8],
-    journal: &mut Journal,
-) -> Result<()> {
-    let tmp = temp_path(home);
-    write_new_file(&tmp, bytes, journal)?;
-    let linked = match fs::hard_link(&tmp, final_path) {
+/// Atomic publish of a verified temp file: link(2) it into place. Unlike rename(2), link fails
+/// instead of clobbering if `final_path` appeared concurrently. There is no fallback: a
+/// filesystem without hard links gets an error, never a clobbering rename.
+fn publish_new_file(home: &Path, tmp: &Path, final_path: &Path) -> Result<()> {
+    match fs::hard_link(tmp, final_path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(wallet_exists(home)),
-        // Filesystems without hard links: fall back to rename after re-checking.
-        Err(_) if fs::symlink_metadata(final_path).is_err() => fs::rename(&tmp, final_path)
-            .map_err(|e| {
-                WalletError::validation(format!("cannot write {}: {e}", final_path.display()))
-            }),
-        Err(_) => Err(wallet_exists(home)),
-    };
-    let _ = fs::remove_file(&tmp);
-    linked?;
-    journal.files.push(final_path.to_path_buf());
-    sync_dir(home);
-    Ok(())
+        Err(e) => Err(WalletError::validation(format!(
+            "cannot publish {} (hard link from {}): {e}",
+            final_path.display(),
+            tmp.display()
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -735,13 +922,35 @@ mod tests {
         Value::Object(Default::default())
     }
 
+    /// The cheapest accepted KDF, for tests where KDF strength is not the point.
+    fn fast_kdf() -> KdfParams {
+        KdfParams {
+            log_n: KDF_MIN_LOG_N,
+            ..KdfParams::default()
+        }
+    }
+
+    fn fast() -> MasterOptions {
+        MasterOptions {
+            kdf: fast_kdf(),
+            ..MasterOptions::default()
+        }
+    }
+
+    /// Directory entries other than the lock files.
+    fn data_names(dir: &Path) -> Vec<OsString> {
+        let mut v = names(dir);
+        v.retain(|n| n != WRITE_LOCK);
+        v
+    }
+
     #[test]
     fn encrypt_decrypt_round_trip() {
-        let sealed = encrypt(&test_seed(), &empty(), PW, KdfParams::default()).unwrap();
+        let sealed = encrypt(&test_seed(), &empty(), PW, fast_kdf()).unwrap();
         let opened = decrypt(&sealed, PW).unwrap();
         assert_eq!(opened.seed.phrase(), TEST_MNEMONIC);
         assert_eq!(opened.policy, empty());
-        let again = encrypt(&test_seed(), &empty(), PW, KdfParams::default()).unwrap();
+        let again = encrypt(&test_seed(), &empty(), PW, fast_kdf()).unwrap();
         assert_ne!(sealed.nonce, again.nonce);
         assert_ne!(sealed.kdfparams.salt, again.kdfparams.salt);
         assert!(!sealed.ciphertext.contains(&hex::encode("test test")));
@@ -749,7 +958,7 @@ mod tests {
 
     #[test]
     fn wrong_password_is_wrong_password_error() {
-        let sealed = encrypt(&test_seed(), &empty(), PW, KdfParams::default()).unwrap();
+        let sealed = encrypt(&test_seed(), &empty(), PW, fast_kdf()).unwrap();
         let err = decrypt(&sealed, "wrong password").err().unwrap();
         assert_eq!(err.code, ErrorCode::WrongPassword);
         assert_eq!(
@@ -763,7 +972,7 @@ mod tests {
 
     #[test]
     fn tampered_file_fails_closed() {
-        let mut sealed = encrypt(&test_seed(), &empty(), PW, KdfParams::default()).unwrap();
+        let mut sealed = encrypt(&test_seed(), &empty(), PW, fast_kdf()).unwrap();
         let mut ct = hex::decode(&sealed.ciphertext).unwrap();
         ct[0] ^= 1;
         sealed.ciphertext = hex::encode(ct);
@@ -785,9 +994,14 @@ mod tests {
         assert_eq!(mode(&home.join(WALLET_FILE)), 0o600);
         assert_eq!(
             names(&home),
-            vec![OsString::from(WALLET_FILE)],
-            "no password or temp file"
+            vec![OsString::from(WRITE_LOCK), OsString::from(WALLET_FILE)],
+            "no password or temp file; only the empty writer lock"
         );
+        assert_eq!(mode(&home.join(WRITE_LOCK)), 0o600);
+        assert_eq!(fs::metadata(home.join(WRITE_LOCK)).unwrap().len(), 0);
+        // The default KDF: scrypt N = 2^18, r = 8, p = 1.
+        let k = &file.crypto.kdfparams;
+        assert_eq!((k.log_n, k.r, k.p), (18, 8, 1));
         assert_eq!(file.active, "main");
         assert_eq!(file.next_index, 1);
         assert_eq!(file.keys[0].index, 0);
@@ -811,7 +1025,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let opts = MasterOptions {
             words: 12,
-            ..MasterOptions::default()
+            ..fast()
         };
         create_master(tmp.path(), PW, "a", opts, &fake_derive).unwrap();
         assert_eq!(
@@ -824,7 +1038,7 @@ mod tests {
         );
         let bad = MasterOptions {
             words: 13,
-            ..MasterOptions::default()
+            ..fast()
         };
         let other = tmp.path().join("other");
         assert!(create_master(&other, PW, "a", bad, &fake_derive).is_err());
@@ -836,11 +1050,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
         fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
-        create_master(&home, PW, "a", MasterOptions::default(), &fake_derive).unwrap();
+        create_master(&home, PW, "a", fast(), &fake_derive).unwrap();
         assert_eq!(mode(&home), 0o700, "pre-existing home must be tightened");
         let before = fs::read(home.join(WALLET_FILE)).unwrap();
-        let err =
-            create_master(&home, PW, "b", MasterOptions::default(), &fake_derive).unwrap_err();
+        let err = create_master(&home, PW, "b", fast(), &fake_derive).unwrap_err();
         assert_eq!(err.code, ErrorCode::WalletExists);
         assert_eq!(fs::read(home.join(WALLET_FILE)).unwrap(), before);
     }
@@ -849,7 +1062,7 @@ mod tests {
     fn subkeys_get_increasing_indices_and_switch_active() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        create_master(home, PW, "a", MasterOptions::default(), &fake_derive).unwrap();
+        create_master(home, PW, "a", fast(), &fake_derive).unwrap();
         let (Unsealed { seed, .. }, file) = unlock(home, PW, &fake_derive).unwrap();
         let crypto_before = serde_json::to_value(&file.crypto).unwrap();
 
@@ -861,7 +1074,7 @@ mod tests {
         assert_eq!(file.next_index, 2);
         assert_eq!(serde_json::to_value(&file.crypto).unwrap(), crypto_before);
         assert_eq!(mode(&home.join(WALLET_FILE)), 0o600);
-        assert_eq!(names(home), vec![OsString::from(WALLET_FILE)]);
+        assert_eq!(data_names(home), vec![OsString::from(WALLET_FILE)]);
 
         assert_eq!(
             plan_new_key(&file, "a").unwrap_err().code,
@@ -892,13 +1105,13 @@ mod tests {
     fn sealed_policy_survives_metadata_rewrites() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        create_master(home, PW, "a", MasterOptions::default(), &fake_derive).unwrap();
+        create_master(home, PW, "a", fast(), &fake_derive).unwrap();
         // Re-seal with a non-empty policy (as a future `policy set` would, with the password).
         let path = home.join(WALLET_FILE);
         let mut file = read_wallet_file(home).unwrap();
         let seed = decrypt(&file.crypto, PW).unwrap().seed;
         let policy = serde_json::json!({ "v": 1, "rules": [{ "maxPerTx": "0.1" }] });
-        file.crypto = encrypt(&seed, &policy, PW, KdfParams::default()).unwrap();
+        file.crypto = encrypt(&seed, &policy, PW, fast_kdf()).unwrap();
         fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
 
         let idx = plan_new_key(&file, "b").unwrap();
@@ -908,7 +1121,7 @@ mod tests {
         assert_eq!(opened.policy, policy);
 
         // Not a JSON object: refused when sealing.
-        assert!(encrypt(&seed, &serde_json::json!([1]), PW, KdfParams::default()).is_err());
+        assert!(encrypt(&seed, &serde_json::json!([1]), PW, fast_kdf()).is_err());
     }
 
     #[test]
@@ -934,19 +1147,19 @@ mod tests {
     fn weak_password_rejected_before_anything_is_written() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("zw");
-        let err =
-            create_master(&home, "short", "a", MasterOptions::default(), &fake_derive).unwrap_err();
+        let err = create_master(&home, "short", "a", fast(), &fake_derive).unwrap_err();
         assert_eq!(err.code, ErrorCode::ValidationError);
         assert!(!home.exists());
     }
 
     #[test]
-    fn failure_after_write_removes_only_created_paths() {
+    fn failure_before_publication_removes_only_created_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let boom = |stage: CreateStage| match stage {
-            CreateStage::WalletWritten => Err(WalletError::validation("injected")),
+            CreateStage::TempWritten(_) => Err(WalletError::validation("injected")),
+            CreateStage::Published(_) => Ok(()),
         };
-        let opts = MasterOptions::default();
+        let opts = fast();
         let home = tmp.path().join("fresh");
         let err = create_master_with_hook(&home, PW, "a", opts, &fake_derive, &boom).unwrap_err();
         assert_eq!(err.message, "injected");
@@ -959,13 +1172,13 @@ mod tests {
         fs::create_dir(&home2).unwrap();
         fs::write(home2.join("unrelated"), "keep").unwrap();
         create_master_with_hook(&home2, PW, "a", opts, &fake_derive, &boom).unwrap_err();
-        assert_eq!(names(&home2), vec![OsString::from("unrelated")]);
+        assert_eq!(data_names(&home2), vec![OsString::from("unrelated")]);
     }
 
     #[test]
     fn inconsistent_address_cache_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        create_master(tmp.path(), PW, "a", MasterOptions::default(), &fake_derive).unwrap();
+        create_master(tmp.path(), PW, "a", fast(), &fake_derive).unwrap();
         let path = tmp.path().join(WALLET_FILE);
         let mut file: WalletFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         file.keys[0]
@@ -974,6 +1187,188 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
         let err = unlock(tmp.path(), PW, &fake_derive).err().unwrap();
         assert_eq!(err.code, ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn decrypt_rejects_kdf_params_outside_policy() {
+        let kdf = KdfParams {
+            log_n: 15,
+            r: 8,
+            p: 1,
+        };
+        let sealed = encrypt(&test_seed(), &empty(), PW, kdf).unwrap();
+        for (log_n, r, p) in [(14, 8, 1), (15, 4, 1), (15, 8, 2)] {
+            let mut s = sealed.clone();
+            s.kdfparams.log_n = log_n;
+            s.kdfparams.r = r;
+            s.kdfparams.p = p;
+            let err = decrypt(&s, PW).err().unwrap();
+            assert_eq!(err.code, ErrorCode::ValidationError, "{log_n} {r} {p}");
+        }
+    }
+
+    #[test]
+    fn plan_new_key_skips_past_the_highest_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_master(tmp.path(), PW, "a", fast(), &fake_derive).unwrap();
+        let mut file = read_wallet_file(tmp.path()).unwrap();
+        let mut stale = file.keys[0].clone();
+        stale.name = "far".into();
+        stale.index = 5;
+        file.keys.push(stale);
+        assert_eq!(file.next_index, 1);
+        assert_eq!(plan_new_key(&file, "b").unwrap(), 6);
+    }
+
+    #[test]
+    fn unlock_rejects_duplicate_indices() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_master(tmp.path(), PW, "a", fast(), &fake_derive).unwrap();
+        let path = tmp.path().join(WALLET_FILE);
+        let mut file = read_wallet_file(tmp.path()).unwrap();
+        let mut dup = file.keys[0].clone();
+        dup.name = "twin".into();
+        file.keys.push(dup);
+        fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        let err = unlock(tmp.path(), PW, &fake_derive).err().unwrap();
+        assert_eq!(err.code, ErrorCode::ValidationError);
+        assert!(err.message.contains("index"), "{}", err.message);
+    }
+
+    #[test]
+    fn published_wallet_is_never_unlinked_on_a_later_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("zw");
+        let path = home.join(WALLET_FILE);
+        let replace = |stage: CreateStage| match stage {
+            CreateStage::TempWritten(_) => Ok(()),
+            CreateStage::Published(p) => {
+                fs::remove_file(p).unwrap();
+                fs::write(p, b"replacement").unwrap();
+                Err(WalletError::validation("injected"))
+            }
+        };
+        let err =
+            create_master_with_hook(&home, PW, "a", fast(), &fake_derive, &replace).unwrap_err();
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert!(err.message.contains("recovery"), "{}", err.message);
+        assert!(err.message.contains(&path.display().to_string()));
+        assert_eq!(data_names(&home), vec![OsString::from(WALLET_FILE)]);
+
+        // Changed after publication without the hook failing: still an error, still kept.
+        let home = tmp.path().join("zw2");
+        let path = home.join(WALLET_FILE);
+        let edit = |stage: CreateStage| {
+            if let CreateStage::Published(p) = stage {
+                fs::write(p, b"edited").unwrap();
+            }
+            Ok(())
+        };
+        let err = create_master_with_hook(&home, PW, "a", fast(), &fake_derive, &edit).unwrap_err();
+        assert!(err.message.contains("recovery"), "{}", err.message);
+        assert_eq!(fs::read(&path).unwrap(), b"edited");
+    }
+
+    #[test]
+    fn rewritten_cache_before_publication_fails_and_leaves_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("zw");
+        let poison = |stage: CreateStage| {
+            if let CreateStage::TempWritten(p) = stage {
+                let mut f: WalletFile = serde_json::from_slice(&fs::read(p).unwrap()).unwrap();
+                f.keys[0]
+                    .addresses
+                    .insert("alpha".into(), "addr-forged".into());
+                fs::write(p, serde_json::to_vec(&f).unwrap()).unwrap();
+            }
+            Ok(())
+        };
+        let err =
+            create_master_with_hook(&home, PW, "a", fast(), &fake_derive, &poison).unwrap_err();
+        assert!(
+            err.message.contains("verification failed"),
+            "{}",
+            err.message
+        );
+        assert!(!home.exists(), "nothing left behind");
+    }
+
+    #[test]
+    fn kdf_policy_bounds_memory_before_any_allocation() {
+        // Pure parameter checks: nothing here runs scrypt.
+        for log_n in KDF_MIN_LOG_N..=KDF_MAX_LOG_N {
+            KdfParams::checked(log_n, 8, 1).unwrap();
+        }
+        for (log_n, r, p) in [
+            (14, 8, 1),
+            (19, 8, 1),
+            (20, 8, 1),
+            (30, 8, 1),
+            (u8::MAX, 8, 1),
+            (15, 1, 1),
+            (15, 16, 1),
+            (15, u32::MAX, 1),
+            (15, 8, 0),
+            (15, 8, 2),
+            (15, 8, u32::MAX),
+        ] {
+            let err = KdfParams::checked(log_n, r, p).unwrap_err();
+            assert_eq!(err.code, ErrorCode::ValidationError, "{log_n} {r} {p}");
+        }
+        // The worst accepted case is 128 * r * N = 256 MiB.
+        assert_eq!(128 * KDF_R as u64 * (1u64 << KDF_MAX_LOG_N), 256 << 20);
+        // And decrypt applies it before deriving anything (log_n = 30 would need 128 GiB).
+        let mut sealed = encrypt(&test_seed(), &empty(), PW, fast_kdf()).unwrap();
+        sealed.kdfparams.log_n = 30;
+        assert_eq!(
+            decrypt(&sealed, PW).err().unwrap().code,
+            ErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn writers_serialize_on_the_write_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        create_master(home, PW, "a", fast(), &fake_derive).unwrap();
+        let held = MetaLock::acquire(home).unwrap();
+        let start = Instant::now();
+        let waiter = std::thread::spawn({
+            let home = home.to_path_buf();
+            move || set_active(&home, "a").map(|_| start.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        drop(held);
+        let waited = waiter.join().unwrap().unwrap();
+        assert!(waited >= Duration::from_millis(250), "{waited:?}");
+
+        // Planned and published under one lock from several threads: distinct indices.
+        let (seed, _) = (test_seed(), ());
+        let names = ["b", "c", "d", "e"];
+        std::thread::scope(|s| {
+            for name in names {
+                let seed = &seed;
+                s.spawn(move || {
+                    let lock = MetaLock::acquire(home).unwrap();
+                    let file = lock.read().unwrap();
+                    let index = plan_new_key(&file, name).unwrap();
+                    lock.add_key(name, index, fake_derive(seed, index).unwrap())
+                        .unwrap();
+                });
+            }
+        });
+        let file = read_wallet_file(home).unwrap();
+        let mut indices: Vec<u32> = file.keys.iter().map(|k| k.index).collect();
+        indices.sort_unstable();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn sync_dir_reports_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        sync_dir(tmp.path()).unwrap();
+        let err = sync_dir(&tmp.path().join("missing")).unwrap_err();
+        assert!(err.message.contains("cannot sync"), "{}", err.message);
     }
 
     #[test]

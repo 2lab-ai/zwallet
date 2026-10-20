@@ -48,9 +48,17 @@ goes to stderr, exit 1. Commands that act on a key take `--key <name>` (default:
 - **Durations** are positional: an integer and one unit of `s m h d w y` (`1y` = 365d). `0`,
   negatives, fractions and unknown units are `VALIDATION_ERROR`.
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
-  `<name>` at index 0. Afterwards it derives the next index as `<name>` and makes it active. While
-  unlocked this needs no password (the daemon derives); while locked it asks for the password for
-  that one operation and starts no daemon.
+  `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
+  reminds the human (on stderr) to run `zwallet backup` before funding the wallet. Afterwards it
+  derives the next index as `<name>` and makes it active. While unlocked this needs no password
+  (the daemon derives); while locked it asks for the password for that one operation and starts
+  no daemon. Concurrent creates get distinct indices.
+- **Address verification**: the addresses in `wallet.json` are a plain cache that anything running
+  as the same user can edit. While unlocked, `address`, `addresses`, `list`, `status` and `change`
+  check the cache against the key daemon's own derivation from the seed and fail with
+  `VALIDATION_ERROR` on a mismatch; their output carries `verified: true`. While locked they print
+  the cache with `verified: false` (and a note in human output). `unlock` and `create --unlock`
+  print the address the new daemon derived from the decrypted seed, and `unlock` adds `daemonPid`.
 - **`call` / `invoke` signatures** are `name(argTypes)(returnTypes)`, e.g.
   `balanceOf(address)(uint256)` or `getReserves()(uint112,uint112,uint32)`. Return types are
   optional (without them `result` is null and `raw` has the hex). Arrays are written `[1,2]`,
@@ -91,7 +99,8 @@ default. zwallet checks the endpoint's `eth_chainId` before using it.
 
 - **Home**: `$ZWALLET_HOME` or `~/.zwallet`, mode 0700.
 - **`wallet.json`** (0600, written atomically): a sealed section encrypted with AES-256-GCM under a
-  scrypt key (N=2^15, r=8, p=1; parameters, salt and nonce stored in the file), plus non-secret
+  scrypt key (N=2^18, r=8, p=1, 256 MiB; parameters, salt and nonce stored in the file; only r=8,
+  p=1 and N from 2^15 to 2^18 are accepted, checked before any key derivation), plus non-secret
   metadata: `createdAt`, `active`, `nextIndex`, and
   `keys: [{ name, index, createdAt, addresses: { <chain>: <address> } }]`. The sealed plaintext is
   a versioned object `{ version, mnemonic, policy }`: one BIP39 English mnemonic (no BIP39
@@ -99,15 +108,24 @@ default. zwallet checks the endpoint's `eth_chainId` before using it.
   through intact). The policy lives under the password because anything outside it can be edited
   by the same OS user without the password.
 - **Password**: held by the human only. There is no password file and no password env variable;
-  it is typed at a terminal prompt (no echo) or piped with `--password-stdin`. Nothing on disk
-  decrypts the wallet by itself. `create` reads `wallet.json` back from disk, decrypts it and checks
-  the addresses before reporting success, and removes only what it created on failure.
+  it is typed at a terminal prompt (no echo) or piped with `--password-stdin`, and read with raw
+  reads into one wiped buffer. Nothing on disk decrypts the wallet by itself. `create` writes a
+  temp file, reads it back from disk, decrypts it and checks the addresses and the phrase, and only
+  then links it into place as `wallet.json`; a failure before that removes only what it created.
+  Once `wallet.json` is in place it is never removed: a later failure says recovery is needed and
+  names the file. Every write of `wallet.json` holds an exclusive lock on `w.lock` (an empty file).
 - **Keys**: named subkeys of the master by index, in creation order, never reused. EVM uses
   `m/44'/60'/0'/0/<index>` (the MetaMask/Trust account order), so the phrase imports into standard
   wallets with the same accounts. One address per key on every EVM chain.
-- **Daemon**: `unlock` starts `zwallet daemon` detached (own session) and sends it the password
-  over `$ZWALLET_HOME/d.sock` (0600; peer uid checked on both ends). The daemon decrypts the wallet
-  itself, keeps only the master seed in memory, and does nothing but derive addresses and sign; it
+- **Daemon**: `unlock` first asks any daemon already serving to lock, then starts `zwallet daemon`
+  as its own child (own session) and writes the TTL and password into the child's stdin pipe; the
+  password never goes over the socket, argv or env. The child takes an exclusive lock on `d.lock`
+  for its whole life (one daemon per home), decrypts the wallet, replaces whatever is at
+  `$ZWALLET_HOME/d.sock` and binds it (0600; peer uid checked on both ends), and only then reports
+  `{ expiresAt, active, address }` back on its stdout pipe; `unlock` reports success only after that
+  line, and kills the child on any failure or timeout. Something else squatting on `d.sock` or
+  `d.lock` makes `unlock` fail visibly; it never receives the password. The daemon keeps only the
+  master seed in memory, and does nothing but derive addresses and sign; it
   makes no network request. For a transaction it receives only the unsigned signing payload bytes,
   decodes them itself (type, chain id, recipient, value, and ERC-20 `transfer` / `approve` /
   `transferFrom` from the calldata), refuses anything zwallet does not produce (other tx types,
@@ -116,6 +134,11 @@ default. zwallet checks the endpoint's `eth_chainId` before using it.
   exits. A reboot or a dead daemon means locked. Everything else (RPC, ABI, tx building, broadcast)
   runs in the one-shot CLI process, which checks every signature it gets back by recovering the
   signer.
+- **Daemon lifetime**: each connection is served in its own task with a 10 s I/O budget, so a
+  silent client never delays expiry. Every second and on every request (including `status`) the
+  daemon also checks that `wallet.json`'s ciphertext is still the one it decrypted and that
+  `d.sock` is still its own socket; otherwise it wipes the seed and exits. Core dumps are disabled
+  in the daemon and in `create`, `unlock` and `backup`.
 - **Secrets are never printed**: the mnemonic, password and private keys appear in no output, log
   or error. The single exception is `backup`, which prints the phrase only when stdin and stdout
   are both an interactive terminal, after the password is entered again.

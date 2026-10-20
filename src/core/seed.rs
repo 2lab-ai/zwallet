@@ -2,6 +2,23 @@
 //!
 //! Error messages are fixed strings: BIP39 errors can quote the offending word, and a mnemonic
 //! word is a secret. `Seed` is deliberately not `Debug`/`Clone`/`Serialize`.
+//!
+//! The phrase itself lives in a `Zeroizing<String>`. Accepted residue: copies made inside
+//! coins-bip39, whose API offers no way to wipe them (`Mnemonic` and `Entropy` have private,
+//! non-`Zeroize` fields), are freed without wiping:
+//! - `Seed::generate`: the `Entropy` copy held by `Mnemonic`, and the `BitVec` of entropy bits and
+//!   the `Vec<&str>` of word pointers that `Mnemonic::to_phrase` builds.
+//! - `Seed::from_phrase` (every decrypt): `Mnemonic::new_from_phrase` builds a `BitVec` and an
+//!   `Entropy` copy, then a full `to_phrase()` `String` for its checksum comparison; a checksum
+//!   mismatch puts another copy of the phrase into `MnemonicError::InvalidPhrase`.
+//! - `chains::evm::signer_at` (every derive and sign in the daemon): alloy's `MnemonicBuilder`
+//!   wipes its own phrase copy on drop (alloy-signer-local's `zeroize` feature is on), but the
+//!   coins-bip39 calls under it repeat the `new_from_phrase` copies above, and `to_seed` returns
+//!   the 64-byte BIP39 seed by value next to one more `to_phrase()` `String`.
+//!
+//! These sit in short-lived processes (`create`, `backup`, `unlock`, and the daemon, which exits
+//! on lock or expiry), all of which disable core dumps; what remains is swap and a debugger
+//! attached by the same user, which the threat model already concedes.
 
 use crate::core::error::{Result, WalletError};
 use alloy::signers::local::coins_bip39::{English, Entropy, Mnemonic};

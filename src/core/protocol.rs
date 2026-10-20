@@ -3,43 +3,49 @@
 //! One JSON request line and one JSON response line per connection over `$ZWALLET_HOME/d.sock`
 //! (0600 inside the 0700 home; peer uid checked on both ends). Requests are family-agnostic:
 //! `chain` picks the family, `index` the key, and `tx` is the family's own unsigned-tx JSON.
+//!
+//! No request carries a secret. The password never travels over the socket: [`start_daemon`]
+//! hands it to the daemon child it spawns, on that child's inherited stdin pipe, and reads the
+//! child's readiness on its stdout pipe. Whatever else listens on `d.sock` (a stale socket, or a
+//! squatter run by the same user) can learn nothing from a client and is replaced by the new
+//! daemon, which binds under an exclusive lock on `d.lock`.
 
 use crate::core::error::{ErrorCode, Result, WalletError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::ErrorKind;
-use std::os::unix::fs::MetadataExt;
+use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const SOCKET_NAME: &str = "d.sock";
+/// Held (flock, exclusive) by the one daemon serving a home, for its whole life.
+pub const LOCK_NAME: &str = "d.lock";
 pub const MAX_MESSAGE: u64 = 1 << 20;
 /// `sizeof(sockaddr_un.sun_path)` including the terminating NUL.
 #[cfg(target_os = "linux")]
 pub const SUN_PATH_MAX: usize = 108;
 #[cfg(not(target_os = "linux"))]
 pub const SUN_PATH_MAX: usize = 104;
-/// Upper bound on waiting for a freshly started daemon to accept connections.
-const STARTUP_WAIT: Duration = Duration::from_secs(10);
 const QUICK: Duration = Duration::from_secs(3);
-/// Unlock runs scrypt and verifies every key, so it gets more time.
+/// How long `lock` waits for the old daemon's socket to disappear.
+const LOCK_SETTLE: Duration = Duration::from_secs(2);
+/// A new daemon waits for the previous one's lock, then decrypts (scrypt) and verifies every
+/// key before it reports readiness, so it gets more time.
 pub const UNLOCK_TIMEOUT: Duration = Duration::from_secs(60);
 pub const SIGN_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// A daemon request. Not `Debug`; the unlock password is wiped on drop.
+/// A daemon request. None carries a secret; the password reaches the daemon only through
+/// [`start_daemon`].
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Request {
-    Unlock {
-        password: String,
-        ttl_secs: u64,
-    },
     Lock,
     Status,
     Address {
@@ -56,14 +62,6 @@ pub enum Request {
         index: u32,
         tx: Value,
     },
-}
-
-impl Drop for Request {
-    fn drop(&mut self) {
-        if let Request::Unlock { password, .. } = self {
-            password.zeroize();
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -156,6 +154,13 @@ pub async fn send(home: &Path, req: &Request, timeout: Duration) -> Result<Optio
                 meta.uid()
             )));
         }
+        // Never follow a symlink (or anything else) planted in place of the socket.
+        Ok(meta) if !meta.file_type().is_socket() => {
+            return Err(WalletError::validation(format!(
+                "refusing to use {}: it is not a socket",
+                path.display()
+            )));
+        }
         Ok(_) => {}
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(io_err("cannot inspect daemon socket")(e)),
@@ -223,17 +228,82 @@ pub async fn status(home: &Path) -> Result<Option<Value>> {
     send(home, &Request::Status, QUICK).await
 }
 
-/// Starts `zwallet daemon` detached in its own session so it outlives the terminal. Only the
-/// home path travels through env; the password and seed never do.
-fn spawn_daemon(home: &Path) -> Result<()> {
+/// Asks whatever answers on `d.sock` to lock (the request carries nothing), then waits (bounded)
+/// for the socket to disappear. Returns whether a daemon reported it was unlocked.
+pub async fn lock(home: &Path) -> Result<bool> {
+    let was_unlocked = send(home, &Request::Lock, QUICK)
+        .await?
+        .is_some_and(|v| v["wasUnlocked"] == serde_json::json!(true));
+    let sock = socket_path(home)?;
+    let deadline = tokio::time::Instant::now() + LOCK_SETTLE;
+    while std::fs::symlink_metadata(&sock).is_ok() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(was_unlocked)
+}
+
+/// What the CLI writes to the daemon child's stdin: the TTL in seconds on the first line, then
+/// the password's raw bytes up to EOF.
+pub fn encode_unlock_input(ttl: Duration, password: &str) -> Zeroizing<Vec<u8>> {
+    let head = format!("{}\n", ttl.as_secs());
+    let mut out = Zeroizing::new(Vec::with_capacity(head.len() + password.len()));
+    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(password.as_bytes());
+    out
+}
+
+/// The daemon's side of [`encode_unlock_input`]. Removes the TTL line in place, so the password
+/// bytes stay in the one zeroized buffer they were read into.
+pub fn decode_unlock_input(mut raw: Zeroizing<Vec<u8>>) -> Result<(Duration, Zeroizing<Vec<u8>>)> {
+    let bad = || WalletError::validation("malformed unlock input");
+    let nl = raw.iter().position(|b| *b == b'\n').ok_or_else(bad)?;
+    let secs: u64 = std::str::from_utf8(&raw[..nl])
+        .ok()
+        .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|d| d.parse().ok())
+        .filter(|s| *s > 0)
+        .ok_or_else(bad)?;
+    raw.drain(..=nl);
+    if raw.is_empty() {
+        return Err(WalletError::validation(
+            "no password given to the key daemon",
+        ));
+    }
+    Ok((Duration::from_secs(secs), raw))
+}
+
+/// Starts a new key daemon for `home` holding the seed for `ttl`, and returns its readiness
+/// report `{ locked, expiresAt, active, index, address, pid }` (the address derived by the
+/// daemon from the decrypted seed, never read from the cache in wallet.json).
+///
+/// Any daemon already serving is first asked to lock. The new daemon is this process's own
+/// child (`setsid`, so it outlives the terminal); it gets the TTL and password on its stdin pipe
+/// and answers on its stdout pipe, so the password never touches the socket, argv or env. It
+/// binds `d.sock` (replacing whatever is there) only after it decrypted the wallet and holds
+/// `d.lock`. On any failure or timeout this kills and reaps the child.
+pub async fn start_daemon(home: &Path, password: &str, ttl: Duration) -> Result<Value> {
+    socket_path(home)?;
+    // Best effort: a squatter that hangs or lies here only costs time; the new daemon replaces
+    // its socket under d.lock either way.
+    let _ = lock(home).await;
+    let mut child = spawn_daemon(home)?;
+    let ready = await_readiness(&mut child, password, ttl);
+    if ready.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    ready
+}
+
+fn spawn_daemon(home: &Path) -> Result<Child> {
     let exe = std::env::current_exe().map_err(io_err("cannot locate the zwallet binary"))?;
     let mut cmd = Command::new(exe);
     cmd.arg("daemon")
         .env_clear()
         .env("ZWALLET_HOME", home)
         .current_dir("/")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
     // SAFETY: setsid(2) is async-signal-safe and only affects the child process.
     unsafe {
@@ -245,32 +315,43 @@ fn spawn_daemon(home: &Path) -> Result<()> {
             }
         });
     }
-    cmd.spawn().map_err(io_err("cannot start the key daemon"))?;
-    Ok(())
+    cmd.spawn().map_err(io_err("cannot start the key daemon"))
 }
 
-/// Ensures a daemon is accepting connections, starting one if needed. Polls with backoff up to
-/// a bounded total wait.
-pub async fn ensure_daemon(home: &Path) -> Result<()> {
-    if status(home).await?.is_some() {
-        return Ok(());
-    }
-    spawn_daemon(home)?;
-    let deadline = Instant::now() + STARTUP_WAIT;
-    let mut delay = Duration::from_millis(10);
-    loop {
-        tokio::time::sleep(delay).await;
-        if status(home).await?.is_some() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
+fn await_readiness(child: &mut Child, password: &str, ttl: Duration) -> Result<Value> {
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        return Err(WalletError::validation("the key daemon has no pipes"));
+    };
+    // Unbuffered pipe writes: no intermediate copy of the password in this process.
+    stdin
+        .write_all(&encode_unlock_input(ttl, password))
+        .map_err(io_err("cannot hand the password to the key daemon"))?;
+    drop(stdin);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let read = stdout.take(MAX_MESSAGE).read_to_end(&mut buf).map(|_| buf);
+        let _ = tx.send(read);
+    });
+    let line = match rx.recv_timeout(UNLOCK_TIMEOUT) {
+        Ok(Ok(line)) => line,
+        Ok(Err(e)) => return Err(io_err("cannot read the key daemon's readiness")(e)),
+        Err(_) => {
             return Err(WalletError::validation(format!(
-                "the key daemon did not start within {}s",
-                STARTUP_WAIT.as_secs()
+                "the key daemon did not report readiness within {}s",
+                UNLOCK_TIMEOUT.as_secs()
             )));
         }
-        delay = (delay * 2).min(Duration::from_millis(200));
+    };
+    if line.is_empty() {
+        return Err(WalletError::validation(
+            "the key daemon exited without reporting readiness",
+        ));
     }
+    let resp: Response = serde_json::from_slice(&line).map_err(|e| {
+        WalletError::validation(format!("malformed readiness from the key daemon: {e}"))
+    })?;
+    resp.into_result()
 }
 
 #[cfg(test)]
@@ -287,13 +368,34 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["op"], "sign_tx");
         assert_eq!(v["index"], 2);
-        let u = serde_json::to_value(Request::Unlock {
-            password: "x".into(),
-            ttl_secs: 5,
-        })
-        .unwrap();
-        assert_eq!(u["op"], "unlock");
-        assert_eq!(u["ttlSecs"], 5);
+        assert_eq!(
+            serde_json::to_value(Request::Lock).unwrap(),
+            serde_json::json!({ "op": "lock" })
+        );
+        // There is no unlock request any more: a password can never be sent over the socket.
+        let unlock = serde_json::json!({ "op": "unlock", "password": "x", "ttlSecs": 5 });
+        assert!(serde_json::from_value::<Request>(unlock).is_err());
+    }
+
+    #[test]
+    fn unlock_input_round_trip() {
+        let raw = encode_unlock_input(Duration::from_secs(86_400), "pa ss\nword");
+        assert_eq!(raw.as_slice(), b"86400\npa ss\nword");
+        let (ttl, pw) = decode_unlock_input(raw).unwrap();
+        assert_eq!(ttl, Duration::from_secs(86_400));
+        assert_eq!(pw.as_slice(), b"pa ss\nword");
+        for bad in [
+            &b"x\npw"[..],
+            b"0\npw",
+            b"\npw",
+            b"10pw",
+            b"10\n",
+            b"-1\npw",
+        ] {
+            let err = decode_unlock_input(Zeroizing::new(bad.to_vec())).unwrap_err();
+            assert_eq!(err.code, ErrorCode::ValidationError);
+            assert!(!err.message.contains("pw"));
+        }
     }
 
     #[test]
