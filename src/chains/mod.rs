@@ -8,10 +8,14 @@ pub mod evm;
 
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
+use crate::core::store;
 use alloy::primitives::U256;
+use alloy::transports::http::reqwest::Url;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs::File;
+use std::path::Path;
 use std::time::Duration;
 
 /// Family plus its family-specific configuration.
@@ -236,80 +240,198 @@ impl fmt::Debug for Net {
 }
 
 impl Net {
-    /// Text from or about this endpoint (a transport error, an HTTP error body, a JSON-RPC error
-    /// message) as it may be printed: every URL through [`redact_url`], then every
-    /// [`url_secrets`] fragment of the configured URL replaced with `<redacted>`, because an
-    /// error body can echo the key without the URL around it.
+    /// Text from or about this endpoint (a transport error, a JSON-RPC error message) as it may
+    /// be printed: every URL through [`redact_url`], then every [`url_secrets`] part of the
+    /// configured URL replaced with `<redacted>`, because the endpoint can echo the key without
+    /// the URL around it. A part of 8 or more characters is replaced wherever it occurs; a
+    /// shorter one (a short query value or userinfo part) only as a whole word, so that a value
+    /// like `1` does not shred every number in the text.
     pub fn redact(&self, text: &str) -> String {
         let mut out = redact_urls(text);
         for secret in url_secrets(&self.rpc_url) {
-            out = out.replace(&secret, "<redacted>");
+            out = if secret.chars().count() >= SECRET_MIN_LEN {
+                out.replace(&secret, REDACTED)
+            } else {
+                replace_word(&out, &secret, REDACTED)
+            };
         }
         out
     }
 }
 
-/// Shortest URL component [`url_secrets`] treats as a possible key on its own.
+const REDACTED: &str = "<redacted>";
+
+/// Shortest path segment or fragment [`url_secrets`] treats as a possible key on its own.
 const SECRET_MIN_LEN: usize = 8;
 
-/// The parts of an RPC URL that may carry an API key, longest first: the path (unless empty or
-/// `/`), the query string, the fragment and the userinfo, each whole; and each path segment,
-/// query parameter value and userinfo part of 8 or more characters. Text that is not
-/// `scheme://...` is one secret as a whole (as in [`redact_url`]).
+/// `text` with every occurrence of `needle` that is a whole word (not preceded or followed by a
+/// letter, digit or `_` where `needle` itself begins or ends with one) replaced by `with`.
+fn replace_word(text: &str, needle: &str, with: &str) -> String {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let (Some(first), Some(last)) = (needle.chars().next(), needle.chars().last()) else {
+        return text.to_string();
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut prev: Option<char> = None;
+    while let Some(i) = rest.find(needle) {
+        let before = rest[..i]
+            .chars()
+            .last()
+            .or(if i == 0 { prev } else { None });
+        let after = rest[i + needle.len()..].chars().next();
+        let starts = !word(first) || !before.is_some_and(word);
+        let ends = !word(last) || !after.is_some_and(word);
+        let (take, keep) = if starts && ends {
+            (i + needle.len(), Some(with))
+        } else {
+            (i + first.len_utf8(), None)
+        };
+        match keep {
+            Some(w) => {
+                out.push_str(&rest[..i]);
+                out.push_str(w);
+            }
+            None => out.push_str(&rest[..take]),
+        }
+        prev = rest[..take].chars().last();
+        rest = &rest[take..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `%XX` escapes decoded (and `+` as a space when `plus`), as a server would read them;
+/// invalid escapes and non-UTF-8 results are kept as they are.
+fn percent_decode(s: &str, plus: bool) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    let hex = |c: u8| (c as char).to_digit(16);
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => match (hex(b[i + 1]), hex(b[i + 2])) {
+                (Some(h), Some(l)) => {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                    continue;
+                }
+                _ => out.push(b'%'),
+            },
+            b'+' if plus => out.push(b' '),
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// The parts of an RPC URL that may carry an API key, longest first, each as written in the URL
+/// and percent-decoded (`+` also as a space in the query), parsed the way the HTTP client parses
+/// the URL:
+/// - credential slots, at any length: the userinfo whole and each of its parts, the query string
+///   whole and each parameter value;
+/// - the path whole (unless empty or `/`), and each path segment of 8 or more characters;
+/// - the fragment, at 8 or more characters (it is never sent, so a short one is noise).
+///
+/// Text that does not parse as a URL is one secret as a whole (as in [`redact_url`]).
 pub fn url_secrets(url: &str) -> Vec<String> {
-    let url = url.trim();
-    let Some((_, rest)) = url.split_once("://") else {
-        return if url.is_empty() {
+    let raw = url.trim();
+    let Ok(u) = Url::parse(raw) else {
+        return if raw.is_empty() {
             Vec::new()
         } else {
-            vec![url.to_string()]
+            vec![raw.to_string()]
         };
     };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(end);
-    let userinfo = authority.rsplit_once('@').map_or("", |(u, _)| u);
-    let (tail, fragment) = tail.split_once('#').unwrap_or((tail, ""));
-    let (path, query) = tail.split_once('?').unwrap_or((tail, ""));
-    let path_whole = if path == "/" { "" } else { path };
-    let parts = path
-        .split('/')
-        .chain(
-            query
-                .split('&')
-                .map(|kv| kv.split_once('=').map_or(kv, |(_, v)| v)),
-        )
-        .chain(userinfo.split(':'))
-        .filter(|p| p.chars().count() >= SECRET_MIN_LEN);
-    let mut secrets: Vec<String> = [path_whole, query, fragment, userinfo]
+    let mut any: Vec<String> = Vec::new();
+    let mut long: Vec<String> = Vec::new();
+    let both = |list: &mut Vec<String>, s: &str, plus: bool| {
+        list.push(s.to_string());
+        list.push(percent_decode(s, false));
+        if plus {
+            list.push(percent_decode(s, true));
+        }
+    };
+    let (user, pass) = (u.username(), u.password());
+    if !user.is_empty() || pass.is_some() {
+        both(&mut any, user, false);
+        if let Some(pass) = pass {
+            both(&mut any, pass, false);
+            any.push(format!("{user}:{pass}"));
+        }
+    }
+    if let Some(query) = u.query() {
+        any.push(query.to_string());
+        for pair in query.split('&') {
+            let value = pair.split_once('=').map_or(pair, |(_, v)| v);
+            both(&mut any, value, true);
+        }
+    }
+    if u.path() != "/" {
+        both(&mut any, u.path(), false);
+    }
+    for segment in u.path_segments().into_iter().flatten() {
+        both(&mut long, segment, false);
+    }
+    if let Some(fragment) = u.fragment() {
+        both(&mut long, fragment, false);
+    }
+    long.retain(|s| s.chars().count() >= SECRET_MIN_LEN);
+    let mut secrets: Vec<String> = any
         .into_iter()
+        .chain(long)
         .filter(|s| !s.is_empty())
-        .chain(parts)
-        .map(str::to_string)
         .collect();
     secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     secrets.dedup();
     secrets
 }
 
-/// An RPC URL as it may be printed: scheme and host (with port) only. Providers put API keys in
-/// the path, the query or the userinfo (`https://eth-mainnet.g.alchemy.com/v2/<key>`), so
-/// anything after the host becomes `/<redacted>`. `https://host` and `https://host/` print as
-/// they are. Text that is not `scheme://...` is redacted whole.
+/// `scheme://host[:port]` of an RPC URL as the HTTP client parses it, or `None` if it does not
+/// parse or has no host.
+fn origin(u: &Url) -> Option<String> {
+    let host = u.host_str()?;
+    Some(match u.port() {
+        Some(port) => format!("{}://{host}:{port}", u.scheme()),
+        None => format!("{}://{host}", u.scheme()),
+    })
+}
+
+/// `scheme://host[:port]` of an RPC URL (as the HTTP client parses it), or `<redacted>` if it has
+/// none: what an error about the endpoint itself may name.
+pub fn url_origin(url: &str) -> String {
+    Url::parse(url.trim())
+        .ok()
+        .as_ref()
+        .and_then(origin)
+        .unwrap_or_else(|| REDACTED.to_string())
+}
+
+/// An RPC URL as it may be printed: scheme and host (with port) only, parsed the way the HTTP
+/// client parses it. Providers put API keys in the path, the query or the userinfo
+/// (`https://eth-mainnet.g.alchemy.com/v2/<key>`), so anything after the host becomes
+/// `/<redacted>`. `https://host` and `https://host/` print as they are. Text that is not a URL
+/// with a host is redacted whole.
 pub fn redact_url(url: &str) -> String {
-    let url = url.trim();
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return "<redacted>".to_string();
+    let raw = url.trim();
+    let Ok(u) = Url::parse(raw) else {
+        return REDACTED.to_string();
     };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(end);
-    let (host, userinfo) = match authority.rsplit_once('@') {
-        Some((_, host)) => (host, true),
-        None => (authority, false),
+    let Some(shown) = origin(&u) else {
+        return REDACTED.to_string();
     };
-    if userinfo || !(tail.is_empty() || tail == "/") {
-        format!("{scheme}://{host}/<redacted>")
+    let extra = !u.username().is_empty()
+        || u.password().is_some()
+        || u.query().is_some()
+        || u.fragment().is_some()
+        || u.path() != "/";
+    if extra {
+        format!("{shown}/{REDACTED}")
+    } else if raw.ends_with('/') {
+        format!("{shown}/")
     } else {
-        format!("{scheme}://{host}{tail}")
+        shown
     }
 }
 
@@ -352,10 +474,44 @@ pub struct TransferRequest {
     pub dry_run: bool,
     /// Use this account sequence number instead of the next free one (to replace a pending tx).
     pub nonce: Option<u64>,
+    /// `--bump` ([`parse_bump`]): what a replacement pays over the fees it must beat.
+    pub bump: Option<u128>,
+    /// `--replace`: the hash of the pending transaction this one replaces (its fees are read).
+    pub replace: Option<String>,
     /// Explicit ceiling on the price per gas unit, in base units, replacing the automatic one.
     pub max_fee_per_gas: Option<u128>,
     /// Allow recipients that are almost certainly mistakes (zero address, the token itself).
     pub force: bool,
+}
+
+/// A replacement's fee bump in ten-thousandths: 12_500 = 1.25x. Nodes drop a replacement that
+/// does not outbid the pending transaction by their bump rule (geth and most clients: +10% on
+/// both the tip and the fee cap), hence the 1.1x minimum.
+pub const DEFAULT_BUMP: u128 = 12_500;
+pub const BUMP_SCALE: u128 = 10_000;
+const BUMP_MIN: u128 = 11_000;
+const BUMP_MAX: u128 = 30_000;
+
+/// `--bump <factor>` in ten-thousandths: a plain decimal from 1.1 to 3, at most 4 decimals.
+pub fn parse_bump(input: &str) -> Result<u128> {
+    let bad = || {
+        WalletError::validation(format!(
+            "--bump '{input}': expected a factor from 1.1 to 3, e.g. 1.25"
+        ))
+    };
+    let v = crate::core::amount::parse_units(input, 4).map_err(|_| bad())?;
+    u128::try_from(v)
+        .ok()
+        .filter(|v| (BUMP_MIN..=BUMP_MAX).contains(v))
+        .ok_or_else(bad)
+}
+
+/// A bump as printed: `1.25x`.
+pub fn bump_label(bump: u128) -> String {
+    format!(
+        "{}x",
+        crate::core::amount::format_units(U256::from(bump), 4)
+    )
 }
 
 /// An unsigned transaction plus the output fields describing it (nonce, fees, shortfall, ...).
@@ -381,8 +537,55 @@ pub struct SignedTx {
 pub enum Broadcast {
     /// The node accepted it and answered with the transaction's own hash.
     Accepted,
-    /// The send call failed (the text), but the node reports the transaction by its hash.
-    KnownDespite(String),
+    /// The send call failed or answered another hash (`warning` says how), but the node reports
+    /// the transaction by its own hash, so it was sent. `rpc_tx_hash` is the other hash, if the
+    /// node answered one.
+    KnownDespite {
+        warning: String,
+        rpc_tx_hash: Option<String>,
+    },
+}
+
+/// How long a send waits for another send from the same account to reach the node.
+const SEND_LOCK_WAIT: Duration = Duration::from_secs(120);
+
+/// Serializes the sends of one account on one chain within a home: held from reading the next
+/// nonce until the node has answered the broadcast, so two concurrent sends cannot sign the same
+/// nonce (the loser would be refused or replace the winner). An exclusive flock on
+/// `<home>/nonce-<chainId>-<address>.lock`, released when this value drops, or by the OS when the
+/// process dies.
+pub struct SendLock {
+    _file: File,
+}
+
+impl SendLock {
+    /// Waits (bounded) for the lock on `address` (as printed by the family) on `chain`.
+    pub fn acquire(home: &Path, chain: &Chain, address: &str) -> Result<Self> {
+        let path = home.join(format!(
+            "nonce-{}-{}.lock",
+            chain.chain_id_json(),
+            address.to_ascii_lowercase()
+        ));
+        let file = store::lock_exclusive(
+            &path,
+            SEND_LOCK_WAIT,
+            &format!(
+                "another send from {address} on {} is in progress",
+                chain.key
+            ),
+        )
+        .map_err(|e| {
+            WalletError::new(
+                e.code,
+                format!(
+                    "{}; nothing was signed or broadcast. If that send is an earlier attempt at \
+                     this same payment, let it finish and look up its result before sending again",
+                    e.message
+                ),
+            )
+        })?;
+        Ok(Self { _file: file })
+    }
 }
 
 /// The error for a transaction that may have reached the network: it carries `txHash`, `from`
@@ -408,15 +611,74 @@ pub fn after_send_error(
     with_tx_details(WalletError::new(code, message), signed)
 }
 
+/// What to do about a retry once a transaction is signed: reuse its nonce, so that the retry can
+/// only replace this transaction, never add a second one.
+fn retry_hint(signed: &SignedTx) -> String {
+    match signed.nonce {
+        Some(n) => {
+            format!("If you retry, pass --nonce {n} so that the retry cannot become a second send")
+        }
+        None => "Look the transaction up before you retry".to_string(),
+    }
+}
+
 /// The error for a transaction the node refused outright (`why` is its answer): nothing was
 /// broadcast. It carries the same `txHash`, `from` and `nonce` fields as [`after_send_error`].
 pub fn rejected_send_error(signed: &SignedTx, why: &str) -> WalletError {
     with_tx_details(
         WalletError::rpc(format!(
-            "the node rejected the transaction; nothing was broadcast ({why})"
+            "the node rejected the transaction; nothing was broadcast ({why}). {}",
+            retry_hint(signed)
         )),
         signed,
     )
+}
+
+/// `e` (code kept) for a failure after signing but before the send request went out: nothing
+/// was broadcast, but the signed transaction exists, so a retry still reuses its nonce.
+pub fn before_send_error(signed: &SignedTx, e: WalletError) -> WalletError {
+    with_tx_details(
+        WalletError::new(
+            e.code,
+            format!(
+                "{}; nothing was broadcast. {}",
+                e.message,
+                retry_hint(signed)
+            ),
+        ),
+        signed,
+    )
+}
+
+/// The node says the transaction's nonce is already used (`why` is its answer) and does not
+/// report this transaction by its hash: another transaction, pending or mined, holds the nonce.
+/// That one may be an earlier send of this same payment, so the message never invites a plain
+/// resend. `BROADCAST_UNCERTAIN` when this send was a `--nonce` retry (`explicit_nonce`), else
+/// `RPC_ERROR`. `hint` is a family-specific addition.
+pub fn nonce_taken_error(
+    signed: &SignedTx,
+    why: &str,
+    explicit_nonce: bool,
+    hint: Option<&str>,
+) -> WalletError {
+    let nonce = signed
+        .nonce
+        .map_or_else(|| "its nonce".to_string(), |n| format!("nonce {n}"));
+    let code = if explicit_nonce {
+        ErrorCode::BroadcastUncertain
+    } else {
+        ErrorCode::RpcError
+    };
+    let mut message = format!(
+        "{nonce} is taken by another transaction (pending or mined), so the node did not take \
+         this one ({why}); if this was a retry of an earlier send, look that txHash up before \
+         sending again; otherwise re-run to take the next nonce"
+    );
+    if let Some(h) = hint {
+        message.push_str(". ");
+        message.push_str(h);
+    }
+    with_tx_details(WalletError::new(code, message), signed)
 }
 
 fn with_tx_details(e: WalletError, signed: &SignedTx) -> WalletError {
@@ -463,11 +725,18 @@ pub trait ChainFamily: FamilyKeys {
     /// Builds an unsigned transfer from live chain state. Outside dry-run this fails with
     /// `INSUFFICIENT_FUNDS` instead of returning a transaction that cannot pay for itself.
     async fn prepare_transfer(&self, net: &Net, req: &TransferRequest) -> Result<PreparedTx>;
-    /// Hands `signed` to the node. A failure before the send is an ordinary error whose message
-    /// says nothing was broadcast, and so is the node refusing the transaction itself
-    /// ([`rejected_send_error`]). Once the request has gone out, any other failure whose outcome
-    /// the node cannot confirm is `BROADCAST_UNCERTAIN` (see [`after_send_error`]).
-    async fn broadcast(&self, net: &Net, signed: &SignedTx) -> Result<Broadcast>;
+    /// Hands `signed` to the node. A failure before the send is [`before_send_error`], and the
+    /// node refusing the transaction itself is [`rejected_send_error`]; both say nothing was
+    /// broadcast. A used nonce that is not this transaction's is [`nonce_taken_error`]
+    /// (`explicit_nonce` = the send was a `--nonce` retry). Once the request has gone out, any
+    /// other failure whose outcome the node cannot confirm is `BROADCAST_UNCERTAIN` (see
+    /// [`after_send_error`]).
+    async fn broadcast(
+        &self,
+        net: &Net,
+        signed: &SignedTx,
+        explicit_nonce: bool,
+    ) -> Result<Broadcast>;
     /// `Ok(None)` when no receipt appeared within `timeout`.
     async fn wait_for_receipt(
         &self,
@@ -564,6 +833,15 @@ mod tests {
                 "https://host.example:8545/<redacted>",
             ),
             ("not a url KEY", "<redacted>"),
+            // The HTTP client reads a backslash as a path separator.
+            (
+                "https://h.example\\v2\\KEYKEYKEY",
+                "https://h.example/<redacted>",
+            ),
+            (
+                "https://u%40x:KEY@h.example",
+                "https://h.example/<redacted>",
+            ),
         ] {
             assert_eq!(redact_url(url), shown, "{url}");
         }
@@ -594,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn url_secrets_cover_path_query_and_long_parts() {
+    fn url_secrets_cover_credentials_query_values_and_long_path_segments() {
         assert_eq!(
             url_secrets("https://u:PASSWORD1@h.example/v2/KEY12345?apikey=QKEY5678&x=1#frag"),
             vec![
@@ -604,14 +882,59 @@ mod tests {
                 "PASSWORD1",
                 "KEY12345",
                 "QKEY5678",
-                "frag",
+                "1",
+                "u",
             ]
         );
-        // Nothing after the host: nothing to scrub. Short parts only inside the whole path.
+        // Nothing after the host: nothing to scrub. Short path segments only inside the whole
+        // path; short credential slots (userinfo, query values) on their own.
         assert!(url_secrets("https://ethereum-rpc.publicnode.com").is_empty());
         assert!(url_secrets("http://127.0.0.1:8545/").is_empty());
         assert_eq!(url_secrets("https://h.example/v2/short"), vec!["/v2/short"]);
+        assert_eq!(
+            url_secrets("https://h.example/?apikey=abc123"),
+            vec!["apikey=abc123", "abc123"]
+        );
         assert_eq!(url_secrets(" not a url KEY "), vec!["not a url KEY"]);
+        // Percent-encoded slots also count in decoded form ('+' in a query is a space too).
+        let s = url_secrets("https://us%40r:p%3Ass@h.example/v3/abc%2Fdef01?k=a%26b+c");
+        for want in [
+            "us%40r",
+            "us@r",
+            "p%3Ass",
+            "p:ss",
+            "abc%2Fdef01",
+            "abc/def01",
+            "a&b c",
+        ] {
+            assert!(s.iter().any(|x| x == want), "{want} missing from {s:?}");
+        }
+    }
+
+    #[test]
+    fn net_redact_scrubs_decoded_and_short_credentials_only_as_whole_words() {
+        let net = |url: &str| Net {
+            chain: find("ethereum").unwrap(),
+            rpc_url: url.into(),
+        };
+        // A percent-encoded key the endpoint echoes decoded.
+        let n = net("https://h.example/v3/abc%2Bdef0123456");
+        assert_eq!(
+            n.redact("invalid key abc+def0123456 for project"),
+            "invalid key <redacted> for project"
+        );
+        // A short query value echoed bare.
+        let n = net("https://h.example/?apikey=abc123&chain=1");
+        assert_eq!(
+            n.redact("key abc123 is not valid at block 1234 (chain 1)"),
+            "key <redacted> is not valid at block 1234 (chain <redacted>)"
+        );
+        // A userinfo password with a percent escape.
+        let n = net("https://user:p%40ss@h.example");
+        assert_eq!(n.redact("bad password p@ss"), "bad password <redacted>");
+        // A short fragment is never sent, so it scrubs nothing.
+        let n = net("https://h.example/#a");
+        assert_eq!(n.redact("a bad answer"), "a bad answer");
     }
 
     #[test]
@@ -654,7 +977,50 @@ mod tests {
             "{}",
             e.message
         );
+        assert!(e.message.contains("pass --nonce 4"), "{}", e.message);
         assert!(!e.message.contains("may have reached"), "{}", e.message);
+
+        let before = before_send_error(&signed, WalletError::rpc("connect failed"));
+        assert_eq!(before.to_json()["errorCode"], "RPC_ERROR");
+        assert_eq!(before.to_json()["nonce"], 4);
+        assert!(
+            before
+                .message
+                .starts_with("connect failed; nothing was broadcast")
+        );
+        assert!(
+            before.message.contains("pass --nonce 4"),
+            "{}",
+            before.message
+        );
+    }
+
+    #[test]
+    fn nonce_taken_is_uncertain_only_for_a_nonce_retry() {
+        let signed = SignedTx {
+            raw: "0x02".into(),
+            tx_hash: "0xabc".into(),
+            signer: "0xF00".into(),
+            nonce: Some(4),
+        };
+        let fresh = nonce_taken_error(&signed, "nonce too low", false, None);
+        assert_eq!(fresh.code, ErrorCode::RpcError);
+        assert!(
+            fresh
+                .message
+                .starts_with("nonce 4 is taken by another transaction (pending or mined)"),
+            "{}",
+            fresh.message
+        );
+        assert!(
+            fresh
+                .message
+                .contains("look that txHash up before sending again")
+        );
+        let retry = nonce_taken_error(&signed, "nonce too low", true, Some("Hint"));
+        assert_eq!(retry.code, ErrorCode::BroadcastUncertain);
+        assert!(retry.message.ends_with(". Hint"), "{}", retry.message);
+        assert_eq!(retry.to_json()["txHash"], "0xabc");
     }
 
     #[test]
@@ -699,6 +1065,23 @@ mod tests {
         assert!(e.message.starts_with("timed out."), "{}", e.message);
         assert!(e.message.contains("--nonce 4"), "{}", e.message);
         assert!(e.message.contains("https://basescan.org/tx/0xabc"));
+    }
+
+    #[test]
+    fn bump_factors() {
+        for (s, v) in [
+            ("1.25", 12_500),
+            ("1.1", 11_000),
+            ("3", 30_000),
+            ("2.5", 25_000),
+        ] {
+            assert_eq!(parse_bump(s).unwrap(), v, "{s}");
+        }
+        for s in ["1.09", "3.01", "1", "0", "x", "1.12345", "-2", ""] {
+            assert!(parse_bump(s).is_err(), "{s}");
+        }
+        assert_eq!(bump_label(DEFAULT_BUMP), "1.25x");
+        assert_eq!(bump_label(20_000), "2x");
     }
 
     #[test]

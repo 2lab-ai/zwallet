@@ -5,8 +5,10 @@ use super::tx::{
     EvmFees, IERC20, IGasPriceOracle, UnsignedEvmTx, encoded_for_signing, erc20_transfer_calldata,
     gas_with_margin,
 };
-use super::{config, parse_address};
-use crate::chains::{Net, PreparedTx, TransferRequest, redact_url};
+use super::{config, parse_address, parse_tx_hash};
+use crate::chains::{
+    BUMP_SCALE, DEFAULT_BUMP, Net, PreparedTx, TransferRequest, bump_label, redact_url, url_origin,
+};
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use alloy::eips::BlockNumberOrTag;
@@ -15,8 +17,8 @@ use alloy::primitives::{Address, B256, Bytes, U128, U256, address};
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::TransactionRequest;
 use alloy::sol_types::SolCall;
+use alloy::transports::{RpcError, TransportError, TransportResult};
 use serde_json::{Map, Value, json};
-use std::fmt::Display;
 use std::future::IntoFuture;
 use std::ops::Deref;
 use std::time::{Duration, Instant};
@@ -36,25 +38,23 @@ const REFERENCE_FLOOR: u128 = GWEI;
 const GAS_PRICE_ORACLE: Address = address!("0x420000000000000000000000000000000000000F");
 /// Gas limit used for a token-transfer dry-run when the node cannot estimate (no token balance).
 pub const TOKEN_FALLBACK_GAS: u64 = 100_000;
-/// A replacement (`--nonce` below the pending nonce) pays this multiple of the estimated fees,
-/// `NUM / DEN`, rounded up. Nodes drop a replacement that does not outbid the pending transaction
-/// by their bump rule (geth and most clients: +10% on both the tip and the fee cap).
-const REPLACEMENT_BUMP_NUM: u128 = 5;
-const REPLACEMENT_BUMP_DEN: u128 = 4;
-const REPLACEMENT_BUMP: &str = "1.25x";
 /// `eth_sendRawTransaction` errors in which the node refuses the transaction itself (geth's
 /// txpool wording, which most clients share), matched case-insensitively: it never entered the
 /// node's pool, so nothing was broadcast.
 const SEND_REJECTIONS: &[&str] = &[
-    "replacement transaction underpriced",
-    "nonce too low",
     "insufficient funds",
     "intrinsic gas too low",
     "exceeds block gas limit",
     "max fee per gas less than block base fee",
 ];
-/// `eth_sendRawTransaction` errors meaning the node already holds this transaction.
-const SEND_KNOWN: &[&str] = &["already known", "known transaction"];
+/// `eth_sendRawTransaction` errors meaning the nonce is already used, by another transaction or
+/// by this very one (resent after it went in); only the lookup by hash can tell which.
+const SEND_NONCE_TAKEN: &[&str] = &["nonce too low", "replacement transaction underpriced"];
+/// `eth_sendRawTransaction` errors meaning the node already holds this transaction: "already
+/// known" as a phrase, or a message that starts with "known transaction" (never "unknown
+/// transaction").
+const SEND_KNOWN_PHRASE: &str = "already known";
+const SEND_KNOWN_PREFIX: &str = "known transaction";
 
 /// A JSON-RPC client for one endpoint (derefs to the alloy provider). Errors become text only
 /// through its `rpc` method, which scrubs the endpoint's URL and API key ([`Net::redact`]).
@@ -84,10 +84,10 @@ impl EvmProvider {
         })
     }
 
-    async fn rpc<T, E: Display>(
+    async fn rpc<T>(
         &self,
         what: &str,
-        call: impl IntoFuture<Output = std::result::Result<T, E>>,
+        call: impl IntoFuture<Output = TransportResult<T>>,
     ) -> Result<T> {
         match tokio::time::timeout(RPC_TIMEOUT, call.into_future()).await {
             Ok(Ok(v)) => Ok(v),
@@ -96,10 +96,26 @@ impl EvmProvider {
         }
     }
 
-    /// Transport errors quote the request URL, and an HTTP error body or a node's error message
-    /// can quote the API key on its own; both are scrubbed.
-    fn failed(&self, what: &str, e: &dyn Display) -> WalletError {
-        WalletError::rpc(self.net.redact(&format!("{what} failed: {e}")))
+    /// A non-2xx answer is printed as its status and the endpoint's origin only: its body is a
+    /// gateway's text, which can quote the API key in any encoding. So is a 2xx answer that is
+    /// not JSON-RPC (its text is dropped). Transport errors quote the request URL, and a node's
+    /// JSON-RPC error message can quote the key on its own; both are scrubbed ([`Net::redact`]).
+    fn failed(&self, what: &str, e: &TransportError) -> WalletError {
+        let why = match e {
+            RpcError::Transport(kind) => match kind.as_http_error() {
+                Some(http) => format!(
+                    "HTTP {} from {}",
+                    http.status,
+                    url_origin(&self.net.rpc_url)
+                ),
+                None => self.net.redact(&kind.to_string()),
+            },
+            RpcError::DeserError { err, .. } => self.net.redact(&format!(
+                "the endpoint's answer is not valid JSON-RPC ({err})"
+            )),
+            other => self.net.redact(&other.to_string()),
+        };
+        WalletError::rpc(format!("{what} failed: {why}"))
     }
 }
 
@@ -187,10 +203,30 @@ pub async fn erc20_balance(p: &EvmProvider, token: Address, owner: Address) -> R
         .map_err(|e| WalletError::rpc(format!("balanceOf returned malformed data: {e}")))
 }
 
-/// EIP-1559 fees when the chain has a base fee, legacy `eth_gasPrice` otherwise, raised 1.25x when
-/// `replacing` a pending transaction, then checked against [`check_fee_ceiling`] (`explicit` =
-/// `--max-fee-gwei` in wei).
-pub async fn fees(p: &EvmProvider, explicit: Option<u128>, replacing: bool) -> Result<EvmFees> {
+/// What a replacement (`--nonce` below the pending nonce, or `--replace`) must outbid: `bump`
+/// ([`crate::chains::parse_bump`]) times the estimate, and times the fees of the transaction it
+/// replaces when those are known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outbid {
+    pub bump: u128,
+    pub original: Option<OriginalFees>,
+}
+
+/// Fee cap and tip of the transaction being replaced (both its `gasPrice` if it is legacy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OriginalFees {
+    pub max_fee: u128,
+    pub tip: u128,
+}
+
+/// EIP-1559 fees when the chain has a base fee, legacy `eth_gasPrice` otherwise, raised by
+/// `outbid` when replacing a pending transaction, then checked against [`check_fee_ceiling`]
+/// (`explicit` = `--max-fee-gwei` in wei).
+pub async fn fees(
+    p: &EvmProvider,
+    explicit: Option<u128>,
+    outbid: Option<Outbid>,
+) -> Result<EvmFees> {
     let block = p
         .rpc(
             "eth_getBlockByNumber",
@@ -220,44 +256,122 @@ pub async fn fees(p: &EvmProvider, explicit: Option<u128>, replacing: bool) -> R
             (fees, 0)
         }
     };
-    if !replacing {
+    let Some(outbid) = outbid else {
         check_fee_ceiling(&fees, base, gas_price, explicit)?;
         return Ok(fees);
-    }
-    let fees = replacement_fees(fees);
+    };
+    let fees = replacement_fees(fees, outbid);
     check_fee_ceiling(&fees, base, gas_price, explicit).map_err(|e| {
         WalletError::new(
             e.code,
             format!(
-                "{} (this replaces a pending transaction, so the fees include the \
-                 {REPLACEMENT_BUMP} replacement bump)",
-                e.message
+                "{} (this replaces a pending transaction, so the fees include the {} replacement \
+                 bump{})",
+                e.message,
+                bump_label(outbid.bump),
+                if outbid.original.is_some() {
+                    " over the higher of the estimate and the original's fees"
+                } else {
+                    ""
+                }
             ),
         )
     })?;
     Ok(fees)
 }
 
-/// Every fee field times [`REPLACEMENT_BUMP`], rounded up (so a 1 wei tip still rises).
-fn replacement_fees(fees: EvmFees) -> EvmFees {
-    let up = |v: U128| {
-        U128::from(
-            v.to::<u128>()
-                .saturating_mul(REPLACEMENT_BUMP_NUM)
-                .div_ceil(REPLACEMENT_BUMP_DEN),
-        )
-    };
+/// Every fee field times the bump, rounded up (so a 1 wei tip still rises), and at least the bump
+/// times the original's matching fee. The tip never exceeds the fee cap.
+fn replacement_fees(fees: EvmFees, outbid: Outbid) -> EvmFees {
+    let up = |v: u128| v.saturating_mul(outbid.bump).div_ceil(BUMP_SCALE);
+    let (cap, tip) = outbid.original.map_or((0, 0), |o| (o.max_fee, o.tip));
     match fees {
         EvmFees::Eip1559 {
             max_fee_per_gas,
             max_priority_fee_per_gas,
-        } => EvmFees::Eip1559 {
-            max_fee_per_gas: up(max_fee_per_gas),
-            max_priority_fee_per_gas: up(max_priority_fee_per_gas),
-        },
+        } => {
+            let tip = up(max_priority_fee_per_gas.to()).max(up(tip));
+            let max = up(max_fee_per_gas.to()).max(up(cap)).max(tip);
+            EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(max),
+                max_priority_fee_per_gas: U128::from(tip),
+            }
+        }
         EvmFees::Legacy { gas_price } => EvmFees::Legacy {
-            gas_price: up(gas_price),
+            gas_price: U128::from(up(gas_price.to()).max(up(cap))),
         },
+    }
+}
+
+/// The fees of the transaction `--replace` names, read as plain JSON. It must be `from`'s
+/// transaction at `nonce` and not yet mined. A node that does not know it cannot tell its fees.
+async fn original_fees(
+    p: &EvmProvider,
+    hash: B256,
+    from: Address,
+    nonce: u64,
+) -> Result<OriginalFees> {
+    let call = p
+        .client()
+        .request::<_, Option<Value>>("eth_getTransactionByHash", (hash,));
+    let tx = p
+        .rpc("eth_getTransactionByHash", call)
+        .await?
+        .ok_or_else(|| {
+            WalletError::rpc(format!(
+                "the node does not know --replace {hash}, so its fees are unknown; nothing was \
+                 signed. If that transaction was dropped, retry with the same --nonce {nonce} \
+                 and no --replace (with a larger --bump if the node refuses the replacement)"
+            ))
+        })?;
+    let num = |k: &str| {
+        tx.get(k)
+            .and_then(Value::as_str)
+            .and_then(|h| u128::from_str_radix(h.strip_prefix("0x")?, 16).ok())
+    };
+    let refuse = |why: String| {
+        WalletError::validation(format!("--replace {hash}: {why}; nothing was signed"))
+    };
+    let sender = tx
+        .get("from")
+        .and_then(Value::as_str)
+        .and_then(|a| a.parse::<Address>().ok());
+    if sender != Some(from) {
+        return Err(refuse(format!(
+            "it was sent from {}, not from this key ({})",
+            sender.map_or_else(|| "an unknown address".to_string(), |a| a.to_checksum(None)),
+            from.to_checksum(None)
+        )));
+    }
+    match num("nonce") {
+        Some(n) if n == u128::from(nonce) => {}
+        other => {
+            return Err(refuse(format!(
+                "it has nonce {}, not --nonce {nonce}",
+                other.map_or_else(|| "?".to_string(), |n| n.to_string())
+            )));
+        }
+    }
+    if tx.get("blockNumber").is_some_and(|b| !b.is_null()) {
+        return Err(refuse(
+            "it is already mined, so that send went through: look it up before sending anything \
+             new"
+            .to_string(),
+        ));
+    }
+    match (
+        num("maxFeePerGas"),
+        num("maxPriorityFeePerGas"),
+        num("gasPrice"),
+    ) {
+        (Some(max_fee), Some(tip), _) => Ok(OriginalFees { max_fee, tip }),
+        (_, _, Some(price)) => Ok(OriginalFees {
+            max_fee: price,
+            tip: price,
+        }),
+        _ => Err(WalletError::rpc(format!(
+            "the node's answer for --replace {hash} has no fee fields; nothing was signed"
+        ))),
     }
 }
 
@@ -265,30 +379,47 @@ fn replacement_fees(fees: EvmFees) -> EvmFees {
 /// from the RPC endpoint, so a broken or hostile one could ask for any price per gas:
 ///
 /// ```text
-/// reference     = max(latest block baseFeePerGas, eth_gasPrice, 1 gwei)
-/// tip ceiling   = 2 x reference   (maxPriorityFeePerGas)
-/// price ceiling = 6 x reference   (maxFeePerGas, or gasPrice on a legacy chain)
+/// EIP-1559: reference = max(latest block baseFeePerGas, eth_gasPrice, 1 gwei)
+///           tip ceiling   = 2 x reference   (maxPriorityFeePerGas)
+///           price ceiling = 6 x reference   (maxFeePerGas)
+/// legacy:   reference = max(latest block baseFeePerGas, 1 gwei)
+///           price ceiling = 6 x reference   (gasPrice)
 /// ```
 ///
 /// The normal estimate, maxFee = 2 x base fee + tip, stays well inside it, and so does a
-/// replacement's 1.25x of it. `eth_gasPrice` (base fee plus the node's suggested tip) and the
-/// 1 gwei floor keep chains whose tip exceeds the base fee working (Polygon, OP Mainnet, Sepolia).
-/// On a legacy chain the price *is* `eth_gasPrice`, so only an explicit ceiling can reject it
-/// there.
+/// replacement's bump of it. On an EIP-1559 chain `eth_gasPrice` (base fee plus the node's
+/// suggested tip) and the 1 gwei floor keep chains whose tip exceeds the base fee working
+/// (Polygon, OP Mainnet, Sepolia). On a legacy chain the price *is* `eth_gasPrice`, so it is left
+/// out of its own reference: BSC (base fee 0) caps at 6 gwei unless `--max-fee-gwei` says more.
 ///
 /// `explicit` (`--max-fee-gwei`) replaces both ceilings with one price, which may be higher or
 /// lower. The reference comes from the same node, so this stops one bad estimate, not a node that
-/// lies consistently; an absolute limit belongs in the daemon-side signing policy.
+/// lies consistently.
 pub fn check_fee_ceiling(
     fees: &EvmFees,
     base_fee: u128,
     gas_price: u128,
     explicit: Option<u128>,
 ) -> Result<()> {
+    // Not here: an absolute fee budget that does not depend on the RPC at all. That belongs in
+    // the daemon-side signing policy, which sees the decoded fees of every transaction it signs.
     let gwei = |wei: u128| format!("{} gwei", format_units(U256::from(wei), 9));
-    let reference = base_fee.max(gas_price).max(REFERENCE_FLOOR);
+    let legacy = matches!(fees, EvmFees::Legacy { .. });
+    let reference = if legacy {
+        base_fee.max(REFERENCE_FLOOR)
+    } else {
+        base_fee.max(gas_price).max(REFERENCE_FLOOR)
+    };
     let (tip_cap, price_cap, rule) = match explicit {
         Some(max) => (max, max, format!("--max-fee-gwei {}", gwei(max))),
+        None if legacy => (
+            reference,
+            reference.saturating_mul(PRICE_CEILING_MULT),
+            format!(
+                "zwallet's legacy ceiling ({PRICE_CEILING_MULT} x max(baseFee {}, 1 gwei))",
+                gwei(base_fee)
+            ),
+        ),
         None => (
             reference.saturating_mul(TIP_CEILING_MULT),
             reference.saturating_mul(PRICE_CEILING_MULT),
@@ -351,6 +482,10 @@ pub struct Intent {
     pub dry_run: bool,
     /// `--nonce`: replace a pending transaction (or name the next nonce) instead of `pending`.
     pub nonce: Option<u64>,
+    /// `--bump` in ten-thousandths (default [`DEFAULT_BUMP`] when replacing).
+    pub bump: Option<u128>,
+    /// `--replace`: the pending transaction being replaced, whose fees are outbid too.
+    pub replace: Option<B256>,
     /// `--max-fee-gwei` in wei: the explicit fee ceiling.
     pub max_fee_per_gas: Option<u128>,
 }
@@ -440,7 +575,16 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         }
     };
     let replacing = nonce < pending;
-    let fees = fees(p, intent.max_fee_per_gas, replacing).await?;
+    let original = match intent.replace {
+        Some(hash) => Some(original_fees(p, hash, intent.from, nonce).await?),
+        None => None,
+    };
+    // `--replace` outbids the named transaction even where this node no longer counts it.
+    let outbid = (replacing || original.is_some()).then(|| Outbid {
+        bump: intent.bump.unwrap_or(DEFAULT_BUMP),
+        original,
+    });
+    let fees = fees(p, intent.max_fee_per_gas, outbid).await?;
     let (gas_estimate, gas_source) = match estimate(p, &intent, intent.value).await {
         Ok(g) => (g, "estimate"),
         // The node will not estimate a tx the account cannot fund. In a dry-run, estimate
@@ -500,8 +644,11 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     fields.insert("nonce".into(), json!(nonce));
     if intent.nonce.is_some() {
         fields.insert("replacesPending".into(), json!(replacing));
-        let bump = replacing.then_some(REPLACEMENT_BUMP);
+        let bump = outbid.map(|o| bump_label(o.bump));
         fields.insert("feeBump".into(), json!(bump));
+    }
+    if let Some(hash) = intent.replace {
+        fields.insert("replacesTx".into(), json!(format!("{hash:#x}")));
     }
     fields.insert("gasLimit".into(), json!(gas_limit));
     fields.insert("gasEstimate".into(), json!(gas_estimate));
@@ -553,18 +700,26 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
 /// An explicit `--nonce n` must reuse a nonce that is still pending (`mined <= n < pending`, the
 /// replacement case) or be the next free one (`n == pending`). Below `mined` it is already spent;
 /// above `pending` the transaction would wait forever for the gap to fill.
+///
+/// `--nonce` is how a retry is made safe, so neither message names another nonce to use: an
+/// agent that took one would turn its retry into a second send.
 fn check_nonce(n: u64, mined: u64, pending: u64) -> Result<u64> {
     if n < mined {
         return Err(WalletError::validation(format!(
-            "--nonce {n} is already used: this account has {mined} mined transaction(s); the \
-             next free nonce is {pending}"
-        )));
+            "nonce {n} is already mined; nothing was signed. If you are retrying an earlier send \
+             with this nonce, that send (or its replacement) went through: look up its txHash \
+             before sending anything new"
+        ))
+        .with_detail("nonce", n));
     }
     if n > pending {
         return Err(WalletError::validation(format!(
-            "--nonce {n} would leave a gap: the next free nonce is {pending}, and a later nonce \
-             is not mined until every earlier one is"
-        )));
+            "--nonce {n} would leave a gap: it is past this account's next unused nonce on this \
+             node, and a nonce is not mined until every earlier one is; nothing was signed. If \
+             you are retrying a send that used nonce {n}, do not send it again under another \
+             nonce: look up its txHash first (this node may be behind)"
+        ))
+        .with_detail("nonce", n));
     }
     Ok(n)
 }
@@ -608,6 +763,7 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
     let from = parse_address(&req.from)?;
     let to = parse_address(&req.to)?;
     let token = req.token.as_deref().map(parse_address).transpose()?;
+    let replace = req.replace.as_deref().map(parse_tx_hash).transpose()?;
     check_recipient(to, token, req.force)?;
     let native_amount = match token {
         None => Some(parse_units(&req.amount, chain.decimals)?),
@@ -638,6 +794,8 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
                 fallback_gas: Some(TOKEN_FALLBACK_GAS),
                 dry_run: req.dry_run,
                 nonce: req.nonce,
+                bump: req.bump,
+                replace,
                 max_fee_per_gas: req.max_fee_per_gas,
             };
             (intent, extra)
@@ -658,6 +816,8 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
                 fallback_gas: None,
                 dry_run: req.dry_run,
                 nonce: req.nonce,
+                bump: req.bump,
+                replace,
                 max_fee_per_gas: req.max_fee_per_gas,
             };
             (intent, extra)
@@ -674,13 +834,19 @@ pub async fn prepare_transfer(net: &Net, req: &TransferRequest) -> Result<Prepar
 pub enum SendOutcome {
     /// The node answered with the transaction's own hash.
     Accepted,
-    /// The node answered with some other hash: a broken or dishonest endpoint.
+    /// The call failed, timed out, or answered another hash (`rpc_hash`), but the node reports
+    /// the transaction by its own hash: it was sent. `why` says what went wrong.
+    KnownDespite { why: String, rpc_hash: Option<B256> },
+    /// The node answered with some other hash (a broken or dishonest endpoint), and does not
+    /// report the transaction by its own hash.
     HashMismatch(B256),
-    /// The call failed or timed out (the text), but the node reports the transaction.
-    KnownDespite(String),
     /// The call failed or timed out (the text), and the node does not report the transaction.
     Unknown(String),
-    /// The node refused the transaction itself (the text; see `SEND_REJECTIONS`): nothing was
+    /// The node says the nonce is already used (the text; see [`SEND_NONCE_TAKEN`]) and does not
+    /// report this transaction: another transaction, pending or mined, holds the nonce. It may be
+    /// an earlier send of the same payment.
+    NonceTaken(String),
+    /// The node refused the transaction itself (the text; see [`SEND_REJECTIONS`]): nothing was
     /// broadcast.
     Rejected(String),
 }
@@ -690,17 +856,33 @@ pub enum SendOutcome {
 enum SendError {
     /// The node refused the transaction ([`SEND_REJECTIONS`]): nothing was broadcast.
     Rejected,
+    /// The nonce is used ([`SEND_NONCE_TAKEN`]), perhaps by this very transaction.
+    NonceTaken,
     /// The node already holds it ([`SEND_KNOWN`]): the lookup by hash then reports it as sent.
     Known,
     /// Anything else: only the lookup by hash can tell.
     Other,
 }
 
+/// Does `phrase` occur in `text` as whole words (no letter or digit right before or after)?
+fn has_phrase(text: &str, phrase: &str) -> bool {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    text.match_indices(phrase).any(|(i, _)| {
+        !word(text[..i].chars().last()) && !word(text[i + phrase.len()..].chars().next())
+    })
+}
+
 fn classify_send_error(message: &str) -> SendError {
     let m = message.to_lowercase();
     let has = |list: &[&str]| list.iter().any(|s| m.contains(s));
-    if has(SEND_KNOWN) {
+    let known = has_phrase(&m, SEND_KNOWN_PHRASE)
+        || m.trim_start()
+            .strip_prefix(SEND_KNOWN_PREFIX)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric()));
+    if known {
         SendError::Known
+    } else if has(SEND_NONCE_TAKEN) {
+        SendError::NonceTaken
     } else if has(SEND_REJECTIONS) {
         SendError::Rejected
     } else {
@@ -710,33 +892,45 @@ fn classify_send_error(message: &str) -> SendError {
 
 /// Sends `raw`, whose hash the caller computed from the bytes. The node's reply is only checked
 /// against that hash, never used in its place. A JSON-RPC error that refuses the transaction
-/// itself is [`SendOutcome::Rejected`]. Any other failure after the request may have gone out
-/// (including "already known", a timeout, or a transport error) asks the node for the
-/// transaction by `hash` before giving up.
+/// itself is [`SendOutcome::Rejected`]. Every other outcome short of the node answering that
+/// hash (a used nonce, another hash, "already known", a timeout, a transport error) asks the
+/// node for the transaction by `hash` before giving up.
 pub async fn send_raw(p: &EvmProvider, raw: &[u8], hash: B256) -> SendOutcome {
     const WHAT: &str = "eth_sendRawTransaction";
     let call = p
         .client()
         .request::<_, B256>(WHAT, (alloy::hex::encode_prefixed(raw),));
+    let found = |why: String, rpc_hash: Option<B256>| SendOutcome::KnownDespite { why, rpc_hash };
     let why = match tokio::time::timeout(RPC_TIMEOUT, call.into_future()).await {
         Ok(Ok(h)) if h == hash => return SendOutcome::Accepted,
-        Ok(Ok(h)) => return SendOutcome::HashMismatch(h),
+        Ok(Ok(h)) => {
+            return if node_has_tx(p, hash).await {
+                let why = format!(
+                    "the RPC answered {WHAT} with hash {h}, not the transaction's own hash"
+                );
+                found(why, Some(h))
+            } else {
+                SendOutcome::HashMismatch(h)
+            };
+        }
         Ok(Err(e)) => {
             let why = p.failed(WHAT, &e).message;
             // Only a JSON-RPC error object (HTTP 200, or a 4xx carrying one) is the node's
             // answer; a bare transport error says nothing about the transaction.
-            let kind = e
+            match e
                 .as_error_resp()
-                .map_or(SendError::Other, |r| classify_send_error(&r.message));
-            if kind == SendError::Rejected {
-                return SendOutcome::Rejected(why);
+                .map_or(SendError::Other, |r| classify_send_error(&r.message))
+            {
+                SendError::Rejected => return SendOutcome::Rejected(why),
+                SendError::NonceTaken if node_has_tx(p, hash).await => return found(why, None),
+                SendError::NonceTaken => return SendOutcome::NonceTaken(why),
+                SendError::Known | SendError::Other => why,
             }
-            why
         }
         Err(_) => timed_out(WHAT).message,
     };
     if node_has_tx(p, hash).await {
-        SendOutcome::KnownDespite(why)
+        found(why, None)
     } else {
         SendOutcome::Unknown(why)
     }
@@ -870,17 +1064,42 @@ mod tests {
     }
 
     #[test]
+    fn legacy_ceiling_does_not_use_the_price_it_checks() {
+        // On a legacy chain the price *is* eth_gasPrice, so it cannot be its own reference: the
+        // reference is max(base fee, 1 gwei), and BSC (base fee 0) caps at 6 gwei.
+        let legacy = |gwei: u128| EvmFees::Legacy {
+            gas_price: U128::from(gwei * G),
+        };
+        assert!(check_fee_ceiling(&legacy(6), 0, 6 * G, None).is_ok());
+        let e = check_fee_ceiling(&legacy(7), 0, 7 * G, None).unwrap_err();
+        assert!(e.message.contains("gasPrice 7 gwei"), "{}", e.message);
+        assert!(
+            e.message.contains("6 x max(baseFee 0 gwei, 1 gwei)"),
+            "{}",
+            e.message
+        );
+        assert!(!e.message.contains("eth_gasPrice"), "{}", e.message);
+        assert!(check_fee_ceiling(&legacy(7), 0, 7 * G, Some(8 * G)).is_ok());
+        // An EIP-1559 chain still counts eth_gasPrice in its reference.
+        let price = EvmFees::Eip1559 {
+            max_fee_per_gas: U128::from(7 * G),
+            max_priority_fee_per_gas: U128::from(G),
+        };
+        assert!(check_fee_ceiling(&price, G, 2 * G, None).is_ok());
+    }
+
+    #[test]
     fn explicit_nonce_must_be_pending_or_next() {
         // 5 mined, 7 = next free: 5 and 6 replace pending transactions, 7 is new.
         for n in [5, 6, 7] {
             assert_eq!(check_nonce(n, 5, 7).unwrap(), n);
         }
-        assert!(
-            check_nonce(4, 5, 7)
-                .unwrap_err()
-                .message
-                .contains("already used")
-        );
+        let mined = check_nonce(4, 5, 7).unwrap_err().message;
+        assert!(mined.starts_with("nonce 4 is already mined"), "{mined}");
+        for e in [mined, check_nonce(8, 5, 7).unwrap_err().message] {
+            // Neither names a nonce to use instead.
+            assert!(!e.contains('5') && !e.contains('7'), "{e}");
+        }
         assert!(check_nonce(8, 5, 7).unwrap_err().message.contains("gap"));
     }
 
@@ -906,9 +1125,14 @@ mod tests {
         assert!(check_recipient(token, Some(token), true).is_ok());
     }
 
+    const QUARTER: Outbid = Outbid {
+        bump: DEFAULT_BUMP,
+        original: None,
+    };
+
     #[test]
     fn replacement_fees_rise_by_a_quarter_rounded_up() {
-        let bumped = replacement_fees(eip1559(G, G / 10));
+        let bumped = replacement_fees(eip1559(G, G / 10), QUARTER);
         assert_eq!(
             bumped,
             EvmFees::Eip1559 {
@@ -918,10 +1142,13 @@ mod tests {
             }
         );
         // A 1 wei tip (Arbitrum, OP Mainnet) must still rise, or the node sees no bump.
-        let tiny = replacement_fees(EvmFees::Eip1559 {
-            max_fee_per_gas: U128::from(3u64),
-            max_priority_fee_per_gas: U128::from(1u64),
-        });
+        let tiny = replacement_fees(
+            EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(3u64),
+                max_priority_fee_per_gas: U128::from(1u64),
+            },
+            QUARTER,
+        );
         assert_eq!(
             tiny,
             EvmFees::Eip1559 {
@@ -929,17 +1156,79 @@ mod tests {
                 max_priority_fee_per_gas: U128::from(2u64),
             }
         );
-        let legacy = replacement_fees(EvmFees::Legacy {
-            gas_price: U128::from(3 * G),
-        });
+        let legacy = replacement_fees(
+            EvmFees::Legacy {
+                gas_price: U128::from(3 * G),
+            },
+            QUARTER,
+        );
         assert_eq!(legacy.max_price(), 3_750_000_000);
+        // The minimum 1.1x still lifts a 1 wei tip.
+        let min = Outbid {
+            bump: 11_000,
+            original: None,
+        };
+        assert_eq!(
+            replacement_fees(eip1559(0, 1), min),
+            EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(2u64),
+                max_priority_fee_per_gas: U128::from(2u64),
+            }
+        );
+    }
+
+    #[test]
+    fn replacement_outbids_the_original_when_its_fees_are_higher() {
+        let original = OriginalFees {
+            max_fee: 10 * G,
+            tip: 2 * G,
+        };
+        let outbid = Outbid {
+            bump: 15_000,
+            original: Some(original),
+        };
+        // Estimate 2.1 gwei / 0.1 gwei: the original's fees win, times 1.5.
+        assert_eq!(
+            replacement_fees(eip1559(G, G / 10), outbid),
+            EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(15 * G),
+                max_priority_fee_per_gas: U128::from(3 * G),
+            }
+        );
+        // A legacy estimate outbids the original's fee cap.
+        let legacy = EvmFees::Legacy {
+            gas_price: U128::from(G),
+        };
+        assert_eq!(replacement_fees(legacy, outbid).max_price(), 15 * G);
+        // A higher estimate wins over a low original.
+        let low = Outbid {
+            bump: 15_000,
+            original: Some(OriginalFees { max_fee: 1, tip: 1 }),
+        };
+        assert_eq!(
+            replacement_fees(eip1559(4 * G, G), low).max_price(),
+            (9 * G * 3) / 2
+        );
+        // A node that reports tip > cap for the original cannot make the tip exceed the cap.
+        let odd = Outbid {
+            bump: DEFAULT_BUMP,
+            original: Some(OriginalFees {
+                max_fee: G,
+                tip: 8 * G,
+            }),
+        };
+        match replacement_fees(eip1559(G, G / 10), odd) {
+            EvmFees::Eip1559 {
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+            } => assert!(max_priority_fee_per_gas <= max_fee_per_gas),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
     fn send_errors_are_classified_case_insensitively() {
         for m in [
-            "replacement transaction underpriced",
-            "Nonce too low: address 0xabc, tx: 1 state: 2",
             "INSUFFICIENT FUNDS for gas * price + value",
             "intrinsic gas too low",
             "tx exceeds block gas limit",
@@ -947,38 +1236,87 @@ mod tests {
         ] {
             assert_eq!(classify_send_error(m), SendError::Rejected, "{m}");
         }
-        for m in ["already known", "Known transaction: 0xabc"] {
+        for m in [
+            "replacement transaction underpriced",
+            "Nonce too low: address 0xabc, tx: 1 state: 2",
+        ] {
+            assert_eq!(classify_send_error(m), SendError::NonceTaken, "{m}");
+        }
+        for m in [
+            "already known",
+            "ALREADY KNOWN",
+            "Known transaction: 0xabc",
+            "known transaction",
+            "tx already known: 0xabc",
+        ] {
             assert_eq!(classify_send_error(m), SendError::Known, "{m}");
         }
-        for m in ["internal error", "rate limited", ""] {
+        for m in ["internal error", "rate limited", "", "unknown transaction"] {
             assert_eq!(classify_send_error(m), SendError::Other, "{m}");
         }
+        // "unknown transaction" is not "known transaction": the rest of the text decides.
+        assert_eq!(
+            classify_send_error("unknown transaction type; insufficient funds"),
+            SendError::Rejected
+        );
+        assert_eq!(
+            classify_send_error("unknown transaction: nonce too low"),
+            SendError::NonceTaken
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn rpc_error_text_never_prints_the_endpoint_key() {
+        use alloy::transports::{RpcError, TransportError, TransportErrorKind};
         let net = Net {
             chain: crate::chains::find("ethereum").unwrap(),
             rpc_url: "https://eth.example.com/v3/0123456789abcdef?apikey=SECRETKEY99&chain=1"
                 .into(),
         };
         let p = EvmProvider::new(&net).unwrap();
-        // An HTTP error body that quotes the key bare, inside the path and query, and the URL.
-        let body = "HTTP error 401 with body: {\"error\":\"invalid project id 0123456789abcdef\",\
-                    \"path\":\"/v3/0123456789abcdef?apikey=SECRETKEY99&chain=1\",\"url\":\
-                    \"https://eth.example.com/v3/0123456789abcdef\"} (apikey SECRETKEY99)";
+        // A non-2xx body: only the status and the endpoint's origin are printed.
+        let body = "{\"error\":\"invalid project id 0123456789abcdef\",\"path\":\
+                    \"/v3/0123456789abcdef?apikey=SECRETKEY99&chain=1\"} (apikey SECRETKEY99)";
         let e = p
-            .rpc("eth_call", std::future::ready(Err::<(), _>(body)))
+            .rpc(
+                "eth_call",
+                std::future::ready(Err::<(), _>(TransportErrorKind::http_error(
+                    401,
+                    body.into(),
+                ))),
+            )
             .await
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::RpcError);
-        for key in ["0123456789abcdef", "SECRETKEY99", "apikey=", "/v3/"] {
+        assert_eq!(
+            e.message,
+            "eth_call failed: HTTP 401 from https://eth.example.com"
+        );
+        // A JSON-RPC error that quotes the key, URL-decoded or not.
+        let err: TransportError = RpcError::ErrorResp(
+            serde_json::from_str(
+                r#"{"code":-32000,"message":"key 0123456789abcdef or SECRETKEY99 rejected at block 1"}"#,
+            )
+            .unwrap(),
+        );
+        let e = p
+            .rpc("eth_call", std::future::ready(Err::<(), _>(err)))
+            .await
+            .unwrap_err();
+        for key in ["0123456789abcdef", "SECRETKEY99"] {
             assert!(!e.message.contains(key), "{key}: {}", e.message);
         }
-        assert!(
-            e.message.starts_with("eth_call failed: HTTP error 401"),
-            "{}",
-            e.message
-        );
+        assert!(e.message.contains("error code -32000"), "{}", e.message);
+        // A 200 answer that is not JSON-RPC: its text is the endpoint's, so it is dropped.
+        let err: TransportError = RpcError::DeserError {
+            err: serde_json::from_str::<u64>("x").unwrap_err(),
+            text: "<html>gateway for key SECRETKEY99</html>".into(),
+        };
+        let e = p
+            .rpc("eth_call", std::future::ready(Err::<(), _>(err)))
+            .await
+            .unwrap_err();
+        assert!(!e.message.contains("SECRETKEY99"), "{}", e.message);
+        assert!(!e.message.contains("html"), "{}", e.message);
     }
 }

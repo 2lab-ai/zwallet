@@ -4,6 +4,8 @@
 
 mod common;
 
+use alloy::consensus::{Transaction, TxEnvelope};
+use alloy::eips::eip2718::Decodable2718;
 use alloy::primitives::keccak256;
 use common::Home;
 use serde_json::{Value, json};
@@ -11,6 +13,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// A second hardhat account, used as a plain recipient.
 const OTHER: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
@@ -140,6 +143,14 @@ fn hex(n: u128) -> Value {
 fn tx_hash_of(raw: &str) -> String {
     let bytes = alloy::hex::decode(raw.trim_start_matches("0x")).unwrap();
     format!("{:#x}", keccak256(bytes))
+}
+
+/// The nonce a raw signed transaction consumes.
+fn nonce_of(raw: &str) -> u64 {
+    let bytes = alloy::hex::decode(raw.trim_start_matches("0x")).unwrap();
+    TxEnvelope::decode_2718(&mut bytes.as_slice())
+        .unwrap()
+        .nonce()
 }
 
 fn block(base_fee: Option<u128>) -> Value {
@@ -347,10 +358,10 @@ fn node_rejection_is_rpc_error_not_broadcast_uncertain() {
         "eth_sendRawTransaction" => Reply::Error(*a.lock().unwrap()),
         _ => healthy(m, p),
     });
-    // geth's wording (most clients share it), matched case-insensitively.
+    // geth's wording (most clients share it), matched case-insensitively. "nonce too low" and
+    // "replacement transaction underpriced" are not here: they may mean the transaction itself is
+    // already in, so they are looked up first (see `nonce_taken_*`).
     let rejections = [
-        "replacement transaction underpriced",
-        "Nonce too low: address 0xf39F, tx: 7 state: 8",
         "INSUFFICIENT FUNDS for gas * price + value",
         "intrinsic gas too low",
         "exceeds block gas limit",
@@ -365,6 +376,8 @@ fn node_rejection_is_rpc_error_not_broadcast_uncertain() {
             "{msg}"
         );
         assert!(msg.contains(why), "{msg}");
+        // A retry must reuse the nonce, so that it can never become a second send.
+        assert!(msg.contains("--nonce 7"), "{msg}");
         let v = r.json();
         let sent = rpc.sent();
         assert_eq!(sent.len(), i + 1, "the CLI must send exactly once");
@@ -372,13 +385,107 @@ fn node_rejection_is_rpc_error_not_broadcast_uncertain() {
         assert_eq!(v["nonce"], PENDING_NONCE);
         assert_eq!(v["from"], me.as_str());
     }
-    // A rejection is definitive: no lookup by hash.
+    // These four refuse the transaction itself: no lookup by hash.
     assert!(rpc.calls("eth_getTransactionByHash").is_empty());
     // Any other error text still asks for the transaction and stays uncertain.
     *answer.lock().unwrap() = "internal error";
     home.run(&transfer(&rpc.url, &[]))
         .err("BROADCAST_UNCERTAIN");
     assert!(!rpc.calls("eth_getTransactionByHash").is_empty());
+}
+
+/// A node whose `eth_sendRawTransaction` fails with `error`. With `known` it reports the
+/// transaction it was sent by that transaction's own hash (as a mined one), otherwise nothing.
+fn send_error_node(error: &'static str, known: bool) -> MockRpc {
+    let sent = Arc::new(Mutex::new(None::<String>));
+    let s = sent.clone();
+    MockRpc::start(move |m, p| match m {
+        "eth_sendRawTransaction" => {
+            *s.lock().unwrap() = Some(tx_hash_of(p[0].as_str().unwrap()));
+            Reply::Error(error)
+        }
+        "eth_getTransactionByHash" => match s.lock().unwrap().clone() {
+            Some(h) if known && p[0] == h.as_str() => {
+                Reply::Result(json!({ "hash": h, "nonce": "0x7", "blockNumber": "0x99" }))
+            }
+            _ => Reply::Result(Value::Null),
+        },
+        _ => healthy(m, p),
+    })
+}
+
+#[test]
+fn nonce_too_low_for_the_same_tx_is_success() {
+    // The identical transaction is already in (resent after a lost reply): the node refuses the
+    // copy, and the lookup by the computed hash finds the original.
+    let (home, _) = unlocked();
+    for why in [
+        "nonce too low: address 0xf39F, tx: 7 state: 8",
+        "replacement transaction underpriced",
+    ] {
+        let rpc = send_error_node(why, true);
+        let v = home.run(&transfer(&rpc.url, &[])).ok();
+        let sent = rpc.sent();
+        assert_eq!(sent.len(), 1, "the CLI must send exactly once");
+        assert_eq!(v["txHash"], tx_hash_of(&sent[0]).as_str(), "{v:#}");
+        assert_eq!(v["nonce"], PENDING_NONCE);
+        let warning = v["broadcastWarning"].as_str().unwrap();
+        assert!(warning.contains(why), "{warning}");
+        assert!(warning.contains("so it was sent"), "{warning}");
+    }
+}
+
+#[test]
+fn nonce_taken_by_another_tx_says_look_up_before_sending_again() {
+    let (home, me) = unlocked();
+    // Without --nonce: the pending nonce went to another transaction meanwhile.
+    let rpc = send_error_node("nonce too low: address 0xf39F, tx: 7 state: 8", false);
+    let r = home.run(&transfer(&rpc.url, &[]));
+    let msg = r.err("RPC_ERROR");
+    let v = r.json();
+    println!("{v:#}");
+    assert!(
+        msg.contains("nonce 7 is taken by another transaction (pending or mined)"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains(
+            "if this was a retry of an earlier send, look that txHash up before sending again"
+        ),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("otherwise re-run to take the next nonce"),
+        "{msg}"
+    );
+    assert!(!msg.contains("rejected"), "{msg}");
+    assert_eq!(v["txHash"], tx_hash_of(&rpc.sent()[0]).as_str(), "{v:#}");
+    assert_eq!(v["nonce"], PENDING_NONCE);
+    assert_eq!(v["from"], me.as_str());
+    let hash = tx_hash_of(&rpc.sent()[0]);
+    let polls = rpc.calls("eth_getTransactionByHash");
+    assert!(!polls.is_empty() && polls.iter().all(|p| p[0] == hash.as_str()));
+
+    // With --nonce (a retry of a pending send): the earlier send may be the one that took it.
+    for why in ["nonce too low", "replacement transaction underpriced"] {
+        let rpc = send_error_node(why, false);
+        let r = home.run(&transfer(&rpc.url, &["--nonce", "6"]));
+        let msg = r.err("BROADCAST_UNCERTAIN");
+        assert!(
+            msg.contains("nonce 6 is taken by another transaction"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("look that txHash up before sending again"),
+            "{msg}"
+        );
+        let v = r.json();
+        assert_eq!(v["nonce"], 6, "{v:#}");
+        assert_eq!(v["txHash"], tx_hash_of(&rpc.sent()[0]).as_str(), "{v:#}");
+        if why.starts_with("replacement") {
+            assert!(msg.contains("--bump"), "{msg}");
+        }
+    }
 }
 
 #[test]
@@ -443,6 +550,108 @@ fn replacing_a_pending_nonce_pays_a_quarter_more() {
 }
 
 #[test]
+fn bump_and_replace_outbid_the_pending_transaction() {
+    let (home, me) = unlocked();
+    let wei = |v: &Value, k: &str| -> u128 {
+        v[k].as_str()
+            .unwrap_or_else(|| panic!("{k}: {v:#}"))
+            .parse()
+            .unwrap()
+    };
+    let rpc = MockRpc::start(healthy);
+    let est = home
+        .run(&transfer(&rpc.url, &["--nonce", "7", "--dry-run"]))
+        .ok();
+    // --bump 2: twice the estimate, signed.
+    let v = home
+        .run(&transfer(
+            &rpc.url,
+            &["--nonce", "6", "--bump", "2", "--dry-run"],
+        ))
+        .ok();
+    assert_eq!(v["feeBump"], "2x");
+    for field in ["maxFeePerGas", "maxPriorityFeePerGas"] {
+        assert_eq!(wei(&v, field), 2 * wei(&est, field), "{field}");
+    }
+    assert_eq!(
+        wei(&v["signerDecoded"], "maxGasPrice"),
+        2 * wei(&est, "maxFeePerGas")
+    );
+    // Out of range, malformed, or without --nonce: refused before any RPC.
+    for bad in [
+        vec!["--nonce", "6", "--bump", "1.05"],
+        vec!["--nonce", "6", "--bump", "3.5"],
+        vec!["--nonce", "6", "--bump", "x"],
+        vec!["--bump", "2"],
+        vec!["--replace", "0x01"],
+    ] {
+        let mut args = bad.clone();
+        args.push("--dry-run");
+        home.run(&transfer("http://127.0.0.1:1", &args))
+            .err("VALIDATION_ERROR");
+    }
+    // The ceiling still applies after the bump: 3 gwei legacy x 2.5 = 7.5 gwei > 6 gwei.
+    let legacy = MockRpc::start(|m, p| fee_node(m, p, None, 0, 3 * GWEI));
+    let msg = home
+        .run(&transfer(
+            &legacy.url,
+            &["--nonce", "6", "--bump", "2.5", "--dry-run"],
+        ))
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains("2.5x replacement bump"), "{msg}");
+
+    // --replace: the original's fees (4 gwei cap, 1 gwei tip) beat the estimate, so the
+    // replacement pays bump x the original.
+    let original = format!("0x{}", "cd".repeat(32));
+    let (o, from) = (original.clone(), me.clone());
+    let node = MockRpc::start(move |m, p| match m {
+        "eth_getTransactionByHash" if p[0] == o.as_str() => Reply::Result(json!({
+            "hash": o, "from": from.to_lowercase(), "nonce": "0x6", "blockNumber": null,
+            "maxFeePerGas": hex(4 * GWEI), "maxPriorityFeePerGas": hex(GWEI),
+        })),
+        _ => healthy(m, p),
+    });
+    let v = home
+        .run(&transfer(
+            &node.url,
+            &["--nonce", "6", "--replace", &original, "--dry-run"],
+        ))
+        .ok();
+    assert_eq!(v["replacesTx"], original.as_str());
+    assert_eq!(v["feeBump"], "1.25x");
+    assert_eq!(wei(&v, "maxFeePerGas"), 5 * GWEI);
+    assert_eq!(wei(&v, "maxPriorityFeePerGas"), GWEI + GWEI / 4);
+    // The original must be this key's transaction at that nonce, and known to the node.
+    let msg = home
+        .run(&transfer(
+            &node.url,
+            &["--nonce", "5", "--replace", &original, "--dry-run"],
+        ))
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains("nonce 6"), "{msg}");
+    let unknown = format!("0x{}", "ef".repeat(32));
+    home.run(&transfer(
+        &node.url,
+        &["--nonce", "6", "--replace", &unknown, "--dry-run"],
+    ))
+    .err("RPC_ERROR");
+    let stranger = MockRpc::start(move |m, p| match m {
+        "eth_getTransactionByHash" => Reply::Result(json!({
+            "hash": p[0], "from": OTHER, "nonce": "0x6", "blockNumber": null, "gasPrice": hex(GWEI),
+        })),
+        _ => healthy(m, p),
+    });
+    let msg = home
+        .run(&transfer(
+            &stranger.url,
+            &["--nonce", "6", "--replace", &original, "--dry-run"],
+        ))
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains(OTHER), "{msg}");
+    assert!(rpc.sent().is_empty() && node.sent().is_empty() && legacy.sent().is_empty());
+}
+
+#[test]
 fn failure_before_the_send_is_rpc_error_and_says_nothing_was_sent() {
     let (home, _) = unlocked();
     // `prepare` connects once (eth_chainId); the broadcast's own connect is the second call.
@@ -452,8 +661,13 @@ fn failure_before_the_send_is_rpc_error_and_says_nothing_was_sent() {
         "eth_chainId" if c.fetch_add(1, Ordering::SeqCst) >= 1 => Reply::Error("node is down"),
         _ => healthy(m, p),
     });
-    let msg = home.run(&transfer(&rpc.url, &[])).err("RPC_ERROR");
+    let r = home.run(&transfer(&rpc.url, &[]));
+    let msg = r.err("RPC_ERROR");
     assert!(msg.contains("nothing was broadcast"), "{msg}");
+    // It was signed already: a retry must reuse the nonce.
+    assert!(msg.contains("--nonce 7"), "{msg}");
+    assert!(!msg.contains("so a retry is safe"), "{msg}");
+    assert_eq!(r.json()["nonce"], PENDING_NONCE);
     assert!(rpc.sent().is_empty());
 }
 
@@ -475,11 +689,22 @@ fn explicit_nonce_is_signed_and_must_be_replaceable_or_next() {
     let lo = home
         .run(&transfer(&rpc.url, &["--nonce", "4", "--dry-run"]))
         .err("VALIDATION_ERROR");
-    assert!(lo.contains("already"), "{lo}");
+    assert!(lo.contains("nonce 4 is already mined"), "{lo}");
+    assert!(
+        lo.contains("that send (or its replacement) went through"),
+        "{lo}"
+    );
+    assert!(
+        lo.contains("look up its txHash before sending anything new"),
+        "{lo}"
+    );
+    // Never a pointer to another nonce: that is how a retry becomes a second send.
+    assert!(!lo.contains("next free nonce"), "{lo}");
     let hi = home
         .run(&transfer(&rpc.url, &["--nonce", "8", "--dry-run"]))
         .err("VALIDATION_ERROR");
     assert!(hi.contains("gap"), "{hi}");
+    assert!(!hi.contains("next free nonce is"), "{hi}");
     let inv = home
         .run(&[
             "invoke",
@@ -502,16 +727,17 @@ fn explicit_nonce_is_signed_and_must_be_replaceable_or_next() {
 }
 
 #[test]
-fn rpc_returning_another_hash_is_rpc_error_with_the_computed_hash() {
+fn rpc_returning_another_hash_is_reconciled_by_the_computed_hash() {
     let (home, me) = unlocked();
     let bogus = format!("0x{}", "ab".repeat(32));
+    // Not found by its own hash: BROADCAST_UNCERTAIN, with both hashes.
     let b = bogus.clone();
     let rpc = MockRpc::start(move |m, p| match m {
         "eth_sendRawTransaction" => Reply::Result(json!(b)),
         _ => healthy(m, p),
     });
     let r = home.run(&transfer(&rpc.url, &[]));
-    r.err("RPC_ERROR");
+    let msg = r.err("BROADCAST_UNCERTAIN");
     let v = r.json();
     println!("{v:#}");
     let hash = tx_hash_of(&rpc.sent()[0]);
@@ -519,6 +745,73 @@ fn rpc_returning_another_hash_is_rpc_error_with_the_computed_hash() {
     assert_eq!(v["rpcTxHash"], bogus.as_str());
     assert_eq!(v["nonce"], PENDING_NONCE);
     assert_eq!(v["from"], me.as_str());
+    assert!(msg.contains("--nonce 7"), "{msg}");
+    let polls = rpc.calls("eth_getTransactionByHash");
+    assert!(!polls.is_empty() && polls.iter().all(|p| p[0] == hash.as_str()));
+
+    // Found by its own hash: sent, with the odd answer noted.
+    let sent = Arc::new(Mutex::new(None::<String>));
+    let (s, b) = (sent.clone(), bogus.clone());
+    let rpc = MockRpc::start(move |m, p| match m {
+        "eth_sendRawTransaction" => {
+            *s.lock().unwrap() = Some(tx_hash_of(p[0].as_str().unwrap()));
+            Reply::Result(json!(b))
+        }
+        "eth_getTransactionByHash" => match s.lock().unwrap().clone() {
+            Some(h) if p[0] == h.as_str() => Reply::Result(json!({ "hash": h })),
+            _ => Reply::Result(Value::Null),
+        },
+        _ => healthy(m, p),
+    });
+    let v = home.run(&transfer(&rpc.url, &[])).ok();
+    assert_eq!(v["txHash"], tx_hash_of(&rpc.sent()[0]).as_str(), "{v:#}");
+    assert_eq!(v["rpcTxHash"], bogus.as_str(), "{v:#}");
+    assert!(
+        v["broadcastWarning"]
+            .as_str()
+            .unwrap()
+            .contains("not the transaction's own hash"),
+        "{v:#}"
+    );
+}
+
+#[test]
+fn concurrent_sends_from_one_account_take_consecutive_nonces() {
+    let (home, me) = unlocked();
+    // A node whose pending nonce counts what it accepted, and which takes a while to accept: two
+    // sends that both read the pending nonce before either is accepted would both sign nonce 7.
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let a = accepted.clone();
+    let rpc = MockRpc::start(move |m, p| match m {
+        "eth_getTransactionCount" if p[1] == "pending" => {
+            Reply::Result(hex(
+                u128::from(PENDING_NONCE) + a.load(Ordering::SeqCst) as u128
+            ))
+        }
+        "eth_sendRawTransaction" => {
+            std::thread::sleep(Duration::from_millis(1500));
+            a.fetch_add(1, Ordering::SeqCst);
+            Reply::Result(json!(tx_hash_of(p[0].as_str().unwrap())))
+        }
+        _ => healthy(m, p),
+    });
+    let args = transfer(&rpc.url, &[]);
+    let (first, second) = std::thread::scope(|s| {
+        let one = s.spawn(|| home.run(&args));
+        let two = s.spawn(|| home.run(&args));
+        (one.join().unwrap(), two.join().unwrap())
+    });
+    let mut nonces: Vec<u64> = rpc.sent().iter().map(|raw| nonce_of(raw)).collect();
+    nonces.sort_unstable();
+    assert_eq!(nonces, vec![PENDING_NONCE, PENDING_NONCE + 1]);
+    let mut reported = [first.ok()["nonce"].clone(), second.ok()["nonce"].clone()];
+    reported.sort_by_key(|n| n.as_u64());
+    assert_eq!(reported, [json!(PENDING_NONCE), json!(PENDING_NONCE + 1)]);
+    // The per-(chain, account) lock file in the home.
+    let lock = home
+        .path()
+        .join(format!("nonce-1-{}.lock", me.to_lowercase()));
+    assert!(lock.exists(), "{}", lock.display());
 }
 
 #[test]
@@ -582,6 +875,18 @@ fn rpc_fees_above_the_ceiling_need_max_fee_gwei() {
         &["--dry-run", "--max-fee-gwei", "2"],
     ))
     .err("VALIDATION_ERROR");
+    // A legacy node's eth_gasPrice is not its own ceiling: 10 gwei is above 6 x 1 gwei.
+    let pricey = MockRpc::start(|m, p| fee_node(m, p, None, 0, 10 * GWEI));
+    let msg = home
+        .run(&transfer(&pricey.url, &["--dry-run"]))
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains("gasPrice 10 gwei"), "{msg}");
+    assert!(msg.contains("--max-fee-gwei"), "{msg}");
+    home.run(&transfer(
+        &pricey.url,
+        &["--dry-run", "--max-fee-gwei", "10"],
+    ))
+    .ok();
     assert!(greedy.sent().is_empty() && normal.sent().is_empty() && legacy.sent().is_empty());
 }
 
@@ -647,6 +952,9 @@ fn rpc_url_path_and_query_are_never_printed() {
         "balance", "--chain", "ethereum", "--rpc", &echo.url, "--json",
     ]);
     let msg = r.err("RPC_ERROR");
-    assert!(msg.contains("401"), "{msg}");
+    // Only the status and the origin: none of the body, whatever it quotes.
+    let origin = echo.url.split("/v3").next().unwrap();
+    assert!(msg.ends_with(&format!("HTTP 401 from {origin}")), "{msg}");
+    assert!(!msg.contains("invalid project id"), "{msg}");
     assert!(!leaks(&r), "{}", r.stdout);
 }

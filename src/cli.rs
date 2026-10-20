@@ -186,6 +186,15 @@ pub struct SendArgs {
     /// replaces it, so a retry after BROADCAST_UNCERTAIN cannot become a second send.
     #[arg(long, value_name = "N")]
     pub nonce: Option<u64>,
+    /// With --nonce below the next free nonce (a replacement): pay this many times the fee
+    /// estimate, from 1.1 to 3 (default 1.25), so that nodes take it over the pending
+    /// transaction. The fee ceiling still applies.
+    #[arg(long, value_name = "FACTOR", requires = "nonce")]
+    pub bump: Option<String>,
+    /// With --nonce: the txHash of the pending transaction being replaced. Its fees are read from
+    /// the node, and the replacement also pays at least --bump times them.
+    #[arg(long, value_name = "TXHASH", requires = "nonce")]
+    pub replace: Option<String>,
     /// Allow a price per gas up to this many gwei, replacing the automatic ceiling on fees the
     /// RPC suggests (raise it only when fees really are that high).
     #[arg(long, value_name = "GWEI")]
@@ -452,7 +461,32 @@ mod tests {
             Command::Invoke(a) => assert_eq!((a.send.nonce, a.send.dry_run), (Some(3), true)),
             other => panic!("{other:?}"),
         }
-        // A negative or fractional nonce is a parse error; --force is transfer-only.
+        let cli = Cli::try_parse_from([
+            "zwallet",
+            "invoke",
+            "--chain",
+            "base",
+            "--to",
+            "0x00",
+            "--data",
+            "0x",
+            "--nonce",
+            "3",
+            "--bump",
+            "1.5",
+            "--replace",
+            "0xab",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Invoke(a) => assert_eq!(
+                (a.send.bump.as_deref(), a.send.replace.as_deref()),
+                (Some("1.5"), Some("0xab"))
+            ),
+            other => panic!("{other:?}"),
+        }
+        // A negative or fractional nonce is a parse error; --force is transfer-only; --bump and
+        // --replace need --nonce.
         let bad = [
             "zwallet", "invoke", "--chain", "base", "--to", "0x00", "--data", "0x",
         ];
@@ -460,6 +494,8 @@ mod tests {
             ["--nonce", "-1"],
             ["--nonce", "1.5"],
             ["--force", "--dry-run"],
+            ["--bump", "2"],
+            ["--replace", "0xab"],
         ] {
             let mut args = bad.to_vec();
             args.extend(extra);

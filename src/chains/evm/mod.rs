@@ -7,7 +7,7 @@ pub mod tx;
 
 use crate::chains::{
     Balance, Broadcast, Chain, ChainFamily, Family, FamilyKeys, Net, PreparedTx, SignedTx,
-    TransferRequest, after_send_error, rejected_send_error,
+    TransferRequest, after_send_error, before_send_error, nonce_taken_error, rejected_send_error,
 };
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
@@ -50,6 +50,19 @@ pub fn signer_at(seed: &Seed, index: u32) -> Result<PrivateKeySigner> {
         .derivation_path(derivation_path(index))
         .and_then(|b| b.build())
         .map_err(|_| WalletError::validation(format!("cannot derive EVM key at index {index}")))
+}
+
+/// Parses a `0x` transaction hash (32 bytes).
+pub fn parse_tx_hash(input: &str) -> Result<B256> {
+    let s = input.trim();
+    s.strip_prefix("0x")
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .and_then(|_| s.parse().ok())
+        .ok_or_else(|| {
+            WalletError::validation(format!(
+                "'{s}' is not a transaction hash (0x and 64 hex digits)"
+            ))
+        })
 }
 
 /// Parses a `0x` address. Mixed case must carry a valid EIP-55 checksum. ENS names are refused.
@@ -222,13 +235,13 @@ impl ChainFamily for Evm {
         rpc::prepare_transfer(net, req).await
     }
 
-    async fn broadcast(&self, net: &Net, signed: &SignedTx) -> Result<Broadcast> {
-        let nothing_sent = |e: WalletError| {
-            WalletError::new(
-                e.code,
-                format!("{}; nothing was broadcast, so a retry is safe", e.message),
-            )
-        };
+    async fn broadcast(
+        &self,
+        net: &Net,
+        signed: &SignedTx,
+        explicit_nonce: bool,
+    ) -> Result<Broadcast> {
+        let nothing_sent = |e: WalletError| before_send_error(signed, e);
         let raw = hex::decode(signed.raw.trim_start_matches("0x"))
             .map_err(|_| nothing_sent(WalletError::validation("malformed raw transaction")))?;
         let hash: B256 = signed
@@ -238,14 +251,17 @@ impl ChainFamily for Evm {
         let p = rpc::connect(net).await.map_err(nothing_sent)?;
         match rpc::send_raw(&p, &raw, hash).await {
             rpc::SendOutcome::Accepted => Ok(Broadcast::Accepted),
-            rpc::SendOutcome::KnownDespite(why) => Ok(Broadcast::KnownDespite(why)),
+            rpc::SendOutcome::KnownDespite { why, rpc_hash } => Ok(Broadcast::KnownDespite {
+                warning: why,
+                rpc_tx_hash: rpc_hash.map(hex0x),
+            }),
             rpc::SendOutcome::HashMismatch(other) => Err(after_send_error(
-                ErrorCode::RpcError,
+                ErrorCode::BroadcastUncertain,
                 net.chain,
                 signed,
                 &format!(
                     "the RPC answered eth_sendRawTransaction with hash {}, not the transaction's \
-                     own hash",
+                     own hash, and the node does not report the transaction by its own hash",
                     hex0x(other)
                 ),
             )
@@ -256,6 +272,24 @@ impl ChainFamily for Evm {
                 signed,
                 &format!("{why}, and the node does not report the transaction"),
             )),
+            rpc::SendOutcome::NonceTaken(why) => {
+                // Replacing a pending transaction needs a higher bid than it, which a larger bump
+                // or the original's own fees (`--replace`) provide.
+                let underpriced = why.to_lowercase().contains("underpriced");
+                let hint = (explicit_nonce && underpriced).then(|| {
+                    format!(
+                        "To replace a transaction that is still pending, retry with the same \
+                         --nonce {} and a larger --bump, or --replace <its txHash>",
+                        signed.nonce.unwrap_or_default()
+                    )
+                });
+                Err(nonce_taken_error(
+                    signed,
+                    &why,
+                    explicit_nonce,
+                    hint.as_deref(),
+                ))
+            }
             rpc::SendOutcome::Rejected(why) => Err(rejected_send_error(signed, &why)),
         }
     }

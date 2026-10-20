@@ -19,7 +19,7 @@ use crate::core::store::{self, KeyEntry, MasterOptions, WalletFile};
 use crate::core::time::parse_duration;
 use crate::daemon;
 use alloy::hex;
-use alloy::primitives::U256;
+use alloy::primitives::{B256, U256};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
@@ -631,8 +631,10 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
         None => U256::ZERO,
     };
     let max_fee_per_gas = max_fee_wei(&a.send)?;
+    let (bump, replace) = replacement(&a.send)?;
     let (from, index, key_name) = signing_key(home, &a.key, chain).await?;
     require_unlocked(home).await?;
+    let lock = send_lock(home, chain, &from, &a.send)?;
     let net = net(chain, a.rpc.as_deref());
     let p = evm_rpc::connect(&net).await?;
     let intent = evm_rpc::Intent {
@@ -644,6 +646,8 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
         fallback_gas: None,
         dry_run: a.send.dry_run,
         nonce: a.send.nonce,
+        bump,
+        replace,
         max_fee_per_gas,
     };
     let prepared = evm_rpc::prepare(&p, &net, intent).await?;
@@ -657,7 +661,34 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     base.insert("data".into(), json!(format!("0x{}", hex::encode(&input))));
     base.insert("value".into(), json!(format_units(value, chain.decimals)));
     base.insert("valueRaw".into(), json!(value.to_string()));
-    sign_and_send(&Evm, &net, home, index, &from, prepared, &a.send, base).await
+    sign_and_send(
+        &Evm, &net, home, index, &from, prepared, &a.send, base, lock,
+    )
+    .await
+}
+
+/// The account's send lock, from the nonce read through the broadcast. A dry-run consumes no
+/// nonce, so it takes none.
+fn send_lock(
+    home: &Path,
+    chain: &Chain,
+    from: &str,
+    send: &SendArgs,
+) -> Result<Option<chains::SendLock>> {
+    (!send.dry_run)
+        .then(|| chains::SendLock::acquire(home, chain, from))
+        .transpose()
+}
+
+/// `--bump` (ten-thousandths) and `--replace` (a tx hash), validated before any RPC.
+fn replacement(send: &SendArgs) -> Result<(Option<u128>, Option<B256>)> {
+    let bump = send.bump.as_deref().map(chains::parse_bump).transpose()?;
+    let replace = send
+        .replace
+        .as_deref()
+        .map(evm::parse_tx_hash)
+        .transpose()?;
+    Ok((bump, replace))
 }
 
 /// `--max-fee-gwei` in wei (gwei = 10^9 wei), validated before any RPC.
@@ -697,8 +728,10 @@ async fn transfer_with<F: ChainFamily>(
         parse_units(&a.amount, chain.decimals)?;
     }
     let max_fee_per_gas = max_fee_wei(&a.send)?;
+    let (bump, replace) = replacement(&a.send)?;
     let (from, index, key_name) = signing_key(home, &a.key, chain).await?;
     require_unlocked(home).await?;
+    let lock = send_lock(home, chain, &from, &a.send)?;
     let req = TransferRequest {
         from: from.clone(),
         to: to.clone(),
@@ -706,6 +739,8 @@ async fn transfer_with<F: ChainFamily>(
         token: a.token.clone(),
         dry_run: a.send.dry_run,
         nonce: a.send.nonce,
+        bump,
+        replace: replace.map(|h| format!("{h:#x}")),
         max_fee_per_gas,
         force: a.force,
     };
@@ -715,11 +750,12 @@ async fn transfer_with<F: ChainFamily>(
     base.insert("key".into(), json!(key_name));
     base.insert("from".into(), json!(from));
     base.insert("to".into(), json!(to));
-    sign_and_send(fam, net, home, index, &from, prepared, &a.send, base).await
+    sign_and_send(fam, net, home, index, &from, prepared, &a.send, base, lock).await
 }
 
 /// Shared tail of `transfer` and `invoke`: sign through the daemon, check the raw bytes really
-/// come from `from`, then either report (dry-run) or broadcast (and optionally wait).
+/// come from `from`, then either report (dry-run) or broadcast (and optionally wait). `lock` is
+/// released once the node has answered the broadcast, before any `--wait`.
 #[allow(clippy::too_many_arguments)]
 async fn sign_and_send<F: ChainFamily>(
     fam: &F,
@@ -730,6 +766,7 @@ async fn sign_and_send<F: ChainFamily>(
     prepared: PreparedTx,
     send: &SendArgs,
     mut out: Map<String, Value>,
+    lock: Option<chains::SendLock>,
 ) -> Result<Out> {
     let signed_value = protocol::send_unlocked(
         home,
@@ -768,18 +805,26 @@ async fn sign_and_send<F: ChainFamily>(
         out.insert("recoveredFrom".into(), json!(signed.signer));
         return Ok(Out::json(Value::Object(out)));
     }
-    let outcome = fam.broadcast(net, &signed).await?;
+    let outcome = fam.broadcast(net, &signed, send.nonce.is_some()).await?;
+    drop(lock);
     out.insert(
         "explorerUrl".into(),
         json!(net.chain.explorer_tx_url(&signed.tx_hash)),
     );
-    if let Broadcast::KnownDespite(why) = outcome {
+    if let Broadcast::KnownDespite {
+        warning,
+        rpc_tx_hash,
+    } = outcome
+    {
         out.insert(
             "broadcastWarning".into(),
             json!(format!(
-                "{why}; the node reports the transaction, so it was sent"
+                "{warning}; the node reports the transaction by its own hash, so it was sent"
             )),
         );
+        if let Some(h) = rpc_tx_hash {
+            out.insert("rpcTxHash".into(), json!(h));
+        }
     }
     if send.wait {
         let receipt = fam
