@@ -21,24 +21,29 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
 - **Native coin and registry tokens** leave this wallet only to **address entries** of a list
   that verifies against the sealed anchor (public key, generation and digest), or as a native
   transfer to the signing key's own address (a token transfer to itself needs an entry too).
-- **Contract calls** go only to **contract entries**, and only with a listed selector; never to a
-  registry token.
-- **Approvals** are revoke-only.
-- **Fees** stay under a per-chain cap on every signature, a self-transfer included: the verified
-  list's cap, or the built-in default while the wallet has no whitelist yet. A list that cannot
-  be trusted refuses every signature, so it never relaxes a stricter signed cap.
+- **ERC-20 `transfer`, `approve`, `transferFrom`** are judged as such whatever the entries say:
+  only registry tokens are transferred, approvals are revoke-only, `transferFrom` is never
+  signed.
+- **Other contract calls** go only to **contract entries**, and only with a listed selector;
+  never to a registry token.
+- **Fees.** Each transaction, a native self-transfer included, must pass the execution-fee cap
+  for its chain (`gasLimit × max price`): the verified list's, or the built-in default before
+  any whitelist exists. A list that cannot be trusted refuses every signature, so it never
+  relaxes a stricter signed cap. The cap is per transaction (see below).
 
 **Not guaranteed:**
 - **Amounts.** There are no amount caps, so an agent can send the whole balance to any listed
   payee.
 - **What a listed contract does.** A listed contract can forward value or act on its arguments;
-  a contract entry delegates that authority.
+  a contract entry delegates that authority. That includes a token outside the registry listed
+  as a contract: its listed selectors (other than the decoded `transfer`/`approve`/
+  `transferFrom`, which stay refused) are called like any listed contract's.
 - **A total fee budget.** The fee cap bounds each transaction, not a sum: repeated transactions
   can each spend up to the cap.
-- **Signing availability.** The daemon has at most 4 list reads in flight, and a request waits
-  at most 2 s in all, for a free slot and for its read. A stalled file or too many requests at
-  once make it "could not be read in time (2000 ms)", and every request meanwhile is refused
-  (`WHITELIST_INVALID`). An agent can deny signing this way, never widen it.
+- **Signing availability.** The daemon has at most 4 list reads in flight. A signing request
+  whose list read cannot complete within the 2 s deadline (waiting for a free slot counts
+  against it) is refused (`WHITELIST_INVALID`, "could not be read in time (2000 ms)"). A stalled
+  file or a flood of requests can deny signing this way, never widen it.
 - **The L1 data fee** on the OP-stack chains (Base, Optimism) is outside `gasLimit × maxFee`, and
   calldata can be up to about 512 KB.
 - **Joint rollback.** The seal is authenticated (AES-GCM) but not fresh: an older `wallet.json`
@@ -141,8 +146,10 @@ reason}`; `status` reads the list again on every call. On every `sign_tx`, after
    the verified list's `maxFeeWei[chain]` (or, with no whitelist yet, the built-in default).
    Above the cap, or no readable cap, is **`FEE_CAP_EXCEEDED`** naming `zwallet whitelist
    fee-cap <chain> <this transaction's fee in whole units>`, with `feeWei` (and `capWei` when
-   there is a cap). Fee caps are never skipped, so a self-transfer cannot burn the balance in
-   fees.
+   there is a cap). Fee caps are never skipped: each native self-transfer must pass the
+   execution-fee cap for its chain (the verified list's, or the built-in default before any
+   whitelist exists). The cap is per transaction, so repeated transactions can each spend up to
+   it, and on the OP-stack chains the L1 data fee is charged on top of it.
 4. Decide by the decoded action:
 
 | Decoded action | Allowed only if |
@@ -154,22 +161,34 @@ reason}`; `status` reads the list again on every call. On every `sign_tx`, after
 | `contract-call` | `to` is not a registry token, `to` is a contract entry valid on this chain, and the selector is in its `selectors`. Native value is allowed only then |
 | anything else (contract creation, other tx types) | never (already refused by the decoder) |
 
-Otherwise the result is **`WHITELIST_DENIED`**. Every refusal carries `counterparty` and `chain`
-in its details and, when one edit of the list allows it, the exact command in `command` and in
-the message: `zwallet whitelist add <nick> <addr> --chains <chain>` for an address not in the
-list (for a contract, plus `--contract --selectors <sel>`). `command` is left out (not null)
-when no edit can allow it: `transferFrom`; an approve of more than 0; an approve on a token that
-is not a registry token; any other call on a registry token; a token transfer to a token
-contract; an address listed as the other kind. It is left out too when an entry exists but does
-not cover the chain or the selector: the message names the entry and what it is missing, since
-`whitelist add` refuses a listed nickname or address and the fix is a remove and an add, two
-password-backed edits. `sign-message` is refused unless the verified list allows it:
-**`WHITELIST_DENIED`** with `command: zwallet whitelist allow-message-signing on` while the
-verified list has it off; **`WHITELIST_INVALID`** with that command while there is no whitelist;
-**`WHITELIST_INVALID`** pointing to `list --verify`, with no command, while the list cannot be
-trusted. `Response.details` is an optional
-field of the daemon protocol, with no `PROTOCOL_VERSION` bump (the daemon and the CLI are always
-the same binary).
+Otherwise the result is **`WHITELIST_DENIED`**. The `transfer-call`, `approve-call` and
+`transfer-from-call` rows apply to any token, whatever the entries say (a token outside the
+registry is refused there); every other selector is a `contract-call`.
+
+**What a refusal carries.**
+- A transaction refusal (`WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED`) carries
+  `counterparty` and `chain` in its details and, when one edit of the list allows it, the exact
+  command in `command` and in the message: `zwallet whitelist add <nick> <addr> --chains
+  <chain>` for an address not in the list (for a contract, plus `--contract --selectors <sel>`),
+  or `zwallet whitelist fee-cap <chain> <fee>`; a fee refusal also carries `feeWei`, and
+  `capWei` when there is a cap.
+- `command` is left out (not null) when no edit can allow it: `transferFrom`; an approve of more
+  than 0; an approve on a token that is not a registry token; any other call on a registry
+  token; a token transfer to a token contract; an address listed as the other kind. It is left
+  out too when an entry exists but does not cover the chain or the selector (the message names
+  the entry and what it is missing, since `whitelist add` refuses a listed nickname or address
+  and the fix is a remove and an add, two password-backed edits), and for every refusal of a list
+  that cannot be trusted.
+- With no whitelist yet (`NoList`), `command` is the add command only when an entry could allow
+  the action; a forbidden action has none, and neither has a revoke of a registry token (any
+  signed list allows it).
+- A `sign-message` refusal carries no `counterparty` or `chain`: **`WHITELIST_DENIED`** with
+  `command: zwallet whitelist allow-message-signing on` while the verified list has it off;
+  **`WHITELIST_INVALID`** with that `command` while there is no whitelist; **`WHITELIST_INVALID`**
+  with no `command`, pointing to `list --verify`, while the list cannot be trusted.
+
+`Response.details` is an optional field of the daemon protocol, with no `PROTOCOL_VERSION` bump
+(the daemon and the CLI are always the same binary).
 
 **Edits.** `whitelist add | remove | fee-cap | allow-message-signing on|off | reset`. Each runs
 only with a typed password (terminal prompt or `--password-stdin`), in this order:
@@ -177,16 +196,20 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
    EIP-55 checksum, chains, selectors, no registry token as a contract, fee amount). With
    `--unlock <duration>`, `unlock`'s own start-up checks run too (the duration, Linux
    `ptrace_scope` (`--allow-ptrace-scope-0` accepts it), `/proc` hidepid) and the binary is
-   pinned as `unlock` pins it. Then **the change is shown** on the channel the password is read
-   from (the terminal with the prompt, stderr with `--password-stdin`): the verb, the nickname,
-   the full EIP-55 address, payee or contract, the chains (`*` spelled out as every chain), the
-   selectors, a policy change's old and new value, what a `reset` drops, and whitelist.json's
-   generation and the next one. whitelist.json is unverified at that point (only the password
-   opens the seal), so the text says that a list that is not the sealed one makes the change
-   start from an empty list. Values from the file are escaped. An agent can start a change, but
-   the human sees exactly what the password authorizes. After the prompt the password is checked
-   against `wallet.json` and the change is tried on the list the edit would start from. A wrong
-   password (`WRONG_PASSWORD`) or a refused change (an unknown nickname to remove, a nickname or
+   pinned as `unlock` pins it. Then `whitelist.json` and `whitelist.next.json` are **read once**
+   and **the change is shown** on the channel the password is read from (the terminal with the
+   prompt, stderr with `--password-stdin`): the verb, the nickname, the full EIP-55 address,
+   payee or contract, the chains (`*` spelled out as every chain), the selectors, a policy
+   change's old and new value, what a `reset` drops, both files as read (generation and
+   entries; an unfinished edit in `whitelist.next.json`, with what it says about the value
+   changed), the generation after the change, that every daemon of this user is stopped, and
+   what happens to signing: "after the change: the wallet stays locked", or "after the change: a
+   new signing session for <dur> (until about <local time>, <UTC>)". Values from the files are
+   escaped. The files are unverified at that point (only the password opens the seal), so the
+   text says what happens if the one shown is not the sealed list: nothing changes. After the
+   prompt the password is checked against `wallet.json`, the base is picked from the bytes read
+   (step 3's rules), and the change is tried on it. A wrong password (`WRONG_PASSWORD`), a list
+   shown that does not verify, or a refused change (an unknown nickname to remove, a nickname or
    address already listed) stops nothing.
 1. **Stop every zwallet daemon of this user** (the `zwallet lock` path, all homes) and confirm
    none is left. Nothing can be signed while the list changes.
@@ -194,26 +217,39 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
    writers; it is a cooperative boundary, and a same-user process that ignores it can still
    write these files. What makes such a write visible is the signature and the seal, not the
    lock.
-3. **Pick the base.** The current list is the base only if it verifies against the anchor.
+3. **Read the list files once, bound to what was shown, and pick the base.** `whitelist.json`
+   and `whitelist.next.json` are read once more, under `w.lock`, and every decision below is made
+   from those bytes. If either is not the bytes shown in step 0 (a fingerprint of each, or
+   absent), the change refuses before writing anything: "<file> changed after it was shown;
+   nothing changed". So **the change is applied to exactly the list shown, or nothing changes.**
+   The current list is the base only if it verifies against the anchor.
    - If it doesn't, and `whitelist.next.json` does, promote that file (renamed into place before
-     the change is staged): it is a committed but unrenamed edit.
-   - If neither verifies, **never sign it.** The output shows it as `discarded` (the reason and
-     its unverified entries as JSON), and the edit starts from an empty list with the default
-     policy, so the human re-adds deliberately.
+     the change is staged, and checked to be the same bytes): it is a committed but unrenamed
+     edit.
+   - If neither verifies, **an edit refuses** and writes nothing: rebuilding from an empty list
+     would drop every entry and loosen every stricter fee cap on the strength of whoever damaged
+     the file. The message gives the reason, points to `zwallet whitelist list --verify`, and
+     names `zwallet whitelist reset`, the only way to start over. Without an anchor (no
+     whitelist yet) the base is empty, and a `whitelist.json` found anyway is reported as
+     `discarded` and never signed.
 4. Apply the change at `gen' = gen + 1`, validate, sign, and write `whitelist.next.json`. Re-seal
    `wallet.json` with the new anchor (refused if its ciphertext changed since step 2). Then rename
    `next` to `whitelist.json`. A crash at any point is recovered by step 3 (and by the daemon's
    `next` fallback): either the old generation stands, or the staged one is promoted.
-5. The wallet **stays locked**, unless `--unlock <duration>` was given: then a new session starts
-   for that duration, the one typed in this command, with the password just typed, through the
-   staged unlock. No duration or expiry is taken from the session that was running. The output
-   shows the new `expiresAt` and the daemon's `whitelist` field. Then the password is wiped. If
-   the edit fails after step 1, nothing is unlocked and the error says the wallet is locked.
+5. The wallet **stays locked**, unless `--unlock <duration>` was given (the summary says which):
+   then a new session starts for that duration, the one typed in this command, with the password
+   just typed, through the staged unlock. No duration or expiry is taken from the session that
+   was running. The output shows the new `expiresAt` and the daemon's `whitelist` field. Then
+   the password is wiped. If the edit fails after step 1, nothing is unlocked and the error says
+   the wallet is locked.
 
 The first `add` creates the key: it generates the ed25519 key, writes `whitelist.key`, and seals
 the anchor at generation 1. `whitelist reset` makes a new key and an empty list with the default
-policy at the next generation (old + 1), for when `whitelist.key` is lost or corrupted, which
-can happen independently of `wallet.json`. A change's output: `{ change, gen, previousGen, base:
+policy at the next generation (old + 1), for when `whitelist.key` is lost or corrupted (which
+can happen independently of `wallet.json`) or the list no longer verifies; when the list it
+replaces did not verify, its output shows it as `discarded` (the reason and its unverified
+entries as JSON). An edit has `discarded` only for a `whitelist.json` found before there was any
+whitelist. A change's output: `{ change, gen, previousGen, base:
 "current" | "promoted-next" | "empty", keyCreated, entries: [nicknames], verified: true,
 stoppedDaemons, entry? | feeCap? | allowMessageSigning? | dropped?, discarded?, warning?, locked,
 hint? }`, and with `--unlock` `{ duration, expiresAt, daemonPid, whitelist }` (or `unlockError`
@@ -302,6 +338,11 @@ From part C (CLI), with review round 1:
 7. `create --unlock` shows the `whitelist` field as `unlock` does.
 8. The dry-run checks the unverified list only when there is a `whitelist.json`; without one the
    daemon decides (the CLI cannot tell "no whitelist yet" from "deleted").
+9. Review round 2: the summary always says what happens to signing; the files are read once
+   for the summary and the edit is bound to those bytes (refused if they changed); an edit never
+   rebuilds an unverifiable list from empty (the plan's "start from empty and show it as
+   discarded" let whoever damaged the file drop every entry and loosen the fee caps), only
+   `reset` starts over.
 
 ## Acceptance
 
@@ -310,7 +351,7 @@ From part C (CLI), with review round 1:
 | W1 | first `whitelist add alice 0x… --chains base` (password) | the change (address, chains, gen 1) is shown before the prompt; `whitelist.key` created; `list` (locked) shows alice, gen 1, `verified:false`; `--verify` gives `verified:true` |
 | W2 | unlocked, no entry for X: `transfer --to X` | `WHITELIST_DENIED` with the exact add command; nothing signed; journal unchanged |
 | W3 | `transfer --chain base --to @alice …` | signed and sent; `transfer --chain ethereum --to @alice` gives `WHITELIST_DENIED` (chain scope) |
-| W4 | edit `whitelist.json` by hand, adding an address | every value send is `WHITELIST_INVALID`; the next password-backed edit refuses to sign the edited list, shows it as `discarded`, and starts from empty |
+| W4 | edit `whitelist.json` by hand, adding an address (or delete it) | every value send is `WHITELIST_INVALID`; every edit refuses, writes nothing and leaves a running session alone, pointing to `list --verify` and `reset`; `reset` starts over and shows what it dropped as `discarded` |
 | W5 | swap `whitelist.json` alone for an older signed copy | `WHITELIST_INVALID` (gen mismatch) |
 | W5b | restore an older `wallet.json`, `whitelist.json` and `whitelist.key` together | accepted, as documented. `unlock` prints the older gen and entries, so the human can see it |
 | W6 | `approve(spender, 1)`; `transferFrom`; `invoke` of an unlisted contract or an unlisted selector; a token transfer to a token-contract address | each `WHITELIST_DENIED`; `approve(spender, 0)` is allowed |
@@ -321,6 +362,8 @@ From part C (CLI), with review round 1:
 | W11 | 0-value self-transfer dry-run and live (A7), no list | allowed (under the built-in default fee cap); with a list that cannot be trusted, refused (`WHITELIST_INVALID`) |
 | W12 | invariant tests | type-4, typed-data and raw-hash requests have no protocol path and are refused |
 | W13 | `transfer --dry-run` to an address the list refuses | `whitelist: {allowed: false, …}` with the add command, and no signature request reaches the daemon; an allowed dry-run is signed and shows `allowed: true`; without a `whitelist.json` the daemon is asked and the output has no `whitelist` field |
+| W14 | rewrite `whitelist.json` after the summary is shown, before the password is typed; or show a forged list and put the genuine one back | refused, "changed after it was shown" or the list shown does not verify; nothing written |
+| W15 | a change with and without `--unlock` | the summary ends with "a new signing session for <dur> (until …)" or "the wallet stays locked", before the prompt |
 
 ## Not in v0.1 (stays planned)
 
