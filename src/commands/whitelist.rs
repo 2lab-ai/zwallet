@@ -602,16 +602,13 @@ fn reset_lines(
          fee-cap` again before `--unlock`"
             .to_string()
     });
-    // A rolled-back wallet.json accepts the copy its seal names, so the copy is only for a
-    // generation the human knows is the highest.
-    lines.push(format!(
-        "  if whitelist.json was only damaged or replaced, put back a genuine copy of it at the \
-         sealed generation instead, but only if that is the highest generation you remember \
-         seeing {}: it verifies again without a reset, because the seal pins its digest; if you \
-         remember a higher one, wallet.json was rolled back: restore the current wallet.json \
-         instead",
-        whitelist::SEEN_SINCE
-    ));
+    // The one alternative to a reset; never an older whitelist.json, which would verify under a
+    // rolled-back seal and complete the rollback.
+    lines.push(
+        "  if wallet.json is an older copy, restore the current one instead if you have it \
+         (zwallet keeps no copy of it)"
+            .to_string(),
+    );
 }
 
 /// Every outcome that can still happen, decided once the password opens wallet.json.
@@ -1170,9 +1167,8 @@ fn verified_view(home: &Path, anchor: Result<Option<WhitelistAnchor>>) -> Value 
         Ok(None) => {
             let reason = match whitelist::unsealed_files_note(&ListFiles::read(home)) {
                 Some(note) => format!(
-                    "{note}: it is not verified, and every edit refuses; {} {}",
-                    whitelist::UNSEALED_REMEDY,
-                    whitelist::RESET_CAVEAT
+                    "{note}: it is not verified, and every edit refuses. {}",
+                    whitelist::recovery()
                 ),
                 None => format!("wallet.json seals no whitelist key yet; {FIRST_ADD}"),
             };
@@ -1182,18 +1178,15 @@ fn verified_view(home: &Path, anchor: Result<Option<WhitelistAnchor>>) -> Value 
     };
     let files = ListFiles::read(home);
     let base = whitelist::pick_base_from(&files, Some(&anchor), &WHITELIST_RULES);
-    // The genuine-copy remedy, as conditional as the edit's (none above the seal: the reason
-    // says what to do).
-    let remedy = |reason: String| match whitelist::unverified_remedy(&files, &anchor) {
-        Some(r) => {
-            format!("{reason}. If whitelist.json was only damaged, replaced or deleted, {r}")
-        }
-        None => reason,
-    };
+    // The same one remedy as an edit's refusal.
     let mut out = match base.source {
         BaseSource::Current => list_view(&base.list, true, WHITELIST_FILE),
         BaseSource::PromotedNext => list_view(&base.list, true, NEXT_FILE),
-        BaseSource::Empty => unverified_view(home, base.discarded.map(|d| remedy(d.reason))),
+        BaseSource::Empty => unverified_view(
+            home,
+            base.discarded
+                .map(|d| format!("{}. {}", d.reason, whitelist::recovery())),
+        ),
     };
     out["sealedGen"] = json!(anchor.generation);
     out
@@ -1895,12 +1888,8 @@ mod tests {
             "message signing after the reset: off (whitelist.json says on, not verified)",
             "the reset allows nothing else (no payee, no contract); set `zwallet whitelist \
              fee-cap` again before `--unlock`",
-            "if whitelist.json was only damaged or replaced, put back a genuine copy of it at the \
-             sealed generation instead, but only if that is the highest generation you remember \
-             seeing since the last start at gen 1 (an edit's report, or unlock, status or \
-             `zwallet whitelist list --verify`): it verifies again without a reset, because the \
-             seal pins its digest; if you remember a higher one, wallet.json was rolled back: \
-             restore the current wallet.json instead",
+            "if wallet.json is an older copy, restore the current one instead if you have it \
+             (zwallet keeps no copy of it)",
             "the reset makes a new key and an empty list, decided once the password opens \
              wallet.json:",
             "    gen 2 if whitelist.json is the list wallet.json seals",

@@ -401,7 +401,7 @@ pub fn open_whitelist_key(sealed: &CryptoBox, password: &str) -> Result<Zeroizin
 /// the abandoned one would verify too.
 ///
 /// AES-GCM authenticates the anchor but gives it no freshness: an authentic older wallet.json can
-/// be put back by anyone who can write the home. One sealed with `{}` reads as "no whitelist",
+/// be restored by anyone who can write the home. One sealed with `{}` reads as "no whitelist",
 /// which refuses every value-moving signature (fails closed); one with an older anchor, restored
 /// together with its list and key, is the documented joint rollback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
