@@ -892,8 +892,12 @@ mod tests {
             resp.error.as_deref().unwrap().contains("could not be read"),
             "{resp:?}"
         );
-        // The session is untouched: the key's own address is still payable.
+        // An unreadable list is an untrusted one: the key's own address too (P-1).
         let (resp, _) = handle(&f.shared, &sign_tx(&f.me)).await;
-        assert!(resp.ok, "{resp:?}");
+        assert_eq!(
+            resp.error_code,
+            Some(ErrorCode::WhitelistInvalid),
+            "{resp:?}"
+        );
     }
 }

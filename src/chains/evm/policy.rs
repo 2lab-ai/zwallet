@@ -12,8 +12,10 @@
 //! allows it, the exact `zwallet whitelist …` command a human runs (`command`). A list that cannot
 //! be trusted gets no such command: it is checked first (`zwallet whitelist list --verify`).
 //!
-//! No signature escapes a fee cap: the list's, or without a usable list the built-in default for
-//! the chain (`registry::DEFAULT_FEE_CAPS_WEI`), which only a self-transfer can reach.
+//! No signature escapes a fee cap: the list's, or while there is no list yet the built-in default
+//! for the chain (`registry::DEFAULT_FEE_CAPS_WEI`), which only a self-transfer can reach. A list
+//! that exists but cannot be trusted signs nothing at all, self-transfers included: breaking the
+//! list must never be a way around its own, stricter, signed cap.
 
 use crate::chains::Chain;
 use crate::chains::evm::tx::{Action, DecodedUnsigned};
@@ -40,13 +42,14 @@ pub enum ListView<'a> {
     /// A list that verified against the sealed anchor (the daemon), or the unverified list the CLI
     /// explains a dry-run with.
     Usable(&'a Whitelist),
-    /// This wallet has no whitelist yet (wallet.json seals no anchor). Refusals name the edit
+    /// This wallet has no whitelist yet (wallet.json seals no anchor). Only a native transfer to
+    /// the signing key's own address is signed, under the built-in fee cap. Refusals name the edit
     /// that would allow the request; that first edit creates the list.
     NoList,
     /// There is a list or an anchor, but nothing that can be trusted, and why: it does not
-    /// verify, cannot be read, or the sealed anchor is malformed. Refusals name no edit (one would
-    /// rebuild the list around whatever the request asks for); they point to
-    /// [`VERIFY_COMMAND`].
+    /// verify, cannot be read (in time), or the sealed anchor is malformed. Nothing is signed,
+    /// self-transfers included. Refusals name no edit (one would rebuild the list around whatever
+    /// the request asks for); they point to [`VERIFY_COMMAND`].
     Unusable(String),
 }
 
@@ -54,9 +57,10 @@ pub enum ListView<'a> {
 ///
 /// With a usable list: the fee limit must be within the list's cap for the chain
 /// (`FEE_CAP_EXCEEDED`, also when there is no cap), then a native transfer to `signer` itself
-/// passes and anything else must be an action the list allows (`WHITELIST_DENIED`). Without one,
-/// only a native transfer to `signer` passes, under the chain's built-in default fee cap; anything
-/// else is `WHITELIST_INVALID`.
+/// passes and anything else must be an action the list allows (`WHITELIST_DENIED`). With no list
+/// yet, only a native transfer to `signer` passes, under the chain's built-in default fee cap
+/// (`FEE_CAP_EXCEEDED` above it, or without one); anything else is `WHITELIST_INVALID`. With a
+/// list that cannot be trusted, everything is `WHITELIST_INVALID`.
 pub fn check_tx(
     view: &ListView,
     chain: &Chain,
@@ -65,13 +69,24 @@ pub fn check_tx(
 ) -> Result<()> {
     let action = decoded.action();
     let to_self = matches!(action, Action::NativeTransfer { to, .. } if to == signer);
-    let ListView::Usable(list) = view else {
-        if !to_self {
-            return Err(invalid(view, chain, action));
+    let list = match view {
+        ListView::Usable(list) => *list,
+        ListView::NoList if to_self => {
+            return check_fee(
+                CapSource::BuiltIn,
+                default_fee_cap(chain.key),
+                chain,
+                decoded,
+            );
         }
-        return check_fee(view, default_fee_cap(chain.key), chain, decoded);
+        ListView::NoList | ListView::Unusable(_) => return Err(invalid(view, chain, action)),
     };
-    check_fee(view, list.policy.max_fee_wei(chain.key), chain, decoded)?;
+    check_fee(
+        CapSource::List,
+        list.policy.max_fee_wei(chain.key),
+        chain,
+        decoded,
+    )?;
     if to_self {
         return Ok(());
     }
@@ -166,8 +181,8 @@ impl Denial {
 /// would need (the first edit creates the list); with an untrusted one, pointing to
 /// [`VERIFY_COMMAND`] and naming no edit.
 fn invalid(view: &ListView, chain: &Chain, action: &Action) -> WalletError {
-    let until = "Until a human signs a whitelist that verifies, only transfers to this key's own \
-                 address are signed";
+    let until = "Until a human signs a whitelist, only transfers to this key's own address are \
+                 signed, under the built-in fee cap";
     let empty = Whitelist::empty(&registry::WHITELIST_RULES);
     let d = match decide(&empty, chain, action) {
         Err(d) => d,
@@ -180,7 +195,8 @@ fn invalid(view: &ListView, chain: &Chain, action: &Action) -> WalletError {
     };
     let message = match (view, &d.fix) {
         (ListView::Unusable(reason), _) => format!(
-            "refusing to sign: the whitelist cannot be trusted: {reason}. {until}; a human checks \
+            "refusing to sign: the whitelist cannot be trusted: {reason}. Nothing is signed, not \
+             even a transfer to this key's own address, until it verifies again; a human checks \
              it with `{VERIFY_COMMAND}`"
         ),
         (_, Fix::Add(c)) => {
@@ -223,10 +239,20 @@ fn default_fee_cap(key: &str) -> Option<U256> {
         .and_then(|(_, wei)| U256::from_str_radix(wei, 10).ok())
 }
 
+/// Where a fee cap comes from.
+#[derive(Clone, Copy)]
+enum CapSource {
+    /// The verified list's `maxFeeWei` for the chain.
+    List,
+    /// The built-in default, while there is no list yet.
+    BuiltIn,
+}
+
 /// `gasLimit × maxFeePerGas` (type 2) or `× gasPrice` (legacy) against `cap`: the usable list's
-/// cap for the chain, or the built-in default without one. A missing cap refuses too.
+/// cap for the chain, or the built-in default while there is no list yet. A missing cap refuses
+/// too; either way the first or next `fee-cap` edit is the fix.
 fn check_fee(
-    view: &ListView,
+    source: CapSource,
     cap: Option<U256>,
     chain: &Chain,
     decoded: &DecodedUnsigned,
@@ -247,59 +273,35 @@ fn check_fee(
         decoded.gas_limit(),
         decoded.fees().max_price()
     );
-    let (why, command) = match (view, cap) {
-        (ListView::Usable(_), Some(cap)) => (
-            format!(
-                "{limit} is above the whitelist's cap of {} on {}",
-                units(cap),
-                chain.key
-            ),
-            Some(set_cap),
+    let why = match (source, cap) {
+        (CapSource::List, Some(cap)) => format!(
+            "{limit} is above the whitelist's cap of {} on {}",
+            units(cap),
+            chain.key
         ),
-        (ListView::Usable(_), None) => (
-            format!(
-                "the whitelist has no fee cap for {} (or an unreadable one), and {limit}",
-                chain.key
-            ),
-            Some(set_cap),
+        (CapSource::List, None) => format!(
+            "the whitelist has no fee cap for {} (or an unreadable one), and {limit}",
+            chain.key
         ),
-        (ListView::NoList, Some(cap)) => (
-            format!(
-                "{limit} is above the built-in cap of {} on {} that applies while there is no \
-                 whitelist; the first fee-cap edit creates the list with its own cap",
-                units(cap),
-                chain.key
-            ),
-            Some(set_cap),
+        (CapSource::BuiltIn, Some(cap)) => format!(
+            "{limit} is above the built-in cap of {} on {} that applies while there is no \
+             whitelist; the first fee-cap edit creates the list with its own cap",
+            units(cap),
+            chain.key
         ),
-        (ListView::Unusable(reason), Some(cap)) => (
-            format!(
-                "{limit} is above the built-in cap of {} on {} that applies while the whitelist \
-                 cannot be trusted ({reason}); a human checks it with `{VERIFY_COMMAND}`",
-                units(cap),
-                chain.key
-            ),
-            None,
-        ),
-        (_, None) => (
-            format!(
-                "there is no built-in fee cap for {}, and no whitelist that can be trusted",
-                chain.key
-            ),
-            None,
+        (CapSource::BuiltIn, None) => format!(
+            "there is no built-in fee cap for {} and no whitelist yet, and {limit}",
+            chain.key
         ),
     };
-    let message = match &command {
-        Some(c) => format!("refusing to sign: {why}; a human can allow it with `{c}`"),
-        None => format!("refusing to sign: {why}"),
-    };
-    let mut e = WalletError::new(ErrorCode::FeeCapExceeded, message)
-        .with_detail("counterparty", decoded.to().to_checksum(None))
-        .with_detail("chain", chain.key)
-        .with_detail("feeWei", fee.to_string());
-    if let Some(c) = command {
-        e = e.with_detail("command", c);
-    }
+    let mut e = WalletError::new(
+        ErrorCode::FeeCapExceeded,
+        format!("refusing to sign: {why}; a human can allow it with `{set_cap}`"),
+    )
+    .with_detail("counterparty", decoded.to().to_checksum(None))
+    .with_detail("chain", chain.key)
+    .with_detail("command", set_cap)
+    .with_detail("feeWei", fee.to_string());
     if let Some(cap) = cap {
         e = e.with_detail("capWei", cap.to_string());
     }
@@ -711,10 +713,11 @@ mod tests {
         // hand whoever broke the list the address it picked. The human checks the list instead.
         let reason = "whitelist.json: whitelist signature does not verify";
         let v = ListView::Unusable(reason.into());
-        check(&v, "ethereum", &cheap("ethereum", SIGNER, u64::MAX, "0x")).unwrap();
         let revoke = approve_data(SPENDER, 0);
         let token_self = transfer_data(SIGNER, 1);
         let cases = [
+            // Not even a cheap transfer to the key's own address.
+            ("ethereum", cheap("ethereum", SIGNER, 0, "0x"), SIGNER),
             ("ethereum", cheap("ethereum", BOB, 1, "0x"), BOB),
             ("base", cheap("base", ROUTER, 0, SEL), ROUTER),
             (
@@ -738,52 +741,104 @@ mod tests {
             );
             assert!(msg.contains(reason), "{msg}");
             assert!(msg.contains(&format!("`{VERIFY_COMMAND}`")), "{msg}");
+            assert!(
+                msg.contains("not even a transfer to this key's own"),
+                "{msg}"
+            );
             assert!(!msg.contains("whitelist add"), "{msg}");
         }
     }
 
     #[test]
+    fn breaking_the_list_never_relaxes_its_signed_fee_cap() {
+        // P-1: a verified list caps base at L below the built-in default D. A self-transfer with
+        // L < fee <= D is refused under it, and must stay refused once the list is broken.
+        let l = {
+            let mut l = list();
+            l.policy.set_max_fee_wei("base", U256::from(21_000 * GWEI));
+            l
+        };
+        let price = default_cap("base") / 21_000;
+        let d = decoded("base", SIGNER, 1, "0x", 21_000, price);
+        assert!(U256::from(21_000 * price) > U256::from(21_000 * GWEI));
+        let e = check(&ListView::Usable(&l), "base", &d).unwrap_err();
+        assert_eq!(e.code, ErrorCode::FeeCapExceeded, "{}", e.message);
+        let broken = ListView::Unusable("whitelist.json: not a whitelist file".into());
+        let msg = refused(
+            check(&broken, "base", &d),
+            ErrorCode::WhitelistInvalid,
+            SIGNER,
+            "base",
+            None,
+        );
+        assert!(msg.contains(&format!("`{VERIFY_COMMAND}`")), "{msg}");
+    }
+
+    /// A chain zwallet has no built-in fee cap for (every real chain has one).
+    const NO_DEFAULT: Chain = Chain {
+        key: "nodefault",
+        name: "No default",
+        symbol: "ETH",
+        decimals: 18,
+        family: crate::chains::Family::Evm(crate::chains::evm::EvmChain {
+            chain_id: 1,
+            default_rpc: "",
+            explorer: "",
+            op_stack: false,
+        }),
+    };
+
+    #[test]
     fn self_transfers_are_always_under_a_fee_cap() {
-        // Without a usable list the compiled-in default cap applies; with one, the list's cap.
-        let reason = "whitelist.json: whitelist signature does not verify";
+        // No list yet: the compiled-in default cap applies to the key's own address.
         for c in crate::chains::CHAINS {
             let gas = 100_000;
             let at = default_cap(c.key) / gas;
-            for v in [ListView::NoList, ListView::Unusable(reason.into())] {
-                check(&v, c.key, &decoded(c.key, SIGNER, u64::MAX, "0x", gas, at)).unwrap();
-                check(&v, c.key, &legacy(c.key, SIGNER, u64::MAX, gas, at)).unwrap();
-                for over in [
-                    decoded(c.key, SIGNER, 0, "0x", gas, at + 1),
-                    legacy(c.key, SIGNER, 0, gas, at + 1),
-                ] {
-                    let e = check(&v, c.key, &over).unwrap_err();
-                    assert_eq!(
-                        e.code,
-                        ErrorCode::FeeCapExceeded,
-                        "{}: {}",
-                        c.key,
-                        e.message
-                    );
-                    assert_eq!(e.details["capWei"], default_cap(c.key).to_string());
-                    assert_eq!(e.details["counterparty"], SIGNER);
-                    assert!(e.message.contains("built-in"), "{}", e.message);
-                    match &v {
-                        // The first fee-cap edit creates the list with that cap.
-                        ListView::NoList => assert!(
-                            e.details["command"]
-                                .as_str()
-                                .unwrap()
-                                .starts_with(&format!("zwallet whitelist fee-cap {} ", c.key)),
-                            "{e:?}"
-                        ),
-                        _ => {
-                            assert!(!e.details.contains_key("command"), "{e:?}");
-                            assert!(e.message.contains(VERIFY_COMMAND), "{}", e.message);
-                        }
-                    }
-                }
+            let v = ListView::NoList;
+            check(&v, c.key, &decoded(c.key, SIGNER, u64::MAX, "0x", gas, at)).unwrap();
+            check(&v, c.key, &legacy(c.key, SIGNER, u64::MAX, gas, at)).unwrap();
+            for over in [
+                decoded(c.key, SIGNER, 0, "0x", gas, at + 1),
+                legacy(c.key, SIGNER, 0, gas, at + 1),
+            ] {
+                let e = check(&v, c.key, &over).unwrap_err();
+                assert_eq!(
+                    e.code,
+                    ErrorCode::FeeCapExceeded,
+                    "{}: {}",
+                    c.key,
+                    e.message
+                );
+                assert_eq!(e.details["capWei"], default_cap(c.key).to_string());
+                assert_eq!(e.details["counterparty"], SIGNER);
+                assert!(e.message.contains("built-in"), "{}", e.message);
+                // The first fee-cap edit creates the list with that cap.
+                assert!(
+                    e.details["command"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with(&format!("zwallet whitelist fee-cap {} ", c.key)),
+                    "{e:?}"
+                );
             }
         }
+        // No list and no built-in cap for the chain: refused, naming the edit that sets one.
+        let e = check_tx(
+            &ListView::NoList,
+            &NO_DEFAULT,
+            &signer(),
+            &cheap("ethereum", SIGNER, 0, "0x"),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::FeeCapExceeded, "{}", e.message);
+        assert!(!e.details.contains_key("capWei"), "{e:?}");
+        assert!(
+            e.details["command"]
+                .as_str()
+                .unwrap()
+                .starts_with("zwallet whitelist fee-cap nodefault "),
+            "{e:?}"
+        );
         // A usable list's own cap, here below the default.
         let mut l = list();
         l.policy.set_max_fee_wei("base", U256::from(21_000 * GWEI));
@@ -795,21 +850,45 @@ mod tests {
         assert_eq!(e.details["capWei"], (21_000 * GWEI).to_string());
     }
 
+    /// A transaction with the widest fee operands there are: u64::MAX gas at u128::MAX wei.
+    fn widest(chain_id: u64, to: &str, input: &str, eip1559: bool) -> DecodedUnsigned {
+        let fees = if eip1559 {
+            EvmFees::Eip1559 {
+                max_fee_per_gas: U128::MAX,
+                max_priority_fee_per_gas: U128::MAX,
+            }
+        } else {
+            EvmFees::Legacy {
+                gas_price: U128::MAX,
+            }
+        };
+        let t = UnsignedEvmTx {
+            chain_id,
+            nonce: u64::MAX - 1,
+            gas_limit: u64::MAX,
+            fees,
+            to: a(to),
+            value: U256::ZERO,
+            input: crate::chains::evm::abi::parse_calldata(input).unwrap(),
+        };
+        tx::decode_unsigned(&tx::encoded_for_signing(&t)).unwrap()
+    }
+
     #[test]
     fn a_broken_list_is_never_more_permissive_than_a_verified_default_list() {
-        // Over every action kind, target, fee shape and chain: whatever a missing or untrusted
-        // list lets through, a verified list with no entries and the default policy does too.
+        // Over every action kind, target, fee shape and chain (plus one with no built-in cap):
+        // an untrusted list allows nothing at all, and no list yet allows nothing a verified list
+        // with no entries and the default policy refuses.
         let mut verified = Whitelist::empty(&registry::WHITELIST_RULES);
         verified.generation = 1;
         verified.validate(&registry::WHITELIST_RULES).unwrap();
-        let broken = [
-            ListView::NoList,
-            ListView::Unusable("whitelist.json: does not verify".into()),
-        ];
+        let untrusted = ListView::Unusable("whitelist.json: does not verify".into());
         let (mut cases, mut allowed) = (0, 0);
-        for c in crate::chains::CHAINS {
+        let mut chains: Vec<&Chain> = crate::chains::CHAINS.iter().collect();
+        chains.push(&NO_DEFAULT);
+        for c in chains {
             let gas = 100_000;
-            let cap = default_cap(c.key) / gas;
+            let cap = default_fee_cap(c.key).map_or(GWEI, |d| d.to::<u64>() / gas);
             let id = crate::chains::evm::config(c).chain_id;
             let mut targets = vec![SIGNER, BOB, ROUTER, USDC_ETH, WETH_BASE];
             targets.extend(
@@ -827,33 +906,57 @@ mod tests {
             }
             for to in &targets {
                 for data in &calls {
+                    let value = if data.len() > 10 { 0 } else { 5 };
+                    let mut txs = Vec::new();
                     for price in [1, cap, cap + 1, cap * 10] {
-                        let value = if data.len() > 10 { 0 } else { 5 };
-                        let mut txs = vec![decoded(c.key, to, value, data, gas, price)];
+                        let t = UnsignedEvmTx {
+                            chain_id: id,
+                            nonce: 3,
+                            gas_limit: gas,
+                            fees: EvmFees::Eip1559 {
+                                max_fee_per_gas: U128::from(price),
+                                max_priority_fee_per_gas: U128::from(1u64),
+                            },
+                            to: a(to),
+                            value: U256::from(value),
+                            input: crate::chains::evm::abi::parse_calldata(data).unwrap(),
+                        };
+                        txs.push(tx::decode_unsigned(&tx::encoded_for_signing(&t)).unwrap());
                         if data == "0x" {
-                            txs.push(legacy(c.key, to, value, gas, price));
+                            let t = UnsignedEvmTx {
+                                fees: EvmFees::Legacy {
+                                    gas_price: U128::from(price),
+                                },
+                                ..t
+                            };
+                            txs.push(tx::decode_unsigned(&tx::encoded_for_signing(&t)).unwrap());
                         }
-                        for d in txs {
-                            let strict = check(&ListView::Usable(&verified), c.key, &d);
-                            for v in &broken {
-                                cases += 1;
-                                if check(v, c.key, &d).is_ok() {
-                                    allowed += 1;
-                                    assert!(
-                                        strict.is_ok(),
-                                        "{v:?} allows on {} what a verified default list \
-                                         refuses: {:?}",
-                                        c.key,
-                                        d.to_json()
-                                    );
-                                }
-                            }
+                    }
+                    txs.push(widest(id, to, data, true));
+                    if data == "0x" {
+                        txs.push(widest(id, to, data, false));
+                    }
+                    for d in txs {
+                        cases += 1;
+                        let r = check_tx(&untrusted, c, &signer(), &d);
+                        let e = r.expect_err("an untrusted list allowed a signature");
+                        assert_eq!(e.code, ErrorCode::WhitelistInvalid, "{}", e.message);
+                        assert!(!e.details.contains_key("command"), "{e:?}");
+                        let strict = check_tx(&ListView::Usable(&verified), c, &signer(), &d);
+                        if check_tx(&ListView::NoList, c, &signer(), &d).is_ok() {
+                            allowed += 1;
+                            assert!(
+                                strict.is_ok(),
+                                "NoList allows on {} what a verified default list refuses: {:?}",
+                                c.key,
+                                d.to_json()
+                            );
                         }
                     }
                 }
             }
         }
-        // Not vacuous: some self-transfers pass, most of the corpus does not.
+        // Not vacuous: some self-transfers pass with no list yet, most of the corpus does not.
         assert!(allowed > 0 && allowed < cases / 10, "{allowed} of {cases}");
     }
 

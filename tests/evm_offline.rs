@@ -2514,7 +2514,7 @@ fn w3_a_payee_is_payable_only_on_its_chains() {
 }
 
 #[test]
-fn w5_a_list_that_does_not_verify_refuses_every_value_send_but_self_transfers() {
+fn w5_a_list_that_does_not_verify_refuses_every_send() {
     let home = Home::new();
     home.create("t", &[]);
     home.allow("alice", ALICE, &["*"]);
@@ -2551,9 +2551,10 @@ fn w5_a_list_that_does_not_verify_refuses_every_value_send_but_self_transfers() 
         "{v:#}"
     );
     assert!(rpc.sent().is_empty(), "a send went out on an invalid list");
-    // The signing key's own address is still payable.
-    home.run(&pay("ethereum", &me, &rpc.url, &[])).ok();
-    assert_eq!(rpc.sent().len(), 1);
+    // Not even the signing key's own address is payable on a list that does not verify.
+    let r = home.run(&pay("ethereum", &me, &rpc.url, &[]));
+    refused(&r, "WHITELIST_INVALID", &me, "ethereum", None);
+    assert!(rpc.sent().is_empty());
 }
 
 #[test]
@@ -2780,7 +2781,7 @@ fn w11_self_transfers_need_no_list() {
 }
 
 #[test]
-fn a_malformed_sealed_anchor_unlocks_and_signs_only_self_transfers() {
+fn a_malformed_sealed_anchor_unlocks_and_signs_nothing() {
     let home = Home::new();
     home.create("t", &[]);
     // A sealed policy that names a generation but no key or digest.
@@ -2806,9 +2807,10 @@ fn a_malformed_sealed_anchor_unlocks_and_signs_only_self_transfers() {
             .contains("`zwallet whitelist list --verify`"),
         "{v:#}"
     );
+    // An anchor that cannot be read is an untrusted list: the key's own address too.
+    let r = home.run(&pay("ethereum", &me, &rpc.url, &[]));
+    refused(&r, "WHITELIST_INVALID", &me, "ethereum", None);
     assert!(rpc.sent().is_empty());
-    home.run(&pay("ethereum", &me, &rpc.url, &[])).ok();
-    assert_eq!(rpc.sent().len(), 1);
 }
 
 /// A new wallet with no whitelist, unlocked for 10 minutes.
@@ -2822,33 +2824,28 @@ fn unlocked_without_list() -> (Home, String) {
 }
 
 #[test]
-fn self_transfers_without_a_usable_list_are_under_the_built_in_fee_cap() {
-    // B-M2: with no list, or a list made unusable by whoever can write the home, a native
-    // self-transfer must not burn the balance in fees.
+fn self_transfers_with_no_list_yet_are_under_the_built_in_fee_cap() {
+    // B-M2: with no list yet, a native self-transfer must not burn the balance in fees.
     let (home, me) = unlocked_without_list();
     let greedy = MockRpc::start(|m, p| fee_node(m, p, Some(GWEI), 500 * GWEI, GWEI + GWEI / 10));
-    let over = |home: &Home, command: bool| {
-        let r = home.run(&pay(
-            "ethereum",
-            &me,
-            &greedy.url,
-            &["--max-fee-gwei", "1000.5"],
-        ));
-        let v = r.json();
-        assert_eq!(v["errorCode"], "FEE_CAP_EXCEEDED", "{v:#}");
-        assert_eq!(v["counterparty"], me.as_str(), "{v:#}");
-        // The compiled-in default for Ethereum: 0.003 ETH.
-        assert_eq!(v["capWei"], "3000000000000000", "{v:#}");
-        assert_eq!(v.get("command").is_some(), command, "{v:#}");
-    };
-    // No list yet: the first fee-cap edit is the way to allow it.
-    over(&home, true);
-    // A list that stops verifying mid-session (junk written over it): the same cap, no edit hint.
-    home.stop_daemons();
-    home.allow("other", OTHER, &["*"]);
-    home.unlock("10m");
-    std::fs::write(home.path().join("whitelist.json"), b"{}").unwrap();
-    over(&home, false);
+    let r = home.run(&pay(
+        "ethereum",
+        &me,
+        &greedy.url,
+        &["--max-fee-gwei", "1000.5"],
+    ));
+    let v = r.json();
+    assert_eq!(v["errorCode"], "FEE_CAP_EXCEEDED", "{v:#}");
+    assert_eq!(v["counterparty"], me.as_str(), "{v:#}");
+    // The compiled-in default for Ethereum: 0.003 ETH. The first fee-cap edit is the way past.
+    assert_eq!(v["capWei"], "3000000000000000", "{v:#}");
+    assert!(
+        v["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("zwallet whitelist fee-cap ethereum "),
+        "{v:#}"
+    );
     assert!(
         greedy.sent().is_empty(),
         "a fee-burning self-transfer was sent"
@@ -2857,4 +2854,58 @@ fn self_transfers_without_a_usable_list_are_under_the_built_in_fee_cap() {
     let rpc = mining_node();
     home.run(&pay("ethereum", &me, &rpc.url, &[])).ok();
     assert_eq!(rpc.sent().len(), 1);
+    // A list that stops verifying mid-session (junk written over it) signs nothing at all, the
+    // cheap self-transfer included (--allow-duplicate: the journal has the one sent above).
+    home.stop_daemons();
+    home.allow("other", OTHER, &["*"]);
+    home.unlock("10m");
+    std::fs::write(home.path().join("whitelist.json"), b"{}").unwrap();
+    for (rpc_url, extra) in [
+        (
+            &greedy.url,
+            &["--max-fee-gwei", "1000.5", "--allow-duplicate"][..],
+        ),
+        (&rpc.url, &["--allow-duplicate"]),
+    ] {
+        let r = home.run(&pay("ethereum", &me, rpc_url, extra));
+        refused(&r, "WHITELIST_INVALID", &me, "ethereum", None);
+    }
+    assert!(greedy.sent().is_empty());
+    assert_eq!(
+        rpc.sent().len(),
+        1,
+        "a self-transfer went out on a broken list"
+    );
+}
+
+#[test]
+fn breaking_the_list_never_relaxes_its_signed_fee_cap() {
+    // P-1: the signed list caps Ethereum fees at 0.0001 ETH, below the built-in 0.003 ETH. A
+    // self-transfer costing more than the list allows is refused; corrupting whitelist.json must
+    // not let the same request through under the looser built-in cap.
+    let (home, me) = listed(|l| {
+        payee(l, "other", OTHER, &["*"]);
+        l.policy
+            .set_max_fee_wei("ethereum", alloy::primitives::U256::from(10u128.pow(14)));
+    });
+    // A 20 gwei base fee: the CLI's own fee limit for 21000 gas lands between the two caps.
+    let rpc = MockRpc::start(|m, p| fee_node(m, p, Some(20 * GWEI), GWEI, 21 * GWEI));
+    let args = pay("ethereum", &me, &rpc.url, &[]);
+    let r = home.run(&args);
+    let v = r.json();
+    assert_eq!(v["errorCode"], "FEE_CAP_EXCEEDED", "{v:#}");
+    assert_eq!(v["capWei"], "100000000000000", "{v:#}");
+    let fee: u128 = v["feeWei"].as_str().unwrap().parse().unwrap();
+    assert!(fee > 10u128.pow(14) && fee <= 3 * 10u128.pow(15), "{v:#}");
+    std::fs::write(home.path().join("whitelist.json"), b"{}").unwrap();
+    let r = home.run(&args);
+    let v = refused(&r, "WHITELIST_INVALID", &me, "ethereum", None);
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("`zwallet whitelist list --verify`"),
+        "{v:#}"
+    );
+    assert!(rpc.sent().is_empty(), "the broken list let a send through");
 }
