@@ -991,6 +991,43 @@ impl MetaLock {
         }
     }
 
+    /// Atomically replaces `<home>/<name>` with `bytes`: a fresh 0600 temp file, fsync, rename,
+    /// then a directory fsync. For the whitelist's files; wallet.json and the lock files are
+    /// refused (they have their own writers).
+    pub(crate) fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        check_plain_name(name)?;
+        let home = &self.home;
+        let path = home.join(name);
+        let tmp = temp_path_for(home, name);
+        let mut journal = Journal::default();
+        let written = write_new_file(&tmp, bytes, &mut journal).and_then(|()| {
+            fs::rename(&tmp, &path).map_err(|e| {
+                WalletError::validation(format!("cannot replace {}: {e}", path.display()))
+            })
+        });
+        if written.is_err() {
+            journal.rollback();
+        }
+        written?;
+        sync_dir(home)
+    }
+
+    /// Renames `<home>/<from>` over `<home>/<to>` and fsyncs the directory. Same refusals as
+    /// [`MetaLock::replace_file`].
+    pub(crate) fn rename_file(&self, from: &str, to: &str) -> Result<()> {
+        check_plain_name(from)?;
+        check_plain_name(to)?;
+        let (src, dst) = (self.home.join(from), self.home.join(to));
+        fs::rename(&src, &dst).map_err(|e| {
+            WalletError::validation(format!(
+                "cannot rename {} to {}: {e}",
+                src.display(),
+                dst.display()
+            ))
+        })?;
+        sync_dir(&self.home)
+    }
+
     /// Read-modify-write of the non-secret metadata. The crypto box must come out unchanged,
     /// and the new file replaces the old one atomically (temp file + rename), so the encrypted
     /// master is never at risk even if this process dies midway.
@@ -1100,11 +1137,35 @@ fn to_json_bytes(file: &WalletFile) -> Result<Vec<u8>> {
 }
 
 fn temp_path(home: &Path) -> PathBuf {
+    temp_path_for(home, WALLET_FILE)
+}
+
+/// A private temp name next to `<home>/<name>`: dot-prefixed, with this process's id and a
+/// random suffix.
+fn temp_path_for(home: &Path, name: &str) -> PathBuf {
     home.join(format!(
-        ".{WALLET_FILE}.tmp-{}-{:08x}",
+        ".{name}.tmp-{}-{:08x}",
         std::process::id(),
         OsRng.next_u32()
     ))
+}
+
+/// A file name directly in the home, other than wallet.json, the lock files and the socket.
+fn check_plain_name(name: &str) -> Result<()> {
+    use crate::core::protocol::{LOCK_NAME, SOCKET_NAME, UNLOCK_LOCK_NAME};
+    let reserved = [
+        WALLET_FILE,
+        WRITE_LOCK,
+        LOCK_NAME,
+        UNLOCK_LOCK_NAME,
+        SOCKET_NAME,
+    ];
+    if name.is_empty() || name.contains('/') || name.starts_with('.') || reserved.contains(&name) {
+        return Err(WalletError::validation(format!(
+            "refusing to write '{name}' through the plain-file writer"
+        )));
+    }
+    Ok(())
 }
 
 /// fsyncs a directory so a new or renamed entry in it survives a crash.
@@ -1992,6 +2053,40 @@ mod tests {
         // The metadata writers carry the new master through untouched.
         set_active(home, "a").unwrap();
         assert_eq!(unlock(home, PW, &fake_derive).unwrap().0.policy, policy);
+    }
+
+    #[test]
+    fn plain_file_writer_replaces_atomically_and_refuses_reserved_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        create_master(home, PW, "a", fast(), &fake_derive).unwrap();
+        let wallet = fs::read(home.join(WALLET_FILE)).unwrap();
+        let lock = MetaLock::acquire(home).unwrap();
+        lock.replace_file("w.next", b"one").unwrap();
+        lock.replace_file("w.next", b"two").unwrap();
+        assert_eq!(fs::read(home.join("w.next")).unwrap(), b"two");
+        assert_eq!(mode(&home.join("w.next")), 0o600);
+        lock.rename_file("w.next", "w.cur").unwrap();
+        assert_eq!(fs::read(home.join("w.cur")).unwrap(), b"two");
+        assert!(!home.join("w.next").exists());
+        for name in [
+            WALLET_FILE,
+            WRITE_LOCK,
+            "d.lock",
+            "u.lock",
+            "d.sock",
+            "",
+            "a/b",
+            ".x",
+        ] {
+            assert!(lock.replace_file(name, b"x").is_err(), "{name:?}");
+            assert!(lock.rename_file("w.cur", name).is_err(), "{name:?}");
+        }
+        assert_eq!(fs::read(home.join(WALLET_FILE)).unwrap(), wallet);
+        assert_eq!(
+            data_names(home),
+            vec![OsString::from("w.cur"), OsString::from(WALLET_FILE)]
+        );
     }
 
     #[test]
