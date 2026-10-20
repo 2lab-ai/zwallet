@@ -305,6 +305,81 @@ fn ptrace_scope_check(path: &Path, allow_scope_0: bool) -> Result<()> {
     )))
 }
 
+/// The mount table of this process's mount namespace (Linux).
+pub const MOUNTINFO: &str = "/proc/self/mountinfo";
+
+/// Before a daemon is started (and before the password is asked for): on Linux, refuses where
+/// `/proc` may hide this user's own key daemons ([`proc_hiding`]), since `lock` could not find
+/// one there to stop it. There is no flag to accept that. Elsewhere this checks nothing.
+pub fn check_daemons_findable() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(why) = proc_hiding_at(Path::new(MOUNTINFO)) {
+        return Err(WalletError::validation(format!(
+            "{why}: zwallet could not find its own key daemon to lock it; refusing to start one"
+        )));
+    }
+    Ok(())
+}
+
+/// [`proc_hiding`] for the mount table at `path`; one that cannot be read counts as hiding.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_hiding_at(path: &Path) -> Option<String> {
+    match std::fs::read(path) {
+        Ok(table) => proc_hiding(&table),
+        Err(e) => Some(format!(
+            "cannot read {}: {e}, so how /proc is mounted is unknown",
+            path.display()
+        )),
+    }
+}
+
+/// Why the `/proc` of a mount table in `/proc/<pid>/mountinfo` form may hide this user's own key
+/// daemons, or `None` when it cannot. A daemon is non-dumpable, and under `hidepid` (1 or
+/// `noaccess`, 2 or `invisible`, 4 or `ptraceable`) the kernel hides a non-dumpable process from
+/// the other processes of its own user too: its `/proc/<pid>` is unreadable or unlisted. Only
+/// proc mounts at `/proc` without `hidepid` (or with 0 or `off`) are safe: no proc mount there,
+/// another file system there, a line whose options cannot be read, or any other `hidepid` value
+/// counts as hiding. `subset=pid` hides no process, and `gid=` is not looked at.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_hiding(mountinfo: &[u8]) -> Option<String> {
+    let mut found = false;
+    for line in mountinfo.split(|b| *b == b'\n') {
+        // `id parent major:minor root mount-point mount-options [optional...] - fstype source
+        // super-options`; `hidepid` is a super option.
+        let fields: Vec<&[u8]> = line.split(|b| *b == b' ').collect();
+        if fields.get(4).copied() != Some(&b"/proc"[..]) {
+            continue;
+        }
+        let after_dash = fields
+            .iter()
+            .skip(6)
+            .position(|f| *f == b"-")
+            .map(|i| &fields[i + 7..]);
+        let Some([fstype, _source, options, ..]) = after_dash else {
+            return Some("cannot read the options of the mount at /proc".into());
+        };
+        if *fstype != b"proc" {
+            return Some(format!(
+                "/proc is a {} mount, not proc",
+                String::from_utf8_lossy(fstype)
+            ));
+        }
+        for option in options.split(|b| *b == b',') {
+            if let Some(value) = option.strip_prefix(b"hidepid=")
+                && value != b"0"
+                && value != b"off"
+            {
+                return Some(format!(
+                    "/proc is mounted with hidepid={}",
+                    String::from_utf8_lossy(value)
+                ));
+            }
+        }
+        found = true;
+    }
+    (!found).then(|| "no proc file system is mounted at /proc".into())
+}
+
 /// What the CLI writes to the daemon child's stdin once the child asked for it: a header line
 /// `<ttl secs> <password length>`, then exactly that many password bytes. Later, once the old
 /// daemons are gone, the single byte [`GO`].
@@ -1071,9 +1146,17 @@ fn stop_until_gone(mut alive: impl FnMut() -> Result<Vec<i32>>, scope: &str) -> 
     }
 }
 
-/// `(pid, argv)` of every process of this effective uid whose argv can be read.
+/// `(pid, argv)` of every process of this effective uid whose argv can be read. Fails where
+/// `/proc` may hide this user's key daemons ([`proc_hiding`]): a list without them would let
+/// `lock` report the wallet locked while one still holds the key.
 #[cfg(target_os = "linux")]
 fn process_argvs() -> Result<Vec<(i32, Vec<OsString>)>> {
+    if let Some(why) = proc_hiding_at(Path::new(MOUNTINFO)) {
+        return Err(WalletError::validation(format!(
+            "{why}: zwallet cannot see key daemons on this host, so it can neither stop them nor \
+             tell whether the wallet is locked"
+        )));
+    }
     let proc = Path::new("/proc");
     let dir = std::fs::read_dir(proc).map_err(io_err("cannot list /proc"))?;
     proc_argvs(
@@ -1591,6 +1674,132 @@ mod tests {
                 && zero.contains("--allow-ptrace-scope-0"),
             "{zero}"
         );
+    }
+
+    /// `/proc/self/mountinfo` of a `rust:1.97-bookworm` container (the overlay root's options
+    /// shortened), with the proc line at `/proc` as `{proc}`. The masked `/proc/<x>` lines are
+    /// proc and tmpfs mounts below `/proc`, which must not count as `/proc` itself.
+    const MOUNTINFO_DOCKER: &str = "\
+272 144 0:69 / / rw,relatime - overlay overlay rw,lowerdir=/l,upperdir=/u,workdir=/w
+{proc}
+275 272 0:102 / /dev rw,nosuid - tmpfs tmpfs rw,size=65536k,mode=755
+280 275 0:105 / /dev/shm rw,nosuid,nodev,noexec,relatime - tmpfs shm rw,size=65536k
+145 274 0:101 /bus /proc/bus ro,nosuid,nodev,noexec,relatime - proc proc rw
+146 274 0:101 /fs /proc/fs ro,nosuid,nodev,noexec,relatime - proc proc rw
+159 274 0:101 /sys /proc/sys ro,nosuid,nodev,noexec,relatime - proc proc rw
+175 274 0:102 /null /proc/kcore rw,nosuid - tmpfs tmpfs rw,size=65536k,mode=755
+177 274 0:106 / /proc/scsi ro,relatime - tmpfs tmpfs ro,size=4k,nr_inodes=1
+";
+
+    fn mountinfo_with(proc_line: &str) -> Vec<u8> {
+        MOUNTINFO_DOCKER.replace("{proc}", proc_line).into_bytes()
+    }
+
+    #[test]
+    fn a_proc_mounted_without_hidepid_hides_no_daemon() {
+        const PROC: &str = "274 272 0:101 / /proc rw,nosuid,nodev,noexec,relatime";
+        for proc_line in [
+            format!("{PROC} - proc proc rw"),
+            // Measured: subset=pid lists and opens a same-user non-dumpable process.
+            format!("{PROC} - proc proc rw,subset=pid"),
+            format!("{PROC} - proc proc rw,hidepid=0"),
+            format!("{PROC} - proc proc rw,hidepid=off"),
+            // An optional field (shared:N) before the separator.
+            format!("{PROC} shared:12 - proc proc rw"),
+        ] {
+            assert_eq!(
+                proc_hiding(&mountinfo_with(&proc_line)),
+                None,
+                "{proc_line}"
+            );
+        }
+        // The host this runs on lists its own daemons (or it is not Linux).
+        #[cfg(target_os = "linux")]
+        assert_eq!(proc_hiding_at(Path::new(MOUNTINFO)), None);
+        check_daemons_findable().unwrap();
+    }
+
+    #[test]
+    fn a_proc_mounted_with_hidepid_or_unreadable_hides_daemons() {
+        const PROC: &str = "274 272 0:101 / /proc rw,nosuid,nodev,noexec,relatime";
+        for (proc_line, why) in [
+            // Older kernels show the number, 5.8 and later the name.
+            (
+                format!("{PROC} - proc proc rw,hidepid=2"),
+                "/proc is mounted with hidepid=2",
+            ),
+            (
+                format!("{PROC} - proc proc rw,hidepid=invisible"),
+                "/proc is mounted with hidepid=invisible",
+            ),
+            (
+                format!("{PROC} - proc proc rw,hidepid=noaccess"),
+                "/proc is mounted with hidepid=noaccess",
+            ),
+            (
+                format!("{PROC} - proc proc rw,hidepid=1"),
+                "/proc is mounted with hidepid=1",
+            ),
+            (
+                format!("{PROC} - proc proc rw,hidepid=ptraceable"),
+                "/proc is mounted with hidepid=ptraceable",
+            ),
+            // A group exempt from hidepid is not looked at.
+            (
+                format!("{PROC} - proc proc rw,gid=1001,hidepid=invisible"),
+                "/proc is mounted with hidepid=invisible",
+            ),
+            (
+                format!("{PROC} - proc proc rw,hidepid=7"),
+                "/proc is mounted with hidepid=7",
+            ),
+            // The options are missing: no separator, or nothing after it.
+            (
+                PROC.to_string(),
+                "cannot read the options of the mount at /proc",
+            ),
+            (
+                format!("{PROC} - proc proc"),
+                "cannot read the options of the mount at /proc",
+            ),
+            (
+                format!("{PROC} - tmpfs tmpfs rw"),
+                "/proc is a tmpfs mount, not proc",
+            ),
+            // No mount at /proc at all.
+            (
+                "999 272 0:101 / /procs rw - proc proc rw".to_string(),
+                "no proc file system is mounted at /proc",
+            ),
+        ] {
+            assert_eq!(
+                proc_hiding(&mountinfo_with(&proc_line)).as_deref(),
+                Some(why),
+                "{proc_line}"
+            );
+        }
+        // Two proc mounts stacked at /proc: one with hidepid is enough.
+        let stacked = format!(
+            "{PROC} - proc proc rw\n300 274 0:110 / /proc rw - proc proc rw,hidepid=invisible"
+        );
+        assert_eq!(
+            proc_hiding(&mountinfo_with(&stacked)).as_deref(),
+            Some("/proc is mounted with hidepid=invisible")
+        );
+        assert_eq!(
+            proc_hiding(b"").as_deref(),
+            Some("no proc file system is mounted at /proc")
+        );
+        // A mount table that cannot be read.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = proc_hiding_at(&tmp.path().join("mountinfo")).unwrap();
+        assert!(
+            missing.starts_with("cannot read ")
+                && missing.ends_with("how /proc is mounted is unknown"),
+            "{missing}"
+        );
+        let unreadable = proc_hiding_at(tmp.path()).unwrap();
+        assert!(unreadable.starts_with("cannot read "), "{unreadable}");
     }
 
     #[test]

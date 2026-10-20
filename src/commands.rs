@@ -281,6 +281,7 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
         protocol::socket_path(home)?;
         // Before the prompt and before anything is written: refused here, nothing was created.
         protocol::check_ptrace_scope(a.allow_ptrace_scope_0)?;
+        protocol::check_daemons_findable()?;
     }
     // Pinned before any password prompt (see `DaemonExe`).
     let exe = ttl.map(|_| DaemonExe::resolve()).transpose()?;
@@ -1104,6 +1105,7 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
     // daemon derived from the decrypted seed.
     let file = store::read_wallet_file(home)?;
     protocol::check_ptrace_scope(a.allow_ptrace_scope_0)?;
+    protocol::check_daemons_findable()?;
     // Pinned before the prompt, so a binary swapped in while the human types is never started.
     let exe = DaemonExe::resolve()?;
     let pw = read_password(a.password.password_stdin, "Wallet password: ", false)?;

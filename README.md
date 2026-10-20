@@ -422,6 +422,12 @@ things a same-user process can still do, and what to do about them:
   default (`--allow-ptrace-scope-0` accepts it). With `ptrace_scope` 1, a process that is an
   ancestor of `zwallet unlock` (e.g. the shell an agent started, if the human types `unlock`
   into it) still can: run `unlock` from a terminal the agent did not start.
+- **Linux hosts with `/proc` mounted `hidepid`** (`1`/`noaccess`, `2`/`invisible`,
+  `4`/`ptraceable`, with or without `gid=`) are refused: there the kernel hides a non-dumpable
+  process such as the key daemon even from its own user, so `lock` could not find a daemon to
+  stop. `unlock` and `create --unlock` refuse to start one before the password prompt (there is
+  no flag to accept this), and `lock` and `status` fail instead of reporting the wallet locked.
+  The same holds when `/proc/self/mountinfo` cannot be read. `subset=pid` is fine.
 - **Root** defeats all of this.
 
 ## Development
