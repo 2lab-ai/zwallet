@@ -976,7 +976,8 @@ async fn status(home: &Path) -> Result<Out> {
     Ok(with_note(out, !shows_address))
 }
 
-/// How long `status` waits for a daemon that says it is locking to leave the process table.
+/// How long `status` waits for a daemon that does not confirm its session (it may be exiting) to
+/// leave the process table.
 const EXIT_GRACE: Duration = Duration::from_secs(1);
 
 /// This home's daemons, by the process table (any daemon process for the home means unlocked,
