@@ -239,12 +239,20 @@ impl Home {
 /// ciphertext changes: seed before `unlock`, or unlock again afterwards (see
 /// `tests/whitelist_seed.rs`).
 pub fn seed_whitelist(home: &Path, change: impl FnOnce(&mut Whitelist)) -> Whitelist {
-    whitelist::edit(home, PW, &WHITELIST_RULES, |list| {
+    try_seed_whitelist(home, |list| {
         change(list);
         Ok(())
     })
     .unwrap_or_else(|e| panic!("seeding the whitelist failed: {}", e.message))
-    .list
+}
+
+/// [`seed_whitelist`] for an edit a test expects to be refused: `change` may fail, and the
+/// edit's error (or the change's) comes back as is. A refused edit writes nothing.
+pub fn try_seed_whitelist(
+    home: &Path,
+    change: impl FnOnce(&mut Whitelist) -> zwallet::core::error::Result<()>,
+) -> zwallet::core::error::Result<Whitelist> {
+    whitelist::edit(home, PW, &WHITELIST_RULES, change).map(|edited| edited.list)
 }
 
 impl Home {
