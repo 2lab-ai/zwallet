@@ -64,20 +64,31 @@ seed, so the wallet file and the daemon protocol do not change.
 
 ## Process model: the daemon holds only the key
 
-- `zwallet unlock <dur>` never sends the password over the socket. Review round 1 (2026-10-20)
-  showed a same-user process listening on `d.sock` received it. Instead:
-  1. It sends a bare `Lock` to whatever answers on the socket. That request carries no secret.
-  2. It spawns its **own** `zwallet daemon` child (setsid) and writes the TTL and password to the
-     child's inherited stdin pipe.
-  3. The child takes an exclusive `flock` on `d.lock` for its lifetime and decrypts `wallet.json`.
-     It then unlinks whatever is at `d.sock`, binds, and writes a readiness line
-     `{expiresAt, active, index, address, pid}` to its stdout pipe. The address is derived from the
-     seed.
-  4. The CLI reports success only after that line arrives. On an error or a 60 s timeout it kills
-     its child.
+- **Unlock** (staged; review rounds 1–2, 2026-10-20). `zwallet unlock <dur>` never sends the
+  password over the socket: in round 1, a same-user listener on `d.sock` received it.
+  1. Before prompting, the CLI pins the daemon executable. Linux spawns `/proc/self/exe`; macOS
+     records the (dev, ino) of `current_exe` and re-checks it right before the spawn.
+  2. It spawns its **own** `zwallet daemon --home <canonical home>` child (setsid, every fd ≥ 3
+     close-on-exec). Concurrent unlocks take turns on `u.lock`.
+  3. The child disables core dumps, then says `{"stage":"input"}`. Only after that does the CLI
+     write the TTL and password to the child's stdin pipe.
+  4. The child decrypts **without** `d.lock` and says `decrypted`. A wrong password stops here and
+     leaves any running session untouched.
+  5. The CLI stops the old daemons. It sends a polite socket `Lock`, then uses the process table.
+  6. It sends a go byte. The child takes `d.lock` (5 s wait), unlinks `d.sock`, binds, and writes
+     `{expiresAt, active, index, address, pid}`, with the address derived from the seed.
+  7. The CLI reports success only after that line arrives. On an error or timeout it kills its child.
 
-  A squatter on `d.lock` or `d.sock` therefore causes a visible failure to unlock, never a password
-  leak. The password and seed never travel through argv, env, or the socket.
+  The password and seed never travel through argv, env, or the socket.
+- **Lock by process table, not by filename** (round 2). A same-user process can rename the real
+  socket and put a fake one at `d.sock`, or replace `d.lock`. So `zwallet lock`, and the start of
+  `unlock`:
+  1. find every process whose argv is a zwallet `daemon --home <this home>` (macOS `KERN_PROCARGS2`,
+     Linux `/proc/<pid>/cmdline`);
+  2. SIGTERM them, then SIGKILL any still alive after 2 s;
+  3. report success only when none remain, otherwise an error naming the pids.
+
+  A fake process that copies that argv gets killed too, which is harmless.
 - **The daemon holds the seed in memory**, zeroizes it on `lock` or expiry, and exits at expiry.
   **It does no RPC.** Socket requests (protocol v2): `lock`, `status`, `address{chain,index}`,
   `sign_message{chain,index,msg}`, `sign_tx{chain,index,unsigned tx}`. These are family-agnostic.
@@ -87,7 +98,9 @@ seed, so the wallet file and the daemon protocol do not change.
   - that `wallet.json`'s ciphertext is unchanged;
   - that `d.sock` is still its own socket (dev/ino).
 
-  Any failure wipes the seed and exits. Each connection is served in its own task with a 10 s I/O
+  Any failure wipes the seed and exits. Every `wallet.json` read opens with
+  `O_NOFOLLOW|O_NONBLOCK` and requires a regular file of at most 1 MiB owned by our uid, so a FIFO
+  cannot hang the tick. Each connection is served in its own task with a 10 s I/O
   timeout, so a silent client cannot hold the seed past expiry.
 - **Socket** `$ZWALLET_HOME/d.sock`, 0600. The daemon checks that the peer uid matches its own
   (getpeereid / SO_PEERCRED). If the path is longer than the `sun_path` limit (~104 bytes on macOS),
@@ -95,14 +108,18 @@ seed, so the wallet file and the daemon protocol do not change.
 - **The CLI does everything else** in one process: RPC (nonce, EIP-1559 fees with a legacy
   fallback, `eth_estimateGas`, balance pre-check, broadcast, receipt polling), ABI encoding and
   decoding, and output.
-- **Address trust**: the address cache in `wallet.json` is not authenticated, and it decides where
-  funds go.
-  - `unlock` and `create` print the address the daemon or the CLI derived from the seed.
-  - While unlocked, `address`/`addresses`/`list`/`status`/`change` cross-check the cache against
-    the daemon and fail on a mismatch.
-  - While locked they report `verified: false`.
-
-  Take a funding address from `create`/`unlock` output on your own terminal.
+- **Address trust** (round 2): the address cache in `wallet.json` is not authenticated, and it
+  decides where funds go. A same-user process can also swap in its own wallet and run a genuine
+  daemon with its own password.
+  - So **`verified: true` only follows the human's password, or a seed generated in this process**:
+    - `address --verify` and `list --verify` (decrypt locally, derive, compare);
+    - the readiness line of `unlock` and `create --unlock`;
+    - the first `create`;
+    - a subkey `create` at a terminal or with `--password-stdin`.
+  - Everything else says `verified: false`, with "run `zwallet address --verify` before funding".
+    That covers an agent's `create` through the daemon, and `balance`.
+  - The daemon cross-check remains as a tamper detector only: a mismatch is a VALIDATION_ERROR, and
+    a match is not verification.
 - **Locked matrix**: `address`, `addresses`, `balance`, `call` and `status` work while locked
   (they use cached addresses). `sign-message`, `transfer` and `invoke` → `WALLET_LOCKED`, with the
   hint `zwallet unlock 24h`.
@@ -168,17 +185,40 @@ stdout and exits 1. Codes: `VALIDATION_ERROR`, `WALLET_EXISTS`, `WALLET_NOT_FOUN
 `CAPABILITY_UNSUPPORTED`, `INVALID_ADDRESS`, `RPC_ERROR`, `INSUFFICIENT_FUNDS`,
 `BROADCAST_UNCERTAIN`. Command shapes are in the README.
 
-**Send safety** (review round 1):
-- A failure before the send is `RPC_ERROR`, meaning nothing was broadcast and a retry is safe.
-- After the send, the computed hash is polled. If the outcome is still unknown, the result is
-  `BROADCAST_UNCERTAIN` carrying `txHash`/`nonce`/`from`. Retry with `--nonce N`, which replaces the
-  pending tx with bumped fees.
+**Send safety** (review rounds 1–2). No message or code may nudge an agent into a second send of
+the same payment.
+- **One send per key and chain at a time.** A send holds `nonce-<chainId>-<addr>.lock` from before
+  `prepare` until broadcast returns. A second send while it is held fails at once (nothing signed),
+  so a duplicate attempt at the same payment cannot slip in at nonce N+1.
+- **Before the send:** an error is `RPC_ERROR` "nothing was broadcast — if you retry, pass
+  `--nonce N`".
+- **After the send:** the computed hash is polled.
+  - If it is known, that is success (with `broadcastWarning` / `rpcTxHash` where relevant).
+  - "Nonce too low" and "replacement underpriced" are looked up by hash first. If not found, the
+    result is "nonce N is taken by another transaction": `BROADCAST_UNCERTAIN` if `--nonce` was
+    given, otherwise `RPC_ERROR`, with guidance to look up the earlier txHash before sending again.
+  - A wrong hash returned by the RPC is reconciled by the computed hash, falling back to
+    `BROADCAST_UNCERTAIN`.
+  - `--nonce` below the mined count says the nonce is already mined and tells the agent to look up
+    that send. It never suggests "the next free nonce".
+- **Replacement:** `--nonce N` with `--bump <1.1–3>` (default 1.25), and `--replace <txHash>`, which
+  bumps from the original's fees.
 - `--dry-run` never prints the signed raw tx.
-- Fees are capped relative to `max(baseFee, eth_gasPrice, 1 gwei)` unless `--max-fee-gwei` is given.
-- In the daemon's decode, known ERC-20 selectors must re-encode byte-for-byte, and must carry
-  `value = 0`.
-- `invoke` address arguments are EIP-55 checked, and integers must be plain decimal or `0x` hex.
-- RPC URLs are printed with the path and query redacted.
+- **Fee ceiling**, unless `--max-fee-gwei` is given:
+  - EIP-1559: tip ≤ 2×reference and price ≤ 6×reference, where reference = `max(baseFee,
+    eth_gasPrice, 1 gwei)`.
+  - Legacy chains (BSC): price ≤ `6 × max(baseFee, 1 gwei)`.
+  - These ceilings trust the RPC. An RPC-independent absolute fee budget belongs in the daemon
+    policy (WU1b).
+- **Daemon decode:** the actions are method-shaped (`transfer-call` / `approve-call` /
+  `transfer-from-call`) with `assetType: "unverified"`, because ERC-721 shares the `approve` and
+  `transferFrom` selectors. Known selectors must re-encode byte-for-byte and carry `value = 0`.
+- **ABI input:**
+  - `invoke` address arguments are EIP-55 checked.
+  - Integers must be plain decimal or `0x` hex.
+  - `bytes*` and `function` values need `0x`.
+  - Top-level strings are taken verbatim.
+- **RPC errors:** URLs are redacted, and HTTP error bodies are never printed.
 
 RPC endpoint precedence: `--rpc` flag, then `ZWALLET_RPC_<KEY>` env, then the default public node
 (publicnode.com per chain).
