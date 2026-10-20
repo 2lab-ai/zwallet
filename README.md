@@ -14,7 +14,8 @@ an agent can sign without the human present.
 ```sh
 zwallet create main          # human, at a terminal: choose a password (asked twice)
 zwallet unlock 24h           # human: unlock signing for 24h (also 30m, 365d, 1y, ...)
-zwallet address              # anyone: 0x... (works while locked)
+zwallet address --verify     # human: 0x..., checked against the seed with the password
+zwallet address              # anyone: 0x... from the cache (works while locked)
 zwallet balance --chain base
 zwallet transfer --chain base --to 0x... --amount 0.01 --dry-run
 zwallet transfer --chain base --to 0x... --amount 0.01 --wait
@@ -31,18 +32,18 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | Command | Output (`--json`) | While locked |
 |---|---|---|
 | `chains` | `[{ key, name, family, symbol, chainId, rpc }]` | works |
-| `create <name> [--password-stdin] [--unlock <dur>] [--words 12\|15\|18\|21\|24]` | `{ name, index, address, active, master, home, chains }` (+ `locked, expiresAt, daemonPid` with `--unlock`) | see below |
-| `list` | `{ active, keys: [{ name, index, address, active }], verified }` | works |
+| `create <name> [--password-stdin] [--unlock <dur>] [--words 12\|15\|18\|21\|24]` | `{ name, index, address, active, master, home, chains, verified }` (+ `locked, expiresAt, daemonPid` with `--unlock`) | see below |
+| `list [--verify [--password-stdin]]` | `{ active, keys: [{ name, index, address, active }], verified }` | works |
 | `change <name>` | `{ active, address, verified }` | works |
-| `address [--chain <key>]` | `{ chain, key, address, verified }` (EIP-55) | works |
+| `address [--chain <key>] [--verify [--password-stdin]]` | `{ chain, key, address, verified }` (EIP-55) | works |
 | `addresses` | `{ key, addresses: [{ chainId: <key>, address }], verified }` | works |
 | `status` | `{ wallet, locked, home, daemonPid?, expiresAt?, active?, address?, verified? }` | works |
-| `balance --chain <key> [--token <erc20>] [--rpc <url>]` | `{ chain, key, address, symbol, decimals, balance, raw, token? }` | works |
+| `balance --chain <key> [--token <erc20>] [--rpc <url>]` | `{ chain, key, address, symbol, decimals, balance, raw, verified: false, token? }` | works |
 | `call --chain <key> --to <contract> --sig "<fn>" [ARGS...] [--rpc <url>]` | `{ chain, from, to, sig, args, result, raw }` | works |
 | `invoke --chain <key> --to <contract> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait] [--nonce <n>] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw }` | `WALLET_LOCKED` |
 | `transfer --chain <key> --to <0x> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait] [--nonce <n>] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
 | `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191) | `WALLET_LOCKED` |
-| `unlock <dur> [--password-stdin]` | `{ locked: false, duration, expiresAt, active, address, daemonPid }` | - |
+| `unlock <dur> [--password-stdin]` | `{ locked: false, duration, expiresAt, active, address, daemonPid, verified: true }` | - |
 | `lock` | `{ locked: true, wasUnlocked }` | - |
 | `backup` | prints the recovery phrase; interactive terminal only | asks for the password |
 
@@ -50,16 +51,30 @@ Commands that act on a key take `--key <name>` (default: the active key).
   negatives, fractions and unknown units are `VALIDATION_ERROR`.
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
-  reminds the human (on stderr) to run `zwallet backup` before funding the wallet. Afterwards it
-  derives the next index as `<name>` and makes it active. While unlocked this needs no password
-  (the daemon derives); while locked it asks for the password for that one operation and starts
-  no daemon. Concurrent creates get distinct indices.
-- **Address verification**: the addresses in `wallet.json` are a plain cache that anything running
-  as the same user can edit. While unlocked, `address`, `addresses`, `list`, `status` and `change`
-  check the cache against the key daemon's own derivation from the seed and fail with
-  `VALIDATION_ERROR` on a mismatch; their output carries `verified: true`. While locked they print
-  the cache with `verified: false` (and a note in human output). `unlock` and `create --unlock`
-  print the address the new daemon derived from the decrypted seed, and both add `daemonPid`.
+  reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's
+  parent directory must already exist. Afterwards it derives the next index as `<name>` and makes
+  it active. At a terminal or with `--password-stdin` it asks for the password for that one
+  operation and derives the key itself (`verified: true`). Without either (an agent) it derives
+  through the unlocked daemon without a password (`verified: false`), and while locked it refuses.
+  It starts no daemon unless `--unlock` is given. Concurrent creates get distinct indices.
+- **Address trust** (`verified`): the addresses in `wallet.json` are a plain cache that anything
+  running as the same user can edit, and that user can also swap `wallet.json` for its own wallet
+  and run a genuine `zwallet daemon` over it, or put a listener on `d.sock`. So only an address
+  this process derived from the seed after the human's password is `verified: true`:
+  - `address --verify` and `list --verify` (password at the terminal prompt, or
+    `--password-stdin`): decrypt `wallet.json` here, derive, and compare with the cache. A
+    mismatch is `VALIDATION_ERROR`; a wallet the password does not open is `WRONG_PASSWORD`.
+  - `unlock` and `create --unlock`: the address the CLI's own daemon child derived from the seed
+    the password opened, reported on that child's pipe (both also add `daemonPid`).
+  - `create`: the first key, derived from the seed generated in the same process, and a later
+    key when the password was asked for (see above).
+
+  Everything else (`address`, `addresses`, `list`, `status` and `change` without `--verify`, an
+  agent's `create`, and `balance`) shows the cache with `verified: false`, and in human output the
+  line ``not verified: run `zwallet address --verify` before funding``. While a daemon answers,
+  those commands still compare the cache with its derivation and fail with `VALIDATION_ERROR` on
+  a mismatch, but a match only means nothing visibly tampered: it is never `verified`. Take a
+  funding address from `address --verify` (or `unlock`) on your own terminal.
 - **`call` / `invoke` signatures** are `name(argTypes)(returnTypes)`, e.g.
   `balanceOf(address)(uint256)` or `getReserves()(uint112,uint112,uint32)`. Return types are
   optional (without them `result` is null and `raw` has the hex). Arrays are written `[1,2]`,
@@ -143,20 +158,41 @@ endpoint sends back.
   wallet by itself. `unlock` hands it to its own daemon child over a pipe, never over the socket
   (see **Daemon**). `create` writes a
   temp file, reads it back from disk, decrypts it and checks the addresses and the phrase, and only
-  then links it into place as `wallet.json`; a failure before that removes only what it created.
-  Once `wallet.json` is in place it is never removed: a later failure says recovery is needed and
-  names the file. Every write of `wallet.json` holds an exclusive lock on `w.lock` (an empty file).
+  then links it into place as `wallet.json`; a failure before that removes only its temp file (a
+  home it created stays, with `w.lock`). Once `wallet.json` is in place it is never removed: a
+  later failure says recovery is needed and names the file. Every write of `wallet.json` holds an
+  exclusive lock on `w.lock` (an empty file, never deleted). `wallet.json` is only read without
+  following a symlink and without blocking, and only as a regular file of this user's of at most
+  1 MiB, so a FIFO or link planted in its place fails fast instead of hanging a reader.
 - **Keys**: named subkeys of the master by index, in creation order, never reused. EVM uses
   `m/44'/60'/0'/0/<index>` (the MetaMask/Trust account order), so the phrase imports into standard
   wallets with the same accounts. One address per key on every EVM chain.
-- **Daemon**: `unlock` first asks any daemon already serving to lock, then starts `zwallet daemon`
-  as its own child (own session) and writes the TTL and password into the child's stdin pipe; the
-  password never goes over the socket, argv or env. The child takes an exclusive lock on `d.lock`
-  for its whole life (one daemon per home), decrypts the wallet, replaces whatever is at
-  `$ZWALLET_HOME/d.sock` and binds it (0600; peer uid checked on both ends), and only then reports
-  `{ expiresAt, active, address }` back on its stdout pipe; `unlock` reports success only after that
-  line, and kills the child on any failure or timeout. Something else squatting on `d.sock` or
-  `d.lock` makes `unlock` fail visibly; it never receives the password. The daemon keeps only the
+- **Daemon**: `unlock` pins the zwallet binary before it asks for the password (on Linux the
+  running image, `/proc/self/exe`; on macOS the file's identity, checked again right before the
+  start, so a binary swapped in meanwhile is refused). It then starts that binary as its own child
+  `zwallet daemon --home <canonical home>` (own session, empty environment, no inherited
+  descriptor but its three pipes). Over those pipes:
+  1. the child disables core dumps (on Linux it becomes non-dumpable) and only then asks for
+     input;
+  2. `unlock` writes the TTL and password into the child's stdin pipe. The password never goes
+     over the socket, argv or env;
+  3. the child decrypts the wallet and says so. A wrong password ends here, and a session that was
+     already running is left untouched;
+  4. only now does `unlock` stop the daemons already serving this home (see **`lock`**);
+  5. the child takes an exclusive lock on `d.lock` for its whole life, replaces whatever is at
+     `$ZWALLET_HOME/d.sock`, binds it (0600; peer uid checked on both ends), and reports
+     `{ expiresAt, active, address }`.
+
+  `unlock` reports success only after that line, and kills the child on any failure or timeout.
+  Concurrent unlocks take turns on `u.lock`. Something else squatting on `d.sock` or `d.lock`
+  makes `unlock` fail visibly; it never receives the password.
+- **`lock`** asks whatever answers on `d.sock` to lock (the request carries nothing), then finds
+  every process of this user whose argv is `zwallet daemon --home <this home>` in the OS process
+  table (macOS `KERN_PROCARGS2`, Linux `/proc/<pid>/cmdline`), sends it SIGTERM, and SIGKILL after
+  2 s. It reports `locked: true` only when none is left; otherwise it fails naming the pids. File
+  names (`d.sock`, `d.lock`) never decide which daemons exist, since any same-user process can
+  rename or replace them.
+- **Daemon duties**: the daemon keeps only the
   master seed in memory, and does nothing but derive addresses and sign; it
   makes no network request. For a transaction it receives only the unsigned signing payload bytes,
   decodes them itself (type, chain id, recipient, value, and ERC-20 `transfer` / `approve` /
@@ -169,7 +205,8 @@ endpoint sends back.
 - **Daemon lifetime**: each connection is served in its own task with a 10 s I/O budget, so a
   silent client never delays expiry. Every second and on every request (including `status`) the
   daemon also checks that `wallet.json`'s ciphertext is still the one it decrypted and that
-  `d.sock` is still its own socket; otherwise it wipes the seed and exits. Core dumps are disabled
+  `d.sock` is still its own socket; otherwise it wipes the seed and exits. The socket check is
+  best effort (a same-user process can race it); `lock` does not depend on it. Core dumps are disabled
   in the daemon and in `create`, `unlock` and `backup`.
 - **Secrets are never printed**: the mnemonic, password and private keys appear in no output, log
   or error. The single exception is `backup`, which prints the phrase only when stdin and stdout

@@ -1,14 +1,17 @@
 //! The key holder (`zwallet daemon`, hidden).
 //!
 //! Started by `zwallet unlock` (or `create --unlock`) as that process's own child, through
-//! [`protocol::start_daemon`]. Startup, in order:
-//! 1. read the TTL and the password from the stdin pipe (raw read(2) into one zeroized buffer),
-//! 2. take an exclusive flock on `<home>/d.lock`, held for the daemon's whole life, so one home
-//!    has at most one daemon,
-//! 3. decrypt wallet.json and derive the active key's address from the seed,
-//! 4. replace whatever is at `d.sock` and bind it (a squatter there is a visible failure, never a
+//! [`protocol::start_daemon`], as `zwallet daemon --home <canonical home>` (the argv `lock` finds
+//! it by). Startup, in order:
+//! 1. disable core dumps (on Linux: non-dumpable, so no same-user process can read its memory
+//!    or its stdin pipe through /proc), and only then ask for input on stdout,
+//! 2. read the TTL and the password from the stdin pipe (raw read(2) into one zeroized buffer),
+//! 3. decrypt wallet.json, derive the active key's address from the seed, report `decrypted`,
+//! 4. wait for the go byte: the unlocking CLI has stopped the old daemons meanwhile,
+//! 5. take an exclusive flock on `<home>/d.lock`, held for the daemon's whole life,
+//! 6. replace whatever is at `d.sock` and bind it (a squatter there is a visible failure, never a
 //!    leak: no secret ever goes over the socket),
-//! 5. report `{ expiresAt, active, index, address, pid }` on the stdout pipe, then serve.
+//! 7. report `{ expiresAt, active, index, address, pid }` on the stdout pipe, then serve.
 //!
 //! It keeps only the master seed in memory, derives keys and signs on request, and nothing else:
 //! it makes no network request and writes no file. Each connection is served in its own task
@@ -20,7 +23,7 @@
 
 use crate::chains;
 use crate::core::error::{ErrorCode, Result, WalletError};
-use crate::core::password::{MAX_SECRET, disable_core_dumps, into_password, read_secret};
+use crate::core::password::{disable_core_dumps, into_password};
 use crate::core::protocol::{self, MAX_MESSAGE, Request, Response};
 use crate::core::seed::Seed;
 use crate::core::store::{self, FILE_MODE};
@@ -42,6 +45,8 @@ use tokio::sync::Notify;
 
 /// How long a new daemon waits for the previous one to release `d.lock`.
 const LOCK_WAIT: Duration = Duration::from_secs(5);
+/// How long a decrypted daemon waits for the go byte from the CLI that started it.
+const GO_WAIT: Duration = Duration::from_secs(60);
 /// Longest sleep between expiry and tamper checks.
 const TICK: Duration = Duration::from_secs(1);
 /// Per-connection read and write budget.
@@ -106,7 +111,7 @@ pub async fn run(home: PathBuf) -> Result<()> {
     let started = match start(&home).await {
         Ok(s) => s,
         Err(e) => {
-            report(&Response::err(&e));
+            report_last(&Response::err(&e));
             return Err(e);
         }
     };
@@ -118,7 +123,7 @@ pub async fn run(home: PathBuf) -> Result<()> {
     } = started;
     // Readiness goes out only now that the socket serves. If the unlocking CLI is gone (it
     // timed out or was killed), nobody is waiting for this key: wipe it and leave.
-    if !report(&Response::ok(ready)) {
+    if !report_last(&Response::ok(ready)) {
         *shared.session() = None;
         remove_own_socket(&shared);
         return Err(WalletError::validation("the unlocking process went away"));
@@ -138,26 +143,49 @@ struct Started {
 }
 
 async fn start(home: &Path) -> Result<Started> {
+    if !home.is_absolute() {
+        return Err(WalletError::validation(
+            "`zwallet daemon --home` needs an absolute path",
+        ));
+    }
     let sock = protocol::socket_path(home)?;
-    let (ttl, password) = read_unlock_input()?;
-    store::read_wallet_file(home)?;
-    let lock = store::lock_exclusive(
-        &home.join(protocol::LOCK_NAME),
-        LOCK_WAIT,
-        "another zwallet daemon serves this wallet",
-    )?;
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(WalletError::validation(
+            "`zwallet daemon` is started by `zwallet unlock`, not by hand",
+        ));
+    }
+    let gone = || WalletError::validation("the unlocking process went away");
+    // Core dumps are off (first thing in `run`): only now may the password come.
+    if !report(&Response::ok(json!({ "stage": protocol::STAGE_INPUT }))) {
+        return Err(gone());
+    }
+    let (ttl, password) = protocol::read_unlock_input(stdin.as_raw_fd())?;
+    let password = into_password(password)?;
     let (unsealed, file) = store::unlock(home, &password, &chains::derive_addresses)?;
     drop(password);
-    // The TTL counts from now, not from before the KDF ran.
-    let expires_at = SystemTime::now()
-        .checked_add(ttl)
-        .ok_or_else(|| WalletError::validation("invalid unlock duration"))?;
     let key = file.key(None)?;
     let primary = chains::find(chains::PRIMARY_CHAIN)?;
     let address = primary
         .family
         .keys()
         .derive_address(&unsealed.seed, key.index)?;
+    // The unlocking CLI stops the old daemons only after this, so a wrong password never ends
+    // a running session; it answers with the go byte.
+    if !report(&Response::ok(json!({ "stage": protocol::STAGE_DECRYPTED }))) {
+        return Err(gone());
+    }
+    protocol::read_go(stdin.as_raw_fd(), GO_WAIT)?;
+    redirect_to_null(libc::STDIN_FILENO);
+    let lock = store::lock_exclusive(
+        &home.join(protocol::LOCK_NAME),
+        LOCK_WAIT,
+        "another zwallet daemon serves this wallet",
+    )?;
+    // The TTL counts from now, not from before the KDF ran.
+    let expires_at = SystemTime::now()
+        .checked_add(ttl)
+        .ok_or_else(|| WalletError::validation("invalid unlock duration"))?;
 
     let fail = |what: &'static str| {
         move |e: std::io::Error| WalletError::validation(format!("{what}: {e}"))
@@ -190,6 +218,13 @@ async fn start(home: &Path) -> Result<Started> {
         })),
         stop: Notify::new(),
     });
+    // wallet.json may have changed while this daemon waited for the go byte.
+    if let Some(reason) = shared.check(&mut shared.session()) {
+        remove_own_socket(&shared);
+        return Err(WalletError::validation(format!(
+            "{reason}; not unlocked, run `zwallet unlock` again"
+        )));
+    }
     Ok(Started {
         listener,
         shared,
@@ -198,29 +233,12 @@ async fn start(home: &Path) -> Result<Started> {
     })
 }
 
-/// The TTL and password from stdin (written by `start_daemon`), after which stdin is closed.
-fn read_unlock_input() -> Result<(Duration, zeroize::Zeroizing<String>)> {
-    let stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return Err(WalletError::validation(
-            "`zwallet daemon` is started by `zwallet unlock`, not by hand",
-        ));
-    }
-    // A maximal password plus the TTL line (at most 20 digits and a newline).
-    let raw = read_secret(stdin.as_raw_fd(), false, MAX_SECRET + 21)
-        .map_err(|e| WalletError::validation(format!("cannot read the unlock input: {e}")))?;
-    redirect_to_null(libc::STDIN_FILENO);
-    let (ttl, password) = protocol::decode_unlock_input(raw)?;
-    Ok((ttl, into_password(password)?))
-}
-
-/// Writes the readiness line to stdout (the unlocking CLI's pipe), then points stdout at
-/// /dev/null so the pipe closes. Returns whether the line was delivered.
+/// Writes one progress line to stdout (the unlocking CLI's pipe). Returns whether it was
+/// delivered.
 fn report(resp: &Response) -> bool {
     let mut line = serde_json::to_vec(resp).unwrap_or_default();
     line.push(b'\n');
     let mut rest = line.as_slice();
-    let mut ok = true;
     while !rest.is_empty() {
         // SAFETY: writes from a valid slice to fd 1.
         let n = unsafe { libc::write(libc::STDOUT_FILENO, rest.as_ptr().cast(), rest.len()) };
@@ -228,11 +246,17 @@ fn report(resp: &Response) -> bool {
             if std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
                 continue;
             }
-            ok = false;
-            break;
+            return false;
         }
         rest = &rest[n as usize..];
     }
+    true
+}
+
+/// The last line (readiness or the startup error), after which stdout points at /dev/null so
+/// the pipe closes.
+fn report_last(resp: &Response) -> bool {
+    let ok = report(resp);
     redirect_to_null(libc::STDOUT_FILENO);
     ok
 }

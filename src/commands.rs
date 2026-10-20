@@ -8,13 +8,13 @@ use crate::chains::{
 };
 use crate::cli::{
     AddressArgs, BalanceArgs, CallArgs, Cli, Command, CreateArgs, InvokeArgs, KeyArg, Out,
-    SendArgs, SignMessageArgs, TransferArgs, UnlockArgs, render_human,
+    SendArgs, SignMessageArgs, TransferArgs, UnlockArgs, VerifyArgs, render_human,
 };
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::password::{disable_core_dumps, read_password};
-use crate::core::protocol::{self, Request, SIGN_TIMEOUT};
-use crate::core::seed::{DEFAULT_WORD_COUNT, VALID_WORD_COUNTS};
+use crate::core::protocol::{self, DaemonExe, Request, SIGN_TIMEOUT};
+use crate::core::seed::{DEFAULT_WORD_COUNT, Seed, VALID_WORD_COUNTS};
 use crate::core::store::{self, KeyEntry, MasterOptions, WalletFile};
 use crate::core::time::parse_duration;
 use crate::daemon;
@@ -38,7 +38,7 @@ pub async fn run(cli: Cli) -> Result<Out> {
     match cli.command {
         Command::Chains => Ok(chains_list()),
         Command::Create(a) => create(&home()?, a).await,
-        Command::List => list(&home()?).await,
+        Command::List(v) => list(&home()?, v).await,
         Command::Change { name } => change(&home()?, &name).await,
         Command::Address(a) => address(&home()?, a).await,
         Command::Addresses(k) => addresses(&home()?, k).await,
@@ -51,8 +51,8 @@ pub async fn run(cli: Cli) -> Result<Out> {
         Command::Backup => backup(&home()?),
         Command::Unlock(a) => unlock(&home()?, a).await,
         Command::Lock => lock(&home()?).await,
-        Command::Daemon => {
-            daemon::run(home()?).await?;
+        Command::Daemon { home } => {
+            daemon::run(home).await?;
             Ok(Out::silent())
         }
     }
@@ -203,15 +203,15 @@ async fn daemon_derive(home: &Path, index: u32, chain: &Chain) -> Result<Option<
         .ok_or_else(|| WalletError::validation("daemon returned no address"))
 }
 
-/// wallet.json's cached address for `key` on `chain` must be the one derived from the seed; the
-/// cache is plain metadata that anyone running as this user can edit.
-fn check_cache(key: &KeyEntry, chain: &str, derived: &str) -> Result<()> {
+/// wallet.json's cached address for `key` on `chain` must be the one `by` derived from the seed;
+/// the cache is plain metadata that anyone running as this user can edit.
+fn check_cache(key: &KeyEntry, chain: &str, derived: &str, by: &str) -> Result<()> {
     match key.addresses.get(chain) {
         Some(cached) if !cached.eq_ignore_ascii_case(derived) => {
             Err(WalletError::validation(format!(
                 "wallet.json's cached {chain} address for key '{}' ({cached}) does not match \
-                 the address the key daemon derives from the seed ({derived}); the cache was \
-                 modified, do not send funds to it",
+                 the address {by} derives from the seed ({derived}); the cache was modified, do \
+                 not send funds to it",
                 key.name
             )))
         }
@@ -219,19 +219,22 @@ fn check_cache(key: &KeyEntry, chain: &str, derived: &str) -> Result<()> {
     }
 }
 
-/// A key's address on `chain` for display, and whether it was verified: cross-checked against
-/// the key daemon while unlocked (a mismatch is `VALIDATION_ERROR`), the unverified cache while
-/// locked.
-async fn verified_address(home: &Path, key: &KeyEntry, chain: &Chain) -> Result<(String, bool)> {
+const DAEMON: &str = "the key daemon";
+
+/// A key's address on `chain` without the password: the cache (the daemon's derivation for a
+/// chain added after the key), cross-checked against whatever key daemon answers. A mismatch is
+/// `VALIDATION_ERROR`, but a match proves nothing: a process of this user can run its own daemon
+/// over its own wallet.json, or squat the socket. So this is never `verified`.
+async fn cross_checked_address(home: &Path, key: &KeyEntry, chain: &Chain) -> Result<String> {
     if let Some(derived) = daemon_derive(home, key.index, chain).await? {
-        check_cache(key, chain.key, &derived)?;
-        return Ok((derived, true));
+        check_cache(key, chain.key, &derived, DAEMON)?;
+        return Ok(derived);
     }
-    Ok((key_address(home, key, chain).await?, false))
+    key_address(home, key, chain).await
 }
 
-const UNVERIFIED_NOTE: &str = "note: address read from wallet.json's cache, not verified \
-                               against the key (the wallet is locked)";
+/// The one-line note on every address shown without `verified: true`.
+const UNVERIFIED_NOTE: &str = "not verified: run `zwallet address --verify` before funding";
 
 /// Human text for a result object, with the unverified note when it applies.
 fn with_note(value: Value, verified: bool) -> Out {
@@ -243,8 +246,31 @@ fn with_note(value: Value, verified: bool) -> Out {
     Out::with_text(value, text)
 }
 
-async fn start_session(home: &Path, password: &str, ttl: Duration) -> Result<Value> {
-    protocol::start_daemon(home, password, ttl).await
+/// Decrypts wallet.json in this process with the human's password and checks every key's cached
+/// addresses against the seed (a mismatch is `VALIDATION_ERROR`). Addresses derived from this
+/// seed are the ones reported `verified: true`: no other process or file can make them.
+fn open_with_password(home: &Path, password_stdin: bool) -> Result<(Seed, WalletFile)> {
+    disable_core_dumps();
+    store::read_wallet_file(home)?;
+    let pw = read_password(password_stdin, "Wallet password: ", false)?;
+    let (unsealed, file) = store::unlock(home, &pw, &chains::derive_addresses)?;
+    Ok((unsealed.seed, file))
+}
+
+/// `key`'s address on `chain` derived from `seed` here, checked against the cache.
+fn derive_checked(seed: &Seed, key: &KeyEntry, chain: &Chain) -> Result<String> {
+    let derived = chain.family.keys().derive_address(seed, key.index)?;
+    check_cache(key, chain.key, &derived, "this process")?;
+    Ok(derived)
+}
+
+async fn start_session(
+    home: &Path,
+    exe: &DaemonExe,
+    password: &str,
+    ttl: Duration,
+) -> Result<Value> {
+    protocol::start_daemon(home, exe, password, ttl).await
 }
 
 async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
@@ -254,7 +280,9 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
     if ttl.is_some() {
         protocol::socket_path(home)?;
     }
-    let (file, addresses, master, password) = match store::read_wallet_file(home) {
+    // Pinned before any password prompt (see `DaemonExe`).
+    let exe = ttl.map(|_| DaemonExe::resolve()).transpose()?;
+    let (file, addresses, master, password, verified) = match store::read_wallet_file(home) {
         Err(e) if e.code == ErrorCode::WalletNotFound => {
             let words = a.words.unwrap_or(DEFAULT_WORD_COUNT);
             if !VALID_WORD_COUNTS.contains(&words) {
@@ -272,7 +300,7 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
             // Derived from the seed create_master generated in memory (and verified on disk
             // before publishing), not read back from the cache.
             let addresses = file.key(Some(&a.name))?.addresses.clone();
-            (file, addresses, "created", Some(pw))
+            (file, addresses, "created", Some(pw), true)
         }
         Err(e) => return Err(e),
         Ok(_) => {
@@ -282,7 +310,10 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
                 ));
             }
             let (file, addresses, pw) = add_subkey(home, &a, ttl.is_none()).await?;
-            (file, addresses, "existing", pw)
+            // Derived here from the seed the password opened, or else by whatever daemon
+            // answered.
+            let verified = pw.is_some();
+            (file, addresses, "existing", pw, verified)
         }
     };
     let key = file.key(Some(&a.name))?;
@@ -298,9 +329,10 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
         "master": master,
         "home": home.display().to_string(),
         "chains": CHAINS.iter().map(|c| c.key).collect::<Vec<_>>(),
+        "verified": verified,
     });
-    if let (Some(ttl), Some(pw)) = (ttl, password.as_deref()) {
-        let session = start_session(home, pw, ttl).await?;
+    if let (Some(ttl), Some(exe), Some(pw)) = (ttl, &exe, password.as_deref()) {
+        let session = start_session(home, exe, pw, ttl).await?;
         // The daemon derived the active key's address from the seed on its own; it must be the
         // key this call just created.
         let same = session["active"] == json!(a.name)
@@ -328,14 +360,15 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
             "Write down your recovery phrase now: run `zwallet backup` before funding this wallet."
         );
     }
-    Ok(Out::json(out))
+    Ok(with_note(out, verified))
 }
 
-/// Adds key `a.name` to an existing master: derived through the unlocked daemon (no password)
-/// when `may_use_daemon`, else from the seed decrypted with a one-off password. The password and
-/// scrypt run before the writer lock is taken, so a slow human never blocks other writers; the
-/// index is planned, derived and published under the lock, so concurrent creates get distinct
-/// indices.
+/// Adds key `a.name` to an existing master. With a terminal or `--password-stdin` (a human), or
+/// without `may_use_daemon`, it is derived here from the seed decrypted with a one-off password,
+/// and the password is returned. Otherwise (an agent, while unlocked) it is derived through
+/// whatever key daemon answers, and nothing proves which seed that is. The password and scrypt
+/// run before the writer lock is taken, so a slow human never blocks other writers; the index is
+/// planned, derived and published under the lock, so concurrent creates get distinct indices.
 async fn add_subkey(
     home: &Path,
     a: &CreateArgs,
@@ -345,7 +378,8 @@ async fn add_subkey(
     BTreeMap<String, String>,
     Option<Zeroizing<String>>,
 )> {
-    let local = if may_use_daemon && unlocked(home).await? {
+    let human = a.password.password_stdin || std::io::stdin().is_terminal();
+    let local = if may_use_daemon && !human && unlocked(home).await? {
         None
     } else {
         let pw = read_password(a.password.password_stdin, "Wallet password: ", false)?;
@@ -370,27 +404,25 @@ async fn add_subkey(
     Ok((file, addresses, local.map(|(.., pw)| pw)))
 }
 
-async fn list(home: &Path) -> Result<Out> {
-    let file = store::read_wallet_file(home)?;
+async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
     let primary = chains::find(PRIMARY_CHAIN)?;
-    let mut verified = true;
+    let (file, opened) = if v.verify {
+        let (seed, file) = open_with_password(home, v.password_stdin)?;
+        (file, Some(seed))
+    } else {
+        (store::read_wallet_file(home)?, None)
+    };
     let mut keys = Vec::new();
     for k in &file.keys {
-        // Once the wallet answers as locked, the rest is the cache too.
-        let derived = if verified {
-            daemon_derive(home, k.index, primary).await?
-        } else {
-            None
-        };
-        let address = match derived {
-            Some(d) => {
-                check_cache(k, primary.key, &d)?;
-                Some(d)
-            }
-            None => {
-                verified = false;
-                primary_address(k).cloned()
-            }
+        let address = match &opened {
+            Some(seed) => Some(derive_checked(seed, k, primary)?),
+            None => match daemon_derive(home, k.index, primary).await? {
+                Some(d) => {
+                    check_cache(k, primary.key, &d, DAEMON)?;
+                    Some(d)
+                }
+                None => primary_address(k).cloned(),
+            },
         };
         keys.push(json!({
             "name": k.name,
@@ -399,6 +431,7 @@ async fn list(home: &Path) -> Result<Out> {
             "active": k.name == file.active,
         }));
     }
+    let verified = opened.is_some();
     let mut text = keys
         .iter()
         .map(|k| {
@@ -424,24 +457,34 @@ async fn list(home: &Path) -> Result<Out> {
 
 async fn change(home: &Path, name: &str) -> Result<Out> {
     let primary = chains::find(PRIMARY_CHAIN)?;
-    // Check the target before switching to it, so a poisoned cache never becomes active.
+    // Check the target before switching to it, so a cache the daemon contradicts never becomes
+    // active.
     let file = store::read_wallet_file(home)?;
-    let (address, verified) = verified_address(home, file.key(Some(name))?, primary).await?;
+    let address = cross_checked_address(home, file.key(Some(name))?, primary).await?;
     let file = store::set_active(home, name)?;
     Ok(with_note(
-        json!({ "active": file.active, "address": address, "verified": verified }),
-        verified,
+        json!({ "active": file.active, "address": address, "verified": false }),
+        false,
     ))
 }
 
 async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
+    if a.verify.verify {
+        let (seed, file) = open_with_password(home, a.verify.password_stdin)?;
+        let key = file.key(a.key.key.as_deref())?;
+        let address = derive_checked(&seed, key, chain)?;
+        return Ok(with_note(
+            json!({ "chain": chain.key, "key": key.name, "address": address, "verified": true }),
+            true,
+        ));
+    }
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
-    let (address, verified) = verified_address(home, key, chain).await?;
+    let address = cross_checked_address(home, key, chain).await?;
     Ok(with_note(
-        json!({ "chain": chain.key, "key": key.name, "address": address, "verified": verified }),
-        verified,
+        json!({ "chain": chain.key, "key": key.name, "address": address, "verified": false }),
+        false,
     ))
 }
 
@@ -450,27 +493,18 @@ async fn addresses(home: &Path, k: KeyArg) -> Result<Out> {
     let key = file.key(k.key.as_deref())?;
     // One daemon derivation per family (EVM chains share an address), checked per chain.
     let mut derived: BTreeMap<&str, Option<String>> = BTreeMap::new();
-    let mut verified = true;
     let mut rows = Vec::new();
     for chain in CHAINS {
         let family = chain.family.name();
         if !derived.contains_key(family) {
-            let d = if verified {
-                daemon_derive(home, key.index, chain).await?
-            } else {
-                None
-            };
-            derived.insert(family, d);
+            derived.insert(family, daemon_derive(home, key.index, chain).await?);
         }
         let address = match &derived[family] {
             Some(d) => {
-                check_cache(key, chain.key, d)?;
+                check_cache(key, chain.key, d, DAEMON)?;
                 d.clone()
             }
-            None => {
-                verified = false;
-                key_address(home, key, chain).await?
-            }
+            None => key_address(home, key, chain).await?,
         };
         rows.push(json!({ "chainId": chain.key, "address": address }));
     }
@@ -485,12 +519,10 @@ async fn addresses(home: &Path, k: KeyArg) -> Result<Out> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    if !verified {
-        text.push('\n');
-        text.push_str(UNVERIFIED_NOTE);
-    }
+    text.push('\n');
+    text.push_str(UNVERIFIED_NOTE);
     Ok(Out::with_text(
-        json!({ "key": key.name, "addresses": rows, "verified": verified }),
+        json!({ "key": key.name, "addresses": rows, "verified": false }),
         text,
     ))
 }
@@ -515,6 +547,8 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
         "decimals": bal.decimals,
         "balance": format_units(bal.raw, bal.decimals),
         "raw": bal.raw.to_string(),
+        // From the cache in wallet.json (see `zwallet address --verify`).
+        "verified": false,
     });
     if let Some(token) = &a.token {
         out["token"] = json!(Evm.normalize_address(token)?);
@@ -803,7 +837,7 @@ async fn status(home: &Path) -> Result<Out> {
             out["expiresAt"] = d["expiresAt"].clone();
         }
     }
-    let mut verified = true;
+    let mut shows_address = false;
     if let Some(file) = &file {
         out["active"] = json!(file.active);
         if let Ok(key) = file.key(None) {
@@ -813,18 +847,18 @@ async fn status(home: &Path) -> Result<Out> {
             } else {
                 daemon_derive(home, key.index, primary).await?
             };
-            verified = derived.is_some();
             out["address"] = match derived {
                 Some(d) => {
-                    check_cache(key, primary.key, &d)?;
+                    check_cache(key, primary.key, &d, DAEMON)?;
                     json!(d)
                 }
                 None => json!(primary_address(key)),
             };
-            out["verified"] = json!(verified);
+            out["verified"] = json!(false);
+            shows_address = true;
         }
     }
-    Ok(with_note(out, verified))
+    Ok(with_note(out, !shows_address))
 }
 
 async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
@@ -834,8 +868,10 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
     // Fail before prompting when there is nothing to unlock. Nothing from this read is reported:
     // the human is shown what the daemon derived from the decrypted seed.
     store::read_wallet_file(home)?;
+    // Pinned before the prompt, so a binary swapped in while the human types is never started.
+    let exe = DaemonExe::resolve()?;
     let pw = read_password(a.password.password_stdin, "Wallet password: ", false)?;
-    let session = start_session(home, &pw, ttl).await?;
+    let session = start_session(home, &exe, &pw, ttl).await?;
     drop(pw);
     Ok(Out::json(json!({
         "locked": false,
@@ -844,6 +880,8 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
         "active": session["active"],
         "address": session["address"],
         "daemonPid": session["pid"],
+        // Derived by this process's own daemon child from the seed this password opened.
+        "verified": true,
     })))
 }
 

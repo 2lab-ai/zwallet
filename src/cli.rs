@@ -30,7 +30,7 @@ pub enum Command {
     /// becomes active.
     Create(CreateArgs),
     /// List keys (* = active). Works while locked.
-    List,
+    List(VerifyArgs),
     /// Make NAME the active key. Works while locked.
     Change { name: String },
     /// Address of a key on a chain (default: ethereum). Works while locked.
@@ -57,7 +57,11 @@ pub enum Command {
     Lock,
     /// The key-holding daemon (started by `unlock`).
     #[command(hide = true)]
-    Daemon,
+    Daemon {
+        /// Absolute wallet home (set by `unlock`; the process table shows it).
+        #[arg(long)]
+        home: std::path::PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -94,6 +98,19 @@ pub struct AddressArgs {
     pub chain: String,
     #[command(flatten)]
     pub key: KeyArg,
+    #[command(flatten)]
+    pub verify: VerifyArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    /// Decrypt the wallet here with the password and check the address against the seed; only
+    /// this reports `verified: true`. Run it before funding an address.
+    #[arg(long)]
+    pub verify: bool,
+    /// With --verify: read the password from one line of stdin instead of prompting.
+    #[arg(long, requires = "verify")]
+    pub password_stdin: bool,
 }
 
 #[derive(Debug, Args)]

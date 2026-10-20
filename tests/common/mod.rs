@@ -9,8 +9,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -127,8 +128,7 @@ impl Home {
         false
     }
 
-    /// Every process other than this test that is bound to this home's `d.sock` (by name, so
-    /// an orphan whose path was unlinked still counts) or holds its `d.lock`.
+    /// Every zwallet daemon process for this home, by argv in the process table.
     pub fn daemon_pids(&self) -> Vec<i32> {
         daemon_pids(self.path())
     }
@@ -211,85 +211,11 @@ pub fn run_in(home: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &st
     }
 }
 
-/// Pids (other than this process) bound to `<home>/d.sock` or holding `<home>/d.lock` open.
+/// Pids of the zwallet daemons for `home` (other than this process), found by argv
+/// (`zwallet daemon --home <home>`) in the OS process table: the same lookup `lock` uses, which
+/// also sees a non-dumpable daemon on Linux whose /proc fd directory is unreadable.
 pub fn daemon_pids(home: &Path) -> Vec<i32> {
-    let sock = home.join("d.sock");
-    let lock = home.join("d.lock");
-    let me = std::process::id() as i32;
-    let mut pids = platform_pids(&sock, &lock);
-    pids.retain(|p| *p != me);
-    pids.sort_unstable();
-    pids.dedup();
-    pids
-}
-
-#[cfg(target_os = "linux")]
-fn platform_pids(sock: &Path, lock: &Path) -> Vec<i32> {
-    // Socket inodes bound to `sock` by name, from /proc/net/unix (last column is the path).
-    let sock_name = sock.to_string_lossy().into_owned();
-    let inodes: Vec<String> = std::fs::read_to_string("/proc/net/unix")
-        .unwrap_or_default()
-        .lines()
-        .skip(1)
-        .filter_map(|l| {
-            let cols: Vec<&str> = l.split_whitespace().collect();
-            (cols.len() >= 8 && cols[7] == sock_name).then(|| cols[6].to_string())
-        })
-        .collect();
-    let mut pids = Vec::new();
-    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
-            continue;
-        };
-        let fds = entry.path().join("fd");
-        for fd in std::fs::read_dir(fds).into_iter().flatten().flatten() {
-            let Ok(target) = std::fs::read_link(fd.path()) else {
-                continue;
-            };
-            let t = target.to_string_lossy();
-            if target == lock || inodes.iter().any(|i| t == format!("socket:[{i}]")) {
-                pids.push(pid);
-            }
-        }
-    }
-    pids
-}
-
-#[cfg(not(target_os = "linux"))]
-fn platform_pids(sock: &Path, lock: &Path) -> Vec<i32> {
-    let mut pids = Vec::new();
-    // `-F pn`: one `p<pid>` line per process, then `n<name>` per file; unix sockets carry the
-    // bound path as their name even after the path itself was unlinked.
-    let out = Command::new("lsof")
-        .args(["-nP", "-U", "-F", "pn"])
-        .stderr(Stdio::null())
-        .output()
-        .expect("lsof");
-    let want = format!("n{}", sock.display());
-    let mut current = None;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if let Some(p) = line.strip_prefix('p') {
-            current = p.parse::<i32>().ok();
-        } else if line == want
-            && let Some(p) = current
-        {
-            pids.push(p);
-        }
-    }
-    if lock.exists() {
-        let out = Command::new("lsof")
-            .arg("-t")
-            .arg(lock)
-            .stderr(Stdio::null())
-            .output()
-            .expect("lsof");
-        pids.extend(
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter_map(|l| l.trim().parse::<i32>().ok()),
-        );
-    }
-    pids
+    zwallet::core::protocol::daemon_pids(home, None).expect("process table")
 }
 
 /// A listener squatting on a socket path, recording every byte any client sends and answering
@@ -302,6 +228,20 @@ pub struct FakeDaemon {
 
 impl FakeDaemon {
     pub fn bind(path: &Path) -> Self {
+        Self::bind_with_reply(path, FAKE_REPLY.to_vec())
+    }
+
+    /// Answers every request with `result` (as an ok reply), e.g. the address it read from the
+    /// cache in wallet.json.
+    pub fn answering(path: &Path, result: Value) -> Self {
+        let mut reply =
+            serde_json::to_vec(&serde_json::json!({ "v": 2, "ok": true, "result": result }))
+                .unwrap();
+        reply.push(b'\n');
+        Self::bind_with_reply(path, reply)
+    }
+
+    fn bind_with_reply(path: &Path, reply: Vec<u8>) -> Self {
         let listener = UnixListener::bind(path).expect("bind fake daemon");
         listener.set_nonblocking(true).unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -316,7 +256,7 @@ impl FakeDaemon {
                         let mut buf = Vec::new();
                         let _ = s.read_to_end(&mut buf);
                         rx.lock().unwrap().push(buf);
-                        let _ = s.write_all(FAKE_REPLY);
+                        let _ = s.write_all(&reply);
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(5)),
                 }
@@ -383,4 +323,165 @@ pub fn drain_pty(master: &File) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `TIOCSCTTY` (make this terminal the controlling one); libc does not define it for macOS.
+#[cfg(target_os = "macos")]
+const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
+#[cfg(not(target_os = "macos"))]
+const TIOCSCTTY: libc::c_ulong = libc::TIOCSCTTY as libc::c_ulong;
+
+/// A process whose stdin and controlling terminal (`/dev/tty`) is a pty, as when a human runs it
+/// at a terminal; stdout and stderr are piped.
+pub struct PtyChild {
+    pub child: Child,
+    pub master: File,
+    seen: String,
+    /// Kept open: on macOS the pty drops unread output once every slave is closed.
+    _slave: OwnedFd,
+}
+
+impl PtyChild {
+    pub fn spawn(mut cmd: Command) -> Self {
+        let (master, slave) = openpty();
+        cmd.stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // SAFETY: setsid and ioctl are async-signal-safe; fd 0 is the pty slave by now.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 || libc::ioctl(0, TIOCSCTTY as _, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().expect("spawn on pty");
+        Self {
+            child,
+            master,
+            seen: String::new(),
+            _slave: slave,
+        }
+    }
+
+    /// Waits (bounded) until the terminal shows `needle`, e.g. a password prompt.
+    pub fn wait_for(&mut self, needle: &str, limit: Duration) {
+        let start = Instant::now();
+        loop {
+            self.seen.push_str(&drain_pty(&self.master));
+            if self.seen.contains(needle) {
+                self.seen.clear();
+                return;
+            }
+            assert!(
+                start.elapsed() < limit,
+                "no {needle:?} on the terminal within {limit:?}; saw {:?}",
+                self.seen
+            );
+            if let Ok(Some(status)) = self.child.try_wait() {
+                panic!(
+                    "exited ({status}) before showing {needle:?}; saw {:?}",
+                    self.seen
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Types one line, as a human would at the prompt.
+    pub fn type_line(&self, line: &str) {
+        (&self.master)
+            .write_all(format!("{line}\n").as_bytes())
+            .unwrap();
+    }
+
+    /// Waits (bounded) for the exit and collects stdout and stderr. The terminal is drained
+    /// meanwhile: a session leader's exit waits until its terminal output has been read.
+    pub fn finish(mut self) -> Output {
+        let pipe = |r: Option<Box<dyn Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut v = Vec::new();
+                if let Some(mut r) = r {
+                    let _ = r.read_to_end(&mut v);
+                }
+                v
+            })
+        };
+        let out = pipe(self.child.stdout.take().map(|s| Box::new(s) as _));
+        let err = pipe(self.child.stderr.take().map(|s| Box::new(s) as _));
+        let start = Instant::now();
+        let status = loop {
+            self.seen.push_str(&drain_pty(&self.master));
+            if let Some(status) = self.child.try_wait().unwrap() {
+                break status;
+            }
+            if start.elapsed() > Duration::from_secs(120) {
+                let _ = self.child.kill();
+                panic!("still running after 120s; terminal {:?}", self.seen);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        Output {
+            status,
+            stdout: out.join().unwrap(),
+            stderr: err.join().unwrap(),
+        }
+    }
+}
+
+/// A minimal JSON-RPC node on 127.0.0.1 answering each method with `result(method)`, for the
+/// commands that need RPC (e.g. `balance`). Returns its URL; it lives until the test exits.
+pub fn tiny_rpc(result: fn(&str) -> Value) -> String {
+    use std::io::BufRead;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut writer = stream.try_clone().unwrap();
+                let mut reader = std::io::BufReader::new(stream);
+                loop {
+                    let mut len = 0usize;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let l = line.trim_end();
+                        if l.is_empty() {
+                            break;
+                        }
+                        if let Some((k, v)) = l.split_once(':')
+                            && k.eq_ignore_ascii_case("content-length")
+                        {
+                            len = v.trim().parse().unwrap();
+                        }
+                    }
+                    let mut body = vec![0u8; len];
+                    if reader.read_exact(&mut body).is_err() {
+                        return;
+                    }
+                    let req: Value = serde_json::from_slice(&body).unwrap();
+                    let text = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req["id"],
+                        "result": result(req["method"].as_str().unwrap_or("")),
+                    })
+                    .to_string();
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        text.len()
+                    );
+                    if writer.write_all(head.as_bytes()).is_err()
+                        || writer.write_all(text.as_bytes()).is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    url
 }

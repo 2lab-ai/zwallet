@@ -6,7 +6,11 @@
 //!
 //! Every write of wallet.json holds an exclusive flock on `<home>/w.lock` across read, check,
 //! mutate and publish, so concurrent writers serialize instead of losing each other's keys. The
-//! lock files (`w.lock`, and the daemon's `d.lock`) are empty and never unlinked while in use.
+//! lock files (`w.lock`, and the daemon's `d.lock` and `u.lock`) are empty and never unlinked: a
+//! waiter may hold an open handle on one at any time.
+//!
+//! wallet.json is only ever read through [`read_wallet_bytes`]: opened without following a link
+//! and without blocking, and accepted only as a regular file of this user's, at most 1 MiB.
 
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
@@ -21,8 +25,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
-use std::io::{ErrorKind, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -42,6 +46,8 @@ pub const DIR_MODE: u32 = 0o700;
 pub const FILE_MODE: u32 = 0o600;
 /// How long a writer waits for another writer's `w.lock` before giving up.
 const WRITE_LOCK_WAIT: Duration = Duration::from_secs(10);
+/// The most wallet.json may weigh; a larger file is refused before it is parsed.
+const MAX_WALLET_FILE: u64 = 1 << 20;
 
 /// Resolves the wallet home: `$ZWALLET_HOME` if set and non-empty, else `<user home>/.zwallet`.
 /// `user_home` is supplied by the caller (`std::env::home_dir`) so this stays testable.
@@ -344,21 +350,7 @@ pub fn read_wallet_file(home: &Path) -> Result<WalletFile> {
 }
 
 fn parse_wallet_file(path: &Path) -> Result<WalletFile> {
-    let bytes = match fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            return Err(WalletError::new(
-                ErrorCode::WalletNotFound,
-                format!("{} does not exist", path.display()),
-            ));
-        }
-        Err(e) => {
-            return Err(WalletError::validation(format!(
-                "cannot read {}: {e}",
-                path.display()
-            )));
-        }
-    };
+    let bytes = read_wallet_bytes(path)?;
     let file: WalletFile = serde_json::from_slice(&bytes)
         .map_err(|e| WalletError::validation(format!("{} is not valid: {e}", path.display())))?;
     if file.version != STORE_VERSION {
@@ -368,6 +360,67 @@ fn parse_wallet_file(path: &Path) -> Result<WalletFile> {
         )));
     }
     Ok(file)
+}
+
+/// Reads a wallet file without ever blocking or following a link: it is opened with
+/// `O_NOFOLLOW | O_NONBLOCK` (so a FIFO planted in its place cannot hang the reader, e.g. the
+/// daemon's tick under its session lock), and must then be a regular file owned by this user and
+/// at most 1 MiB. A missing file is `WALLET_NOT_FOUND`; anything else wrong is
+/// `VALIDATION_ERROR`.
+pub fn read_wallet_bytes(path: &Path) -> Result<Vec<u8>> {
+    let refuse = |why: String| {
+        WalletError::validation(format!("refusing to read {}: {why}", path.display()))
+    };
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Err(WalletError::new(
+                ErrorCode::WalletNotFound,
+                format!("{} does not exist", path.display()),
+            ));
+        }
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(refuse("it is a symbolic link".into()));
+        }
+        Err(e) => {
+            return Err(WalletError::validation(format!(
+                "cannot read {}: {e}",
+                path.display()
+            )));
+        }
+    };
+    let meta = file
+        .metadata()
+        .map_err(|e| WalletError::validation(format!("cannot inspect {}: {e}", path.display())))?;
+    if !meta.file_type().is_file() {
+        return Err(refuse("it is not a regular file".into()));
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let me = unsafe { libc::geteuid() };
+    if meta.uid() != me {
+        return Err(refuse(format!(
+            "it is owned by uid {}, not this user",
+            meta.uid()
+        )));
+    }
+    let too_big = || refuse("it is larger than 1 MiB".into());
+    if meta.len() > MAX_WALLET_FILE {
+        return Err(too_big());
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    // The file can grow after fstat: never read more than the limit.
+    (&file)
+        .take(MAX_WALLET_FILE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| WalletError::validation(format!("cannot read {}: {e}", path.display())))?;
+    if bytes.len() as u64 > MAX_WALLET_FILE {
+        return Err(too_big());
+    }
+    Ok(bytes)
 }
 
 /// Decrypts the master seed and checks every key's cached addresses against it.
@@ -440,24 +493,18 @@ pub enum CreateStage<'a> {
     Published(&'a Path),
 }
 
-/// Paths this invocation created. On a failure before publication exactly these are removed: its
-/// temp files, and the home directory (with its lock file) only if this call created it.
+/// Private temp files this invocation created; on a failure before publication exactly these are
+/// removed. Never the home or a lock file: another creator may already be waiting on `w.lock`
+/// in that home, and unlinking it would let a third one lock a different file.
 #[derive(Default)]
 struct Journal {
     temps: Vec<PathBuf>,
-    dir: Option<PathBuf>,
 }
 
 impl Journal {
     fn rollback(&self) {
         for f in self.temps.iter().rev() {
             let _ = fs::remove_file(f);
-        }
-        if let Some(d) = &self.dir {
-            // Nobody else can have published into a home this call created and still holds:
-            // remove_dir only succeeds once it is empty again.
-            let _ = fs::remove_file(d.join(WRITE_LOCK));
-            let _ = fs::remove_dir(d);
         }
     }
 }
@@ -468,9 +515,10 @@ impl Journal {
 ///
 /// Writes a temp file, reads it back from disk, decrypts it with the same password, checks the
 /// derived addresses and the phrase, and only then links it into place as `wallet.json` (link,
-/// unlike rename, never clobbers a concurrent wallet). A failure before that removes only what
-/// this call created. Once published, wallet.json is never removed: a later failure returns an
-/// error naming the file and saying recovery is needed. Refuses if `wallet.json` already exists.
+/// unlike rename, never clobbers a concurrent wallet). A failure before that removes only this
+/// call's temp files; a home directory it created stays, with its lock file. Once published,
+/// wallet.json is never removed: a later failure returns an error naming the file and saying
+/// recovery is needed. Refuses if `wallet.json` already exists.
 pub fn create_master(
     home: &Path,
     password: &str,
@@ -491,6 +539,13 @@ pub fn create_master_with_hook(
 ) -> Result<WalletFile> {
     validate_key_name(first_key)?;
     validate_new_password(password)?;
+    if !crate::core::seed::VALID_WORD_COUNTS.contains(&opts.words) {
+        return Err(WalletError::validation(format!(
+            "--words must be one of {:?}, got {}",
+            crate::core::seed::VALID_WORD_COUNTS,
+            opts.words
+        )));
+    }
     let mut journal = Journal::default();
     let wallet_path = home.join(WALLET_FILE);
     match create_steps(home, password, first_key, opts, derive, hook, &mut journal) {
@@ -535,7 +590,7 @@ fn create_steps(
     if fs::symlink_metadata(&wallet_path).is_ok() {
         return Err(Failure::Before(wallet_exists(home)));
     }
-    ensure_home_dir(home, journal).map_err(Failure::Before)?;
+    ensure_home_dir(home).map_err(Failure::Before)?;
     let _lock = MetaLock::acquire(home).map_err(Failure::Before)?;
     let before = |e| Failure::Before(e);
     if fs::symlink_metadata(&wallet_path).is_ok() {
@@ -599,19 +654,21 @@ fn create_steps(
     }
     sync_dir(home).map_err(after)?;
     hook(CreateStage::Published(&wallet_path)).map_err(after)?;
-    match fs::read(&wallet_path) {
+    match read_wallet_bytes(&wallet_path) {
         Ok(b) if b == bytes => Ok(file),
         Ok(_) => Err(after(WalletError::validation(
             "wallet.json changed right after it was written",
         ))),
         Err(e) => Err(after(WalletError::validation(format!(
-            "cannot read it back: {e}"
+            "cannot read it back: {}",
+            e.message
         )))),
     }
 }
 
 /// The derivation index the next [`add_key`] will use, after checking the name is free: past
-/// both `nextIndex` and every index in use, so a hand-edited counter can never reuse a key.
+/// both `nextIndex` and every index in use, so a hand-edited counter can never reuse a key. An
+/// index with no successor to store as the next `nextIndex` is `VALIDATION_ERROR`.
 pub fn plan_new_key(file: &WalletFile, name: &str) -> Result<u32> {
     validate_key_name(name)?;
     if file.keys.iter().any(|k| k.name == name) {
@@ -621,12 +678,16 @@ pub fn plan_new_key(file: &WalletFile, name: &str) -> Result<u32> {
         ));
     }
     let past_used = match file.keys.iter().map(|k| k.index).max() {
-        Some(i) => i
-            .checked_add(1)
-            .ok_or_else(|| WalletError::validation("no derivation index left"))?,
+        Some(i) => i.checked_add(1).ok_or_else(no_index_left)?,
         None => 0,
     };
-    Ok(file.next_index.max(past_used))
+    let index = file.next_index.max(past_used);
+    index.checked_add(1).ok_or_else(no_index_left)?;
+    Ok(index)
+}
+
+fn no_index_left() -> WalletError {
+    WalletError::validation("wallet.json has no derivation index left for a new key")
 }
 
 /// Exclusive writer lock on `<home>/w.lock`, held across read → check → mutate → publish.
@@ -675,7 +736,7 @@ impl MetaLock {
                 created_at: time::now_rfc3339(),
                 addresses: addresses.clone(),
             });
-            file.next_index = index + 1;
+            file.next_index = index.checked_add(1).ok_or_else(no_index_left)?;
             file.active = name.to_string();
             Ok(())
         })
@@ -811,17 +872,30 @@ fn wallet_exists(home: &Path) -> WalletError {
     )
 }
 
-/// Creates `home` with 0700 (recording it if new, and syncing its parent so the new entry is
-/// durable) or tightens an existing one to 0700.
-fn ensure_home_dir(home: &Path, journal: &mut Journal) -> Result<()> {
+/// Creates `home` with 0700, or tightens an existing one to 0700. Only the final directory is
+/// created: its parent must already exist (`VALIDATION_ERROR` naming it otherwise), and is
+/// fsynced so the new entry survives a crash.
+fn ensure_home_dir(home: &Path) -> Result<()> {
     let fail = |e: std::io::Error| {
         WalletError::validation(format!(
             "cannot prepare wallet home {}: {e}",
             home.display()
         ))
     };
-    match fs::metadata(home) {
-        Ok(meta) => {
+    let parent = home
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| {
+            WalletError::validation(format!("wallet home {} has no parent", home.display()))
+        })?;
+    match DirBuilder::new().mode(DIR_MODE).create(home) {
+        Ok(()) => {
+            // umask can only clear bits; set the mode explicitly anyway.
+            fs::set_permissions(home, fs::Permissions::from_mode(DIR_MODE)).map_err(fail)?;
+            sync_dir(parent)
+        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            let meta = fs::metadata(home).map_err(fail)?;
             if !meta.is_dir() {
                 return Err(WalletError::validation(format!(
                     "wallet home {} exists and is not a directory",
@@ -831,23 +905,15 @@ fn ensure_home_dir(home: &Path, journal: &mut Journal) -> Result<()> {
             if meta.permissions().mode() & 0o777 != DIR_MODE {
                 fs::set_permissions(home, fs::Permissions::from_mode(DIR_MODE)).map_err(fail)?;
             }
+            Ok(())
         }
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            DirBuilder::new()
-                .recursive(true)
-                .mode(DIR_MODE)
-                .create(home)
-                .map_err(fail)?;
-            journal.dir = Some(home.to_path_buf());
-            // umask can only clear bits; set the mode explicitly anyway.
-            fs::set_permissions(home, fs::Permissions::from_mode(DIR_MODE)).map_err(fail)?;
-            if let Some(parent) = home.parent() {
-                sync_dir(parent)?;
-            }
-        }
-        Err(e) => return Err(fail(e)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Err(WalletError::validation(format!(
+            "the parent of wallet home {}, {}, does not exist; create it first",
+            home.display(),
+            parent.display()
+        ))),
+        Err(e) => Err(fail(e)),
     }
-    Ok(())
 }
 
 /// Creates `path` exclusively with mode 0600, writes `bytes`, and fsyncs.
@@ -1163,10 +1229,10 @@ mod tests {
         let home = tmp.path().join("fresh");
         let err = create_master_with_hook(&home, PW, "a", opts, &fake_derive, &boom).unwrap_err();
         assert_eq!(err.message, "injected");
-        assert!(
-            !home.exists(),
-            "home created by this call should be removed"
-        );
+        // The temp file is gone; the home and its lock file stay (another creator may wait on
+        // that lock).
+        assert!(data_names(&home).is_empty(), "{:?}", names(&home));
+        assert!(home.join(WRITE_LOCK).exists());
 
         let home2 = tmp.path().join("existing");
         fs::create_dir(&home2).unwrap();
@@ -1290,7 +1356,11 @@ mod tests {
             "{}",
             err.message
         );
-        assert!(!home.exists(), "nothing left behind");
+        assert!(
+            data_names(&home).is_empty(),
+            "nothing left behind but the home and its lock: {:?}",
+            names(&home)
+        );
     }
 
     #[test]
@@ -1361,6 +1431,133 @@ mod tests {
         let mut indices: Vec<u32> = file.keys.iter().map(|k| k.index).collect();
         indices.sort_unstable();
         assert_eq!(indices, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn failed_creator_never_unlinks_the_lock_a_waiter_holds() {
+        // K7: creator A made the home and holds w.lock; creator B waits on that same lock file.
+        // A then fails before publishing. Its rollback must leave w.lock and the home in place,
+        // so B, once it gets the lock, creates the wallet in that home.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("zw");
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
+        let (fail_tx, fail_rx) = std::sync::mpsc::channel::<()>();
+        let fail_rx = std::sync::Mutex::new(fail_rx);
+        let hook = |stage: CreateStage| match stage {
+            CreateStage::TempWritten(_) => {
+                holding_tx.send(()).unwrap();
+                fail_rx.lock().unwrap().recv().unwrap();
+                Err(WalletError::validation("injected"))
+            }
+            CreateStage::Published(_) => Ok(()),
+        };
+        let b = std::thread::scope(|s| {
+            let a =
+                s.spawn(|| create_master_with_hook(&home, PW, "a", fast(), &fake_derive, &hook));
+            holding_rx.recv().unwrap();
+            let b = s.spawn(|| create_master(&home, PW, "b", fast(), &fake_derive));
+            // B is now waiting on w.lock (it polls every 20 ms).
+            std::thread::sleep(Duration::from_millis(300));
+            fail_tx.send(()).unwrap();
+            assert_eq!(a.join().unwrap().unwrap_err().message, "injected");
+            b.join().unwrap()
+        });
+        let file = b.unwrap_or_else(|e| panic!("the waiting creator failed: {}", e.message));
+        assert_eq!(file.active, "b");
+        assert_eq!(
+            data_names(&home),
+            vec![OsString::from(WALLET_FILE)],
+            "no temp file left"
+        );
+        assert!(home.join(WRITE_LOCK).exists());
+        unlock(&home, PW, &fake_derive).unwrap();
+    }
+
+    #[test]
+    fn missing_home_parent_is_a_validation_error_naming_it() {
+        // K8: only the final directory is created; its parent must already exist.
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("missing");
+        let home = parent.join("zw");
+        let err = create_master(&home, PW, "a", fast(), &fake_derive).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError);
+        assert!(
+            err.message.contains(&parent.display().to_string()),
+            "{}",
+            err.message
+        );
+        assert!(!parent.exists(), "no ancestor directory was created");
+    }
+
+    #[test]
+    fn exhausted_index_counter_is_a_validation_error_and_leaves_the_file() {
+        // K9: a hand-edited nextIndex at u32::MAX has no successor to store.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        create_master(home, PW, "a", fast(), &fake_derive).unwrap();
+        let path = home.join(WALLET_FILE);
+        let mut file = read_wallet_file(home).unwrap();
+        file.next_index = u32::MAX;
+        fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+        let before = fs::read(&path).unwrap();
+        let err = plan_new_key(&file, "b").unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError, "{}", err.message);
+        let seed = test_seed();
+        let err = add_key(home, "b", u32::MAX, fake_derive(&seed, u32::MAX).unwrap()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError, "{}", err.message);
+        assert_eq!(fs::read(&path).unwrap(), before, "wallet.json unchanged");
+
+        // The same through the highest index in use rather than the counter.
+        file.next_index = 1;
+        file.keys[0].index = u32::MAX - 1;
+        assert_eq!(
+            plan_new_key(&file, "b").unwrap_err().code,
+            ErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn wallet_file_reads_refuse_fifos_links_and_oversized_files() {
+        // K10: a FIFO in place of wallet.json must fail fast instead of blocking the reader.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let path = home.join(WALLET_FILE);
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: mkfifo with a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = {
+            let home = home.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(read_wallet_file(&home).map(|_| ()));
+            })
+        };
+        let got = rx.recv_timeout(Duration::from_secs(2));
+        if got.is_err() {
+            // Unblock the stuck reader so the test can end.
+            let _ = OpenOptions::new().write(true).open(&path);
+        }
+        let _ = reader.join();
+        let err = got
+            .expect("reading a FIFO wallet.json blocked")
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError, "{}", err.message);
+        fs::remove_file(&path).unwrap();
+
+        // A symlink to a real wallet is refused, not followed.
+        let real = tmp.path().join("real");
+        create_master(&real, PW, "a", fast(), &fake_derive).unwrap();
+        std::os::unix::fs::symlink(real.join(WALLET_FILE), &path).unwrap();
+        assert_eq!(
+            read_wallet_file(&home).unwrap_err().code,
+            ErrorCode::ValidationError
+        );
+        fs::remove_file(&path).unwrap();
+
+        // Larger than 1 MiB: refused before it is parsed.
+        fs::write(&path, vec![b' '; (1 << 20) + 1]).unwrap();
+        let err = read_wallet_file(&home).unwrap_err();
+        assert!(err.message.contains("1 MiB"), "{}", err.message);
     }
 
     #[test]

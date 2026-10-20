@@ -66,6 +66,31 @@ pub fn read_secret(fd: RawFd, line: bool, max: usize) -> std::io::Result<Zeroizi
     Ok(buf)
 }
 
+/// Reads exactly `len` bytes from `fd` with raw read(2) into one zeroized buffer of that size
+/// (the daemon's password, whose length the unlocking CLI sends first). EOF before that is an
+/// error.
+pub fn read_exact_secret(fd: RawFd, len: usize) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    let mut buf = Zeroizing::new(vec![0u8; len]);
+    let mut got = 0;
+    while got < len {
+        let free = &mut buf[got..];
+        // SAFETY: `free` is a valid writable region of `free.len()` bytes for the whole call.
+        let n = unsafe { libc::read(fd, free.as_mut_ptr().cast(), free.len()) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        if n == 0 {
+            return Err(std::io::Error::from(ErrorKind::UnexpectedEof));
+        }
+        got += n as usize;
+    }
+    Ok(buf)
+}
+
 /// Turns raw secret bytes into a password without copying them: one trailing `\n` or `\r\n` is
 /// dropped, and invalid UTF-8 is wiped before the error is returned.
 pub fn into_password(mut raw: Zeroizing<Vec<u8>>) -> Result<Zeroizing<String>> {
