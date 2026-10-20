@@ -414,9 +414,11 @@ fn node_rejection_is_rpc_error_not_broadcast_uncertain() {
         // Below the pool's minimum price (not a replacement).
         "transaction underpriced: gas tip cap 1, minimum needed 25000000",
     ];
+    // Each answer is a separate case, not a retry: --allow-duplicate.
+    let args = transfer(&rpc.url, &["--allow-duplicate"]);
     for (i, why) in rejections.into_iter().enumerate() {
         *answer.lock().unwrap() = why;
-        let r = home.run(&transfer(&rpc.url, &[]));
+        let r = home.run(&args);
         let msg = r.err("RPC_ERROR");
         assert!(
             msg.contains("the node rejected the transaction; nothing was broadcast"),
@@ -442,8 +444,7 @@ fn node_rejection_is_rpc_error_not_broadcast_uncertain() {
     assert!(rpc.calls("eth_getTransactionByHash").is_empty());
     // Any other error text still asks for the transaction and stays uncertain.
     *answer.lock().unwrap() = "internal error";
-    home.run(&transfer(&rpc.url, &[]))
-        .err("BROADCAST_UNCERTAIN");
+    home.run(&args).err("BROADCAST_UNCERTAIN");
     assert!(!rpc.calls("eth_getTransactionByHash").is_empty());
 }
 
@@ -477,7 +478,8 @@ fn nonce_too_low_for_the_same_tx_is_success() {
         "replacement transaction underpriced",
     ] {
         let rpc = send_error_node(why, true);
-        let v = home.run(&transfer(&rpc.url, &[])).ok();
+        // Two separate cases in one home, not a retry.
+        let v = home.run(&transfer(&rpc.url, &["--allow-duplicate"])).ok();
         let sent = rpc.sent();
         assert_eq!(sent.len(), 1, "the CLI must send exactly once");
         assert_eq!(v["txHash"], tx_hash_of(&sent[0]).as_str(), "{v:#}");
@@ -945,7 +947,8 @@ fn rpc_returning_another_hash_is_reconciled_by_the_computed_hash() {
         },
         _ => healthy(m, p),
     });
-    let v = home.run(&transfer(&rpc.url, &[])).ok();
+    // A separate case in the same home, not a retry.
+    let v = home.run(&transfer(&rpc.url, &["--allow-duplicate"])).ok();
     assert_eq!(v["txHash"], tx_hash_of(&rpc.sent()[0]).as_str(), "{v:#}");
     assert_eq!(v["rpcTxHash"], bogus.as_str(), "{v:#}");
     assert!(
@@ -1011,8 +1014,11 @@ fn a_send_while_another_from_the_key_is_in_flight_fails_fast_and_signs_nothing()
         assert_eq!(first.join().unwrap().ok()["nonce"], PENDING_NONCE);
     });
     assert_eq!(rpc.sent().len(), 1);
-    // Once the first send is done, the lock is free for the next payment.
-    assert_eq!(home.run(&args).ok()["nonce"], PENDING_NONCE + 1);
+    // Once the first send is done, the lock is free for the next payment (the same recipient
+    // and amount, so it must say it is a second payment).
+    let mut next = args.clone();
+    next.push("--allow-duplicate");
+    assert_eq!(home.run(&next).ok()["nonce"], PENDING_NONCE + 1);
     let nonces: Vec<u64> = rpc.sent().iter().map(|raw| nonce_of(raw)).collect();
     assert_eq!(nonces, vec![PENDING_NONCE, PENDING_NONCE + 1]);
     // The per-(chain, account) lock file in the home.
@@ -1160,10 +1166,22 @@ fn a_fresh_send_while_one_is_pending_is_refused_unless_allow_pending() {
     // A dry-run reports the pending nonces instead of refusing.
     let dry = home.run(&transfer(&rpc.url, &["--dry-run"])).ok();
     assert_eq!(dry["pendingNonces"], json!([7]));
-    // A different payment, said so explicitly.
-    let v = home.run(&transfer(&rpc.url, &["--allow-pending"])).ok();
+    assert_eq!(dry["duplicateSends"][0]["txHash"], first_hash.as_str());
+    // --allow-pending alone: the same recipient and amount as the pending send is still a
+    // likely repeat.
+    let v = home.run(&transfer(&rpc.url, &["--allow-pending"])).json();
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v:#}");
+    assert_eq!(v["duplicateSends"][0]["txHash"], first_hash.as_str());
+    // A second payment, said so explicitly.
+    let v = home
+        .run(&transfer(
+            &rpc.url,
+            &["--allow-pending", "--allow-duplicate"],
+        ))
+        .ok();
     assert_eq!(v["nonce"], PENDING_NONCE + 1);
     assert_eq!(v["pendingNonces"], json!([7]));
+    assert_eq!(v["duplicateSends"][0]["txHash"], first_hash.as_str());
     assert_eq!(rpc.sent().len(), 2);
 }
 
@@ -1228,7 +1246,7 @@ fn human_errors_print_the_send_details() {
     assert!(r.stderr.contains("[BROADCAST_UNCERTAIN]"), "{}", r.stderr);
     // A refused transaction is named as such.
     let refused = send_error_node("nonce too low", false);
-    let mut args = transfer(&refused.url, &[]);
+    let mut args = transfer(&refused.url, &["--allow-duplicate"]);
     args.retain(|a| *a != "--json");
     let r = home.run(&args);
     let hash = tx_hash_of(&refused.sent()[0]);
@@ -1392,4 +1410,150 @@ fn rpc_url_path_and_query_are_never_printed() {
     assert!(msg.ends_with(&format!("HTTP 401 from {origin}")), "{msg}");
     assert!(!msg.contains("invalid project id"), "{msg}");
     assert!(!leaks(&r), "{}", r.stdout);
+}
+
+/// A node whose nonces count what it accepted, mined at once (`latest` = `pending`).
+fn mining_node() -> MockRpc {
+    let accepted = Arc::new(AtomicUsize::new(0));
+    MockRpc::start(move |m, p| match m {
+        "eth_getTransactionCount" => Reply::Result(hex(
+            u128::from(PENDING_NONCE) + accepted.load(Ordering::SeqCst) as u128
+        )),
+        "eth_sendRawTransaction" => {
+            accepted.fetch_add(1, Ordering::SeqCst);
+            healthy(m, p)
+        }
+        // Any token contract: 6 decimals, symbol "USDC", a large balance.
+        "eth_call" => {
+            let tx = &p[0];
+            let data = tx["input"].as_str().or(tx["data"].as_str()).unwrap_or("");
+            let word = |n: u128| format!("{n:064x}");
+            Reply::Result(json!(match &data[..10.min(data.len())] {
+                "0x313ce567" => format!("0x{}", word(6)),
+                "0x70a08231" => format!("0x{}", word(10u128.pow(12))),
+                "0x95d89b41" => format!("0x{}{}{:0<64}", word(32), word(4), "55534443"),
+                other => panic!("mock: unexpected eth_call {other}"),
+            }))
+        }
+        _ => healthy(m, p),
+    })
+}
+
+/// `transfer` of `amount` (instead of 0.01) to OTHER.
+fn transfer_amount<'a>(rpc: &'a str, amount: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = transfer(rpc, extra);
+    args[6] = amount;
+    args
+}
+
+#[test]
+fn a_repeat_of_a_recent_send_is_refused_unless_allow_duplicate() {
+    let (home, me) = unlocked();
+    let rpc = mining_node();
+    let args = transfer(&rpc.url, &[]);
+    let first = home.run(&args).ok();
+    let first_hash = first["txHash"].as_str().unwrap().to_string();
+    assert_eq!(first["duplicateSends"], json!([]));
+    // The first was mined (nothing pending), and the harness runs the same command again.
+    let r = home.run(&args);
+    let msg = r.err("VALIDATION_ERROR");
+    println!("{msg}");
+    assert!(
+        msg.starts_with(
+            "this looks like a repeat of a recent send; look those hashes up first. If this \
+             really is a second payment, pass --allow-duplicate"
+        ),
+        "{msg}"
+    );
+    assert!(
+        msg.contains(&format!("{first_hash} (nonce 7, sent ")),
+        "{msg}"
+    );
+    assert!(msg.ends_with("; nothing was signed"), "{msg}");
+    let v = r.json();
+    let dup = &v["duplicateSends"][0];
+    assert_eq!(dup["txHash"], first_hash.as_str(), "{v:#}");
+    assert_eq!(dup["nonce"], 7);
+    assert!(dup["ts"].as_str().unwrap().ends_with('Z'), "{v:#}");
+    assert_eq!(
+        v["journal"],
+        journal_path(&home, &me).display().to_string().as_str()
+    );
+    assert_eq!(rpc.sent().len(), 1, "the repeat was broadcast");
+    // A dry-run reports it instead.
+    let dry = home.run(&transfer(&rpc.url, &["--dry-run"])).ok();
+    assert_eq!(dry["duplicateSends"][0]["txHash"], first_hash.as_str());
+    // Another amount is another payment.
+    let other = home.run(&transfer_amount(&rpc.url, "0.02", &[])).ok();
+    assert_eq!(other["nonce"], PENDING_NONCE + 1);
+    assert_eq!(other["duplicateSends"], json!([]));
+    // A real second payment of the same amount, said so explicitly.
+    let again = home.run(&transfer(&rpc.url, &["--allow-duplicate"])).ok();
+    assert_eq!(again["nonce"], PENDING_NONCE + 2);
+    assert_eq!(again["duplicateSends"][0]["txHash"], first_hash.as_str());
+    // A --nonce send is an explicit retry or replacement at a fixed nonce: not checked.
+    let fixed = home.run(&transfer(&rpc.url, &["--nonce", "10"])).ok();
+    assert_eq!(fixed["nonce"], 10);
+    assert!(fixed.get("duplicateSends").is_none(), "{fixed:#}");
+    assert_eq!(rpc.sent().len(), 4);
+}
+
+#[test]
+fn only_recent_well_formed_entries_count_as_duplicates() {
+    let (home, me) = unlocked();
+    let rpc = mining_node();
+    let line = |ts: &str| {
+        json!({ "ts": ts, "chain": "ethereum", "from": me, "nonce": 3,
+                "txHash": format!("0x{}", "0a".repeat(32)), "to": OTHER.to_lowercase(),
+                "value": "0.01 ETH", "kind": "transfer" })
+        .to_string()
+    };
+    // An entry from long ago, and lines that are not entries.
+    let old = line("2026-01-01T00:00:00Z");
+    std::fs::write(
+        journal_path(&home, &me),
+        format!("{old}\nnot json\n[1,2]\n{{\"ts\":\"bad\"}}\n"),
+    )
+    .unwrap();
+    let v = home.run(&transfer(&rpc.url, &[])).ok();
+    assert_eq!(v["duplicateSends"], json!([]));
+    // The same entry stamped 9 minutes ago is a duplicate (recipient case does not matter).
+    let now = zwallet::core::time::unix_secs(std::time::SystemTime::now());
+    let recent = line(&zwallet::core::time::rfc3339_utc(now - 540));
+    std::fs::write(journal_path(&home, &me), format!("{recent}\n")).unwrap();
+    home.run(&transfer(&rpc.url, &[])).err("VALIDATION_ERROR");
+    // 11 minutes ago is not.
+    let stale = line(&zwallet::core::time::rfc3339_utc(now - 660));
+    std::fs::write(journal_path(&home, &me), format!("{stale}\n")).unwrap();
+    home.run(&transfer(&rpc.url, &[])).ok();
+}
+
+#[test]
+fn token_transfers_match_on_the_token_contract() {
+    let (home, me) = unlocked();
+    let rpc = mining_node();
+    // Another contract that also calls itself USDC.
+    let fake = "0x1111111111111111111111111111111111111111";
+    let token = |t: &'static str| {
+        let mut a = transfer(&rpc.url, &["--token", t]);
+        a[6] = "0.5";
+        a
+    };
+    let first = home.run(&token(USDC)).ok();
+    assert_eq!(first["symbol"], "USDC");
+    let text = std::fs::read_to_string(journal_path(&home, &me)).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!(entry["kind"], "token-transfer");
+    assert_eq!(entry["value"], "0.5 USDC");
+    assert_eq!(entry["token"], USDC);
+    assert_eq!(entry["to"], OTHER);
+    // The same token again: a repeat.
+    let v = home.run(&token(USDC)).json();
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v:#}");
+    assert_eq!(v["duplicateSends"][0]["txHash"], first["txHash"]);
+    // The same symbol and amount from another contract: another payment.
+    home.run(&token(fake)).ok();
+    // A native transfer of 0.5 is not a token transfer of 0.5.
+    home.run(&transfer_amount(&rpc.url, "0.5", &[])).ok();
+    assert_eq!(rpc.sent().len(), 3);
 }

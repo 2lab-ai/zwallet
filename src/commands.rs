@@ -766,11 +766,35 @@ async fn transfer_with<F: ChainFamily>(
     .await
 }
 
-/// Shared tail of `transfer` and `invoke`: sign through the daemon, check the raw bytes really
-/// come from `from`, then either report (dry-run) or broadcast (and optionally wait). Right
-/// before the broadcast the send is written to the account's journal and announced on stderr
-/// (`kind` names the command). `_lock` is held until this returns, through any `--wait`, so no
-/// other send from the key starts while this one's outcome is still being read.
+/// What `out` (the command's fields merged with `prepare`'s) says the send does: the recipient
+/// (the contract for an invoke), the amount with its symbol (`amount` and the asset's `symbol`
+/// for a transfer, the native `value` for an invoke), and the token contract of a token transfer.
+fn send_summary(out: &Map<String, Value>, chain: &Chain, kind: &str) -> chains::SendSummary {
+    let text = |k: &str| out.get(k).and_then(Value::as_str);
+    chains::SendSummary {
+        kind: kind.to_string(),
+        to: text("to").unwrap_or("?").to_string(),
+        value: format!(
+            "{} {}",
+            text("amount").or_else(|| text("value")).unwrap_or("?"),
+            text("symbol").unwrap_or(chain.symbol)
+        ),
+        token: text("token").map(str::to_string),
+    }
+}
+
+/// Shared tail of `transfer` and `invoke`: refuse a likely repeat, sign through the daemon,
+/// check the raw bytes really come from `from`, then either report (dry-run) or broadcast (and
+/// optionally wait). Right before the broadcast the send is written to the account's journal and
+/// announced on stderr (`kind` names the command). `_lock` is held until this returns, through
+/// any `--wait`, so no other send from the key starts while this one's outcome is still being
+/// read.
+///
+/// A send without `--nonce` whose journal has the same send from the last 10 minutes is refused
+/// before signing (unless `--allow-duplicate`): a run cut off after the broadcast and run again
+/// once the first is mined passes the pending check and would pay twice. A dry-run reports the
+/// matches (`duplicateSends`) instead. A `--nonce` send is an explicit replacement or retry at a
+/// fixed nonce, so it cannot add a second payment and skips the check.
 #[allow(clippy::too_many_arguments)]
 async fn sign_and_send<F: ChainFamily>(
     fam: &F,
@@ -784,12 +808,26 @@ async fn sign_and_send<F: ChainFamily>(
     _lock: Option<chains::SendLock>,
     kind: &str,
 ) -> Result<Out> {
+    let PreparedTx { unsigned, fields } = prepared;
+    for (k, v) in fields {
+        out.entry(k).or_insert(v);
+    }
+    let journal = chains::SendJournal::new(home, net.chain, from);
+    let summary = send_summary(&out, net.chain, kind);
+    if send.nonce.is_none() {
+        let now = crate::core::time::unix_secs(std::time::SystemTime::now());
+        let duplicates = journal.recent_duplicates(&summary, now);
+        if !duplicates.is_empty() && !send.dry_run && !send.allow_duplicate {
+            return Err(journal.duplicate_error(duplicates));
+        }
+        out.insert("duplicateSends".into(), Value::Array(duplicates));
+    }
     let signed_value = protocol::send_unlocked(
         home,
         &Request::SignTx {
             chain: net.chain.key.into(),
             index,
-            tx: prepared.unsigned.clone(),
+            tx: unsigned,
         },
         SIGN_TIMEOUT,
     )
@@ -800,9 +838,6 @@ async fn sign_and_send<F: ChainFamily>(
             "the key daemon signed as {}, expected {from}; not broadcasting",
             signed.signer
         )));
-    }
-    for (k, v) in prepared.fields {
-        out.entry(k).or_insert(v);
     }
     // The nonce the signed bytes actually consume.
     if let Some(n) = signed.nonce {
@@ -821,26 +856,7 @@ async fn sign_and_send<F: ChainFamily>(
         out.insert("recoveredFrom".into(), json!(signed.signer));
         return Ok(Out::json(Value::Object(out)));
     }
-    let journal = chains::SendJournal::new(home, net.chain, from);
-    let shown = |k: &str| {
-        out.get(k)
-            .and_then(Value::as_str)
-            .unwrap_or("?")
-            .to_string()
-    };
-    // The amount with its symbol: `amount` and the asset's `symbol` for a transfer, the native
-    // `value` for an invoke.
-    let value = format!(
-        "{} {}",
-        out.get("amount")
-            .or_else(|| out.get("value"))
-            .and_then(Value::as_str)
-            .unwrap_or("?"),
-        out.get("symbol")
-            .and_then(Value::as_str)
-            .unwrap_or(net.chain.symbol)
-    );
-    let record = chains::SendRecord::new(journal, &signed, &shown("to"), &value, kind);
+    let record = chains::SendRecord::new(journal, &signed, &summary);
     let outcome = fam
         .broadcast(net, &signed, send.nonce.is_some(), &record)
         .await?;

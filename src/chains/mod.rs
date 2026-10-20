@@ -635,9 +635,10 @@ impl SendLock {
 }
 
 /// The send journal of one account on one chain: `<home>/sends-<chainId>-<address>.jsonl`, one
-/// JSON line `{ ts, chain, from, nonce, txHash, to, value, kind }` per transaction, appended and
-/// fsynced right before it is broadcast. If the process dies after the broadcast, this is where
-/// the transaction is still named. Not secret, but created 0600 like every file in the home.
+/// JSON line `{ ts, chain, from, nonce, txHash, to, value, kind, token? }` per transaction,
+/// appended and fsynced right before it is broadcast. If the process dies after the broadcast,
+/// this is where the transaction is still named. Not secret, but created 0600 like every file in
+/// the home.
 #[derive(Debug, Clone)]
 pub struct SendJournal {
     path: PathBuf,
@@ -647,6 +648,23 @@ pub struct SendJournal {
 
 /// How many journal entries an error message names at most (the newest).
 const JOURNAL_SHOWN: usize = 5;
+/// How much of the journal's end is read; older entries are past every window that matters.
+const JOURNAL_TAIL: u64 = 1 << 20;
+/// A send without `--nonce` that matches a journal entry this recent is refused as a likely
+/// repeat ([`SendJournal::recent_duplicates`]).
+pub const DUPLICATE_WINDOW_SECS: u64 = 600;
+
+/// What a send does, as its journal line records it and the duplicate check compares it:
+/// `kind` (`transfer`, `token-transfer`, `invoke`), `to` (the recipient, or the contract for
+/// `invoke`), `value` (the amount with its symbol, e.g. `0.01 ETH`), and `token` (the token
+/// contract of a token transfer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendSummary {
+    pub kind: String,
+    pub to: String,
+    pub value: String,
+    pub token: Option<String>,
+}
 
 impl SendJournal {
     pub fn new(home: &Path, chain: &'static Chain, address: &str) -> Self {
@@ -699,15 +717,42 @@ impl SendJournal {
         Ok(())
     }
 
-    /// The entries whose nonce is in `nonces`, oldest first, minus the one for `except` (a hash
-    /// known not to be the one sought). Best effort: a missing journal or a malformed line reads
-    /// as nothing.
-    pub fn entries_at(&self, nonces: RangeInclusive<u64>, except: Option<&str>) -> Vec<Value> {
-        let Ok(text) = std::fs::read_to_string(&self.path) else {
+    /// The journal's entries, oldest first, read tolerantly: only its last [`JOURNAL_TAIL`] bytes
+    /// (from the first whole line in them), skipping lines that are not JSON objects. A missing
+    /// or unreadable journal reads as empty. Never follows a symlink.
+    fn entries(&self) -> Vec<Value> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut f) = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&self.path)
+        else {
             return Vec::new();
         };
-        text.lines()
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        let start = len.saturating_sub(JOURNAL_TAIL);
+        let mut bytes = Vec::new();
+        if f.seek(SeekFrom::Start(start)).is_err() || f.read_to_end(&mut bytes).is_err() {
+            return Vec::new();
+        }
+        // Mid-file, the first line is cut: drop it.
+        let whole = match (start > 0, bytes.iter().position(|&b| b == b'\n')) {
+            (false, _) => &bytes[..],
+            (true, Some(i)) => &bytes[i + 1..],
+            (true, None) => &[][..],
+        };
+        String::from_utf8_lossy(whole)
+            .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(Value::is_object)
+            .collect()
+    }
+
+    /// The entries whose nonce is in `nonces`, oldest first, minus the one for `except` (a hash
+    /// known not to be the one sought). Best effort, as [`Self::entries`].
+    pub fn entries_at(&self, nonces: RangeInclusive<u64>, except: Option<&str>) -> Vec<Value> {
+        self.entries()
+            .into_iter()
             .filter(|e| e["nonce"].as_u64().is_some_and(|n| nonces.contains(&n)))
             .filter(|e| {
                 except.is_none_or(|h| {
@@ -752,6 +797,66 @@ impl SendJournal {
         );
         (text, entries)
     }
+
+    /// The entries from the last [`DUPLICATE_WINDOW_SECS`] before `now` (UNIX seconds) that do
+    /// what `send` does: same chain, kind, `to` and value, and the same token contract (or none
+    /// on both). Addresses compare without case. An entry stamped after `now` (a clock set back)
+    /// counts as recent; one whose time does not parse does not.
+    pub fn recent_duplicates(&self, send: &SendSummary, now: u64) -> Vec<Value> {
+        let same_addr = |v: &Value, want: Option<&str>| match (v.as_str(), want) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            (None, None) => v.is_null(),
+            _ => false,
+        };
+        self.entries()
+            .into_iter()
+            .filter(|e| {
+                e["ts"]
+                    .as_str()
+                    .and_then(crate::core::time::parse_rfc3339_utc)
+                    .is_some_and(|ts| now.saturating_sub(ts) <= DUPLICATE_WINDOW_SECS)
+            })
+            .filter(|e| {
+                e["chain"] == self.chain.key
+                    && e["kind"] == send.kind.as_str()
+                    && e["value"] == send.value.as_str()
+                    && same_addr(&e["to"], Some(&send.to))
+                    && same_addr(&e["token"], send.token.as_deref())
+            })
+            .collect()
+    }
+
+    /// The refusal of a send without `--nonce` that repeats `duplicates` (from
+    /// [`Self::recent_duplicates`], not empty): nothing was signed.
+    pub fn duplicate_error(&self, duplicates: Vec<Value>) -> WalletError {
+        let shown: Vec<String> = duplicates
+            .iter()
+            .rev()
+            .take(JOURNAL_SHOWN)
+            .rev()
+            .map(|e| {
+                format!(
+                    "{} (nonce {}, sent {})",
+                    e["txHash"].as_str().unwrap_or("?"),
+                    e["nonce"]
+                        .as_u64()
+                        .map_or_else(|| "?".to_string(), |n| n.to_string()),
+                    e["ts"].as_str().unwrap_or("?")
+                )
+            })
+            .collect();
+        WalletError::validation(format!(
+            "this looks like a repeat of a recent send; look those hashes up first. If this \
+             really is a second payment, pass --allow-duplicate. The send journal {} has the same \
+             send (chain, kind, recipient, value and token) from the last {} minutes: {}; nothing \
+             was signed",
+            self.display(),
+            DUPLICATE_WINDOW_SECS / 60,
+            shown.join("; ")
+        ))
+        .with_detail("duplicateSends", Value::Array(duplicates))
+        .with_detail("journal", self.display())
+    }
 }
 
 /// `nonce 6` or `nonces 5 to 7`.
@@ -787,19 +892,22 @@ pub struct SendRecord {
 }
 
 impl SendRecord {
-    /// `kind` is what the command does (`transfer`, `token-transfer`, `invoke`); `value` is the
-    /// amount with its symbol, `to` the recipient (the contract for `invoke`).
-    pub fn new(journal: SendJournal, signed: &SignedTx, to: &str, value: &str, kind: &str) -> Self {
-        let entry = json!({
+    /// The journal line for `signed`, which does what `send` says; `token` only for a token
+    /// transfer.
+    pub fn new(journal: SendJournal, signed: &SignedTx, send: &SendSummary) -> Self {
+        let mut entry = json!({
             "ts": crate::core::time::now_rfc3339(),
             "chain": journal.chain.key,
             "from": signed.signer,
             "nonce": signed.nonce,
             "txHash": signed.tx_hash,
-            "to": to,
-            "value": value,
-            "kind": kind,
+            "to": send.to,
+            "value": send.value,
+            "kind": send.kind,
         });
+        if let Some(token) = &send.token {
+            entry["token"] = json!(token);
+        }
         Self { journal, entry }
     }
 
@@ -1444,7 +1552,13 @@ mod tests {
             signer: "0xAbC".into(),
             nonce: Some(3),
         };
-        let record = SendRecord::new(journal.clone(), &signed, "0xB0B", "0.5 ETH", "transfer");
+        let summary = SendSummary {
+            kind: "transfer".into(),
+            to: "0xB0B".into(),
+            value: "0.5 ETH".into(),
+            token: None,
+        };
+        let record = SendRecord::new(journal.clone(), &signed, &summary);
         record.write().unwrap();
         journal
             .append(&json!({ "nonce": 5, "txHash": "0x22" }))
@@ -1487,6 +1601,99 @@ mod tests {
         std::os::unix::fs::symlink(home.path().join("target"), other.path()).unwrap();
         assert!(other.append(&json!({})).is_err());
         assert!(!home.path().join("target").exists());
+    }
+
+    #[test]
+    fn recent_duplicates_match_the_send_inside_the_window_only() {
+        use crate::core::time::rfc3339_utc;
+        let home = temp_home();
+        let chain = find("ethereum").unwrap();
+        let journal = SendJournal::new(home.path(), chain, "0xF00");
+        let now = 1_800_000_000;
+        let usdc = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+        let entry = |hash: &str, ago: i64, kind: &str, value: &str, token: Option<&str>| {
+            let mut e = json!({
+                "ts": rfc3339_utc((now as i64 - ago) as u64), "chain": "ethereum",
+                "nonce": 1, "txHash": hash, "to": "0xb0b", "value": value, "kind": kind,
+            });
+            if let Some(t) = token {
+                e["token"] = json!(t);
+            }
+            e
+        };
+        for e in [
+            entry("0x01", 600, "transfer", "1 ETH", None), // at the edge: in
+            entry("0x02", 601, "transfer", "1 ETH", None), // just past it: out
+            entry("0x03", -30, "transfer", "1 ETH", None), // clock set back: in
+            entry("0x04", 5, "transfer", "2 ETH", None),
+            entry("0x05", 5, "invoke", "1 ETH", None),
+            entry("0x06", 5, "token-transfer", "1 USDC", Some(usdc)),
+            entry("0x07", 5, "token-transfer", "1 USDC", Some("0x1111")),
+            json!({ "ts": rfc3339_utc(now), "chain": "base", "to": "0xb0b", "value": "1 ETH",
+                    "kind": "transfer", "txHash": "0x08" }),
+        ] {
+            journal.append(&e).unwrap();
+        }
+        let hashes = |send: &SendSummary| -> Vec<String> {
+            journal
+                .recent_duplicates(send, now)
+                .iter()
+                .map(|e| e["txHash"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let native = SendSummary {
+            kind: "transfer".into(),
+            to: "0xB0B".into(),
+            value: "1 ETH".into(),
+            token: None,
+        };
+        assert_eq!(hashes(&native), ["0x01", "0x03"]);
+        let token = SendSummary {
+            kind: "token-transfer".into(),
+            value: "1 USDC".into(),
+            token: Some(usdc.to_lowercase()),
+            ..native.clone()
+        };
+        assert_eq!(hashes(&token), ["0x06"]);
+        let e = journal.duplicate_error(journal.recent_duplicates(&native, now));
+        assert_eq!(e.code, ErrorCode::ValidationError);
+        assert!(
+            e.message.starts_with(
+                "this looks like a repeat of a recent send; look those hashes up first. If this \
+                 really is a second payment, pass --allow-duplicate."
+            ),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("0x01 (nonce 1, sent "), "{}", e.message);
+        let v = e.to_json();
+        assert_eq!(v["duplicateSends"].as_array().unwrap().len(), 2);
+        assert_eq!(v["journal"], journal.display());
+    }
+
+    #[test]
+    fn the_journal_is_read_from_its_last_mebibyte_skipping_malformed_lines() {
+        let home = temp_home();
+        let chain = find("ethereum").unwrap();
+        let journal = SendJournal::new(home.path(), chain, "0xF00");
+        let line = |n: u64| json!({ "nonce": n, "txHash": format!("0x{n}") }).to_string();
+        // An entry, then more than the tail of filler, then malformed lines and an entry.
+        let filler = format!("{}\n", "x".repeat(1023)).repeat(1100);
+        let text = format!(
+            "{}\n{filler}not json\n[1]\n\u{fffd}\n{}\n",
+            line(1),
+            line(2)
+        );
+        std::fs::write(journal.path(), text).unwrap();
+        let found: Vec<u64> = journal
+            .entries()
+            .iter()
+            .map(|e| e["nonce"].as_u64().unwrap())
+            .collect();
+        assert_eq!(found, [2]);
+        // A short journal is read whole, its first line included.
+        std::fs::write(journal.path(), format!("{}\n{}", line(1), line(2))).unwrap();
+        assert_eq!(journal.entries().len(), 2);
     }
 
     #[test]

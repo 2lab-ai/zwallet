@@ -204,6 +204,11 @@ pub struct SendArgs {
     /// payment: a re-run of a send that was cut off would land as a second payment.
     #[arg(long, conflicts_with = "nonce")]
     pub allow_pending: bool,
+    /// Send even though the send journal has the same send (recipient, value, token) from the
+    /// last 10 minutes. Only for a real second payment: a re-run of a send that went through
+    /// would pay twice.
+    #[arg(long, conflicts_with = "nonce")]
+    pub allow_duplicate: bool,
     /// Allow a price per gas up to this many gwei, replacing the automatic ceiling on fees the
     /// RPC suggests (raise it only when fees really are that high).
     #[arg(long, value_name = "GWEI")]
@@ -529,20 +534,27 @@ mod tests {
             &["--wait", "--wait-timeout", "30"],
             &["--wait", "--wait-timeout", "0s"],
             &["--allow-pending", "--nonce", "3"],
+            &["--allow-duplicate", "--nonce", "3"],
         ] {
             let mut args = bad.to_vec();
             args.extend(extra);
             assert!(Cli::try_parse_from(args).is_err(), "{extra:?}");
         }
         let mut args = bad.to_vec();
-        args.extend(["--wait", "--wait-timeout", "2m", "--allow-pending"]);
+        args.extend([
+            "--wait",
+            "--wait-timeout",
+            "2m",
+            "--allow-pending",
+            "--allow-duplicate",
+        ]);
         match Cli::try_parse_from(args).unwrap().command {
             Command::Invoke(a) => {
                 assert_eq!(
                     a.send.wait_timeout,
                     Some(std::time::Duration::from_secs(120))
                 );
-                assert!(a.send.allow_pending);
+                assert!(a.send.allow_pending && a.send.allow_duplicate);
             }
             other => panic!("{other:?}"),
         }

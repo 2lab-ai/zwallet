@@ -42,8 +42,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `status` | `{ wallet, locked, home, daemonPid?, expiresAt?, active?, address?, verified? }` | works |
 | `balance --chain <key> [--token <erc20>] [--rpc <url>]` | `{ chain, key, address, symbol, decimals, balance, raw, verified: false, token? }` | works |
 | `call --chain <key> --to <contract> --sig "<fn>" [ARGS...] [--rpc <url>]` | `{ chain, from, to, sig, args, result, raw }` | works |
-| `invoke --chain <key> --to <contract> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| --allow-pending] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw }` | `WALLET_LOCKED` |
-| `transfer --chain <key> --to <0x> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| --allow-pending] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
+| `invoke --chain <key> --to <contract> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw }` | `WALLET_LOCKED` |
+| `transfer --chain <key> --to <0x> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
 | `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191) | `WALLET_LOCKED` |
 | `unlock <dur> [--password-stdin]` | `{ locked: false, duration, expiresAt, active, address, daemonPid, verified: true }` | - |
 | `lock` | `{ locked: true, wasUnlocked }` | - |
@@ -97,13 +97,15 @@ Commands that act on a key take `--key <name>` (default: the active key).
   has no base fee), `eth_estimateGas` + 20% (exactly 21000 for plain transfers) and, on Base and OP
   Mainnet, the L1 data fee. Without `--dry-run` a shortfall is `INSUFFICIENT_FUNDS` before anything
   is signed. `--dry-run` signs but does not broadcast and returns `{ dryRun: true, chain, key, from,
-  to, amount, amountRaw, symbol, decimals, token?, chainId, nonce, pendingNonces, gasLimit,
-  gasEstimate, gasLimitSource, type, maxFeePerGas, maxPriorityFeePerGas, gasPrice, maxGasCost,
-  l1Fee, nativeBalance, sufficientFunds, shortfall, signerDecoded, txHash, recoveredFrom }`. It has
-  no `rawTx`: a dry-run never hands out bytes that could be broadcast without zwallet.
-  `recoveredFrom` is recovered from the signed raw bytes, `signerDecoded` is what the key daemon
-  decoded from the bytes it signed, and an empty wallet can be dry-run. `pendingNonces` lists the
-  key's nonces that are pending (between its mined count and its next free nonce) on the node.
+  to, amount, amountRaw, symbol, decimals, token?, chainId, nonce, pendingNonces, duplicateSends?,
+  gasLimit, gasEstimate, gasLimitSource, type, maxFeePerGas, maxPriorityFeePerGas, gasPrice,
+  maxGasCost, l1Fee, nativeBalance, sufficientFunds, shortfall, signerDecoded, txHash,
+  recoveredFrom }`. It has no `rawTx`: a dry-run never hands out bytes that could be broadcast
+  without zwallet. `recoveredFrom` is recovered from the signed raw bytes, `signerDecoded` is what
+  the key daemon decoded from the bytes it signed, and an empty wallet can be dry-run.
+  `pendingNonces` lists the key's nonces that are pending (between its mined count and its next
+  free nonce) on the node; `duplicateSends` (a send without `--nonce`) lists the journal's
+  recent sends that this one repeats (see below).
   Live: `{ ..., txHash, explorerUrl, journal, broadcastWarning?, rpcTxHash? }` plus `{ status,
   blockNumber, gasUsed }` with `--wait`.
 - **`--wait`** polls for the receipt for `--wait-timeout <dur>` (default `90s`; same units as
@@ -113,8 +115,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   --nonce is a second payment"` (for `unknown` it starts "receipt unknown, it may still be
   pending").
 - **The send journal.** Right before `eth_sendRawTransaction`, zwallet appends one JSON line
-  `{ ts, chain, from, nonce, txHash, to, value, kind }` (`value` like `"0.01 ETH"`, `kind`
-  `transfer`, `token-transfer` or `invoke`, `to` the recipient or the contract) to
+  `{ ts, chain, from, nonce, txHash, to, value, kind, token? }` (`value` like `"0.01 ETH"`, `kind`
+  `transfer`, `token-transfer` or `invoke`, `to` the recipient or the contract, `token` the token
+  contract of a token transfer) to
   `sends-<chainId>-<address>.jsonl` in the wallet home (0600, fsynced), and prints the same fields
   on one stderr line: "broadcasting <txHash> (nonce N on <chain>); if this command does not finish,
   look this hash up before sending again; a retry must pass --nonce N --replace <txHash>. Journal
@@ -135,6 +138,18 @@ Commands that act on a key take `--key <name>` (default: the active key).
   nonce as a second payment: look the pending transaction up, and to speed it up or replace it use
   `--nonce N --replace <its txHash>`. `--allow-pending` sends anyway; use it only for a different
   payment. A dry-run reports `pendingNonces` instead of refusing.
+- **A send without `--nonce` that repeats a recent one is refused.** If the send journal has an
+  entry from the last 10 minutes with the same chain, kind, `to` and value (and, for a token
+  transfer, the same token contract), a send without `--nonce` is `VALIDATION_ERROR` "this looks
+  like a repeat of a recent send; look those hashes up first. If this really is a second payment,
+  pass --allow-duplicate", naming each match's txHash, nonce and time (`duplicateSends`,
+  `journal`); nothing is signed. This catches the re-run of a send that was cut off after it was
+  already mined, which the pending check cannot see. A send that was refused or never got out is
+  in the journal too, so the lookup comes first there as well. `--allow-duplicate` sends anyway;
+  a dry-run reports `duplicateSends` instead of refusing, and a live send without `--nonce`
+  reports it too. `--nonce` sends skip the check: at a fixed nonce they can only replace or retry,
+  never add a payment. Only the journal's last 1 MiB is read, and lines that are not entries are
+  skipped.
 - **`signerDecoded.action`** names the ABI method the calldata calls, never an asset, because
   ERC-20 and ERC-721 share these selectors: `{ kind: "native-transfer", to, value }`,
   `{ kind: "transfer-call", token, to, amount, assetType: "unverified" }`,
@@ -202,8 +217,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
     nothing was signed or broadcast. If the running send is an earlier attempt at this same
     payment, wait for it to finish and look up its result before sending again; for a different
     payment, retry after it finishes.
-  - `VALIDATION_ERROR` "a transaction from this key is still pending on <chain> at nonce N" (a
-    send without `--nonce`, see above) and "nonce N belongs to a pending transaction; pass
+  - `VALIDATION_ERROR` "this looks like a repeat of a recent send" and "a transaction from this
+    key is still pending on <chain> at nonce N" (a send without `--nonce`, see above) and "nonce N belongs to a pending transaction; pass
     --replace <its txHash>" (`--nonce` below the next free nonce): nothing was signed.
 
 ## Chains
