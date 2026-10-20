@@ -686,6 +686,17 @@ impl PtyChild {
     }
 }
 
+impl Drop for PtyChild {
+    /// A test that fails while the child still runs (say, waiting at a password prompt) must not
+    /// leave it behind.
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 /// A minimal JSON-RPC node on 127.0.0.1 answering each method with `result(method)`, for the
 /// commands that need RPC (e.g. `balance`). Returns its URL; it lives until the test exits.
 pub fn tiny_rpc(result: fn(&str) -> Value) -> String {
