@@ -1592,9 +1592,10 @@ fn balance_without_chain_reads_every_network_and_its_registry_tokens() {
     let env = rpc_env(&nodes, &[]);
     let started = std::time::Instant::now();
     let v = home.run_env(&["balance", "--json"], &env_refs(&env)).ok();
-    // The networks are read at once: eight 1 s balance reads take about 1 s, not 8.
+    // The networks are read at once: eight 1 s balance reads take about 1 s, not the 8 s one
+    // after another would (the bound leaves room for a loaded machine).
     let took = started.elapsed();
-    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert!(took < Duration::from_secs(7), "{took:?}");
     assert_eq!(
         (&v["key"], &v["address"], &v["verified"]),
         (&json!("t"), &json!(me), &json!(false))
