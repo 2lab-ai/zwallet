@@ -1698,11 +1698,17 @@ fn balance_without_chain_shows_the_networks_that_answer() {
     let polygon = rows[4]["error"].as_str().unwrap();
     assert!(polygon.starts_with("eth_chainId failed"), "{polygon}");
 
-    // Human (Polygon down only): its line says so briefly, and the count says one did not
-    // answer; still exit 0.
-    let env = rpc_env(&nodes, &[("polygon", "http://127.0.0.1:1")]);
+    // Human (Polygon down only, its RPC URL carrying a key): its line says so briefly, and the
+    // count says one did not answer; still exit 0. Neither form prints the key.
+    let keyed = "http://127.0.0.1:1/v3/SECRETKEY9?apikey=SECRETKEY10";
+    let env = rpc_env(&nodes, &[("polygon", keyed)]);
     let human = home.run_env(&["balance"], &env_refs(&env));
     assert_eq!(human.code, 0, "{}", human.stderr);
+    let json = home.run_env(&["balance", "--json"], &env_refs(&env));
+    for out in [&human.stdout, &human.stderr, &json.stdout, &json.stderr] {
+        assert!(!out.contains("SECRETKEY"), "{out}");
+    }
+    assert_eq!(json.ok()["chains"][4]["errorCode"], "RPC_ERROR");
     let lines: Vec<&str> = human.stdout.lines().collect();
     let polygon = lines
         .iter()
@@ -1713,7 +1719,7 @@ fn balance_without_chain_shows_the_networks_that_answer() {
     assert!(polygon.chars().count() <= 110, "{polygon}");
     assert_eq!(
         lines.last(),
-        Some(&"1 of 8 networks have a balance; 1 did not answer"),
+        Some(&"2 of 8 networks have a balance; 1 did not answer"),
         "{}",
         human.stdout
     );

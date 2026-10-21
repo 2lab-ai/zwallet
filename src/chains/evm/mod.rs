@@ -10,8 +10,8 @@ pub mod tx;
 use crate::chains::evm::policy::ListView;
 use crate::chains::{
     Balance, Broadcast, Chain, ChainFamily, Family, FamilyKeys, Net, PreparedTx, SendRecord,
-    SignedTx, TransferRequest, after_send_error, before_send_error, nonce_taken_error,
-    rejected_send_error,
+    SignedTx, TokenBalance, TransferRequest, after_send_error, before_send_error,
+    nonce_taken_error, rejected_send_error,
 };
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
@@ -254,6 +254,33 @@ impl ChainFamily for Evm {
             symbol: meta.symbol,
             decimals: meta.decimals,
         })
+    }
+
+    async fn wallet_balances(
+        &self,
+        net: &Net,
+        owner: &str,
+    ) -> Result<(Balance, Vec<TokenBalance>)> {
+        let owner = parse_address(owner)?;
+        let p = rpc::connect(net).await?;
+        let native = Balance {
+            symbol: net.chain.symbol.to_string(),
+            decimals: net.chain.decimals,
+            raw: rpc::native_balance(&p, owner).await?,
+        };
+        let chain_id = config(net.chain).chain_id;
+        let mut tokens = Vec::new();
+        for t in registry::TOKENS.iter().filter(|t| t.chain_id == chain_id) {
+            tokens.push(TokenBalance {
+                address: t.address.to_string(),
+                balance: Balance {
+                    symbol: t.symbol.to_string(),
+                    decimals: t.decimals,
+                    raw: rpc::erc20_balance(&p, parse_address(t.address)?, owner).await?,
+                },
+            });
+        }
+        Ok((native, tokens))
     }
 
     async fn prepare_transfer(&self, net: &Net, req: &TransferRequest) -> Result<PreparedTx> {

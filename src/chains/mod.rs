@@ -144,6 +144,9 @@ pub const CHAINS: &[Chain] = &[
 /// The chain whose cached address is reported as the wallet's primary `address`.
 pub const PRIMARY_CHAIN: &str = "ethereum";
 
+/// Test networks among [`CHAINS`]. A listing of every chain puts them after the mainnets.
+const TESTNETS: &[&str] = &["sepolia"];
+
 pub fn find(key: &str) -> Result<&'static Chain> {
     let wanted = key.trim().to_ascii_lowercase();
     CHAINS.iter().find(|c| c.key == wanted).ok_or_else(|| {
@@ -156,6 +159,11 @@ pub fn find(key: &str) -> Result<&'static Chain> {
 }
 
 impl Chain {
+    /// A test network ([`TESTNETS`]), whose coins have no value.
+    pub fn is_testnet(&self) -> bool {
+        TESTNETS.contains(&self.key)
+    }
+
     /// Environment variable that overrides this chain's RPC URL.
     pub fn rpc_env_var(&self) -> String {
         format!("ZWALLET_RPC_{}", self.key.to_ascii_uppercase())
@@ -529,6 +537,14 @@ pub struct Balance {
     pub symbol: String,
     pub decimals: u8,
     pub raw: U256,
+}
+
+/// A registry token's balance: its contract as the registry writes it, and the balance with the
+/// registry's symbol and decimals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenBalance {
+    pub address: String,
+    pub balance: Balance,
 }
 
 #[derive(Debug, Clone)]
@@ -1292,6 +1308,11 @@ pub trait ChainFamily: FamilyKeys {
     }
     async fn native_balance(&self, net: &Net, owner: &str) -> Result<Balance>;
     async fn token_balance(&self, net: &Net, owner: &str, token: &str) -> Result<Balance>;
+    /// The native coin and every registry token of `net`'s chain, in registry order, zero
+    /// balances included (`balance` without `--chain`). Symbols and decimals are the registry's;
+    /// no contract is asked for them.
+    async fn wallet_balances(&self, net: &Net, owner: &str)
+    -> Result<(Balance, Vec<TokenBalance>)>;
     /// Builds an unsigned transfer from live chain state. Outside dry-run this fails with
     /// `INSUFFICIENT_FUNDS` instead of returning a transaction that cannot pay for itself.
     async fn prepare_transfer(&self, net: &Net, req: &TransferRequest) -> Result<PreparedTx>;
@@ -1356,6 +1377,17 @@ mod tests {
             find("solana").unwrap_err().code,
             ErrorCode::ChainUnsupported
         );
+    }
+
+    #[test]
+    fn sepolia_is_the_only_testnet() {
+        let testnets: Vec<&str> = CHAINS
+            .iter()
+            .filter(|c| c.is_testnet())
+            .map(|c| c.key)
+            .collect();
+        assert_eq!(testnets, ["sepolia"]);
+        assert!(TESTNETS.iter().all(|k| find(k).is_ok()));
     }
 
     #[test]

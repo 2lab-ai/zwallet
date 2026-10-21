@@ -47,7 +47,8 @@ pub enum Command {
     Address(AddressArgs),
     /// Addresses of a key on every chain. Works while locked.
     Addresses(KeyArg),
-    /// Native or ERC-20 balance. Works while locked.
+    /// Native or ERC-20 balance on one chain; without --chain, the native coin and every registry
+    /// token on every network. Works while locked.
     Balance(BalanceArgs),
     /// Read-only contract call (eth_call). Works while locked.
     Call(CallArgs),
@@ -136,13 +137,16 @@ pub struct VerifyArgs {
 
 #[derive(Debug, Args)]
 pub struct BalanceArgs {
+    /// The chain to read. Omit to check every network at once (testnets last): the native coin
+    /// and every registry token on each, up to 8s per network, through ZWALLET_RPC_<CHAIN> or
+    /// the default RPC.
     #[arg(long)]
-    pub chain: String,
-    /// ERC-20 token contract (0x...). Omit for the native coin.
-    #[arg(long)]
+    pub chain: Option<String>,
+    /// ERC-20 token contract (0x...). Omit for the native coin. Needs --chain.
+    #[arg(long, requires = "chain")]
     pub token: Option<String>,
-    /// RPC URL (overrides ZWALLET_RPC_<CHAIN> and the default).
-    #[arg(long)]
+    /// RPC URL (overrides ZWALLET_RPC_<CHAIN> and the default). Needs --chain.
+    #[arg(long, requires = "chain")]
     pub rpc: Option<String>,
     #[command(flatten)]
     pub key: KeyArg,
