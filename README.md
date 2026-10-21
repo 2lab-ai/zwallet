@@ -530,7 +530,7 @@ data).
   following a symlink and without blocking, and only as a regular file of this user's of at most
   1 MiB, so a FIFO or link planted in its place fails fast instead of hanging a reader.
 - **Keys**: named subkeys of the master by index, in creation order, never reused. EVM uses
-  `m/44'/60'/0'/0/<index>` (the MetaMask/Trust account order), so the phrase imports into standard
+  `m/44'/60'/0'/0/<index>` (the standard BIP44 Ethereum account order), so the phrase imports into standard
   wallets with the same accounts. One address per key on every EVM chain. Indices stay below
   2^31, where BIP32's hardened range starts (`VALIDATION_ERROR` at or above it).
 - **Daemon**: `unlock` pins the zwallet binary before it asks for the password. On Linux that is
