@@ -453,10 +453,7 @@ pub fn main_entry() -> i32 {
             };
         }
     };
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match cli_runtime() {
         Ok(rt) => rt,
         Err(e) => {
             print_error(
@@ -466,7 +463,7 @@ pub fn main_entry() -> i32 {
             return 1;
         }
     };
-    match runtime.block_on(commands::run(cli)) {
+    match run_to_end(runtime, commands::run(cli)) {
         Ok(out) => {
             print_out(json, &out);
             0
@@ -476,6 +473,21 @@ pub fn main_entry() -> i32 {
             1
         }
     }
+}
+
+/// The runtime a command (and the key daemon) runs on: one thread, with I/O and timers.
+fn cli_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
+/// Runs `work` on `runtime` to its end, then drops the runtime.
+fn run_to_end<T>(
+    runtime: tokio::runtime::Runtime,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    runtime.block_on(work)
 }
 
 /// A clap error as the `--json` message: its lines up to the usage and help hint, trimmed, empty
@@ -835,6 +847,22 @@ mod tests {
              '--allow-ptrace-scope-0'"
         );
         assert_eq!(clap_json_message(""), "invalid arguments");
+    }
+
+    #[test]
+    fn a_blocking_task_left_behind_does_not_hold_the_process() {
+        // Like a DNS lookup (getaddrinfo on the blocking pool) that a network's deadline gave up
+        // on during `balance` without --chain: the result is out, and main_entry returns at once.
+        let started = std::time::Instant::now();
+        let out = run_to_end(cli_runtime().unwrap(), async {
+            drop(tokio::task::spawn_blocking(|| {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }));
+            7
+        });
+        assert_eq!(out, 7);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 
     #[test]
