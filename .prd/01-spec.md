@@ -36,6 +36,8 @@ no account, no API key, no telemetry and no OS keychain.
   derived from it by index (`zwallet create <name>`; the newest becomes active). `zwallet list`
   and `zwallet change <name>` show and switch keys. No network call is needed to create.
 - **G2 Balance.** Native coin and ERC-20 balance for the wallet's address on any configured chain.
+  Without `--chain`, `balance` reads every network at once (native plus registry tokens; testnets
+  last).
 - **G3 Function call.** `call` = read-only `eth_call` with a signature such as
   `balanceOf(address)(uint256)`, returning decoded values. `invoke` = signed state-changing
   transaction from a signature + args, or raw calldata, with an optional native value.
