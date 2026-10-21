@@ -482,12 +482,17 @@ fn cli_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
-/// Runs `work` on `runtime` to its end, then drops the runtime.
+/// Runs `work` on `runtime` to its end, then shuts the runtime down without waiting for its
+/// blocking tasks. Its async tasks are dropped as a plain drop would; but a drop also waits for
+/// every blocking task, such as a DNS lookup (getaddrinfo) a network's deadline gave up on, which
+/// would keep the process alive after its output.
 fn run_to_end<T>(
     runtime: tokio::runtime::Runtime,
     work: impl std::future::Future<Output = T>,
 ) -> T {
-    runtime.block_on(work)
+    let out = runtime.block_on(work);
+    runtime.shutdown_background();
+    out
 }
 
 /// A clap error as the `--json` message: its lines up to the usage and help hint, trimmed, empty
