@@ -1475,6 +1475,25 @@ const ARB_USDC: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
 /// A node serving chain `id` that only reads balances: `native` wei for any account (answered
 /// after `delay`), and 12.5 USDC of [`ARB_USDC`], zero of any other token.
 fn wallet_node(id: u64, native: u128, delay: Duration) -> MockRpc {
+    failing_wallet_node(id, native, delay, None)
+}
+
+/// How a [`failing_wallet_node`] treats `balanceOf` of one token.
+#[derive(Clone, Copy)]
+enum TokenFault {
+    /// A JSON-RPC error.
+    Fails,
+    /// No answer for 40 s.
+    Hangs,
+}
+
+/// A [`wallet_node`] whose `balanceOf` of token `broken.0` (any case) goes wrong as `broken.1`.
+fn failing_wallet_node(
+    id: u64,
+    native: u128,
+    delay: Duration,
+    broken: Option<(&'static str, TokenFault)>,
+) -> MockRpc {
     MockRpc::start(move |m, p| match m {
         "eth_chainId" => Reply::Result(hex(id.into())),
         "eth_getBalance" => {
@@ -1490,7 +1509,18 @@ fn wallet_node(id: u64, native: u128, delay: Duration) -> MockRpc {
                 data.starts_with("0x70a08231"),
                 "mock: unexpected eth_call {data}"
             );
-            let held = if p[0]["to"].as_str().unwrap().eq_ignore_ascii_case(ARB_USDC) {
+            let to = p[0]["to"].as_str().unwrap();
+            match broken {
+                Some((token, TokenFault::Fails)) if to.eq_ignore_ascii_case(token) => {
+                    return Reply::Error("execution reverted");
+                }
+                Some((token, TokenFault::Hangs)) if to.eq_ignore_ascii_case(token) => {
+                    std::thread::sleep(Duration::from_secs(40));
+                    return Reply::Drop;
+                }
+                _ => {}
+            }
+            let held = if to.eq_ignore_ascii_case(ARB_USDC) {
                 12_500_000
             } else {
                 0
@@ -1720,6 +1750,114 @@ fn balance_without_chain_shows_the_networks_that_answer() {
     assert_eq!(
         lines.last(),
         Some(&"2 of 8 networks have a balance; 1 did not answer"),
+        "{}",
+        human.stdout
+    );
+}
+
+#[test]
+fn balance_without_chain_shows_a_failed_token_read_on_its_row_only() {
+    let home = Home::new();
+    let me = home.create("t", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Arbitrum's node refuses balanceOf of USDT; Optimism's never answers it for DAI. Both still
+    // answer the chain id, the native balance and every other token.
+    const ARB_USDT: &str = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9";
+    const OP_DAI: &str = "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1";
+    let mut nodes = every_chain_node(Duration::ZERO);
+    for (key, id, broken) in [
+        ("arbitrum", 42161, (ARB_USDT, TokenFault::Fails)),
+        ("optimism", 10, (OP_DAI, TokenFault::Hangs)),
+    ] {
+        let slot = nodes.iter_mut().find(|(k, _)| *k == key).unwrap();
+        slot.1 = failing_wallet_node(id, 0, Duration::ZERO, Some(broken));
+    }
+    let env = rpc_env(&nodes, &[]);
+    let started = std::time::Instant::now();
+    let v = home.run_env(&["balance", "--json"], &env_refs(&env)).ok();
+    // The hanging read ends with the network's 8 s, and the others on Optimism do not wait.
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_secs(7) && took < Duration::from_secs(20),
+        "{took:?}"
+    );
+    let rows = v["chains"].as_array().unwrap();
+    for row in rows {
+        assert!(row.get("error").is_none(), "{row:#}");
+        assert!(row["native"]["balance"].is_string(), "{row:#}");
+    }
+    let tokens = |key: &str| {
+        rows.iter().find(|r| r["chain"] == key).unwrap()["tokens"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let check = |key: &str, broken: &str, why: &str| {
+        let tokens = tokens(key);
+        let want = zwallet::chains::evm::registry::TOKENS
+            .iter()
+            .filter(|t| t.chain_id == if key == "arbitrum" { 42161 } else { 10 })
+            .count();
+        assert_eq!(tokens.len(), want, "{key}");
+        for t in &tokens {
+            if t["address"] == broken {
+                // The failed read: symbol, address, decimals and why; no balance.
+                assert_eq!(t["errorCode"], "RPC_ERROR", "{t:#}");
+                let msg = t["error"].as_str().unwrap();
+                assert!(msg.contains(why), "{msg}");
+                assert!(
+                    t.get("balance").is_none() && t.get("raw").is_none(),
+                    "{t:#}"
+                );
+                assert_eq!(t["symbol"], if key == "arbitrum" { "USDT" } else { "DAI" });
+                assert!(t["decimals"].is_u64(), "{t:#}");
+            } else {
+                assert!(t.get("error").is_none(), "{t:#}");
+                assert!(t["balance"].is_string(), "{t:#}");
+            }
+        }
+    };
+    check("arbitrum", ARB_USDT, "execution reverted");
+    check("optimism", OP_DAI, "timed out after 8s");
+    let arb = tokens("arbitrum");
+    let usdc = arb.iter().find(|t| t["address"] == ARB_USDC).unwrap();
+    assert_eq!(usdc["balance"], "12.5");
+
+    // Human: a failed token read is a line under its network; zero tokens stay hidden.
+    let human = home.run_env(&["balance"], &env_refs(&env));
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    let lines: Vec<&str> = human.stdout.lines().collect();
+    assert_eq!(lines[..2], ["key: t".to_string(), format!("address: {me}")]);
+    let at = |prefix: &str| {
+        lines
+            .iter()
+            .position(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix}: {}", human.stdout))
+    };
+    let arb = at("arbitrum ");
+    assert_eq!(lines[arb], "arbitrum   0 ETH");
+    assert_eq!(lines[arb + 1], "           12.5 USDC");
+    assert!(
+        lines[arb + 2].starts_with("           USDT error: eth_call failed")
+            && lines[arb + 2].ends_with(" [RPC_ERROR]"),
+        "{}",
+        human.stdout
+    );
+    let op = at("optimism ");
+    assert_eq!(arb + 3, op, "{}", human.stdout);
+    assert_eq!(lines[op], "optimism   0 ETH");
+    assert!(
+        lines[op + 1].starts_with("           DAI error: ")
+            && lines[op + 1].contains("timed out after 8s"),
+        "{}",
+        human.stdout
+    );
+    assert!(lines[op + 2].starts_with("polygon "), "{}", human.stdout);
+    assert_eq!(
+        lines.last(),
+        Some(&"2 of 8 networks have a balance; 2 token reads failed"),
         "{}",
         human.stdout
     );
