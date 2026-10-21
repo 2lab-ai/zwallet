@@ -539,12 +539,14 @@ pub struct Balance {
     pub raw: U256,
 }
 
-/// A registry token's balance: its contract as the registry writes it, and the balance with the
-/// registry's symbol and decimals.
+/// A registry token's balance read: its contract as the registry writes it, the registry's
+/// symbol and decimals, and the raw balance or why it could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenBalance {
     pub address: String,
-    pub balance: Balance,
+    pub symbol: String,
+    pub decimals: u8,
+    pub raw: Result<U256>,
 }
 
 #[derive(Debug, Clone)]
@@ -1309,10 +1311,16 @@ pub trait ChainFamily: FamilyKeys {
     async fn native_balance(&self, net: &Net, owner: &str) -> Result<Balance>;
     async fn token_balance(&self, net: &Net, owner: &str, token: &str) -> Result<Balance>;
     /// The native coin and every registry token of `net`'s chain, in registry order, zero
-    /// balances included (`balance` without `--chain`). Symbols and decimals are the registry's;
-    /// no contract is asked for them.
-    async fn wallet_balances(&self, net: &Net, owner: &str)
-    -> Result<(Balance, Vec<TokenBalance>)>;
+    /// balances included (`balance` without `--chain`), all read by `limit` from the call.
+    /// Symbols and decimals are the registry's; no contract is asked for them. A failed or late
+    /// token read is that token's error; the call fails only when the endpoint, its chain id or
+    /// the native balance does.
+    async fn wallet_balances(
+        &self,
+        net: &Net,
+        owner: &str,
+        limit: Duration,
+    ) -> Result<(Balance, Vec<TokenBalance>)>;
     /// Builds an unsigned transfer from live chain state. Outside dry-run this fails with
     /// `INSUFFICIENT_FUNDS` instead of returning a transaction that cannot pay for itself.
     async fn prepare_transfer(&self, net: &Net, req: &TransferRequest) -> Result<PreparedTx>;
