@@ -520,7 +520,7 @@ fn balance_without_chain_reads_every_network() {
             "sepolia"
         ]
     );
-    // Each answered through its default RPC, with every registry token of its chain.
+    // Each answered through its default RPC, with every registry token of its chain read.
     for row in rows {
         assert!(row.get("error").is_none(), "{row:#}");
         let id = row["chainId"].as_u64().unwrap();
@@ -528,7 +528,9 @@ fn balance_without_chain_reads_every_network() {
             .iter()
             .filter(|t| t.chain_id == id)
             .count();
-        assert_eq!(row["tokens"].as_array().unwrap().len(), tokens, "{row:#}");
+        let rows = row["tokens"].as_array().unwrap();
+        assert_eq!(rows.len(), tokens, "{row:#}");
+        assert!(rows.iter().all(|t| t.get("error").is_none()), "{row:#}");
     }
     let human = home.run(&["balance"]);
     println!("{}", human.stdout);
