@@ -1469,6 +1469,354 @@ fn rpc_url_path_and_query_are_never_printed() {
     assert!(!leaks(&r), "{}", r.stdout);
 }
 
+/// Arbitrum's USDC: the one registry token the [`wallet_node`]s of these tests hold (12.5).
+const ARB_USDC: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
+
+/// A node serving chain `id` that only reads balances: `native` wei for any account (answered
+/// after `delay`), and 12.5 USDC of [`ARB_USDC`], zero of any other token.
+fn wallet_node(id: u64, native: u128, delay: Duration) -> MockRpc {
+    MockRpc::start(move |m, p| match m {
+        "eth_chainId" => Reply::Result(hex(id.into())),
+        "eth_getBalance" => {
+            std::thread::sleep(delay);
+            Reply::Result(hex(native))
+        }
+        "eth_call" => {
+            let data = p[0]["input"]
+                .as_str()
+                .or(p[0]["data"].as_str())
+                .unwrap_or("");
+            assert!(
+                data.starts_with("0x70a08231"),
+                "mock: unexpected eth_call {data}"
+            );
+            let held = if p[0]["to"].as_str().unwrap().eq_ignore_ascii_case(ARB_USDC) {
+                12_500_000
+            } else {
+                0
+            };
+            Reply::Result(json!(format!("0x{held:064x}")))
+        }
+        other => panic!("mock: unexpected {other}"),
+    })
+}
+
+/// A [`wallet_node`] for every chain, keyed by chain key: 1.5 ETH on Base, nothing elsewhere.
+fn every_chain_node(delay: Duration) -> Vec<(&'static str, MockRpc)> {
+    zwallet::chains::CHAINS
+        .iter()
+        .map(|c| {
+            let id = zwallet::chains::evm::config(c).chain_id;
+            let native = if c.key == "base" {
+                15 * 10u128.pow(17)
+            } else {
+                0
+            };
+            (c.key, wallet_node(id, native, delay))
+        })
+        .collect()
+}
+
+/// `ZWALLET_RPC_<CHAIN>` for every chain: its node, or the URL `instead` gives for that chain
+/// key. Every chain is set, so none falls back to its public default RPC.
+fn rpc_env(nodes: &[(&str, MockRpc)], instead: &[(&str, &str)]) -> Vec<(String, String)> {
+    nodes
+        .iter()
+        .map(|(key, node)| {
+            let url = instead
+                .iter()
+                .find(|(k, _)| k == key)
+                .map_or(node.url.as_str(), |(_, u)| u);
+            (
+                format!("ZWALLET_RPC_{}", key.to_uppercase()),
+                url.to_string(),
+            )
+        })
+        .collect()
+}
+
+fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
+    env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+}
+
+/// Every chain key in the order `balance` without `--chain` lists them: mainnets, then Sepolia.
+const ALL_CHAINS_ORDER: [&str; 8] = [
+    "ethereum",
+    "base",
+    "arbitrum",
+    "optimism",
+    "polygon",
+    "bsc",
+    "avalanche",
+    "sepolia",
+];
+
+#[test]
+fn balance_without_chain_reads_every_network_and_its_registry_tokens() {
+    let home = Home::new();
+    let me = home.create("t", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let nodes = every_chain_node(Duration::from_secs(1));
+    let env = rpc_env(&nodes, &[]);
+    let started = std::time::Instant::now();
+    let v = home.run_env(&["balance", "--json"], &env_refs(&env)).ok();
+    // The networks are read at once: eight 1 s balance reads take about 1 s, not 8.
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert_eq!(
+        (&v["key"], &v["address"], &v["verified"]),
+        (&json!("t"), &json!(me), &json!(false))
+    );
+    let rows = v["chains"].as_array().unwrap();
+    let keys: Vec<&str> = rows.iter().map(|r| r["chain"].as_str().unwrap()).collect();
+    assert_eq!(keys, ALL_CHAINS_ORDER);
+    for row in rows {
+        let key = row["chain"].as_str().unwrap();
+        let chain = zwallet::chains::find(key).unwrap();
+        let id = zwallet::chains::evm::config(chain).chain_id;
+        assert_eq!(row["chainId"], id, "{row:#}");
+        assert!(row.get("error").is_none(), "{row:#}");
+        // The same address on every EVM chain: only the top-level one.
+        assert!(row.get("address").is_none(), "{row:#}");
+        let (balance, raw) = if key == "base" {
+            ("1.5", "1500000000000000000")
+        } else {
+            ("0", "0")
+        };
+        assert_eq!(
+            row["native"],
+            json!({ "symbol": chain.symbol, "decimals": 18, "balance": balance, "raw": raw }),
+            "{key}"
+        );
+        // Every registry row of this chain, in registry order, zero balances included.
+        let want: Vec<Value> = zwallet::chains::evm::registry::TOKENS
+            .iter()
+            .filter(|t| t.chain_id == id)
+            .map(|t| {
+                let (balance, raw) = if t.address == ARB_USDC {
+                    ("12.5", "12500000")
+                } else {
+                    ("0", "0")
+                };
+                json!({
+                    "symbol": t.symbol,
+                    "address": t.address,
+                    "decimals": t.decimals,
+                    "balance": balance,
+                    "raw": raw,
+                })
+            })
+            .collect();
+        assert_eq!(row["tokens"], json!(want), "{key}");
+        // One balance read of the key's address, and one balanceOf per registry token.
+        let node = &nodes.iter().find(|(k, _)| *k == key).unwrap().1;
+        let reads = node.calls("eth_getBalance");
+        assert_eq!(reads.len(), 1, "{key}");
+        assert!(
+            reads[0][0].as_str().unwrap().eq_ignore_ascii_case(&me),
+            "{key}"
+        );
+        let mut calls: Vec<String> = node
+            .calls("eth_call")
+            .iter()
+            .map(|p| p[0]["to"].as_str().unwrap().to_lowercase())
+            .collect();
+        let mut tokens: Vec<String> = want
+            .iter()
+            .map(|t| t["address"].as_str().unwrap().to_lowercase())
+            .collect();
+        calls.sort();
+        tokens.sort();
+        assert_eq!(calls, tokens, "{key}");
+    }
+    // BNB Smart Chain has no registry token.
+    assert_eq!(rows[5]["tokens"], json!([]));
+
+    // Human: one line per network, a held token under its network, then the count.
+    let human = home.run_env(&["balance"], &env_refs(&env));
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert_eq!(
+        human.stdout,
+        format!(
+            "key: t\naddress: {me}\n\
+             ethereum   0 ETH\n\
+             base       1.5 ETH\n\
+             arbitrum   0 ETH\n\
+             \x20          12.5 USDC\n\
+             optimism   0 ETH\n\
+             polygon    0 POL\n\
+             bsc        0 BNB\n\
+             avalanche  0 AVAX\n\
+             sepolia    0 ETH\n\
+             2 of 8 networks have a balance\n"
+        )
+    );
+}
+
+#[test]
+fn balance_without_chain_shows_the_networks_that_answer() {
+    let home = Home::new();
+    home.create("t", &[]);
+    let nodes = every_chain_node(Duration::ZERO);
+    // Polygon refuses the connection; BNB Smart Chain takes it and never answers.
+    let silent = MockRpc::start(|_, _| {
+        std::thread::sleep(Duration::from_secs(40));
+        Reply::Drop
+    });
+    let env = rpc_env(
+        &nodes,
+        &[("polygon", "http://127.0.0.1:1"), ("bsc", &silent.url)],
+    );
+    let started = std::time::Instant::now();
+    let v = home.run_env(&["balance", "--json"], &env_refs(&env)).ok();
+    // BNB Smart Chain gets its 8 s, not the 30 s a single RPC call may take.
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_secs(7) && took < Duration::from_secs(20),
+        "{took:?}"
+    );
+    let rows = v["chains"].as_array().unwrap();
+    let keys: Vec<&str> = rows.iter().map(|r| r["chain"].as_str().unwrap()).collect();
+    assert_eq!(keys, ALL_CHAINS_ORDER);
+    for row in rows {
+        match row["chain"].as_str().unwrap() {
+            "polygon" | "bsc" => {
+                assert_eq!(row["errorCode"], "RPC_ERROR", "{row:#}");
+                assert!(row.get("native").is_none(), "{row:#}");
+                assert!(row.get("tokens").is_none(), "{row:#}");
+            }
+            _ => {
+                assert!(row.get("error").is_none(), "{row:#}");
+                assert!(row["native"]["balance"].is_string(), "{row:#}");
+            }
+        }
+    }
+    let bsc = rows[5]["error"].as_str().unwrap();
+    assert!(bsc.contains("timed out after 8s"), "{bsc}");
+    let polygon = rows[4]["error"].as_str().unwrap();
+    assert!(polygon.starts_with("eth_chainId failed"), "{polygon}");
+
+    // Human (Polygon down only): its line says so briefly, and the count says one did not
+    // answer; still exit 0.
+    let env = rpc_env(&nodes, &[("polygon", "http://127.0.0.1:1")]);
+    let human = home.run_env(&["balance"], &env_refs(&env));
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    let lines: Vec<&str> = human.stdout.lines().collect();
+    let polygon = lines
+        .iter()
+        .find(|l| l.starts_with("polygon "))
+        .unwrap_or_else(|| panic!("{}", human.stdout));
+    assert!(polygon.starts_with("polygon    error: "), "{polygon}");
+    assert!(polygon.ends_with(" [RPC_ERROR]"), "{polygon}");
+    assert!(polygon.chars().count() <= 110, "{polygon}");
+    assert_eq!(
+        lines.last(),
+        Some(&"1 of 8 networks have a balance; 1 did not answer"),
+        "{}",
+        human.stdout
+    );
+}
+
+#[test]
+fn balance_without_chain_fails_when_no_network_answers() {
+    let home = Home::new();
+    home.create("t", &[]);
+    let env: Vec<(String, String)> = zwallet::chains::CHAINS
+        .iter()
+        .map(|c| (c.rpc_env_var(), "http://127.0.0.1:1".to_string()))
+        .collect();
+    let msg = home
+        .run_env(&["balance", "--json"], &env_refs(&env))
+        .err("RPC_ERROR");
+    assert!(msg.starts_with("no network answered"), "{msg}");
+    for key in ALL_CHAINS_ORDER {
+        assert!(msg.contains(&format!("{key}: ")), "{key}: {msg}");
+    }
+    let human = home.run_env(&["balance"], &env_refs(&env));
+    assert_eq!(human.code, 1, "{}", human.stdout);
+    assert!(
+        human.stderr.starts_with("error: no network answered"),
+        "{}",
+        human.stderr
+    );
+    assert!(human.stderr.trim_end().ends_with("[RPC_ERROR]"));
+}
+
+#[test]
+fn balance_with_chain_prints_what_it_always_did() {
+    let home = Home::new();
+    let me = home.create("t", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let base = wallet_node(8453, 15 * 10u128.pow(17), Duration::ZERO);
+    let v = home
+        .run(&["balance", "--chain", "base", "--rpc", &base.url, "--json"])
+        .ok();
+    assert_eq!(
+        v,
+        json!({
+            "chain": "base",
+            "key": "t",
+            "address": me,
+            "symbol": "ETH",
+            "decimals": 18,
+            "balance": "1.5",
+            "raw": "1500000000000000000",
+            "verified": false,
+        })
+    );
+    let human = home.run(&["balance", "--chain", "base", "--rpc", &base.url]);
+    assert_eq!(
+        human.stdout,
+        format!(
+            "address: {me}\nbalance: 1.5\nchain: base\ndecimals: 18\nkey: t\nraw: \
+             1500000000000000000\nsymbol: ETH\nverified: false\n"
+        )
+    );
+    // A token: its own symbol and decimals, read from the contract, plus `token`.
+    let node = mining_node();
+    let v = home
+        .run(&[
+            "balance", "--chain", "ethereum", "--token", USDC, "--rpc", &node.url, "--json",
+        ])
+        .ok();
+    assert_eq!(
+        v,
+        json!({
+            "chain": "ethereum",
+            "key": "t",
+            "address": me,
+            "symbol": "USDC",
+            "decimals": 6,
+            "balance": "1000000",
+            "raw": "1000000000000",
+            "verified": false,
+            "token": USDC,
+        })
+    );
+    // The env var still picks the RPC for one chain.
+    let v = home
+        .run_env(
+            &["balance", "--chain", "base", "--json"],
+            &[("ZWALLET_RPC_BASE", &base.url)],
+        )
+        .ok();
+    assert_eq!(v["balance"], "1.5");
+    // A token contract or an RPC URL without --chain: refused, nothing read.
+    let reads = base.calls("eth_getBalance").len();
+    for flag in [["--token", USDC], ["--rpc", base.url.as_str()]] {
+        home.run(&["balance", flag[0], flag[1], "--json"])
+            .err("VALIDATION_ERROR");
+        let human = home.run(&["balance", flag[0], flag[1]]);
+        assert_eq!(human.code, 1, "{}", human.stdout);
+        assert!(human.stderr.contains("--chain <CHAIN>"), "{}", human.stderr);
+    }
+    assert_eq!(base.calls("eth_getBalance").len(), reads);
+}
+
 /// A node whose nonces count what it accepted, mined at once (`latest` = `pending`).
 fn mining_node() -> MockRpc {
     let accepted = Arc::new(AtomicUsize::new(0));

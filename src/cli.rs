@@ -748,6 +748,40 @@ mod tests {
     }
 
     #[test]
+    fn balance_chain_is_optional_but_token_and_rpc_need_it() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["zwallet", "balance"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all).map(|c| c.command)
+        };
+        // No --chain: every network.
+        for ok in [&[][..], &["--key", "main", "--json"]] {
+            assert!(matches!(parse(ok), Ok(Command::Balance(_))), "{ok:?}");
+        }
+        // One chain, with or without a token contract and an RPC URL.
+        assert!(matches!(
+            parse(&["--chain", "base", "--token", "0xab", "--rpc", "http://x"]),
+            Ok(Command::Balance(_))
+        ));
+        // A token contract and an RPC URL belong to one chain.
+        for bad in [&["--token", "0xab"][..], &["--rpc", "http://x"]] {
+            let e = parse(bad).unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::MissingRequiredArgument, "{bad:?}");
+            assert!(e.to_string().contains("--chain <CHAIN>"), "{e}");
+        }
+    }
+
+    #[test]
+    fn balance_help_says_no_chain_means_every_network() {
+        let mut cli = Cli::command();
+        let balance = cli.find_subcommand_mut("balance").unwrap();
+        let help = balance.render_help().to_string();
+        assert!(help.contains("every network"), "{help}");
+        let long = balance.render_long_help().to_string();
+        assert!(long.contains("Omit to check every network"), "{long}");
+    }
+
+    #[test]
     fn tx_takes_a_positional_hash() {
         let cli =
             Cli::try_parse_from(["zwallet", "tx", "--chain", "base", "0xab", "--json"]).unwrap();
