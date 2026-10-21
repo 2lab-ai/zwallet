@@ -1,9 +1,8 @@
 # zwallet
 
-Local, login-free wallet CLI for agents (EVM today; Solana and TON planned). A Rust
-re-implementation of the wallet surface of Trust Wallet's `twak` CLI with everything that needed
-Trust's servers removed: no API credentials, no telemetry, no OS keychain, no backend registration.
-Keys stay on this machine; chain access is plain JSON-RPC.
+Local, login-free wallet CLI for agents (EVM today; Solana and TON planned), written in Rust. No
+API credentials, no telemetry, no OS keychain, no backend registration: keys stay on this machine,
+and chain access is plain JSON-RPC.
 
 It does four things: create a wallet, read balances, call contract functions (read and write), and
 transfer. A human unlocks it for a chosen time; while unlocked, a small daemon holds only the key so

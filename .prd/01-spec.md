@@ -25,9 +25,9 @@ The user wanted an Ethereum address the agent can use on its own, funded with a 
   But its signing daemon's session lasts `SESSION_TTL_MINUTES = 5` (`src/config/constants.js:51`),
   so an agent would need a human to unlock it every five minutes.
 
-Neither twak's source repo nor a fork of it is public (`gh repo view trustwallet/twak` → not found,
-2026-10-20). zwallet is therefore a clean Rust implementation of the wallet surface, with no account,
-no API key, no telemetry and no OS keychain.
+Both were research only; zwallet takes no code, design or dependency from either (user,
+2026-10-21: "twak은 처음에 리서치할때만 쓴거고 전혀 관계없음"). It is its own Rust wallet CLI, with
+no account, no API key, no telemetry and no OS keychain.
 
 ## Goals
 

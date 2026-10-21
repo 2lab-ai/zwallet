@@ -22,6 +22,7 @@ Status: **in-progress**, 2026-10-20. This is the fixed target; do not reinterpre
 16. "1. 그 마스터키를 만들고 마스터키에서 서브키 만들수 있는거 그걸로해줘 2. 그리고 키를 그럼 여러개 서로 변경할 수 있도록해줘 (새로 키를 만들면 해당 키로 변경됨) 3. zwallet list, zwallet change {키이름} 추가"
 17. "니모닉은 디폴트로 좇나 긴걸로해주고"
 18. "ai내성이나 양자 내성 월릿을 사용할수 있으면 그걸로해줘 처음부터"
+19. (2026-10-21, on the README's opening line) "이 내용 뺴줘 > A Rust re-implementation of the wallet surface of Trust Wallet's twak CLI with everything that needed Trust's servers removed: twak은 처음에 리서치할때만 쓴거고 전혀 관계없음"
 
 ## Fixed scope
 
@@ -42,8 +43,8 @@ Status: **in-progress**, 2026-10-20. This is the fixed target; do not reinterpre
   [`../v0-2-tui/ssot.md`](../v0-2-tui/ssot.md)). It lands as WU1b before the v0.1.0 tag and
   before funding.
 - **Chains** (10): EVM only in v0.1. The architecture leaves room for Solana and TON.
-- **No Trust Wallet anything** (5, 6, 7): no Trust API, packages, keychain, or telemetry. twak's
-  source is not public, so "fork" = re-implement its wallet surface (see 01-spec §Problem).
+- **No Trust Wallet anything** (5, 6, 7, 19): no Trust API, packages, keychain, or telemetry, and
+  no relation to twak: it was only looked at during the 2026-10-20 research (01-spec §Problem).
 - **Distribution** (14): the llmux pattern — CI, preview, release, `2lab-ai/homebrew-tap` formulae
   (stable and preview), and an xbrew recipe.
 - **Deliverable to the user** (1): an Ethereum address the agent can use, from a wallet the user
