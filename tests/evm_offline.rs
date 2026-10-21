@@ -1952,8 +1952,11 @@ fn balance_with_chain_prints_what_it_always_did() {
     // A token contract or an RPC URL without --chain: refused, nothing read.
     let reads = base.calls("eth_getBalance").len();
     for flag in [["--token", USDC], ["--rpc", base.url.as_str()]] {
-        home.run(&["balance", flag[0], flag[1], "--json"])
+        // The JSON error names the missing argument, as the human one does.
+        let msg = home
+            .run(&["balance", flag[0], flag[1], "--json"])
             .err("VALIDATION_ERROR");
+        assert!(msg.contains("--chain <CHAIN>"), "{msg}");
         let human = home.run(&["balance", flag[0], flag[1]]);
         assert_eq!(human.code, 1, "{}", human.stdout);
         assert!(human.stderr.contains("--chain <CHAIN>"), "{}", human.stderr);
