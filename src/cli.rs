@@ -442,14 +442,8 @@ pub fn main_entry() -> i32 {
                     0
                 }
                 _ if json => {
-                    let rendered = e.render().to_string();
-                    let first = rendered
-                        .lines()
-                        .next()
-                        .unwrap_or("invalid arguments")
-                        .trim_start_matches("error: ")
-                        .to_string();
-                    print_error(true, &WalletError::new(ErrorCode::ValidationError, first));
+                    let message = clap_json_message(&e.render().to_string());
+                    print_error(true, &WalletError::new(ErrorCode::ValidationError, message));
                     1
                 }
                 _ => {
@@ -481,6 +475,30 @@ pub fn main_entry() -> i32 {
             print_error(json, &e);
             1
         }
+    }
+}
+
+/// A clap error as the `--json` message: its lines up to the usage and help hint, trimmed, empty
+/// ones dropped, joined with "; " (a line ending in `:` runs on with a space), without the
+/// `error: ` prefix. So a missing-argument error names the arguments that are missing.
+fn clap_json_message(rendered: &str) -> String {
+    let mut out = String::new();
+    for line in rendered.lines().map(str::trim) {
+        if line.starts_with("Usage:") || line.starts_with("For more information") {
+            break;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str(if out.ends_with(':') { " " } else { "; " });
+        }
+        out.push_str(line.strip_prefix("error: ").unwrap_or(line));
+    }
+    if out.is_empty() {
+        "invalid arguments".to_string()
+    } else {
+        out
     }
 }
 
@@ -783,6 +801,40 @@ mod tests {
         assert!(help.contains("every network"), "{help}");
         let long = balance.render_long_help().to_string();
         assert!(long.contains("Omit to check every network"), "{long}");
+    }
+
+    #[test]
+    fn json_clap_errors_keep_the_message_without_usage() {
+        let message = |args: &[&str]| {
+            let e = Cli::try_parse_from(args).unwrap_err();
+            clap_json_message(&e.render().to_string())
+        };
+        assert_eq!(
+            message(&["zwallet", "transfer"]),
+            "the following required arguments were not provided: --chain <CHAIN>; --to <TO>; \
+             --amount <AMOUNT>"
+        );
+        assert_eq!(
+            message(&["zwallet", "balance", "--token", "0xab"]),
+            "the following required arguments were not provided: --chain <CHAIN>"
+        );
+        assert_eq!(
+            message(&["zwallet", "unlock"]),
+            "the following required arguments were not provided: <DURATION>"
+        );
+        // One-line errors are unchanged; a tip stays.
+        assert_eq!(
+            message(&[
+                "zwallet", "invoke", "--chain", "b", "--to", "0x", "--sig", "f()", "--data", "0x"
+            ]),
+            "the argument '--sig <SIG>' cannot be used with '--data <DATA>'"
+        );
+        assert_eq!(
+            message(&["zwallet", "unlock", "1h", "--allow-ptrace-scope0"]),
+            "unexpected argument '--allow-ptrace-scope0' found; tip: a similar argument exists: \
+             '--allow-ptrace-scope-0'"
+        );
+        assert_eq!(clap_json_message(""), "invalid arguments");
     }
 
     #[test]
