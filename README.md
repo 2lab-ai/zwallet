@@ -286,7 +286,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   network's error in the message. The address is the same on every EVM chain; a row has its own
   `address` only where the cache differs. Human output: `key` and `address`, one line per network
   with its coin, each non-zero token indented under it, a failed network as `error: <message,
-  cut short> [<CODE>]`, and a last line `N of 8 networks have a balance` (`; M did not answer`).
+  cut short> [<CODE>]`, and a last line `<n> of <all> networks have a balance` (`; <m> did not
+  answer` when some failed).
 - **`call` / `invoke` signatures** are `name(argTypes)(returnTypes)`, e.g.
   `balanceOf(address)(uint256)` or `getReserves()(uint112,uint112,uint32)`. Return types are
   optional (without them `result` is null and `raw` has the hex). Arrays are written `[1,2]`,
