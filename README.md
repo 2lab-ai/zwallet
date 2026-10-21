@@ -1,9 +1,8 @@
 # zwallet
 
-Local, login-free wallet CLI for agents (EVM today; Solana and TON planned). A Rust
-re-implementation of the wallet surface of Trust Wallet's `twak` CLI with everything that needed
-Trust's servers removed: no API credentials, no telemetry, no OS keychain, no backend registration.
-Keys stay on this machine; chain access is plain JSON-RPC.
+Local, login-free wallet CLI for agents (EVM today; Solana and TON planned), written in Rust. No
+API credentials, no telemetry, no OS keychain, no backend registration: keys stay on this machine,
+and chain access is plain JSON-RPC.
 
 It does four things: create a wallet, read balances, call contract functions (read and write), and
 transfer. A human unlocks it for a chosen time; while unlocked, a small daemon holds only the key so
@@ -531,7 +530,7 @@ data).
   following a symlink and without blocking, and only as a regular file of this user's of at most
   1 MiB, so a FIFO or link planted in its place fails fast instead of hanging a reader.
 - **Keys**: named subkeys of the master by index, in creation order, never reused. EVM uses
-  `m/44'/60'/0'/0/<index>` (the MetaMask/Trust account order), so the phrase imports into standard
+  `m/44'/60'/0'/0/<index>` (the standard BIP44 Ethereum account order), so the phrase imports into standard
   wallets with the same accounts. One address per key on every EVM chain. Indices stay below
   2^31, where BIP32's hardened range starts (`VALIDATION_ERROR` at or above it).
 - **Daemon**: `unlock` pins the zwallet binary before it asks for the password. On Linux that is

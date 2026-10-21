@@ -40,7 +40,7 @@ seed, so the wallet file and the daemon protocol do not change.
   the file, and non-secret key metadata:
   `keys: [{ name, index, createdAt, addresses: { <chain>: addr } }]` and `active`.
 - **Keys**: a key = an index `i` under the master, assigned in creation order and never reused.
-  Each family maps `i` to its own path. EVM uses `m/44'/60'/0'/0/i` (MetaMask/Trust account order).
+  Each family maps `i` to its own path. EVM uses `m/44'/60'/0'/0/i` (the standard BIP44 Ethereum account order).
   Solana will use `m/44'/501'/i'/0'` and TON `m/44'/607'/i'`. Every command acts on the active key
   unless `--key <name>` is given. `create <name>` on an existing master derives the next index
   through the unlocked daemon, or through a one-off password prompt.

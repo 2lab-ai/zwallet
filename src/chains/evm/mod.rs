@@ -43,7 +43,7 @@ pub fn config(chain: &Chain) -> &EvmChain {
     }
 }
 
-/// `m/44'/60'/0'/0/{index}`: the MetaMask / Trust account order, so the mnemonic imports into
+/// `m/44'/60'/0'/0/{index}`: the standard BIP44 Ethereum account order, so the mnemonic imports into
 /// standard wallets with the same accounts in the same order.
 pub fn derivation_path(index: u32) -> String {
     format!("m/44'/60'/0'/0/{index}")
