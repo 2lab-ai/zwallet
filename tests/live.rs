@@ -487,3 +487,57 @@ async fn every_registry_token_answers_its_symbol_and_decimals() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+#[ignore = "live: public RPC"]
+fn balance_without_chain_reads_every_network() {
+    let home = Home::new();
+    home.create("live", &[]);
+    // A known address in place of the fresh key's (an edit of the cache, which `balance`
+    // reads): Hardhat's account #0, public test key, dust on many networks.
+    const HARDHAT_0: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    home.edit_wallet(|v| {
+        for (_, a) in v["keys"][0]["addresses"].as_object_mut().unwrap() {
+            *a = serde_json::json!(HARDHAT_0);
+        }
+    });
+    let v = home.run(&["balance", "--json"]).ok();
+    println!("{v:#}");
+    assert_eq!(v["address"], HARDHAT_0);
+    let rows = v["chains"].as_array().unwrap();
+    let keys: Vec<&str> = rows.iter().map(|r| r["chain"].as_str().unwrap()).collect();
+    // Every network, the testnet last.
+    assert_eq!(
+        keys,
+        [
+            "ethereum",
+            "base",
+            "arbitrum",
+            "optimism",
+            "polygon",
+            "bsc",
+            "avalanche",
+            "sepolia"
+        ]
+    );
+    // Each answered through its default RPC, with every registry token of its chain read.
+    for row in rows {
+        assert!(row.get("error").is_none(), "{row:#}");
+        let id = row["chainId"].as_u64().unwrap();
+        let tokens = evm::registry::TOKENS
+            .iter()
+            .filter(|t| t.chain_id == id)
+            .count();
+        let rows = row["tokens"].as_array().unwrap();
+        assert_eq!(rows.len(), tokens, "{row:#}");
+        assert!(rows.iter().all(|t| t.get("error").is_none()), "{row:#}");
+    }
+    let human = home.run(&["balance"]);
+    println!("{}", human.stdout);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.trim_end().ends_with("networks have a balance"),
+        "{}",
+        human.stdout
+    );
+}

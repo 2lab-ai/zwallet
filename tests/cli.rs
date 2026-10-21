@@ -398,8 +398,17 @@ fn json_error_codes_offline() {
         "call", "--chain", "ethereum", "--to", &me, "--sig", "f(uint8)", "--json",
     ])
     .err("VALIDATION_ERROR"); // arity
-    // clap-level errors are JSON too with --json.
-    home.run(&["transfer", "--json"]).err("VALIDATION_ERROR");
+    // clap-level errors are JSON too with --json, with clap's whole message (not its usage and
+    // help hint): a missing-argument error names every missing argument.
+    let msg = home.run(&["transfer", "--json"]).err("VALIDATION_ERROR");
+    for arg in ["--chain <CHAIN>", "--to <TO>", "--amount <AMOUNT>"] {
+        assert!(msg.contains(arg), "{arg}: {msg}");
+    }
+    assert!(!msg.contains("Usage:") && !msg.contains("--help"), "{msg}");
+    let msg = home
+        .run(&["unlock", "--password-stdin", "--json"])
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains("<DURATION>"), "{msg}");
     home.run(&["no-such-command", "--json"])
         .err("VALIDATION_ERROR");
     // An unreachable RPC is RPC_ERROR (closed local port; no network needed).

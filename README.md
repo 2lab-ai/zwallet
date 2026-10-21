@@ -35,6 +35,7 @@ zwallet whitelist add alice 0x... --chains base  # human: let the wallet pay ali
 zwallet unlock 24h           # human: unlock signing for 24h (also 30m, 365d, 1y, ...)
 zwallet address --verify     # human: 0x..., checked against the seed with the password
 zwallet address              # anyone: 0x... from the cache (works while locked)
+zwallet balance              # anyone: every network at once (coin + registry tokens)
 zwallet balance --chain base
 zwallet transfer --chain base --to @alice --amount 0.01 --dry-run
 zwallet transfer --chain base --to @alice --amount 0.01 --wait
@@ -59,6 +60,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `address [--chain <key>] [--verify [--password-stdin]]` | `{ chain, key, address, verified }` (EIP-55; `--verify` adds `index` and `warning?`) | works |
 | `addresses` | `{ key, addresses: [{ chainId: <key>, address }], verified }` | works |
 | `status` | `{ wallet, locked, home, daemonPids?, otherDaemonPids, daemonPid?, expiresAt?, whitelist?, active?, address?, verified? }` | works |
+| `balance` | `{ key, address, verified: false, chains: [{ chain, chainId, native: { symbol, decimals, balance, raw }, tokens: [{ symbol, address, decimals, balance, raw }] }] }`; a network that failed has `{ chain, chainId, error, errorCode }` instead, a token whose read failed `{ symbol, address, decimals, error, errorCode }` (see below) | works |
 | `balance --chain <key> [--token <erc20>] [--rpc <url>]` | `{ chain, key, address, symbol, decimals, balance, raw, verified: false, token? }` | works |
 | `call --chain <key> --to <contract> --sig "<fn>" [ARGS...] [--rpc <url>]` | `{ chain, from, to, sig, args, result, raw }` | works |
 | `invoke --chain <key> --to <contract\|@nick> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw, toNickname? }` | `WALLET_LOCKED` |
@@ -272,6 +274,22 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - **`@nick`**: `transfer --to @alice` and `invoke --to @router` take the address from
     `whitelist.json` as it is, unverified (the daemon decides anyway), and add `toNickname`. An
     unknown nickname is `VALIDATION_ERROR` naming `zwallet whitelist list`.
+- **`balance` without `--chain`** checks every network in **Chains**, mainnets first and the
+  testnet (Sepolia) last: the native coin and every registry token there (USDC, USDT, DAI and
+  WETH where their issuers publish them; BNB Smart Chain has none), zero balances included in
+  `--json`. Token symbols and decimals come from the registry; `--token` instead asks the
+  contract. The networks are read at once, each through `ZWALLET_RPC_<KEY>` or its default RPC
+  and within 8 s for all its reads; `--token` and `--rpc` need `--chain` (a contract and an RPC
+  URL belong to one chain). A network whose endpoint, chain id check or native balance fails or
+  runs out of time has `error` and `errorCode` (and no `native` or `tokens`); a token whose
+  `balanceOf` does has them on its own row (and no `balance` or `raw`), and the rest of the
+  network still shows. The command exits 0 when any network answered; when none did it fails with
+  their shared error code (else `RPC_ERROR`) and every network's error in the message. The
+  address is the same on every EVM chain; a row has its own `address` only where the cache
+  differs. Human output: `key` and `address`, one line per network with its coin, indented under
+  it each non-zero token and each failed token as `<SYMBOL> error: …`, a failed network as
+  `error: <message, cut short> [<CODE>]`, and a last line `<n> of <all> networks have a balance`
+  (`; <m> did not answer`, `; <k> token reads failed` when some failed).
 - **`call` / `invoke` signatures** are `name(argTypes)(returnTypes)`, e.g.
   `balanceOf(address)(uint256)` or `getReserves()(uint112,uint112,uint32)`. Return types are
   optional (without them `result` is null and `raw` has the hex). Arrays are written `[1,2]`,

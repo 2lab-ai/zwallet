@@ -10,8 +10,8 @@ pub mod tx;
 use crate::chains::evm::policy::ListView;
 use crate::chains::{
     Balance, Broadcast, Chain, ChainFamily, Family, FamilyKeys, Net, PreparedTx, SendRecord,
-    SignedTx, TransferRequest, after_send_error, before_send_error, nonce_taken_error,
-    rejected_send_error,
+    SignedTx, TokenBalance, TransferRequest, after_send_error, before_send_error,
+    nonce_taken_error, rejected_send_error,
 };
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
@@ -254,6 +254,59 @@ impl ChainFamily for Evm {
             symbol: meta.symbol,
             decimals: meta.decimals,
         })
+    }
+
+    async fn wallet_balances(
+        &self,
+        net: &Net,
+        owner: &str,
+        limit: Duration,
+    ) -> Result<(Balance, Vec<TokenBalance>)> {
+        let deadline = tokio::time::Instant::now() + limit;
+        let late = move |what: &str| {
+            WalletError::rpc(format!("{what} timed out after {}s", limit.as_secs()))
+        };
+        let owner = parse_address(owner)?;
+        let p = tokio::time::timeout_at(deadline, rpc::connect(net))
+            .await
+            .map_err(|_| late("the chain id check"))??;
+        let p = std::sync::Arc::new(p);
+        // Every token at once, each until the deadline, so one that hangs delays no other.
+        let chain_id = config(net.chain).chain_id;
+        let reads: Vec<_> = registry::TOKENS
+            .iter()
+            .filter(|t| t.chain_id == chain_id)
+            .map(|t| {
+                let p = p.clone();
+                let read = tokio::spawn(async move {
+                    let token = parse_address(t.address)?;
+                    tokio::time::timeout_at(deadline, rpc::erc20_balance(&p, token, owner))
+                        .await
+                        .map_err(|_| late("balanceOf"))?
+                });
+                (t, read)
+            })
+            .collect();
+        let native = tokio::time::timeout_at(deadline, rpc::native_balance(&p, owner))
+            .await
+            .map_err(|_| late("eth_getBalance"))??;
+        let mut tokens = Vec::with_capacity(reads.len());
+        for (t, read) in reads {
+            tokens.push(TokenBalance {
+                address: t.address.to_string(),
+                symbol: t.symbol.to_string(),
+                decimals: t.decimals,
+                raw: read
+                    .await
+                    .unwrap_or_else(|_| Err(WalletError::rpc("balanceOf stopped unexpectedly"))),
+            });
+        }
+        let native = Balance {
+            symbol: net.chain.symbol.to_string(),
+            decimals: net.chain.decimals,
+            raw: native,
+        };
+        Ok((native, tokens))
     }
 
     async fn prepare_transfer(&self, net: &Net, req: &TransferRequest) -> Result<PreparedTx> {

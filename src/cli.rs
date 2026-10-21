@@ -47,7 +47,8 @@ pub enum Command {
     Address(AddressArgs),
     /// Addresses of a key on every chain. Works while locked.
     Addresses(KeyArg),
-    /// Native or ERC-20 balance. Works while locked.
+    /// Native or ERC-20 balance on one chain; without --chain, the native coin and every registry
+    /// token on every network. Works while locked.
     Balance(BalanceArgs),
     /// Read-only contract call (eth_call). Works while locked.
     Call(CallArgs),
@@ -136,13 +137,16 @@ pub struct VerifyArgs {
 
 #[derive(Debug, Args)]
 pub struct BalanceArgs {
+    /// The chain to read. Omit to check every network at once (testnets last): the native coin
+    /// and every registry token on each, up to 8s per network, through ZWALLET_RPC_<CHAIN> or
+    /// the default RPC.
     #[arg(long)]
-    pub chain: String,
-    /// ERC-20 token contract (0x...). Omit for the native coin.
-    #[arg(long)]
+    pub chain: Option<String>,
+    /// ERC-20 token contract (0x...). Omit for the native coin. Needs --chain.
+    #[arg(long, requires = "chain")]
     pub token: Option<String>,
-    /// RPC URL (overrides ZWALLET_RPC_<CHAIN> and the default).
-    #[arg(long)]
+    /// RPC URL (overrides ZWALLET_RPC_<CHAIN> and the default). Needs --chain.
+    #[arg(long, requires = "chain")]
     pub rpc: Option<String>,
     #[command(flatten)]
     pub key: KeyArg,
@@ -438,14 +442,8 @@ pub fn main_entry() -> i32 {
                     0
                 }
                 _ if json => {
-                    let rendered = e.render().to_string();
-                    let first = rendered
-                        .lines()
-                        .next()
-                        .unwrap_or("invalid arguments")
-                        .trim_start_matches("error: ")
-                        .to_string();
-                    print_error(true, &WalletError::new(ErrorCode::ValidationError, first));
+                    let message = clap_json_message(&e.render().to_string());
+                    print_error(true, &WalletError::new(ErrorCode::ValidationError, message));
                     1
                 }
                 _ => {
@@ -455,10 +453,7 @@ pub fn main_entry() -> i32 {
             };
         }
     };
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match cli_runtime() {
         Ok(rt) => rt,
         Err(e) => {
             print_error(
@@ -468,7 +463,7 @@ pub fn main_entry() -> i32 {
             return 1;
         }
     };
-    match runtime.block_on(commands::run(cli)) {
+    match run_to_end(runtime, commands::run(cli)) {
         Ok(out) => {
             print_out(json, &out);
             0
@@ -477,6 +472,50 @@ pub fn main_entry() -> i32 {
             print_error(json, &e);
             1
         }
+    }
+}
+
+/// The runtime a command (and the key daemon) runs on: one thread, with I/O and timers.
+fn cli_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
+/// Runs `work` on `runtime` to its end, then shuts the runtime down without waiting for its
+/// blocking tasks. Its async tasks are dropped as a plain drop would; but a drop also waits for
+/// every blocking task, such as a DNS lookup (getaddrinfo) a network's deadline gave up on, which
+/// would keep the process alive after its output.
+fn run_to_end<T>(
+    runtime: tokio::runtime::Runtime,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let out = runtime.block_on(work);
+    runtime.shutdown_background();
+    out
+}
+
+/// A clap error as the `--json` message: its lines up to the usage and help hint, trimmed, empty
+/// ones dropped, joined with "; " (a line ending in `:` runs on with a space), without the
+/// `error: ` prefix. So a missing-argument error names the arguments that are missing.
+fn clap_json_message(rendered: &str) -> String {
+    let mut out = String::new();
+    for line in rendered.lines().map(str::trim) {
+        if line.starts_with("Usage:") || line.starts_with("For more information") {
+            break;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str(if out.ends_with(':') { " " } else { "; " });
+        }
+        out.push_str(line.strip_prefix("error: ").unwrap_or(line));
+    }
+    if out.is_empty() {
+        "invalid arguments".to_string()
+    } else {
+        out
     }
 }
 
@@ -745,6 +784,90 @@ mod tests {
         );
         let plain = WalletError::validation("bad");
         assert_eq!(human_error(&plain), "error: bad [VALIDATION_ERROR]");
+    }
+
+    #[test]
+    fn balance_chain_is_optional_but_token_and_rpc_need_it() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["zwallet", "balance"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all).map(|c| c.command)
+        };
+        // No --chain: every network.
+        for ok in [&[][..], &["--key", "main", "--json"]] {
+            assert!(matches!(parse(ok), Ok(Command::Balance(_))), "{ok:?}");
+        }
+        // One chain, with or without a token contract and an RPC URL.
+        assert!(matches!(
+            parse(&["--chain", "base", "--token", "0xab", "--rpc", "http://x"]),
+            Ok(Command::Balance(_))
+        ));
+        // A token contract and an RPC URL belong to one chain.
+        for bad in [&["--token", "0xab"][..], &["--rpc", "http://x"]] {
+            let e = parse(bad).unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::MissingRequiredArgument, "{bad:?}");
+            assert!(e.to_string().contains("--chain <CHAIN>"), "{e}");
+        }
+    }
+
+    #[test]
+    fn balance_help_says_no_chain_means_every_network() {
+        let mut cli = Cli::command();
+        let balance = cli.find_subcommand_mut("balance").unwrap();
+        let help = balance.render_help().to_string();
+        assert!(help.contains("every network"), "{help}");
+        let long = balance.render_long_help().to_string();
+        assert!(long.contains("Omit to check every network"), "{long}");
+    }
+
+    #[test]
+    fn json_clap_errors_keep_the_message_without_usage() {
+        let message = |args: &[&str]| {
+            let e = Cli::try_parse_from(args).unwrap_err();
+            clap_json_message(&e.render().to_string())
+        };
+        assert_eq!(
+            message(&["zwallet", "transfer"]),
+            "the following required arguments were not provided: --chain <CHAIN>; --to <TO>; \
+             --amount <AMOUNT>"
+        );
+        assert_eq!(
+            message(&["zwallet", "balance", "--token", "0xab"]),
+            "the following required arguments were not provided: --chain <CHAIN>"
+        );
+        assert_eq!(
+            message(&["zwallet", "unlock"]),
+            "the following required arguments were not provided: <DURATION>"
+        );
+        // One-line errors are unchanged; a tip stays.
+        assert_eq!(
+            message(&[
+                "zwallet", "invoke", "--chain", "b", "--to", "0x", "--sig", "f()", "--data", "0x"
+            ]),
+            "the argument '--sig <SIG>' cannot be used with '--data <DATA>'"
+        );
+        assert_eq!(
+            message(&["zwallet", "unlock", "1h", "--allow-ptrace-scope0"]),
+            "unexpected argument '--allow-ptrace-scope0' found; tip: a similar argument exists: \
+             '--allow-ptrace-scope-0'"
+        );
+        assert_eq!(clap_json_message(""), "invalid arguments");
+    }
+
+    #[test]
+    fn a_blocking_task_left_behind_does_not_hold_the_process() {
+        // Like a DNS lookup (getaddrinfo on the blocking pool) that a network's deadline gave up
+        // on during `balance` without --chain: the result is out, and main_entry returns at once.
+        let started = std::time::Instant::now();
+        let out = run_to_end(cli_runtime().unwrap(), async {
+            drop(tokio::task::spawn_blocking(|| {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }));
+            7
+        });
+        assert_eq!(out, 7);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 
     #[test]

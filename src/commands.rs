@@ -604,7 +604,17 @@ async fn addresses(home: &Path, k: KeyArg) -> Result<Out> {
 }
 
 async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
-    let chain = chains::find(&a.chain)?;
+    let chain = match (&a.chain, &a.token, &a.rpc) {
+        (Some(chain), _, _) => chains::find(chain)?,
+        (None, None, None) => return every_balance(home, &a.key).await,
+        // clap refuses these already (`requires`).
+        _ => {
+            return Err(WalletError::validation(
+                "--token and --rpc need --chain: a token contract and an RPC URL belong to one \
+                 chain",
+            ));
+        }
+    };
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
     let owner = key_address(home, key, chain).await?;
@@ -630,6 +640,195 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
         out["token"] = json!(Evm.normalize_address(token)?);
     }
     Ok(Out::json(out))
+}
+
+/// How long `balance` without `--chain` waits for one network: its chain id check and every
+/// balance read on it, together.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// The most characters of an error a network's line shows in `balance` without `--chain`
+/// (`--json` has the whole message).
+const BRIEF_ERROR_CHARS: usize = 72;
+
+/// One network's balances for `balance` without `--chain`: the native coin and every registry
+/// token there.
+type NetworkBalances = Result<(chains::Balance, Vec<chains::TokenBalance>)>;
+
+/// `balance` without `--chain`: the native coin and every registry token on every chain,
+/// mainnets first. The networks are read at once, each within [`NETWORK_TIMEOUT`], through
+/// `ZWALLET_RPC_<CHAIN>` or the default RPC. A network whose endpoint, chain id or native balance
+/// fails is a row with `error` and `errorCode` instead of `native` and `tokens`; a token whose
+/// read fails is a token row with them instead of `balance` and `raw`. Only when no network
+/// answers is it an error (their shared code, else `RPC_ERROR`).
+async fn every_balance(home: &Path, k: &KeyArg) -> Result<Out> {
+    let file = store::read_wallet_file(home)?;
+    let key = file.key(k.key.as_deref())?;
+    let mut order: Vec<&'static Chain> = CHAINS.iter().collect();
+    order.sort_by_key(|c| c.is_testnet());
+    // The address on each chain first, as `balance --chain` finds it: the cache, or the daemon
+    // for a chain added after the key.
+    let mut owners = Vec::with_capacity(order.len());
+    for chain in &order {
+        owners.push(key_address(home, key, chain).await);
+    }
+    // The same on every EVM chain; a row names its own only where it differs. (When no chain
+    // has one, every row fails and this is never shown.)
+    let address = owners
+        .iter()
+        .find_map(|o| o.as_ref().ok())
+        .cloned()
+        .unwrap_or_default();
+    let reads: Vec<_> = order
+        .iter()
+        .zip(owners)
+        .map(|(chain, owner)| {
+            owner.map(|owner| {
+                let read = tokio::spawn(read_network(net(chain, None), owner.clone()));
+                (owner, read)
+            })
+        })
+        .collect();
+    let mut rows = Vec::with_capacity(order.len());
+    let mut lines = vec![format!("key: {}", key.name), format!("address: {address}")];
+    let mut failed: Vec<(&str, WalletError)> = Vec::new();
+    let mut held = 0;
+    let mut failed_tokens = 0;
+    for (chain, read) in order.iter().zip(reads) {
+        let mut row = json!({ "chain": chain.key, "chainId": chain.chain_id_json() });
+        let mut own = String::new();
+        let result = match read {
+            Ok((owner, read)) => {
+                if owner != address {
+                    own = format!(" ({owner})");
+                    row["address"] = json!(owner);
+                }
+                read.await.unwrap_or_else(|_| {
+                    Err(WalletError::rpc("the balance read stopped unexpectedly"))
+                })
+            }
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok((native, tokens)) => {
+                lines.push(format!("{:<10} {}{own}", chain.key, amount_text(&native)));
+                let mut any = !native.raw.is_zero();
+                let mut token_rows = Vec::with_capacity(tokens.len());
+                for t in tokens {
+                    let mut v = json!({
+                        "symbol": t.symbol,
+                        "address": t.address,
+                        "decimals": t.decimals,
+                    });
+                    match t.raw {
+                        Ok(raw) => {
+                            let b = chains::Balance {
+                                symbol: t.symbol,
+                                decimals: t.decimals,
+                                raw,
+                            };
+                            if !raw.is_zero() {
+                                any = true;
+                                lines.push(format!("{:<10} {}", "", amount_text(&b)));
+                            }
+                            v["balance"] = json!(format_units(raw, b.decimals));
+                            v["raw"] = json!(raw.to_string());
+                        }
+                        Err(e) => {
+                            failed_tokens += 1;
+                            lines.push(format!("{:<10} {} {}", "", t.symbol, error_text(&e)));
+                            v["error"] = json!(e.message);
+                            v["errorCode"] = json!(e.code.as_str());
+                        }
+                    }
+                    token_rows.push(v);
+                }
+                if any {
+                    held += 1;
+                }
+                row["native"] = amount_json(&native);
+                row["tokens"] = Value::Array(token_rows);
+            }
+            Err(e) => {
+                lines.push(format!("{:<10} {}", chain.key, error_text(&e)));
+                row["error"] = json!(e.message);
+                row["errorCode"] = json!(e.code.as_str());
+                failed.push((chain.key, e));
+            }
+        }
+        rows.push(row);
+    }
+    if failed.len() == order.len() {
+        let code = failed[0].1.code;
+        let code = if failed.iter().all(|(_, e)| e.code == code) {
+            code
+        } else {
+            ErrorCode::RpcError
+        };
+        let why: Vec<String> = failed
+            .iter()
+            .map(|(chain, e)| format!("{chain}: {}", e.message))
+            .collect();
+        return Err(WalletError::new(
+            code,
+            format!("no network answered: {}", why.join("; ")),
+        ));
+    }
+    let mut total = format!("{held} of {} networks have a balance", order.len());
+    if !failed.is_empty() {
+        total.push_str(&format!("; {} did not answer", failed.len()));
+    }
+    if failed_tokens > 0 {
+        let reads = if failed_tokens == 1 { "read" } else { "reads" };
+        total.push_str(&format!("; {failed_tokens} token {reads} failed"));
+    }
+    lines.push(total);
+    Ok(Out::with_text(
+        json!({
+            "key": key.name,
+            "address": address,
+            "chains": rows,
+            // From the cache in wallet.json (see `zwallet address --verify`).
+            "verified": false,
+        }),
+        lines.join("\n"),
+    ))
+}
+
+/// One network's [`NetworkBalances`], read within [`NETWORK_TIMEOUT`].
+async fn read_network(net: Net, owner: String) -> NetworkBalances {
+    match &net.chain.family {
+        Family::Evm(_) => Evm.wallet_balances(&net, &owner, NETWORK_TIMEOUT).await,
+    }
+}
+
+/// `{ symbol, decimals, balance, raw }`.
+fn amount_json(b: &chains::Balance) -> Value {
+    json!({
+        "symbol": b.symbol,
+        "decimals": b.decimals,
+        "balance": format_units(b.raw, b.decimals),
+        "raw": b.raw.to_string(),
+    })
+}
+
+/// `1.5 ETH`.
+fn amount_text(b: &chains::Balance) -> String {
+    format!("{} {}", format_units(b.raw, b.decimals), b.symbol)
+}
+
+/// `error: <brief message> [<CODE>]`, as a network's or token's line shows a failed read.
+fn error_text(e: &WalletError) -> String {
+    format!("error: {} [{}]", brief(&e.message), e.code)
+}
+
+/// The first line of an error message, cut to [`BRIEF_ERROR_CHARS`] characters.
+fn brief(message: &str) -> String {
+    let line = message.lines().next().unwrap_or_default();
+    if line.chars().count() <= BRIEF_ERROR_CHARS {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(BRIEF_ERROR_CHARS - 1).collect();
+    format!("{cut}…")
 }
 
 /// Returns (from, index) of the selected key on `chain`.
