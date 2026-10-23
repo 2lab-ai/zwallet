@@ -307,7 +307,9 @@ fn open(sealed: &CryptoBox, password: &str, aad: &[u8], file: &str) -> Result<Ze
     let nonce = hex::decode(&sealed.nonce).map_err(|_| corrupt("nonce is not hex"))?;
     let ciphertext =
         hex::decode(&sealed.ciphertext).map_err(|_| corrupt("ciphertext is not hex"))?;
-    if salt.len() < 16 || nonce.len() != NONCE_LEN {
+    // Exactly the length `seal` draws (every zwallet has): so the AES key is never scrypt over
+    // another input, such as the whitelist key's domain-prefixed salt.
+    if salt.len() != SALT_LEN || nonce.len() != NONCE_LEN {
         return Err(corrupt("bad salt or nonce length"));
     }
     let key = derive_key(password, &salt, &kdf)?;
@@ -513,14 +515,13 @@ impl SealedWhitelist {
 
     /// The salt the whitelist key is derived from. `VALIDATION_ERROR` for an anchor zwallet
     /// 0.1.0 sealed: its key was random and lived in a file this zwallet no longer reads, so the
-    /// key cannot be derived, and only a reset (a new salt, a new key, an empty list) goes on.
+    /// key cannot be derived. The message names the cause only, as every reason the daemon shows
+    /// does; the editor adds what a human can do (`whitelist::edit_salt`).
     pub fn salt(&self) -> Result<[u8; 32]> {
         self.salt.ok_or_else(|| {
-            WalletError::validation(format!(
-                "this whitelist was made by zwallet 0.1.0, whose key file is no longer used (the \
-                 whitelist key is now derived from the password); {}",
-                crate::core::whitelist::RESET_CAVEAT
-            ))
+            WalletError::validation(
+                "this whitelist was made by zwallet 0.1.0, whose key file is no longer used",
+            )
         })
     }
 }

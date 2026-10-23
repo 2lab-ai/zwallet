@@ -278,7 +278,7 @@ async fn edit(home: &Path, change: Change, opts: &WhitelistEditArgs) -> Result<O
         _ => {
             let base = whitelist::base_for_edit(&files, anchor.as_ref(), &WHITELIST_RULES)?;
             if let Some(sealed) = &sealed {
-                sealed.salt()?;
+                whitelist::edit_salt(sealed)?;
             }
             try_change(&change, &base)?;
             base
@@ -1149,10 +1149,21 @@ fn list(home: &Path, a: WhitelistListArgs) -> Result<Out> {
     store::read_wallet_file(home)?;
     let out = if a.verify {
         let password = read_password(a.password_stdin, "Wallet password: ", false)?;
-        let anchor = store::unlock(home, &password, &chains::derive_addresses)?
+        let sealed = store::unlock(home, &password, &chains::derive_addresses)?
             .0
-            .whitelist_anchor();
+            .sealed_whitelist();
         drop(password);
+        // The anchor as the daemon reads it; for one zwallet 0.1.0 sealed, the cause with what a
+        // human can do about it.
+        let anchor = sealed.and_then(|sealed| {
+            sealed
+                .map(|s| {
+                    s.salt()
+                        .map(|_| s.anchor)
+                        .map_err(|e| WalletError::validation(whitelist::without_salt(&e.message)))
+                })
+                .transpose()
+        });
         verified_view(home, anchor)
     } else {
         unverified_view(home, None)

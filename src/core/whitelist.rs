@@ -1201,6 +1201,28 @@ pub struct Edited {
     pub warning: Option<String>,
 }
 
+/// For a human: why the whitelist an anchor without a salt names cannot be edited
+/// ([`store::SealedWhitelist::salt`]'s `cause`), the other way it comes about, and [`recovery`].
+/// The daemon shows the cause alone.
+pub fn without_salt(cause: &str) -> String {
+    format!(
+        "{cause} (a wallet zwallet 0.1.0 made, or a wallet.json restored from before the \
+         upgrade). {}",
+        recovery()
+    )
+}
+
+/// The sealed salt an edit derives the key from. For an anchor zwallet 0.1.0 sealed,
+/// `VALIDATION_ERROR` with [`without_salt`]'s advice; nothing is written.
+pub fn edit_salt(sealed: &store::SealedWhitelist) -> Result<[u8; 32]> {
+    sealed.salt().map_err(|e| {
+        WalletError::validation(format!(
+            "refusing to edit the whitelist: {}",
+            without_salt(&e.message)
+        ))
+    })
+}
+
 /// A new whitelist salt from the OS's randomness: the first edit's, and every reset's.
 fn new_salt() -> Result<[u8; 32]> {
     let mut salt = [0u8; 32];
@@ -1328,7 +1350,7 @@ fn transact(
     // KDF parameters that opened it (never a re-read). An edit keeps the sealed salt and must
     // derive the sealed key; the first edit and a reset draw a new salt, so a new key.
     let (salt, sealed_key) = match (&mutate, &sealed) {
-        (Some(_), Some(s)) => (s.salt()?, Some(s.anchor.public_key)),
+        (Some(_), Some(s)) => (edit_salt(s)?, Some(s.anchor.public_key)),
         _ => (new_salt()?, None),
     };
     let kdf = opened.file().crypto.kdf_params()?;
