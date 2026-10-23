@@ -120,7 +120,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `scan to send to <address> …` and the address as a QR code for a phone wallet: the plain EIP-55
   address (no URI scheme; the same address on every EVM network), error correction level M,
   black on white in ANSI colours, or with `NO_COLOR` plain blocks for a dark terminal. Scan that
-  one and save it in the phone wallet's address book. `--no-qr` leaves it out. Nothing that reads
+  one and save it in the phone wallet's address book. The `create` that makes the master seed
+  shows no code, only a line to run `zwallet backup` first: funds sent before the recovery
+  phrase is written down are at risk. `--no-qr` leaves either out. Nothing that reads
   the cache prints one (`address` without `--verify`, `addresses`, `balance`), and neither
   `--json` nor output into a pipe ever has one, so agents see the same text as before.
 - **The whitelist** ([`.prd/04-whitelist.md`](.prd/04-whitelist.md)): the key daemon signs a
