@@ -46,11 +46,7 @@ fn seeded_lists_verify_against_the_cli_wallet_seal() {
         whitelist::load_verified(home.path(), &anchor).unwrap(),
         list
     );
-    for f in [
-        whitelist::WHITELIST_FILE,
-        whitelist::KEY_FILE,
-        "wallet.json",
-    ] {
+    for f in [whitelist::WHITELIST_FILE, "wallet.json"] {
         let mode = std::fs::metadata(home.path().join(f))
             .unwrap()
             .permissions()
@@ -58,6 +54,8 @@ fn seeded_lists_verify_against_the_cli_wallet_seal() {
         assert_eq!(mode & 0o777, 0o600, "{f}");
     }
     assert!(!home.path().join(whitelist::NEXT_FILE).exists());
+    // The key is derived from the password at every edit: no key file.
+    assert!(!home.path().join("whitelist.key").exists());
 
     let list = home.allow_contract("router", ROUTER, &["base"], &["0x12345678"]);
     assert_eq!(list.generation, 2);
@@ -110,12 +108,8 @@ fn a_refused_seed_leaves_the_sealed_list_as_it_was() {
     let list = home.allow("alice", PAYEE, &["base"]);
     let anchor = sealed_anchor(&home);
     let files = || {
-        [
-            "wallet.json",
-            whitelist::WHITELIST_FILE,
-            whitelist::KEY_FILE,
-        ]
-        .map(|f| std::fs::read(home.path().join(f)).unwrap())
+        ["wallet.json", whitelist::WHITELIST_FILE]
+            .map(|f| std::fs::read(home.path().join(f)).unwrap())
     };
     let before = files();
     // A registry token as a contract entry is refused before anything is written.
@@ -129,11 +123,7 @@ fn a_refused_seed_leaves_the_sealed_list_as_it_was() {
     })
     .unwrap_err();
     assert!(err.message.contains("registry token"), "{}", err.message);
-    assert_eq!(
-        files(),
-        before,
-        "wallet.json, whitelist.json and whitelist.key unchanged"
-    );
+    assert_eq!(files(), before, "wallet.json and whitelist.json unchanged");
     assert!(!home.path().join(whitelist::NEXT_FILE).exists());
     let after = sealed_anchor(&home);
     assert_eq!(

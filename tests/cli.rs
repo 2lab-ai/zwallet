@@ -1975,7 +1975,9 @@ fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
     let added: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(added["gen"], 1, "{added}");
     assert_eq!(added["previousGen"], serde_json::Value::Null, "{added}");
-    assert_eq!(added["keyCreated"], true, "{added}");
+    // The key is derived from the password at every edit: no key file, no key flag.
+    assert!(added.get("keyCreated").is_none(), "{added}");
+    assert!(!home.path().join("whitelist.key").exists());
     assert_eq!(added["change"], "added", "{added}");
     assert_eq!(
         added["entry"],
@@ -1997,9 +1999,7 @@ fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
         added["hint"].as_str().unwrap_or("").contains("--unlock"),
         "{added}"
     );
-    for f in ["whitelist.key", "whitelist.json"] {
-        assert_eq!(mode(&home.path().join(f)), 0o600, "{f}");
-    }
+    assert_eq!(mode(&home.path().join("whitelist.json")), 0o600);
     assert!(!home.path().join("whitelist.next.json").exists());
 
     // `list` works while locked, without the password: unverified.
@@ -2059,7 +2059,7 @@ fn whitelist_verbs_change_one_generation_each_and_refuse_before_writing() {
         (&json!(2), &json!(["*"])),
         "{b}"
     );
-    assert_eq!(b["keyCreated"], false, "{b}");
+    assert!(b.get("keyCreated").is_none(), "{b}");
     // A contract entry: its selectors (lower-cased), and the residual it carries.
     let r = whitelist_edit(
         &home,
@@ -2184,18 +2184,26 @@ fn whitelist_verbs_change_one_generation_each_and_refuse_before_writing() {
     assert_eq!(v["policy"]["allowMessageSigning"], true, "{v}");
     assert_eq!(nicknames(&v["entries"]), ["alice", "router"], "{v}");
 
-    // reset: a new key and an empty list with the default policy, at the next generation.
-    let key_before = fs::read(home.path().join("whitelist.key")).unwrap();
+    // reset: a new key (a new sealed salt) and an empty list with the default policy, at the
+    // next generation.
+    let sealed = || {
+        store::unlock(home.path(), PW, &chains::derive_addresses)
+            .unwrap()
+            .0
+            .policy
+    };
+    let before = sealed();
     let z = whitelist_edit(&home, &["reset"]).ok();
     assert_eq!(z["gen"], 7, "{z}");
     assert_eq!(z["change"], "reset", "{z}");
-    assert_eq!(z["keyCreated"], true, "{z}");
     assert_eq!(z["entries"], json!([]), "{z}");
     assert_eq!(nicknames(&z["dropped"]), ["alice", "router"], "{z}");
-    assert_ne!(
-        fs::read(home.path().join("whitelist.key")).unwrap(),
-        key_before
-    );
+    let after = sealed();
+    for key in ["whitelistSalt", "whitelistPub"] {
+        assert!(after[key].is_string(), "{after}");
+        assert_ne!(after[key], before[key], "{key}");
+    }
+    assert!(!home.path().join("whitelist.key").exists());
     let v = verify_list(&home);
     assert_eq!(
         (&v["verified"], &v["gen"]),
@@ -2280,8 +2288,8 @@ fn w4_a_hand_edited_list_is_shown_but_an_edit_refuses_and_only_reset_starts_over
     // Reset starts over: a new key and an empty list, with what it dropped.
     let z = whitelist_edit(&home, &["reset"]).ok();
     assert_eq!(
-        (&z["gen"], &z["keyCreated"]),
-        (&json!(2), &json!(true)),
+        (&z["gen"], &z["change"]),
+        (&json!(2), &json!("reset")),
         "{z}"
     );
     assert_eq!(z["entries"], json!([]), "{z}");
@@ -2916,8 +2924,8 @@ fn r3_2_a_wallet_json_from_before_the_first_edit_refuses_every_edit() {
     // Reset still works: a new key, an empty list, the list it dropped shown.
     let z = whitelist_edit(&home, &["reset"]).ok();
     assert_eq!(
-        (&z["gen"], &z["keyCreated"]),
-        (&json!(1), &json!(true)),
+        (&z["gen"], &z["change"]),
+        (&json!(1), &json!("reset")),
         "{z}"
     );
     assert_eq!(z["entries"], json!([]), "{z}");
@@ -3064,6 +3072,74 @@ fn r5_a_first_edit_cut_off_before_its_seal_is_named_by_list_and_list_verify() {
         "{plain}"
     );
     assert!(!reason.contains("creates it"), "{plain}");
+}
+
+#[test]
+fn a_whitelist_sealed_by_zwallet_0_1_0_is_refused_before_anything_stops_and_reset_starts_over() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    // zwallet 0.1.0 sealed no salt (its key sat in whitelist.key, which nothing reads now).
+    let lock = store::MetaLock::acquire(home.path()).unwrap();
+    let opened = lock.open(PW).unwrap();
+    let mut policy = opened.unsealed().policy.clone();
+    policy.as_object_mut().unwrap().remove("whitelistSalt");
+    lock.reseal(&opened, &policy).unwrap();
+    drop(lock);
+    let stray = home.path().join("whitelist.key");
+    fs::write(&stray, b"{\"version\":1}\n").unwrap();
+    let made_by = "this whitelist was made by zwallet 0.1.0, whose key file is no longer used";
+    let restored = "or a wallet.json restored from before the upgrade";
+
+    // `list --verify` names the cause, the other way it comes about, and the one recovery.
+    let v = verify_list(&home);
+    assert_eq!(v["verified"], false, "{v}");
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(reason.contains(made_by), "{v}");
+    assert!(reason.contains(restored), "{v}");
+    assert_recovery_only(reason);
+    // W18: the daemon's view is untrusted, with the cause alone (no remedy for an agent).
+    let unlocked = home.unlock("10m");
+    let w = &unlocked["whitelist"];
+    assert_eq!(
+        (&w["verified"], &w["entries"]),
+        (&json!(false), &json!([])),
+        "{unlocked}"
+    );
+    assert_eq!(w["reason"], made_by, "{unlocked}");
+    let pid = unlocked["daemonPid"].as_i64().unwrap() as i32;
+    // Every edit refuses before any daemon is stopped, and writes nothing.
+    let before = files_of(&home);
+    for args in [
+        &["add", "bob", BOB, "--chains", "base"][..],
+        &["remove", "alice"],
+    ] {
+        let msg = whitelist_edit(&home, args).err("VALIDATION_ERROR");
+        assert!(msg.contains(made_by), "{args:?}: {msg}");
+        assert!(msg.contains(restored), "{args:?}: {msg}");
+        assert_recovery_only(&msg);
+        assert!(!msg.contains("already stopped"), "{args:?}: {msg}");
+        assert_eq!(files_of(&home), before, "{args:?} wrote something");
+    }
+    assert_eq!(home.daemon_pids(), vec![pid], "a refused edit stopped it");
+    // Reset starts over under a new salt; the stray key file is left as it was.
+    let z = whitelist_edit(&home, &["reset"]).ok();
+    assert_eq!(
+        (&z["gen"], &z["change"]),
+        (&json!(2), &json!("reset")),
+        "{z}"
+    );
+    assert!(z.get("keyCreated").is_none(), "{z}");
+    let e = whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).ok();
+    assert_eq!(e["gen"], 3, "{e}");
+    let v = verify_list(&home);
+    assert_eq!(
+        (&v["verified"], &v["gen"]),
+        (&json!(true), &json!(3)),
+        "{v}"
+    );
+    assert_eq!(fs::read(&stray).unwrap(), b"{\"version\":1}\n");
 }
 
 /// The value of the `<name>: ` line in human output.
