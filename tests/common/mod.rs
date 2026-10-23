@@ -177,6 +177,34 @@ impl Home {
         command_in(self.path(), args)
     }
 
+    /// `zwallet <args>` (plus `env`) as a human runs it: stdin, stdout and the controlling
+    /// terminal on a pty. Types [`PW`] at each of `prompts` in turn, and returns what the
+    /// terminal showed after the last one (from the start, without prompts), `\r\n` read as `\n`
+    /// and without the newline the password prompt echoes. Panics unless the command succeeds.
+    pub fn run_on_terminal(&self, args: &[&str], prompts: &[&str], env: &[(&str, &str)]) -> String {
+        let mut cmd = self.command(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut pty = PtyChild::spawn_on_terminal(cmd);
+        for prompt in prompts {
+            pty.wait_for(prompt, Duration::from_secs(30));
+            pty.type_line(PW);
+        }
+        let (out, shown) = pty.finish_terminal();
+        assert!(
+            out.status.success(),
+            "{args:?}: {shown:?}; stderr {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let shown = if prompts.is_empty() {
+            &shown[..]
+        } else {
+            shown.strip_prefix('\n').unwrap_or(&shown)
+        };
+        shown.to_string()
+    }
+
     /// `create <name> --password-stdin --json` with the shared test password.
     pub fn create(&self, name: &str, extra: &[&str]) -> Value {
         let mut args = vec!["create", name, "--password-stdin", "--json"];
@@ -598,10 +626,24 @@ pub struct PtyChild {
 }
 
 impl PtyChild {
-    pub fn spawn(mut cmd: Command) -> Self {
+    pub fn spawn(cmd: Command) -> Self {
+        Self::spawn_with(cmd, false)
+    }
+
+    /// [`PtyChild::spawn`] with stdout on the terminal too, as when a human reads the output:
+    /// [`PtyChild::finish_terminal`] returns what it printed.
+    pub fn spawn_on_terminal(cmd: Command) -> Self {
+        Self::spawn_with(cmd, true)
+    }
+
+    fn spawn_with(mut cmd: Command, stdout_on_terminal: bool) -> Self {
         let (master, slave) = openpty();
         cmd.stdin(Stdio::from(slave.try_clone().unwrap()))
-            .stdout(Stdio::piped())
+            .stdout(if stdout_on_terminal {
+                Stdio::from(slave.try_clone().unwrap())
+            } else {
+                Stdio::piped()
+            })
             .stderr(Stdio::piped());
         // SAFETY: setsid and ioctl are async-signal-safe; fd 0 is the pty slave by now.
         unsafe {
@@ -654,7 +696,13 @@ impl PtyChild {
 
     /// Waits (bounded) for the exit and collects stdout and stderr. The terminal is drained
     /// meanwhile: a session leader's exit waits until its terminal output has been read.
-    pub fn finish(mut self) -> Output {
+    pub fn finish(self) -> Output {
+        self.finish_terminal().0
+    }
+
+    /// [`PtyChild::finish`], plus what the terminal showed after the last
+    /// [`PtyChild::wait_for`] (from the start, if none), its `\r\n` read as `\n`.
+    pub fn finish_terminal(mut self) -> (Output, String) {
         let pipe = |r: Option<Box<dyn Read + Send>>| {
             std::thread::spawn(move || {
                 let mut v = Vec::new();
@@ -678,12 +726,100 @@ impl PtyChild {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        Output {
+        // What it wrote just before exiting.
+        self.seen.push_str(&drain_pty(&self.master));
+        let output = Output {
             status,
             stdout: out.join().unwrap(),
             stderr: err.join().unwrap(),
+        };
+        (output, std::mem::take(&mut self.seen).replace("\r\n", "\n"))
+    }
+}
+
+/// The QR codes in `terminal` (as [`PtyChild::finish_terminal`] returns it), decoded: each run
+/// of lines drawn only with half blocks and spaces once ANSI escapes are removed, read as two rows
+/// of modules per line. In a coloured code (zwallet's default) a block is a dark module; in a
+/// plain one (`NO_COLOR`) a block is a light one, as on a dark terminal. Read from a picture of
+/// the code on a dark terminal, so the code must carry its own quiet zone.
+pub fn scan_qr(terminal: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut block: Vec<String> = Vec::new();
+    let mut colored = false;
+    for line in terminal.lines().chain([""]) {
+        let plain = strip_ansi(line);
+        if !plain.is_empty() && plain.chars().all(|c| " ▀▄█".contains(c)) {
+            colored |= plain.len() < line.len();
+            block.push(plain);
+            continue;
+        }
+        if !block.is_empty() {
+            found.push(decode_qr_lines(&std::mem::take(&mut block), colored));
+            colored = false;
         }
     }
+    found
+}
+
+/// `text` without its ANSI escape sequences (`ESC [`, up to a final byte from `@` to `~`).
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn decode_qr_lines(lines: &[String], colored: bool) -> String {
+    // Modules, `true` for dark: the block characters draw the dark modules in colour, the light
+    // ones without.
+    let mut rows: Vec<Vec<bool>> = Vec::new();
+    for line in lines {
+        let (mut top, mut bottom) = (Vec::new(), Vec::new());
+        for c in line.chars() {
+            let (t, b) = match c {
+                '█' => (true, true),
+                '▀' => (true, false),
+                '▄' => (false, true),
+                _ => (false, false),
+            };
+            top.push(if colored { t } else { !t });
+            bottom.push(if colored { b } else { !b });
+        }
+        rows.push(top);
+        rows.push(bottom);
+    }
+    // A picture of a dark terminal showing them: 4 px per module, 8 modules of background around.
+    let (scale, pad) = (4, 8);
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0) + 2 * pad;
+    let height = rows.len() + 2 * pad;
+    let mut img =
+        rqrr::PreparedImage::prepare_from_greyscale(width * scale, height * scale, |x, y| {
+            let (x, y) = (x / scale, y / scale);
+            let dark = x < pad
+                || y < pad
+                || rows
+                    .get(y - pad)
+                    .is_none_or(|r| r.get(x - pad).is_none_or(|&d| d));
+            if dark { 0 } else { 255 }
+        });
+    let grids = img.detect_grids();
+    assert_eq!(grids.len(), 1, "one QR code in {lines:#?}");
+    grids[0]
+        .decode()
+        .unwrap_or_else(|e| panic!("{e:?}: {lines:#?}"))
+        .1
 }
 
 impl Drop for PtyChild {

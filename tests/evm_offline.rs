@@ -1965,6 +1965,27 @@ fn balance_with_chain_prints_what_it_always_did() {
     assert_eq!(base.calls("eth_getBalance").len(), reads);
 }
 
+#[test]
+fn balance_on_a_terminal_prints_as_on_a_pipe() {
+    // `balance` reads wallet.json's cache (`verified: false`): no QR code of the address, on a
+    // terminal either.
+    let home = Home::new();
+    home.create("t", &[]);
+    let nodes = every_chain_node(Duration::ZERO);
+    let env = rpc_env(&nodes, &[]);
+    let base = &nodes.iter().find(|(k, _)| *k == "base").unwrap().1.url;
+    for args in [
+        &["balance"][..],
+        &["balance", "--chain", "base", "--rpc", base],
+    ] {
+        let piped = home.run_env(args, &env_refs(&env));
+        assert_eq!(piped.code, 0, "{args:?}: {}", piped.stderr);
+        let shown = home.run_on_terminal(args, &[], &env_refs(&env));
+        assert_eq!(shown, piped.stdout, "{args:?}");
+        assert!(common::scan_qr(&shown).is_empty(), "{shown:?}");
+    }
+}
+
 /// A node whose nonces count what it accepted, mined at once (`latest` = `pending`).
 fn mining_node() -> MockRpc {
     let accepted = Arc::new(AtomicUsize::new(0));

@@ -29,6 +29,7 @@ tokio = { version = "1", features = ["rt", "macros", "time", "net", "io-util", "
 zeroize = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
+rqrr = { version = "=0.11.0", default-features = false }
 tempfile = "3"
 
 # The KDF runs in every invocation; keep it fast in the debug builds the tests use.
