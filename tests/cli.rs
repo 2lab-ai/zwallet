@@ -3170,12 +3170,16 @@ fn qr1_address_verify_on_a_terminal_shows_the_address_as_a_qr_code() {
         &format!("{PW}\n"),
     );
     let shown = home.run_on_terminal(&["address", "--verify"], &prompt, &[]);
-    // The fields a pipe gets, then a line repeating the address, then the code, in black on
-    // white; a phone scanning it reads the address. Verified: no note.
+    // The fields a pipe gets, then two lines repeating the address, then the code, in black on
+    // white; a phone scanning it reads the address. Verified: no note. All of it fits an
+    // 80-column terminal.
     let (fields, code) = shown
-        .split_once(&format!("scan to send to {addr} {EVERY_NETWORK}\n"))
+        .split_once(&format!("scan to send to {addr}\n{EVERY_NETWORK}\n"))
         .unwrap_or_else(|| panic!("{shown:?}"));
     assert_eq!(fields, piped.stdout);
+    for line in shown.lines() {
+        assert!(common::strip_ansi(line).chars().count() <= 80, "{line:?}");
+    }
     assert!(field(fields, "verified") == "true", "{shown:?}");
     assert!(code.lines().all(|l| l.starts_with('\x1b')), "{shown:?}");
     assert_eq!(common::scan_qr(&shown), [addr.as_str()]);
@@ -3188,7 +3192,7 @@ fn qr1_address_verify_on_a_terminal_shows_the_address_as_a_qr_code() {
     // Another chain: the code carries no chain, and the line says so.
     let base = home.run_on_terminal(&["address", "--verify", "--chain", "base"], &prompt, &[]);
     assert!(
-        base.contains(&format!("scan to send to {addr} {EVERY_NETWORK}\n")),
+        base.contains(&format!("scan to send to {addr}\n{EVERY_NETWORK}\n")),
         "{base:?}"
     );
     assert_eq!(common::scan_qr(&base), [addr.as_str()]);
@@ -3248,7 +3252,7 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
     let unlocked = home.run_on_terminal(&["unlock", "10m"], &["Wallet password: "], &[]);
     assert_eq!(field(&unlocked, "address"), addr);
     assert_eq!(field(&unlocked, "verified"), "true");
-    let label = format!("scan to send to {addr} {EVERY_NETWORK}\n");
+    let label = format!("scan to send to {addr}\n{EVERY_NETWORK}\n");
     let at = unlocked
         .find(&label)
         .unwrap_or_else(|| panic!("{unlocked:?}"));
@@ -3287,7 +3291,7 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
     let sub3_addr = field(&sub3, "address").to_string();
     assert_eq!(field(&sub3, "verified"), "true");
     assert!(
-        sub3.contains(&format!("scan to send to {sub3_addr} {EVERY_NETWORK}\n")),
+        sub3.contains(&format!("scan to send to {sub3_addr}\n{EVERY_NETWORK}\n")),
         "{sub3:?}"
     );
     assert_eq!(common::scan_qr(&sub3), [sub3_addr]);
