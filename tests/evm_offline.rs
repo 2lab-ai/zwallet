@@ -3326,6 +3326,46 @@ fn a_malformed_sealed_anchor_unlocks_and_signs_nothing() {
     assert!(rpc.sent().is_empty());
 }
 
+#[test]
+fn a_whitelist_sealed_by_zwallet_0_1_0_unlocks_and_signs_nothing() {
+    let home = Home::new();
+    home.create("t", &[]);
+    home.allow("alice", ALICE, &["*"]);
+    // zwallet 0.1.0 sealed the anchor (key, generation, digest) with no salt: its key sat in a
+    // file of its own.
+    let lock = zwallet::core::store::MetaLock::acquire(home.path()).unwrap();
+    let opened = lock.open(common::PW).unwrap();
+    let mut policy = opened.unsealed().policy.clone();
+    policy.as_object_mut().unwrap().remove("whitelistSalt");
+    lock.reseal(&opened, &policy).unwrap();
+    drop(lock);
+    let unlocked = home.unlock("10m");
+    let w = &unlocked["whitelist"];
+    assert_eq!(w["verified"], false, "{unlocked:#}");
+    assert!(
+        w["reason"]
+            .as_str()
+            .unwrap()
+            .contains("made by zwallet 0.1.0"),
+        "{unlocked:#}"
+    );
+    // Untrusted, not "no whitelist yet": neither the listed payee nor the key's own address.
+    let me = unlocked["address"].as_str().unwrap().to_string();
+    let rpc = mining_node();
+    for to in [ALICE, me.as_str()] {
+        let r = home.run(&pay("ethereum", to, &rpc.url, &[]));
+        let v = refused(&r, "WHITELIST_INVALID", to, "ethereum", None);
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .contains("made by zwallet 0.1.0"),
+            "{v:#}"
+        );
+    }
+    assert!(rpc.sent().is_empty());
+}
+
 /// A new wallet with no whitelist, unlocked for 10 minutes.
 fn unlocked_without_list() -> (Home, String) {
     let home = Home::new();

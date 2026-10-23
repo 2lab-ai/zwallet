@@ -1975,7 +1975,9 @@ fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
     let added: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(added["gen"], 1, "{added}");
     assert_eq!(added["previousGen"], serde_json::Value::Null, "{added}");
-    assert_eq!(added["keyCreated"], true, "{added}");
+    // The key is derived from the password at every edit: no key file, no key flag.
+    assert!(added.get("keyCreated").is_none(), "{added}");
+    assert!(!home.path().join("whitelist.key").exists());
     assert_eq!(added["change"], "added", "{added}");
     assert_eq!(
         added["entry"],
@@ -1997,9 +1999,7 @@ fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
         added["hint"].as_str().unwrap_or("").contains("--unlock"),
         "{added}"
     );
-    for f in ["whitelist.key", "whitelist.json"] {
-        assert_eq!(mode(&home.path().join(f)), 0o600, "{f}");
-    }
+    assert_eq!(mode(&home.path().join("whitelist.json")), 0o600);
     assert!(!home.path().join("whitelist.next.json").exists());
 
     // `list` works while locked, without the password: unverified.
@@ -3064,4 +3064,57 @@ fn r5_a_first_edit_cut_off_before_its_seal_is_named_by_list_and_list_verify() {
         "{plain}"
     );
     assert!(!reason.contains("creates it"), "{plain}");
+}
+
+#[test]
+fn a_whitelist_sealed_by_zwallet_0_1_0_is_refused_before_anything_stops_and_reset_starts_over() {
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    whitelist_edit(&home, &["add", "alice", PAYEE, "--chains", "base"]).ok();
+    // zwallet 0.1.0 sealed no salt (its key sat in whitelist.key, which nothing reads now).
+    let lock = store::MetaLock::acquire(home.path()).unwrap();
+    let opened = lock.open(PW).unwrap();
+    let mut policy = opened.unsealed().policy.clone();
+    policy.as_object_mut().unwrap().remove("whitelistSalt");
+    lock.reseal(&opened, &policy).unwrap();
+    drop(lock);
+    let stray = home.path().join("whitelist.key");
+    fs::write(&stray, b"{\"version\":1}\n").unwrap();
+    let made_by = "made by zwallet 0.1.0";
+
+    let v = verify_list(&home);
+    assert_eq!(v["verified"], false, "{v}");
+    assert!(v["reason"].as_str().unwrap_or("").contains(made_by), "{v}");
+    // Every edit refuses before any daemon is stopped, and writes nothing.
+    let pid = home.unlock("10m")["daemonPid"].as_i64().unwrap() as i32;
+    let before = files_of(&home);
+    for args in [
+        &["add", "bob", BOB, "--chains", "base"][..],
+        &["remove", "alice"],
+    ] {
+        let msg = whitelist_edit(&home, args).err("VALIDATION_ERROR");
+        assert!(msg.contains(made_by), "{args:?}: {msg}");
+        assert!(msg.contains("zwallet whitelist reset"), "{args:?}: {msg}");
+        assert!(!msg.contains("already stopped"), "{args:?}: {msg}");
+        assert_eq!(files_of(&home), before, "{args:?} wrote something");
+    }
+    assert_eq!(home.daemon_pids(), vec![pid], "a refused edit stopped it");
+    // Reset starts over under a new salt; the stray key file is left as it was.
+    let z = whitelist_edit(&home, &["reset"]).ok();
+    assert_eq!(
+        (&z["gen"], &z["change"]),
+        (&json!(2), &json!("reset")),
+        "{z}"
+    );
+    assert!(z.get("keyCreated").is_none(), "{z}");
+    let e = whitelist_edit(&home, &["add", "bob", BOB, "--chains", "base"]).ok();
+    assert_eq!(e["gen"], 3, "{e}");
+    let v = verify_list(&home);
+    assert_eq!(
+        (&v["verified"], &v["gen"]),
+        (&json!(true), &json!(3)),
+        "{v}"
+    );
+    assert_eq!(fs::read(&stray).unwrap(), b"{\"version\":1}\n");
 }

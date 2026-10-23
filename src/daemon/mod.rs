@@ -1056,4 +1056,50 @@ mod tests {
         }
         assert!(gate.count(&gate.max_live) <= MAX_READERS);
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_session_keeps_the_anchor_and_never_the_whitelist_salt() {
+        let unsealed = |policy: Value| store::Unsealed {
+            seed: Seed::from_phrase(zeroize::Zeroizing::new(
+                crate::core::seed::TEST_MNEMONIC.into(),
+            ))
+            .unwrap(),
+            policy,
+        };
+        let sealed = json!({
+            "whitelistPub": hex::encode([1u8; 32]),
+            "whitelistGen": 3,
+            "whitelistDigest": hex::encode([2u8; 32]),
+            "whitelistSalt": hex::encode([9u8; 32]),
+        });
+        // The session's anchor is exactly the public key, the generation and the digest: the
+        // pattern names every field, so a field added to it (the salt, key material) fails to
+        // build here.
+        let Anchor::Sealed(anchor) = Anchor::of(&unsealed(sealed.clone())) else {
+            panic!("a sealed anchor with its salt is not Sealed");
+        };
+        let WhitelistAnchor {
+            public_key,
+            generation,
+            digest,
+        } = anchor;
+        assert_eq!((public_key, generation, digest), ([1; 32], 3, [2; 32]));
+
+        // zwallet 0.1.0 sealed no salt: the anchor cannot be used, so the list is Unusable and
+        // nothing is signed, never NoList (which signs self-transfers).
+        let mut old = sealed;
+        old.as_object_mut().unwrap().remove("whitelistSalt");
+        let anchor = Anchor::of(&unsealed(old));
+        let Anchor::Malformed(reason) = &anchor else {
+            panic!("a 0.1.0 anchor is not Malformed: {anchor:?}");
+        };
+        assert!(reason.contains("made by zwallet 0.1.0"), "{reason}");
+        let never: ListReader = Arc::new(|_, _| unreachable!("no list is read"));
+        let f = fixture(never, GENEROUS, GENEROUS);
+        let loaded = f.shared.load(&anchor).await;
+        assert!(
+            matches!(loaded.view(), ListView::Unusable(r) if r == *reason),
+            "not Unusable"
+        );
+    }
 }
