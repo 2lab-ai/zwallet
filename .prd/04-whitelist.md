@@ -97,7 +97,7 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
 
 | File | Contents | Who reads it |
 |---|---|---|
-| `wallet.json` | the sealed payload `{version, mnemonic, policy}`; `policy` holds the anchor `{whitelistPub, whitelistGen, whitelistDigest}` and the key's salt `whitelistSalt` (`{}` = no whitelist yet) | the daemon at unlock (the anchor only, kept in memory; never the salt); the editor (anchor and salt) |
+| `wallet.json` | the sealed payload `{version, mnemonic, policy}`; `policy` holds the anchor `{whitelistPub, whitelistGen, whitelistDigest}` and the key's salt `whitelistSalt` (`{}` = no whitelist yet) | the daemon at unlock (keeps the anchor only, in memory; drops the salt); the editor (anchor and salt) |
 | `whitelist.json` | `{version, gen, entries, policy, sig}`, plaintext and signed | everyone. Readable while locked; trusted only after verification |
 | `whitelist.next.json` | an edit staged between signing and publishing | the editor; the daemon only when the anchor names it (see **Edits**) |
 
@@ -117,8 +117,9 @@ parameters that opened `wallet.json` (validated as wallet.json's are, never re-r
 then checks that its public key is the sealed one. It is a scrypt run of its own, not derived
 from the AES key that opens `wallet.json`, so holding that key never yields the whitelist key;
 an edit costs one scrypt to open `wallet.json` and one to derive the key, as decrypting the
-0.1.0 key file did. The daemon reads only the three anchor keys and never holds the salt or any
-of the key. An anchor without a salt was sealed by zwallet 0.1.0: the daemon treats it as
+0.1.0 key file did. The daemon keeps only the three anchor keys: at unlock it decrypts the
+whole policy, checks that the salt is there and well-formed, and drops it with the rest once the
+session starts; its session never holds the salt or any of the key. An anchor without a salt was sealed by zwallet 0.1.0: the daemon treats it as
 untrusted (`Unusable`, never `NoList`), `list --verify` gives the reason, every edit refuses it
 before anything is stopped ("this whitelist was made by zwallet 0.1.0, whose key file is no
 longer used ...; `zwallet whitelist reset` starts over ..."), and `reset` starts over under a new

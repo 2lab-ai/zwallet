@@ -177,7 +177,8 @@ built 2026-10-20):
 - that key is never stored: each edit derives it from the typed password and a random
   per-wallet salt sealed next to the anchor (scrypt with the wallet's KDF parameters, its own
   run, not a step off the AES key that opens wallet.json; since 2026-10-21, v0-1 SSOT item 20).
-  `unlock` gives the daemon the seed and the anchor only, never the salt. The generation and
+  After `unlock` the daemon's session holds the seed and the anchor only, never the salt (the
+  rest of the decrypted policy is dropped when the session starts). The generation and
   the digest stay in the anchor because the public key alone would also accept an older list the
   same key signed. The seed stays a random BIP39 mnemonic encrypted under the password, never
   derived from it: a password-derived seed is a "brain wallet", open to password guessing

@@ -45,8 +45,8 @@ Status: **in-progress**, 2026-10-20. This is the fixed target; do not reinterpre
   before funding.
 - **Whitelist key** (20): the key that signs the whitelist is derived from the typed password
   (with a per-wallet salt sealed in wallet.json) at every add or remove, and never stored;
-  `unlock` puts only the wallet seed and the whitelist's public key (with its generation and
-  digest) in the daemon, which verifies the list before signing a send. Decided after research
+  after `unlock` the daemon keeps only the wallet seed and the whitelist's public key (with its
+  generation and digest), and verifies the list with it before signing a send. Decided after research
   on 2026-10-21 (04-whitelist §Design, The key): the wallet seed stays a random mnemonic
   encrypted under the password, not derived from it (a password-derived seed is a brain wallet).
 - **Chains** (10): EVM only in v0.1. The architecture leaves room for Solana and TON.

@@ -119,9 +119,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   transaction that moves value only when a list signed with this wallet's whitelist key allows
   it. That ed25519 key is not derived from the seed, and it is never stored: every whitelist
   change derives it again from the password you type and a random per-wallet salt sealed in
-  `wallet.json` (its own scrypt run, with the wallet's parameters). `unlock` gives the daemon only
-  the seed and, from the sealed policy, the key's public half, the list's generation and its
-  digest, so the daemon can check a list but never sign one. The generation and the digest are
+  `wallet.json` (its own scrypt run, with the wallet's parameters). After `unlock` the daemon
+  keeps only the seed and, from the sealed policy, the key's public half, the list's generation
+  and its digest (the rest of the decrypted policy, the salt included, is dropped once the session
+  starts), so the daemon can check a list but never sign one. The generation and the digest are
   there because the public key alone would also accept an older list the same key signed. The
   seed is not derived from the password: it is a random BIP39 mnemonic encrypted under it, since
   a password-derived seed would be a "brain wallet" that anyone could attack by guessing
