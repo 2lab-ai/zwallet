@@ -177,10 +177,10 @@ impl Home {
         command_in(self.path(), args)
     }
 
-    /// `zwallet <args>` (plus `env`) as a human runs it: stdin, stdout and the controlling
-    /// terminal on a pty. Types [`PW`] at each of `prompts` in turn, and returns what the
-    /// terminal showed after the last one (from the start, without prompts), `\r\n` read as `\n`
-    /// and without the newline the password prompt echoes. Panics unless the command succeeds.
+    /// `zwallet <args>` (plus `env`) as a human runs it: stdin and the controlling terminal on a
+    /// pty, stdout on a terminal ([`PtyChild::spawn_on_terminal`]). Types [`PW`] at each of
+    /// `prompts` in turn, and returns what stdout's terminal showed, `\r\n` read as `\n`. Panics
+    /// unless the command succeeds.
     pub fn run_on_terminal(&self, args: &[&str], prompts: &[&str], env: &[(&str, &str)]) -> String {
         let mut cmd = self.command(args);
         for (k, v) in env {
@@ -197,12 +197,7 @@ impl Home {
             "{args:?}: {shown:?}; stderr {:?}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let shown = if prompts.is_empty() {
-            &shown[..]
-        } else {
-            shown.strip_prefix('\n').unwrap_or(&shown)
-        };
-        shown.to_string()
+        shown
     }
 
     /// `create <name> --password-stdin --json` with the shared test password.
@@ -591,6 +586,11 @@ pub fn openpty() -> (File, OwnedFd) {
 
 /// Reads whatever the pty master has buffered right now, without blocking.
 pub fn drain_pty(master: &File) -> String {
+    String::from_utf8_lossy(&drain_pty_bytes(master)).into_owned()
+}
+
+/// [`drain_pty`] as bytes: a read may end inside a multi-byte character.
+pub fn drain_pty_bytes(master: &File) -> Vec<u8> {
     use std::os::fd::AsRawFd;
     let fd = master.as_raw_fd();
     // SAFETY: fcntl on an fd we own.
@@ -606,7 +606,7 @@ pub fn drain_pty(master: &File) -> String {
             Ok(n) => out.extend_from_slice(&buf[..n]),
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 /// `TIOCSCTTY` (make this terminal the controlling one); libc does not define it for macOS.
@@ -623,26 +623,30 @@ pub struct PtyChild {
     seen: String,
     /// Kept open: on macOS the pty drops unread output once every slave is closed.
     _slave: OwnedFd,
+    /// With [`PtyChild::spawn_on_terminal`]: the master of the terminal stdout is on (and its
+    /// slave, kept open), and the bytes it showed.
+    out: Option<(File, OwnedFd)>,
+    shown: Vec<u8>,
 }
 
 impl PtyChild {
     pub fn spawn(cmd: Command) -> Self {
-        Self::spawn_with(cmd, false)
+        Self::spawn_with(cmd, None)
     }
 
-    /// [`PtyChild::spawn`] with stdout on the terminal too, as when a human reads the output:
-    /// [`PtyChild::finish_terminal`] returns what it printed.
+    /// [`PtyChild::spawn`] with stdout on a terminal too, as when a human reads the output;
+    /// [`PtyChild::finish_terminal`] returns what it printed. That terminal is a second pty, so
+    /// the output is not mixed with the password prompts on the controlling one.
     pub fn spawn_on_terminal(cmd: Command) -> Self {
-        Self::spawn_with(cmd, true)
+        Self::spawn_with(cmd, Some(openpty()))
     }
 
-    fn spawn_with(mut cmd: Command, stdout_on_terminal: bool) -> Self {
+    fn spawn_with(mut cmd: Command, out: Option<(File, OwnedFd)>) -> Self {
         let (master, slave) = openpty();
         cmd.stdin(Stdio::from(slave.try_clone().unwrap()))
-            .stdout(if stdout_on_terminal {
-                Stdio::from(slave.try_clone().unwrap())
-            } else {
-                Stdio::piped()
+            .stdout(match &out {
+                Some((_, out_slave)) => Stdio::from(out_slave.try_clone().unwrap()),
+                None => Stdio::piped(),
             })
             .stderr(Stdio::piped());
         // SAFETY: setsid and ioctl are async-signal-safe; fd 0 is the pty slave by now.
@@ -660,6 +664,8 @@ impl PtyChild {
             master,
             seen: String::new(),
             _slave: slave,
+            out,
+            shown: Vec::new(),
         }
     }
 
@@ -668,6 +674,7 @@ impl PtyChild {
         let start = Instant::now();
         loop {
             self.seen.push_str(&drain_pty(&self.master));
+            self.drain_out();
             if self.seen.contains(needle) {
                 self.seen.clear();
                 return;
@@ -687,6 +694,13 @@ impl PtyChild {
         }
     }
 
+    /// Reads what stdout's terminal holds, so the child never blocks on a full one.
+    fn drain_out(&mut self) {
+        if let Some((master, _)) = &self.out {
+            self.shown.extend(drain_pty_bytes(master));
+        }
+    }
+
     /// Types one line, as a human would at the prompt.
     pub fn type_line(&self, line: &str) {
         (&self.master)
@@ -700,8 +714,8 @@ impl PtyChild {
         self.finish_terminal().0
     }
 
-    /// [`PtyChild::finish`], plus what the terminal showed after the last
-    /// [`PtyChild::wait_for`] (from the start, if none), its `\r\n` read as `\n`.
+    /// [`PtyChild::finish`], plus what stdout's terminal showed (with
+    /// [`PtyChild::spawn_on_terminal`]), its `\r\n` read as `\n`.
     pub fn finish_terminal(mut self) -> (Output, String) {
         let pipe = |r: Option<Box<dyn Read + Send>>| {
             std::thread::spawn(move || {
@@ -717,6 +731,7 @@ impl PtyChild {
         let start = Instant::now();
         let status = loop {
             self.seen.push_str(&drain_pty(&self.master));
+            self.drain_out();
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
             }
@@ -727,13 +742,18 @@ impl PtyChild {
             std::thread::sleep(Duration::from_millis(20));
         };
         // What it wrote just before exiting.
-        self.seen.push_str(&drain_pty(&self.master));
+        self.drain_out();
         let output = Output {
             status,
             stdout: out.join().unwrap(),
             stderr: err.join().unwrap(),
         };
-        (output, std::mem::take(&mut self.seen).replace("\r\n", "\n"))
+        (
+            output,
+            String::from_utf8(std::mem::take(&mut self.shown))
+                .expect("UTF-8 output")
+                .replace("\r\n", "\n"),
+        )
     }
 }
 

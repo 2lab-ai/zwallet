@@ -3075,7 +3075,7 @@ fn field<'a>(text: &'a str, name: &str) -> &'a str {
 }
 
 /// The line above the QR code of an address that holds on every network.
-const EVERY_NETWORK: &str = "(the same address on every network `zwallet chains` lists)";
+const EVERY_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
 
 #[test]
 fn qr1_address_verify_on_a_terminal_shows_the_address_as_a_qr_code() {
@@ -3098,20 +3098,20 @@ fn qr1_address_verify_on_a_terminal_shows_the_address_as_a_qr_code() {
     assert_eq!(fields, piped.stdout);
     assert!(field(fields, "verified") == "true", "{shown:?}");
     assert!(code.lines().all(|l| l.starts_with('\x1b')), "{shown:?}");
-    assert_eq!(common::scan_qr(&shown), [addr.clone()]);
+    assert_eq!(common::scan_qr(&shown), [addr.as_str()]);
     assert!(!shown.contains("not verified"), "{shown:?}");
     // NO_COLOR: no escape sequences, the light modules drawn for a dark terminal; it scans the
     // same.
     let plain = home.run_on_terminal(&["address", "--verify"], &prompt, &[("NO_COLOR", "1")]);
     assert!(!plain.contains('\x1b'), "{plain:?}");
-    assert_eq!(common::scan_qr(&plain), [addr.clone()]);
+    assert_eq!(common::scan_qr(&plain), [addr.as_str()]);
     // Another chain names that chain.
     let base = home.run_on_terminal(&["address", "--verify", "--chain", "base"], &prompt, &[]);
     assert!(
         base.contains(&format!("scan to send to {addr} on base\n")),
         "{base:?}"
     );
-    assert_eq!(common::scan_qr(&base), [addr.clone()]);
+    assert_eq!(common::scan_qr(&base), [addr.as_str()]);
     // --no-qr: what a pipe gets. --json: the JSON only.
     let quiet = home.run_on_terminal(&["address", "--verify", "--no-qr"], &prompt, &[]);
     assert_eq!(quiet, piped.stdout);
@@ -3139,7 +3139,7 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
         created.contains(&format!("scan to send to {addr} {EVERY_NETWORK}\n")),
         "{created:?}"
     );
-    assert_eq!(common::scan_qr(&created), [addr.clone()]);
+    assert_eq!(common::scan_qr(&created), [addr.as_str()]);
 
     // unlock: the address its daemon derived from the seed, the code under it.
     let unlocked = home.run_on_terminal(&["unlock", "10m"], &["Wallet password: "], &[]);
@@ -3150,7 +3150,7 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
         .find(&label)
         .unwrap_or_else(|| panic!("{unlocked:?}"));
     assert!(at > unlocked.find("address: ").unwrap(), "{unlocked:?}");
-    assert_eq!(common::scan_qr(&unlocked), [addr.clone()]);
+    assert_eq!(common::scan_qr(&unlocked), [addr.as_str()]);
     let quiet = home.run_on_terminal(&["unlock", "10m", "--no-qr"], &["Wallet password: "], &[]);
     assert!(!quiet.contains("scan to send"), "{quiet:?}");
     assert!(common::scan_qr(&quiet).is_empty() && !quiet.contains('\x1b'));
@@ -3158,6 +3158,11 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
     let v: serde_json::Value =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}: {json:?}"));
     assert_eq!(v["address"], addr.as_str());
+    // Into a pipe: the fields only, as before.
+    let piped = home.run_stdin(&["unlock", "10m", "--password-stdin"], &format!("{PW}\n"));
+    assert_eq!(piped.code, 0, "{}", piped.stderr);
+    assert_eq!(field(&piped.stdout, "address"), addr);
+    assert!(!piped.stdout.contains("scan to send") && !piped.stdout.contains('\x1b'));
 
     // create --unlock: a new key from the seed the password opened, then its session.
     let sub = home.run_on_terminal(
