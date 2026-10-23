@@ -2,8 +2,9 @@
 
 use qrcode::{Color, EcLevel, QrCode};
 
-/// Light modules around the code (its quiet zone), as many as `qrencode -t UTF8` draws.
-const QUIET: usize = 2;
+/// Light modules around the code (its quiet zone), as ISO/IEC 18004 asks: phone cameras need it,
+/// most of all on a dark terminal, where everything around it is dark.
+const QUIET: usize = 4;
 
 /// Black on white (`30;107`): the code reads the same on a dark and on a light terminal.
 const BLACK_ON_WHITE: &str = "\x1b[30;107m";
@@ -12,7 +13,7 @@ const RESET: &str = "\x1b[0m";
 /// `text` as a QR code at error correction level M, in Unicode half blocks (two rows of modules
 /// per line) with a quiet zone of [`QUIET`] modules. With `color`, each line paints black modules
 /// on a white background. Without (`NO_COLOR`), plain characters for a dark terminal: the blocks
-/// draw the light modules, as `qrencode -t UTF8` does. `None` when `text` does not fit.
+/// draw the light modules. `None` when `text` does not fit.
 pub fn render(text: &str, color: bool) -> Option<String> {
     let code = QrCode::with_error_correction_level(text, EcLevel::M).ok()?;
     let width = code.width();

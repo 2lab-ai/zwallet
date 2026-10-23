@@ -252,21 +252,24 @@ fn with_note(value: Value, verified: bool) -> Out {
     Out::with_text(value, text)
 }
 
-/// What follows `scan to send to <address>` for a key's address on every chain.
+/// What follows `scan to send to <address>`: the code carries no chain.
 const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
 
 /// `out` with `address` as a QR code at the end of its human text, for a phone wallet to scan,
-/// under the line `scan to send to <address> <place>`. Only for an address reported
-/// `verified: true`, only with stdout on a terminal, and not with `--no-qr`: agents read zwallet
-/// through pipes, and `--json` prints no human text.
-fn with_qr(out: Out, verified: bool, address: Option<&str>, place: &str, no_qr: bool) -> Out {
+/// under the line `scan to send to <address> (the same address on every EVM network ...)`. Only
+/// for an address reported `verified: true`, only with stdout on a terminal, and not with
+/// `--no-qr`: agents read zwallet through pipes, and `--json` prints no human text.
+fn with_qr(out: Out, verified: bool, address: Option<&str>, no_qr: bool) -> Out {
     let Some(address) = address.filter(|_| verified && qr_shown(no_qr)) else {
         return out;
     };
     // No colours when NO_COLOR is set and not empty (no-color.org).
     let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
     match qr::render(address, color) {
-        Some(code) => with_line(out, &format!("scan to send to {address} {place}\n{code}")),
+        Some(code) => with_line(
+            out,
+            &format!("scan to send to {address} {EVERY_EVM_NETWORK}\n{code}"),
+        ),
         None => out,
     }
 }
@@ -413,13 +416,7 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
             out
         });
     }
-    Ok(with_qr(
-        out,
-        verified,
-        address.as_deref(),
-        EVERY_EVM_NETWORK,
-        a.qr.no_qr,
-    ))
+    Ok(with_qr(out, verified, address.as_deref(), a.qr.no_qr))
 }
 
 /// The error for a `create --unlock` whose new session shows another key: says whether locking
@@ -604,12 +601,10 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         if let Some(w) = index_warning(&file, &[key]) {
             out["warning"] = json!(w);
         }
-        let place = format!("on {}", chain.key);
         return Ok(with_qr(
             with_note(out, true),
             true,
             Some(&address),
-            &place,
             a.qr.no_qr,
         ));
     }
@@ -1424,7 +1419,6 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
         Out::json(out),
         true,
         session["address"].as_str(),
-        EVERY_EVM_NETWORK,
         a.qr.no_qr,
     ))
 }
