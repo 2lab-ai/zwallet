@@ -23,6 +23,7 @@ Status: **in-progress**, 2026-10-20. This is the fixed target; do not reinterpre
 17. "니모닉은 디폴트로 좇나 긴걸로해주고"
 18. "ai내성이나 양자 내성 월릿을 사용할수 있으면 그걸로해줘 처음부터"
 19. (2026-10-21, on the README's opening line) "이 내용 뺴줘 > A Rust re-implementation of the wallet surface of Trust Wallet's twak CLI with everything that needed Trust's servers removed: twak은 처음에 리서치할때만 쓴거고 전혀 관계없음"
+20. (2026-10-21, on the whitelist key) "그리고 지금 화이트리스트는 시드가 아니라 유저가 친 암호로 만든 다른 대칭키로 사인하고 검증하도록해줘 즉 유저암호 -> 지갑 시드, 화이트리스트 시드 이렇게 2개를 만들고 지갑 unlock은 지갑 시드와 화이트리스트용 퍼블릭키만 데몬에 올려서 화이트리스트는 검증만할수 있도록해서 보낼수 있도록 화이트리스트 추가 삭제는 유저가 직접 매번 암호 쳐서 화이트 리스트 priv key까지 다시 만들어서 그걸로 사인하고 봇이 zwallet cli로 보낼때는 데몬에 로드된 화이트리스트 pub key로 화이트리스트 서명확인후 전송할수 있도록해줘", then "이 내용을 리서치하고 괜찮으면 진행 아니면 다른 제안해줘"
 
 ## Fixed scope
 
@@ -42,6 +43,12 @@ Status: **in-progress**, 2026-10-20. This is the fixed target; do not reinterpre
   the user specified ([`../04-whitelist.md`](../04-whitelist.md); user text in
   [`../v0-2-tui/ssot.md`](../v0-2-tui/ssot.md)). It lands as WU1b before the v0.1.0 tag and
   before funding.
+- **Whitelist key** (20): the key that signs the whitelist is derived from the typed password
+  (with a per-wallet salt sealed in wallet.json) at every add or remove, and never stored;
+  `unlock` puts only the wallet seed and the whitelist's public key (with its generation and
+  digest) in the daemon, which verifies the list before signing a send. Decided after research
+  on 2026-10-21 (04-whitelist §Design, The key): the wallet seed stays a random mnemonic
+  encrypted under the password, not derived from it (a password-derived seed is a brain wallet).
 - **Chains** (10): EVM only in v0.1. The architecture leaves room for Solana and TON.
 - **No Trust Wallet anything** (5, 6, 7, 19): no Trust API, packages, keychain, or telemetry, and
   no relation to twak: it was only looked at during the 2026-10-20 research (01-spec §Problem).
