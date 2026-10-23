@@ -757,6 +757,51 @@ impl PtyChild {
     }
 }
 
+/// Runs `cmd` (stdin as it has it) with stdout on a terminal of its own and stderr piped, reading
+/// the terminal all along: a pty nobody reads holds a writer after about 1 KB on macOS, so a
+/// command that prints more never exits. Fails after 60 s rather than hang. Returns the output
+/// and what the terminal showed, `\r\n` read as `\n`.
+pub fn run_stdout_on_terminal(mut cmd: Command) -> (Output, String) {
+    let (master, slave) = openpty();
+    cmd.stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn with stdout on a pty");
+    drop(cmd);
+    let mut stderr = child.stderr.take().unwrap();
+    let err = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = stderr.read_to_end(&mut v);
+        v
+    });
+    let mut shown = Vec::new();
+    let start = Instant::now();
+    let status = loop {
+        shown.extend(drain_pty_bytes(&master));
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(60) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "still running after 60s; terminal {:?}",
+                String::from_utf8_lossy(&shown)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // What it wrote just before exiting (the slave is still open here).
+    shown.extend(drain_pty_bytes(&master));
+    drop(slave);
+    let output = Output {
+        status,
+        stdout: Vec::new(),
+        stderr: err.join().unwrap(),
+    };
+    let shown = String::from_utf8(shown).expect("UTF-8 output");
+    (output, shown.replace("\r\n", "\n"))
+}
+
 /// The QR codes in `terminal` (as [`PtyChild::finish_terminal`] returns it), decoded: each run
 /// of lines drawn only with half blocks and spaces once ANSI escapes are removed, read as two rows
 /// of modules per line. In a coloured code (zwallet's default) a block is a dark module; in a

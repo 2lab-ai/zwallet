@@ -3218,15 +3218,9 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
 
     // An agent's create while unlocked (stdin no terminal): derived by whatever daemon answers,
     // so not verified, and no code even with stdout on a terminal.
-    let (master, slave) = common::openpty();
     let mut cmd = home.command(&["create", "agent"]);
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::from(slave.try_clone().unwrap()))
-        .stderr(std::process::Stdio::piped());
-    let out = cmd.output().unwrap();
-    drop(cmd);
-    let shown = common::drain_pty(&master).replace("\r\n", "\n");
-    drop(slave);
+    cmd.stdin(std::process::Stdio::null());
+    let (out, shown) = common::run_stdout_on_terminal(cmd);
     assert!(out.status.success(), "{:?}", out.stderr);
     assert_eq!(field(&shown, "verified"), "false", "{shown:?}");
     assert!(shown.contains(NOT_VERIFIED), "{shown:?}");
