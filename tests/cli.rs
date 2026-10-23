@@ -3097,7 +3097,7 @@ fn qr1_address_verify_on_a_terminal_shows_the_address_as_a_qr_code() {
     // The fields a pipe gets, then a line repeating the address, then the code, in black on
     // white; a phone scanning it reads the address. Verified: no note.
     let (fields, code) = shown
-        .split_once(&format!("scan to send to {addr} on ethereum\n"))
+        .split_once(&format!("scan to send to {addr} {EVERY_NETWORK}\n"))
         .unwrap_or_else(|| panic!("{shown:?}"));
     assert_eq!(fields, piped.stdout);
     assert!(field(fields, "verified") == "true", "{shown:?}");
@@ -3109,10 +3109,10 @@ fn qr1_address_verify_on_a_terminal_shows_the_address_as_a_qr_code() {
     let plain = home.run_on_terminal(&["address", "--verify"], &prompt, &[("NO_COLOR", "1")]);
     assert!(!plain.contains('\x1b'), "{plain:?}");
     assert_eq!(common::scan_qr(&plain), [addr.as_str()]);
-    // Another chain names that chain.
+    // Another chain: the code carries no chain, and the line says so.
     let base = home.run_on_terminal(&["address", "--verify", "--chain", "base"], &prompt, &[]);
     assert!(
-        base.contains(&format!("scan to send to {addr} on base\n")),
+        base.contains(&format!("scan to send to {addr} {EVERY_NETWORK}\n")),
         "{base:?}"
     );
     assert_eq!(common::scan_qr(&base), [addr.as_str()]);

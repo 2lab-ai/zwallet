@@ -115,10 +115,16 @@ mod tests {
     fn coloured_code_scans_to_the_address_on_any_background() {
         let rendered = render(ADDRESS, true).unwrap();
         let rows = modules(&rendered, true);
-        // Version 3 (29 modules) plus the quiet zone on each side, in 17 lines.
-        assert_eq!(rows[0].len(), 29 + 2 * QUIET);
-        assert_eq!(rendered.lines().count(), 17);
-        assert!(rows[..QUIET].iter().flatten().all(|&d| !d));
+        // Version 3 (29 modules) plus a quiet zone of 4 modules on each side (ISO/IEC 18004),
+        // in 19 lines.
+        assert_eq!(rows[0].len(), 29 + 2 * 4);
+        assert_eq!(rendered.lines().count(), 19);
+        let light = |r: &Vec<bool>| r.iter().all(|&d| !d);
+        assert!(rows[..4].iter().all(light) && rows[33..].iter().all(light));
+        assert!(
+            rows.iter()
+                .all(|r| !r[..4].contains(&true) && !r[33..].contains(&true))
+        );
         for surround in [true, false] {
             assert_eq!(scan(&rows, surround), ADDRESS, "surround dark {surround}");
         }
