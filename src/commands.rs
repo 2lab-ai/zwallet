@@ -252,13 +252,14 @@ fn with_note(value: Value, verified: bool) -> Out {
     Out::with_text(value, text)
 }
 
-/// What follows `scan to send to <address>`: the code carries no chain.
+/// The line under `scan to send to <address>`: the code carries no chain. Two lines, so both fit
+/// an 80-column terminal.
 const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
 
 /// `out` with `address` as a QR code at the end of its human text, for a phone wallet to scan,
-/// under the line `scan to send to <address> (the same address on every EVM network ...)`. Only
-/// for an address reported `verified: true`, only with stdout on a terminal, and not with
-/// `--no-qr`: agents read zwallet through pipes, and `--json` prints no human text.
+/// under the lines `scan to send to <address>` and [`EVERY_EVM_NETWORK`]. Only for an address
+/// reported `verified: true`, only with stdout on a terminal, and not with `--no-qr`: agents read
+/// zwallet through pipes, and `--json` prints no human text.
 fn with_qr(out: Out, verified: bool, address: Option<&str>, no_qr: bool) -> Out {
     let Some(address) = address.filter(|_| verified && qr_shown(no_qr)) else {
         return out;
@@ -268,7 +269,7 @@ fn with_qr(out: Out, verified: bool, address: Option<&str>, no_qr: bool) -> Out 
     match qr::render(address, color) {
         Some(code) => with_line(
             out,
-            &format!("scan to send to {address} {EVERY_EVM_NETWORK}\n{code}"),
+            &format!("scan to send to {address}\n{EVERY_EVM_NETWORK}\n{code}"),
         ),
         None => out,
     }
