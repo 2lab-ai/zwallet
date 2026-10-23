@@ -1223,6 +1223,14 @@ pub fn edit_salt(sealed: &store::SealedWhitelist) -> Result<[u8; 32]> {
     })
 }
 
+/// The whitelist key under `salt`, from the password that opened wallet.json and the KDF
+/// parameters of the envelope that opened it: never a re-read of the file, whose parameters
+/// anyone who can write the home can edit after the open.
+fn derive_for(opened: &store::Opened, salt: &[u8; 32]) -> Result<WhitelistKey> {
+    let kdf = opened.file().crypto.kdf_params()?;
+    WhitelistKey::derive(opened.password(), salt, kdf)
+}
+
 /// A new whitelist salt from the OS's randomness: the first edit's, and every reset's.
 fn new_salt() -> Result<[u8; 32]> {
     let mut salt = [0u8; 32];
@@ -1353,8 +1361,7 @@ fn transact(
         (Some(_), Some(s)) => (edit_salt(s)?, Some(s.anchor.public_key)),
         _ => (new_salt()?, None),
     };
-    let kdf = opened.file().crypto.kdf_params()?;
-    let key = WhitelistKey::derive(opened.password(), &salt, kdf)?;
+    let key = derive_for(&opened, &salt)?;
     if sealed_key.is_some_and(|sealed| sealed != key.public_key()) {
         return Err(WalletError::validation(format!(
             "the password-derived whitelist key is not the one wallet.json seals; nothing in the \
@@ -3355,6 +3362,46 @@ mod tests {
             fs::read(&stray).unwrap(),
             b"{\"version\":1}\n",
             "left alone"
+        );
+    }
+
+    #[test]
+    fn the_key_is_derived_with_the_kdf_that_opened_wallet_json_not_one_edited_after() {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        let sealed_key = sealed(home).unwrap().public_key;
+        let lock = MetaLock::acquire(home).unwrap();
+        let opened = lock.open(PW).unwrap();
+        let salt = opened
+            .unsealed()
+            .sealed_whitelist()
+            .unwrap()
+            .unwrap()
+            .salt()
+            .unwrap();
+        // After the open, log_n on disk is raised (no password is needed to edit it).
+        let mut file = store::read_wallet_file(home).unwrap();
+        assert_eq!(file.crypto.kdfparams.log_n, KDF_MIN_LOG_N);
+        file.crypto.kdfparams.log_n = KDF_MIN_LOG_N + 1;
+        fs::write(
+            home.join(store::WALLET_FILE),
+            serde_json::to_vec_pretty(&file).unwrap(),
+        )
+        .unwrap();
+        // The derivation keeps the opened envelope's parameters, so it is still the sealed key.
+        assert_eq!(derive_for(&opened, &salt).unwrap().public_key(), sealed_key);
+        // The edited parameters would derive another key, so this tells the two apart.
+        let edited = store::read_wallet_file(home)
+            .unwrap()
+            .crypto
+            .kdf_params()
+            .unwrap();
+        assert_ne!(
+            WhitelistKey::derive(PW, &salt, edited)
+                .unwrap()
+                .public_key(),
+            sealed_key
         );
     }
 
