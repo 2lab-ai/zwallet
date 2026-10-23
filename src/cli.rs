@@ -312,7 +312,8 @@ pub enum WhitelistCommand {
     FeeCap(WhitelistFeeCapArgs),
     /// Let `sign-message` sign (on) or refuse it (off, the default).
     AllowMessageSigning(WhitelistToggleArgs),
-    /// A new whitelist key and an empty list, for a lost or damaged whitelist.key.
+    /// A new whitelist key and an empty list, for a list that does not verify (or one made by
+    /// zwallet 0.1.0).
     Reset(WhitelistEditArgs),
 }
 

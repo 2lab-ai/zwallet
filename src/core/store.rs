@@ -240,9 +240,16 @@ pub struct Unsealed {
 }
 
 impl Unsealed {
-    /// The whitelist anchor sealed in `policy` ([`WhitelistAnchor::from_policy`]).
+    /// The whitelist anchor sealed in `policy` ([`WhitelistAnchor::from_policy`]): what the
+    /// daemon keeps, and what a list is verified against.
     pub fn whitelist_anchor(&self) -> Result<Option<WhitelistAnchor>> {
         WhitelistAnchor::from_policy(&self.policy)
+    }
+
+    /// The anchor and the salt sealed in `policy` ([`SealedWhitelist::from_policy`]): what the
+    /// editor reads.
+    pub fn sealed_whitelist(&self) -> Result<Option<SealedWhitelist>> {
+        SealedWhitelist::from_policy(&self.policy)
     }
 }
 
@@ -364,36 +371,34 @@ pub fn decrypt(sealed: &CryptoBox, password: &str) -> Result<Unsealed> {
     })
 }
 
-/// `whitelist.key`'s associated data: a box sealed for one file never opens as the other.
-const WHITELIST_KEY_AAD: &[u8] = b"zwallet/whitelist.key/v1";
-/// The whitelist signing key's file, for errors.
-const WHITELIST_KEY_FILE: &str = "whitelist.key";
+/// Prefixed to the sealed whitelist salt to make the scrypt salt of the whitelist key, so that
+/// derivation is its own whatever salt it is given.
+const WHITELIST_KEY_DOMAIN: &[u8] = b"zwallet/whitelist-key/v1\n";
 
-/// Seals the whitelist's 32-byte ed25519 secret the way wallet.json seals the mnemonic (same
-/// cipher and KDF, a fresh salt and nonce), but under its own associated data, so neither
-/// ciphertext can stand in for the other.
-pub fn seal_whitelist_key(secret: &[u8; 32], password: &str, kdf: KdfParams) -> Result<CryptoBox> {
-    seal(secret, password, kdf, WHITELIST_KEY_AAD)
-}
-
-/// Opens a box [`seal_whitelist_key`] made. A wrong password, or a box from wallet.json, is
-/// `WRONG_PASSWORD`; anything but 32 bytes inside is `VALIDATION_ERROR`.
-pub fn open_whitelist_key(sealed: &CryptoBox, password: &str) -> Result<Zeroizing<[u8; 32]>> {
-    let plain = open(sealed, password, WHITELIST_KEY_AAD, WHITELIST_KEY_FILE)?;
-    let mut secret = Zeroizing::new([0u8; 32]);
-    if plain.len() != secret.len() {
-        return Err(WalletError::validation(
-            "whitelist.key is corrupt: the sealed key is not 32 bytes",
-        ));
-    }
-    secret.copy_from_slice(&plain);
-    Ok(secret)
+/// The whitelist key's 32-byte ed25519 secret, derived from `password` and the wallet's sealed
+/// whitelist `salt`: scrypt over `"zwallet/whitelist-key/v1\n" || salt`, with `kdf`, the
+/// parameters that opened wallet.json (never a re-read, as in [`MetaLock::reseal`]; they are
+/// checked as in [`KdfParams::checked`] before anything allocates). It is a scrypt run of its
+/// own, not a step off wallet.json's AES key, so holding that key never yields this one. The same
+/// password, salt and parameters always give the same secret, and nothing of it is stored: every
+/// whitelist edit derives it again from the password typed.
+pub fn derive_whitelist_secret(
+    password: &str,
+    salt: &[u8; 32],
+    kdf: KdfParams,
+) -> Result<Zeroizing<[u8; 32]>> {
+    let mut input = Zeroizing::new(Vec::with_capacity(WHITELIST_KEY_DOMAIN.len() + salt.len()));
+    input.extend_from_slice(WHITELIST_KEY_DOMAIN);
+    input.extend_from_slice(salt);
+    derive_key(password, &input, &kdf)
 }
 
 /// What wallet.json's sealed `policy` pins about the signed whitelist
 /// (`.prd/04-whitelist.md`): the ed25519 public key that signs it, its generation, and the
 /// digest of the one list signed at that generation. A policy without these keys (`{}`) means
-/// there is no whitelist yet.
+/// there is no whitelist yet. This is all the daemon keeps of the policy: it can check a list,
+/// never make one. The salt the key is derived from is sealed beside it ([`SealedWhitelist`]),
+/// for the editor only.
 ///
 /// The digest binds the generation to exactly one list: an edit that died after signing
 /// `whitelist.next.json` but before re-sealing leaves a signed list at generation + 1 behind, and
@@ -403,7 +408,7 @@ pub fn open_whitelist_key(sealed: &CryptoBox, password: &str) -> Result<Zeroizin
 /// AES-GCM authenticates the anchor but gives it no freshness: an authentic older wallet.json can
 /// be restored by anyone who can write the home. One sealed with `{}` reads as "no whitelist",
 /// which refuses every value-moving signature (fails closed); one with an older anchor, restored
-/// together with its list and key, is the documented joint rollback.
+/// together with its list, is the documented joint rollback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WhitelistAnchor {
     pub public_key: [u8; 32],
@@ -414,17 +419,57 @@ pub struct WhitelistAnchor {
 const POLICY_PUB: &str = "whitelistPub";
 const POLICY_GEN: &str = "whitelistGen";
 const POLICY_DIGEST: &str = "whitelistDigest";
+const POLICY_SALT: &str = "whitelistSalt";
 
 impl WhitelistAnchor {
-    /// The anchor in a sealed policy object. None of its three keys: `None`. All three
-    /// well-formed (`whitelistPub` and `whitelistDigest` 32 bytes of lower-case hex,
-    /// `whitelistGen` a number from 1): `Some`. Anything in between is `VALIDATION_ERROR`, so a
-    /// damaged anchor never reads as "no whitelist".
+    /// The anchor in a sealed policy object, when its salt is sealed too
+    /// ([`SealedWhitelist::from_policy`], then [`SealedWhitelist::salt`]). No whitelist key at
+    /// all: `None`. An anchor zwallet 0.1.0 sealed (no salt) is `VALIDATION_ERROR`, as a damaged
+    /// one is: never "no whitelist", so the daemon trusts no list under it and signs nothing.
+    pub fn from_policy(policy: &Value) -> Result<Option<Self>> {
+        SealedWhitelist::from_policy(policy)?
+            .map(|sealed| sealed.salt().map(|_| sealed.anchor))
+            .transpose()
+    }
+
+    /// `policy` (a JSON object) with this anchor's keys and the whitelist `salt` set; every other
+    /// key is kept.
+    pub fn to_policy(&self, salt: &[u8; 32], policy: &Value) -> Result<Value> {
+        let mut obj = policy
+            .as_object()
+            .cloned()
+            .ok_or_else(|| WalletError::validation("policy must be a JSON object"))?;
+        obj.insert(POLICY_PUB.into(), Value::from(hex::encode(self.public_key)));
+        obj.insert(POLICY_GEN.into(), Value::from(self.generation));
+        obj.insert(POLICY_DIGEST.into(), Value::from(hex::encode(self.digest)));
+        obj.insert(POLICY_SALT.into(), Value::from(hex::encode(salt)));
+        Ok(Value::Object(obj))
+    }
+}
+
+/// What the whitelist editor reads of the sealed policy: the [`WhitelistAnchor`], and the
+/// per-wallet salt (`whitelistSalt`) the whitelist key is derived from with the password
+/// ([`derive_whitelist_secret`]). The salt is drawn at random by the first edit and by every
+/// reset, and is sealed, so it is no plaintext input anyone can swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SealedWhitelist {
+    pub anchor: WhitelistAnchor,
+    /// `None`: an anchor sealed by zwallet 0.1.0, whose key was random and kept in a file of its
+    /// own, which is no longer used ([`SealedWhitelist::salt`]).
+    salt: Option<[u8; 32]>,
+}
+
+impl SealedWhitelist {
+    /// The anchor and the salt in a sealed policy object. None of the four keys: `None`. The
+    /// three anchor keys well-formed (`whitelistPub` and `whitelistDigest` 32 bytes of lower-case
+    /// hex, `whitelistGen` a number from 1), and `whitelistSalt` 32 bytes of lower-case hex or
+    /// absent (zwallet 0.1.0): `Some`. Anything else is `VALIDATION_ERROR`, so a damaged anchor
+    /// never reads as "no whitelist".
     pub fn from_policy(policy: &Value) -> Result<Option<Self>> {
         let obj = policy.as_object().ok_or_else(|| {
             WalletError::validation("wallet.json is corrupt: sealed policy is not an object")
         })?;
-        let keys = [POLICY_PUB, POLICY_GEN, POLICY_DIGEST];
+        let keys = [POLICY_PUB, POLICY_GEN, POLICY_DIGEST, POLICY_SALT];
         let present = keys.iter().filter(|k| obj.contains_key(**k)).count();
         if present == 0 {
             return Ok(None);
@@ -452,23 +497,31 @@ impl WhitelistAnchor {
             .and_then(Value::as_u64)
             .filter(|g| *g >= 1)
             .ok_or_else(|| bad(&format!("{POLICY_GEN} is missing or not a number from 1")))?;
-        Ok(Some(Self {
+        let anchor = WhitelistAnchor {
             public_key: bytes32(POLICY_PUB)?,
             generation,
             digest: bytes32(POLICY_DIGEST)?,
-        }))
+        };
+        // Absent: sealed by zwallet 0.1.0 ([`SealedWhitelist::salt`]).
+        let salt = if obj.contains_key(POLICY_SALT) {
+            Some(bytes32(POLICY_SALT)?)
+        } else {
+            None
+        };
+        Ok(Some(Self { anchor, salt }))
     }
 
-    /// `policy` (a JSON object) with this anchor's keys set; every other key is kept.
-    pub fn to_policy(&self, policy: &Value) -> Result<Value> {
-        let mut obj = policy
-            .as_object()
-            .cloned()
-            .ok_or_else(|| WalletError::validation("policy must be a JSON object"))?;
-        obj.insert(POLICY_PUB.into(), Value::from(hex::encode(self.public_key)));
-        obj.insert(POLICY_GEN.into(), Value::from(self.generation));
-        obj.insert(POLICY_DIGEST.into(), Value::from(hex::encode(self.digest)));
-        Ok(Value::Object(obj))
+    /// The salt the whitelist key is derived from. `VALIDATION_ERROR` for an anchor zwallet
+    /// 0.1.0 sealed: its key was random and lived in a file this zwallet no longer reads, so the
+    /// key cannot be derived, and only a reset (a new salt, a new key, an empty list) goes on.
+    pub fn salt(&self) -> Result<[u8; 32]> {
+        self.salt.ok_or_else(|| {
+            WalletError::validation(format!(
+                "this whitelist was made by zwallet 0.1.0, whose key file is no longer used (the \
+                 whitelist key is now derived from the password); {}",
+                crate::core::whitelist::RESET_CAVEAT
+            ))
+        })
     }
 }
 
@@ -863,7 +916,7 @@ impl Opened {
         &self.unsealed
     }
 
-    /// The password that opened this wallet.json (for sealing `whitelist.key` alongside it).
+    /// The password that opened this wallet.json (the whitelist key is derived from it).
     pub fn password(&self) -> &str {
         &self.password
     }
@@ -1954,53 +2007,62 @@ mod tests {
     }
 
     #[test]
-    fn whitelist_key_box_opens_only_as_whitelist_key() {
-        let secret = [7u8; 32];
-        let key_box = seal_whitelist_key(&secret, PW, fast_kdf()).unwrap();
-        assert_eq!(*open_whitelist_key(&key_box, PW).unwrap(), secret);
-        let again = seal_whitelist_key(&secret, PW, fast_kdf()).unwrap();
-        assert_ne!(key_box.nonce, again.nonce, "its own nonce");
-        assert_ne!(key_box.kdfparams.salt, again.kdfparams.salt, "its own salt");
+    fn the_whitelist_secret_is_its_own_scrypt_of_the_password_and_the_salt() {
+        let salt = [7u8; 32];
+        let secret = derive_whitelist_secret(PW, &salt, fast_kdf()).unwrap();
+        // Deterministic: nothing needs storing.
         assert_eq!(
-            key_box.kdfparams.log_n, KDF_MIN_LOG_N,
-            "the KDF it was given"
+            *derive_whitelist_secret(PW, &salt, fast_kdf()).unwrap(),
+            *secret
         );
-        assert!(!key_box.ciphertext.contains(&hex::encode(secret)));
-
-        let err = open_whitelist_key(&key_box, "not the password").unwrap_err();
-        assert_eq!(err.code, ErrorCode::WrongPassword);
-        assert!(err.message.contains("whitelist.key"), "{}", err.message);
-        // Same password, same cipher and KDF: still neither box opens as the other.
-        let wallet_box = encrypt(&test_seed(), &empty(), PW, fast_kdf()).unwrap();
-        assert_eq!(
-            open_whitelist_key(&wallet_box, PW).unwrap_err().code,
-            ErrorCode::WrongPassword
-        );
-        assert_eq!(
-            decrypt(&key_box, PW).err().unwrap().code,
-            ErrorCode::WrongPassword
-        );
-        // A tampered KDF names the file it came from.
-        let mut bad = key_box.clone();
-        bad.kdfparams.log_n = 30;
-        let err = open_whitelist_key(&bad, PW).unwrap_err();
-        assert!(
-            err.message.starts_with("whitelist.key is corrupt"),
-            "{}",
-            err.message
-        );
+        // Another salt, another password or other parameters give another secret.
+        let others = [
+            derive_whitelist_secret(PW, &[8u8; 32], fast_kdf()).unwrap(),
+            derive_whitelist_secret("another password", &salt, fast_kdf()).unwrap(),
+            derive_whitelist_secret(
+                PW,
+                &salt,
+                KdfParams {
+                    log_n: KDF_MIN_LOG_N + 1,
+                    ..fast_kdf()
+                },
+            )
+            .unwrap(),
+        ];
+        for other in &others {
+            assert_ne!(**other, *secret);
+        }
+        // Domain-separated: never the key scrypt gives for the bare salt (the AES key a box
+        // sealed with that salt would use).
+        assert_ne!(*derive_key(PW, &salt, &fast_kdf()).unwrap(), *secret);
+        let mut prefixed = b"zwallet/whitelist-key/v1\n".to_vec();
+        prefixed.extend_from_slice(&salt);
+        assert_eq!(*derive_key(PW, &prefixed, &fast_kdf()).unwrap(), *secret);
+        // Parameters outside the accepted range are refused before anything allocates.
+        let err = derive_whitelist_secret(
+            PW,
+            &salt,
+            KdfParams {
+                log_n: 30,
+                ..fast_kdf()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError);
     }
 
     #[test]
     fn whitelist_anchor_rides_in_the_sealed_policy() {
         assert_eq!(WhitelistAnchor::from_policy(&empty()).unwrap(), None);
+        assert_eq!(SealedWhitelist::from_policy(&empty()).unwrap(), None);
         let anchor = WhitelistAnchor {
             public_key: [0xab; 32],
             generation: 3,
             digest: [0x01; 32],
         };
+        let salt = [0x5a; 32];
         let other = serde_json::json!({ "future": [1, 2] });
-        let policy = anchor.to_policy(&other).unwrap();
+        let policy = anchor.to_policy(&salt, &other).unwrap();
         assert_eq!(
             policy["future"],
             serde_json::json!([1, 2]),
@@ -2009,12 +2071,40 @@ mod tests {
         assert_eq!(policy["whitelistPub"], hex::encode([0xab; 32]));
         assert_eq!(policy["whitelistGen"], 3);
         assert_eq!(policy["whitelistDigest"], hex::encode([0x01; 32]));
+        assert_eq!(policy["whitelistSalt"], hex::encode(salt));
         assert_eq!(WhitelistAnchor::from_policy(&policy).unwrap(), Some(anchor));
+        let sealed = SealedWhitelist::from_policy(&policy).unwrap().unwrap();
+        assert_eq!((sealed.anchor, sealed.salt().unwrap()), (anchor, salt));
 
-        // Through the seal: what the daemon reads at unlock.
+        // Through the seal: what the daemon reads at unlock, and what the editor reads.
         let sealed = encrypt(&test_seed(), &policy, PW, fast_kdf()).unwrap();
         let opened = decrypt(&sealed, PW).unwrap();
         assert_eq!(opened.whitelist_anchor().unwrap(), Some(anchor));
+        let read = opened.sealed_whitelist().unwrap().unwrap();
+        assert_eq!((read.anchor, read.salt().unwrap()), (anchor, salt));
+
+        // An anchor zwallet 0.1.0 sealed (no salt): the editor sees it, and only a reset goes on
+        // from it; to every other reader it is unusable, never "no whitelist".
+        let mut old = policy.clone();
+        old.as_object_mut().unwrap().remove("whitelistSalt");
+        let read = SealedWhitelist::from_policy(&old).unwrap().unwrap();
+        assert_eq!(read.anchor, anchor);
+        let err = read.salt().unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError);
+        assert!(
+            err.message.contains("made by zwallet 0.1.0"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains(crate::core::whitelist::RESET_CAVEAT),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            WhitelistAnchor::from_policy(&old).unwrap_err().message,
+            err.message
+        );
 
         // A damaged anchor never reads as "no whitelist".
         let mut damaged = Vec::new();
@@ -2023,6 +2113,8 @@ mod tests {
             p.as_object_mut().unwrap().remove(key);
             damaged.push(p);
         }
+        // A salt alone.
+        damaged.push(serde_json::json!({ "whitelistSalt": hex::encode(salt) }));
         for (key, value) in [
             ("whitelistPub", Value::from("AB".repeat(32))),
             ("whitelistPub", Value::from("ab".repeat(31))),
@@ -2030,6 +2122,9 @@ mod tests {
             ("whitelistGen", Value::from(0)),
             ("whitelistGen", Value::from("3")),
             ("whitelistGen", Value::from(-1)),
+            ("whitelistSalt", Value::from("5A".repeat(32))),
+            ("whitelistSalt", Value::from("5a".repeat(33))),
+            ("whitelistSalt", Value::Null),
         ] {
             let mut p = policy.clone();
             p[key] = value;
@@ -2038,8 +2133,10 @@ mod tests {
         for p in damaged {
             let err = WhitelistAnchor::from_policy(&p).unwrap_err();
             assert_eq!(err.code, ErrorCode::ValidationError, "{p}");
+            assert!(err.message.contains("malformed"), "{p}: {}", err.message);
+            assert!(SealedWhitelist::from_policy(&p).is_err(), "{p}");
         }
-        assert!(anchor.to_policy(&serde_json::json!([])).is_err());
+        assert!(anchor.to_policy(&salt, &serde_json::json!([])).is_err());
     }
 
     #[test]

@@ -7,8 +7,8 @@
 //!    password is read from (the terminal, or stderr with `--password-stdin`), so the human sees
 //!    what the password authorizes; then the password is read and checked against wallet.json,
 //!    and the change is tried on the list it builds on, from the same bytes. A wrong password, a
-//!    list shown that does not verify (only `reset` starts over), or a refused change stops
-//!    nothing;
+//!    list shown that does not verify or a whitelist made by zwallet 0.1.0 (only `reset` starts
+//!    over), or a refused change stops nothing;
 //! 1. every zwallet daemon of this user is stopped (the `zwallet lock` path, which returns only
 //!    once none is left): nothing is signed while the list changes;
 //! 2. to 4. [`whitelist::edit_as_shown`] (or [`whitelist::reset_as_shown`]) under `w.lock`:
@@ -266,15 +266,20 @@ async fn edit(home: &Path, change: Change, opts: &WhitelistEditArgs) -> Result<O
     } else {
         read_password(false, &format!("{told}\nWallet password: "), false)?
     };
-    // A wrong password, a list shown that does not verify, or a change the list refuses is
-    // refused here, before anything is stopped.
-    let anchor = store::unlock(home, &password, &chains::derive_addresses)?
+    // A wrong password, a list shown that does not verify, a whitelist made by zwallet 0.1.0
+    // (an edit; a reset goes on from it), or a change the list refuses is refused here, before
+    // anything is stopped.
+    let sealed = store::unlock(home, &password, &chains::derive_addresses)?
         .0
-        .whitelist_anchor()?;
+        .sealed_whitelist()?;
+    let anchor = sealed.map(|s| s.anchor);
     let base = match change {
         Change::Reset => whitelist::pick_base_from(&files, anchor.as_ref(), &WHITELIST_RULES),
         _ => {
             let base = whitelist::base_for_edit(&files, anchor.as_ref(), &WHITELIST_RULES)?;
+            if let Some(sealed) = &sealed {
+                sealed.salt()?;
+            }
             try_change(&change, &base)?;
             base
         }
@@ -887,7 +892,6 @@ fn edit_output(
         "gen": list.generation,
         "previousGen": edited.previous_generation,
         "base": base_name(edited.base),
-        "keyCreated": edited.key_created,
         "entries": nicknames(list),
         "verified": true,
         "stoppedDaemons": stopped,
@@ -1046,9 +1050,6 @@ fn edit_text(out: &Value) -> String {
                 format!("its unverified entries: {}", ascii_json(entries))
             }
         ));
-    }
-    if out["keyCreated"] == json!(true) {
-        lines.push(format!("created a new {}", whitelist::KEY_FILE));
     }
     if out["stoppedDaemons"]
         .as_array()
@@ -1331,7 +1332,7 @@ mod tests {
         for e in entries {
             list.add(e.clone()).unwrap();
         }
-        let signed = WhitelistKey::generate().unwrap().sign(&list);
+        let signed = WhitelistKey::from_secret(&[1u8; 32]).sign(&list);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1438,7 +1439,7 @@ mod tests {
             "change": "added", "gen": 2, "previousGen": 1, "entries": ["bob"],
             "entry": { "nickname": "bob", "kind": "address", "address": "0xb0b", "chains": ["base"] },
             "discarded": { "reason": "bad \u{202e}", "entries": raw },
-            "keyCreated": false, "stoppedDaemons": [], "locked": true,
+            "stoppedDaemons": [], "locked": true,
         });
         let text = edit_text(&out);
         assert!(
@@ -1465,7 +1466,6 @@ mod tests {
             previous_generation: Some(1),
             base: BaseSource::Current,
             discarded: None,
-            key_created: false,
             warning: Some(left.into()),
         };
         let base = Base {
@@ -1508,7 +1508,6 @@ mod tests {
             previous_generation: Some(1),
             base: BaseSource::Current,
             discarded: None,
-            key_created: false,
             warning: Some("the change landed, but zwallet could not remove it".into()),
         };
         let ready = json!({ "pid": 7, "expiresAt": "later", "whitelist": { "gen": 2 } });
@@ -1573,7 +1572,6 @@ mod tests {
             previous_generation: None,
             base: BaseSource::Empty,
             discarded: None,
-            key_created: true,
             warning: None,
         };
         let out = edit_output(
@@ -1603,7 +1601,6 @@ mod tests {
             previous_generation: None,
             base: BaseSource::Empty,
             discarded: None,
-            key_created: true,
             warning: None,
         };
         let out = edit_output(
@@ -1807,7 +1804,7 @@ mod tests {
         staged
             .policy
             .set_max_fee_wei("base", U256::from(2_000_000_000_000_000u64));
-        let signed = WhitelistKey::generate().unwrap().sign(&staged);
+        let signed = WhitelistKey::from_secret(&[2u8; 32]).sign(&staged);
         std::fs::write(tmp.path().join(NEXT_FILE), signed.to_file_bytes().unwrap()).unwrap();
         let at = |change: &Change| summary(&ListFiles::read(tmp.path()), change, None);
         let base = chains::find("base").unwrap();
@@ -1872,7 +1869,7 @@ mod tests {
             .list;
         l.policy.set_max_fee_wei("base", U256::from(1u64));
         l.policy.allow_message_signing = true;
-        let signed = WhitelistKey::generate().unwrap().sign(&l);
+        let signed = WhitelistKey::from_secret(&[3u8; 32]).sign(&l);
         std::fs::write(
             tmp.path().join(WHITELIST_FILE),
             signed.to_file_bytes().unwrap(),
@@ -1927,7 +1924,7 @@ mod tests {
         )]);
         let mut staged = Whitelist::empty(&WHITELIST_RULES);
         staged.generation = 6;
-        let signed = WhitelistKey::generate().unwrap().sign(&staged);
+        let signed = WhitelistKey::from_secret(&[4u8; 32]).sign(&staged);
         std::fs::write(tmp.path().join(NEXT_FILE), signed.to_file_bytes().unwrap()).unwrap();
         let text = summary(&ListFiles::read(tmp.path()), &Change::Reset, None);
         for want in [

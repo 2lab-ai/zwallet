@@ -3055,11 +3055,12 @@ fn w5_a_list_that_does_not_verify_refuses_every_send() {
 }
 
 #[test]
-fn w5b_an_older_wallet_list_and_key_restored_together_are_accepted_and_shown() {
+fn w5b_an_older_wallet_and_list_restored_together_are_accepted_and_shown() {
     let home = Home::new();
     home.create("t", &[]);
     home.allow("alice", ALICE, &["*"]);
-    let files = ["wallet.json", "whitelist.json", "whitelist.key"];
+    // Two files: the key is derived from the password and the salt the older wallet.json seals.
+    let files = ["wallet.json", "whitelist.json"];
     let old: Vec<Vec<u8>> = files
         .iter()
         .map(|f| std::fs::read(home.path().join(f)).unwrap())

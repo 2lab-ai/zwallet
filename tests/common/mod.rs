@@ -232,7 +232,8 @@ impl Home {
 
 /// Seeds the signed whitelist of `home` (a wallet created with [`PW`]) through the core edit
 /// path, `zwallet::core::whitelist::edit` with the real chain rules: `change` edits the current
-/// list (the first call makes `whitelist.key` and generation 1, each call adds one generation).
+/// list (the first call seals the whitelist salt, so the key, and generation 1; each call adds one
+/// generation).
 /// Returns the list now in `whitelist.json`, verified against the new seal.
 ///
 /// Every call re-seals wallet.json, and a running daemon ends its session when wallet.json's

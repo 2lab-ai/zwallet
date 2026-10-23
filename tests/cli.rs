@@ -2059,7 +2059,7 @@ fn whitelist_verbs_change_one_generation_each_and_refuse_before_writing() {
         (&json!(2), &json!(["*"])),
         "{b}"
     );
-    assert_eq!(b["keyCreated"], false, "{b}");
+    assert!(b.get("keyCreated").is_none(), "{b}");
     // A contract entry: its selectors (lower-cased), and the residual it carries.
     let r = whitelist_edit(
         &home,
@@ -2184,18 +2184,26 @@ fn whitelist_verbs_change_one_generation_each_and_refuse_before_writing() {
     assert_eq!(v["policy"]["allowMessageSigning"], true, "{v}");
     assert_eq!(nicknames(&v["entries"]), ["alice", "router"], "{v}");
 
-    // reset: a new key and an empty list with the default policy, at the next generation.
-    let key_before = fs::read(home.path().join("whitelist.key")).unwrap();
+    // reset: a new key (a new sealed salt) and an empty list with the default policy, at the
+    // next generation.
+    let sealed = || {
+        store::unlock(home.path(), PW, &chains::derive_addresses)
+            .unwrap()
+            .0
+            .policy
+    };
+    let before = sealed();
     let z = whitelist_edit(&home, &["reset"]).ok();
     assert_eq!(z["gen"], 7, "{z}");
     assert_eq!(z["change"], "reset", "{z}");
-    assert_eq!(z["keyCreated"], true, "{z}");
     assert_eq!(z["entries"], json!([]), "{z}");
     assert_eq!(nicknames(&z["dropped"]), ["alice", "router"], "{z}");
-    assert_ne!(
-        fs::read(home.path().join("whitelist.key")).unwrap(),
-        key_before
-    );
+    let after = sealed();
+    for key in ["whitelistSalt", "whitelistPub"] {
+        assert!(after[key].is_string(), "{after}");
+        assert_ne!(after[key], before[key], "{key}");
+    }
+    assert!(!home.path().join("whitelist.key").exists());
     let v = verify_list(&home);
     assert_eq!(
         (&v["verified"], &v["gen"]),
@@ -2280,8 +2288,8 @@ fn w4_a_hand_edited_list_is_shown_but_an_edit_refuses_and_only_reset_starts_over
     // Reset starts over: a new key and an empty list, with what it dropped.
     let z = whitelist_edit(&home, &["reset"]).ok();
     assert_eq!(
-        (&z["gen"], &z["keyCreated"]),
-        (&json!(2), &json!(true)),
+        (&z["gen"], &z["change"]),
+        (&json!(2), &json!("reset")),
         "{z}"
     );
     assert_eq!(z["entries"], json!([]), "{z}");
@@ -2916,8 +2924,8 @@ fn r3_2_a_wallet_json_from_before_the_first_edit_refuses_every_edit() {
     // Reset still works: a new key, an empty list, the list it dropped shown.
     let z = whitelist_edit(&home, &["reset"]).ok();
     assert_eq!(
-        (&z["gen"], &z["keyCreated"]),
-        (&json!(1), &json!(true)),
+        (&z["gen"], &z["change"]),
+        (&json!(1), &json!("reset")),
         "{z}"
     );
     assert_eq!(z["entries"], json!([]), "{z}");
