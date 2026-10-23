@@ -174,6 +174,15 @@ built 2026-10-20):
   key, and holds only the sealed anchor (public key, generation, digest of the signed list);
   a list that cannot be trusted refuses every signature (`WHITELIST_INVALID`), and a wallet
   with no whitelist yet signs only a native self-transfer under the built-in fee cap;
+- that key is never stored: each edit derives it from the typed password and a random
+  per-wallet salt sealed next to the anchor (scrypt with the wallet's KDF parameters, its own
+  run, not a step off the AES key that opens wallet.json; since 2026-10-21, v0-1 SSOT item 20).
+  `unlock` gives the daemon the seed and the anchor only, never the salt. The generation and
+  the digest stay in the anchor because the public key alone would also accept an older list the
+  same key signed. The seed stays a random BIP39 mnemonic encrypted under the password, never
+  derived from it: a password-derived seed is a "brain wallet", open to password guessing
+  against its public addresses. A future password change must sign the list again under the
+  new password's key (no command for it yet);
 - native coin and the built-in registry tokens go only to listed payees on the listed chains
   (`WHITELIST_DENIED` otherwise, naming the `zwallet whitelist add` command only when one add
   would allow the action);
@@ -184,10 +193,10 @@ built 2026-10-20):
   refuses);
 - `sign-message` is gated (off by default).
 
-The list and its key are edited only by the one-shot CLI with the typed password (`zwallet
-whitelist …`, never the daemon). An edit shows the change and what happens to signing before
-the password is read, applies it to exactly the list shown or changes nothing, and builds only
-on the list the seal names (an unverifiable list, or a list file without a sealed whitelist, is
+The list is edited only by the one-shot CLI with the typed password, from which it derives the
+key each time (`zwallet whitelist …`, never the daemon). An edit shows the change and what
+happens to signing before the password is read, applies it to exactly the list shown or changes
+nothing, and builds only on the list the seal names (an unverifiable list, or a list file without a sealed whitelist, is
 refused; only `reset` starts over, with every fee cap back to the default and no payee and no
 contract). It stops every daemon, signs the next generation, re-seals the anchor into
 wallet.json, and leaves the wallet locked unless `--unlock <duration>` starts a new session. A

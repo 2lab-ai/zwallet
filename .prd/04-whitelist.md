@@ -49,10 +49,10 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
   calldata can be up to about 512 KB.
 - **Joint rollback.** The seal is authenticated (AES-GCM) but not fresh: an older `wallet.json`
   still opens with the password. Restoring an older `wallet.json` and `whitelist.json` together
-  therefore resurrects revoked entries. (The daemon never reads `whitelist.key`; an older key
-  matters only to later edits.) No same-user storage can stop that; a counter outside the home,
-  such as the Secure Enclave, would be needed. The mitigation is visibility: `unlock`, `status`
-  and `whitelist list` print the generation and the entries.
+  therefore resurrects revoked entries. (The older `wallet.json` seals its own salt, so the same
+  password derives the key it names.) No same-user storage can stop that; a counter outside the
+  home, such as the Secure Enclave, would be needed. The mitigation is visibility: `unlock`,
+  `status` and `whitelist list` print the generation and the entries.
   Rolling back `wallet.json` alone to an older edit fails closed: its anchor does not match the
   current list, so every signature is `WHITELIST_INVALID`. The reason names the cause, by the
   `whitelist.json` it finds above the seal (gen N, the seal at gen M):
@@ -86,8 +86,10 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
   put the current `wallet.json` back (a copy made after the last edit), or `whitelist reset`
   (every fee cap back to the default, no payee and no contract).
 - **Independence from the password.** The separate key adds no second factor in v0.1: it is
-  encrypted under the same password. What it buys is that the daemon never holds policy-signing
-  authority, and that the key can later move to the Secure Enclave or to hardware.
+  derived from the same password. What it buys is that the daemon never holds policy-signing
+  authority (a later version can move the key to the Secure Enclave or to hardware). A password
+  change, when zwallet has one (no command yet), must sign the list again under the key the new
+  password derives; until it does, every edit refuses the key.
 
 ## Design
 
@@ -95,15 +97,34 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
 
 | File | Contents | Who reads it |
 |---|---|---|
-| `wallet.json` | the sealed payload `{version, mnemonic, policy}`; `policy` holds the anchor `{whitelistPub, whitelistGen, whitelistDigest}` (`{}` = no whitelist yet) | the daemon at unlock (the anchor only, kept in memory); the editor |
-| `whitelist.key` | `{version: 1, crypto}`: the ed25519 secret in the same `CryptoBox` shape as wallet.json, its own salt and nonce, AAD `zwallet/whitelist.key/v1`, KDF parameters copied from wallet.json, same password | the **editor only** (CLI with a typed password). Never the daemon |
+| `wallet.json` | the sealed payload `{version, mnemonic, policy}`; `policy` holds the anchor `{whitelistPub, whitelistGen, whitelistDigest}` and the key's salt `whitelistSalt` (`{}` = no whitelist yet) | the daemon at unlock (the anchor only, kept in memory; never the salt); the editor (anchor and salt) |
 | `whitelist.json` | `{version, gen, entries, policy, sig}`, plaintext and signed | everyone. Readable while locked; trusted only after verification |
 | `whitelist.next.json` | an edit staged between signing and publishing | the editor; the daemon only when the anchor names it (see **Edits**) |
+
+There is no key file. A `whitelist.key` left by zwallet 0.1.0 is not read and not removed.
 
 **The anchor** sits inside the existing sealed `policy` object (no `SEALED_VERSION` bump): the
 public key (hex, 32 bytes), the generation (a number), and the digest (keccak-256 of the signed
 message, 32 bytes hex). The digest pins the one list signed at that generation, so an abandoned
-edit's file signed at the same generation never verifies.
+edit's file signed at the same generation never verifies. The generation and the digest are
+what the public key alone cannot give: without them an older list the same key signed would
+verify too.
+
+**The key** is derived, never stored. `whitelistSalt`, next to the anchor in the sealed policy,
+is 32 random bytes (lower-case hex) drawn by the first edit and by every reset. Each edit derives
+the ed25519 secret as scrypt(password, `"zwallet/whitelist-key/v1\n"` ‖ salt) with the scrypt
+parameters that opened `wallet.json` (validated as wallet.json's are, never re-read from disk),
+then checks that its public key is the sealed one. It is a scrypt run of its own, not derived
+from the AES key that opens `wallet.json`, so holding that key never yields the whitelist key;
+an edit costs one scrypt to open `wallet.json` and one to derive the key, as decrypting the
+0.1.0 key file did. The daemon reads only the three anchor keys and never holds the salt or any
+of the key. An anchor without a salt was sealed by zwallet 0.1.0: the daemon treats it as
+untrusted (`Unusable`, never `NoList`), `list --verify` gives the reason, every edit refuses it
+before anything is stopped ("this whitelist was made by zwallet 0.1.0, whose key file is no
+longer used ...; `zwallet whitelist reset` starts over ..."), and `reset` starts over under a new
+salt. The seed is not derived this way: it stays a random BIP39 mnemonic encrypted under the
+password, because a seed derived from the password would be a "brain wallet", open to password
+guessing against its public addresses.
 
 **Entries.** Nicknames match `^[a-z0-9][a-z0-9_-]{0,31}$`, are unique, and each address appears
 under one nickname. Addresses and selectors are stored lower-case.
@@ -133,9 +154,9 @@ stored, wei amounts as decimal strings, `gen` and `version` as numbers. The enco
 hand and pinned by a golden-bytes test. The signature binds the list to this wallet because only
 this wallet's sealed public key verifies it; there is no separate wallet id. Verification does
 not re-check the registry; the daemon's action table does. What each part guarantees:
-- the **signature** says the list was made by whoever holds the key in `whitelist.key`: the
-  editor, with the wallet password. The daemon only ever holds the public key, so it can check
-  lists but never make one;
+- the **signature** says the list was made by whoever holds the wallet password, from which the
+  editor derives the key. The daemon only ever holds the public key, so it can check lists but
+  never make one;
 - the sealed **digest** says this is the one list committed at the sealed generation, so a list
   the key signed for an edit that never committed is not accepted in its place;
 - the sealed **generation** names that commit for humans (`unlock`, `status` and `whitelist
@@ -147,8 +168,9 @@ reports the on-chain symbol `USDt`). A live test checks `symbol()` and `decimals
 on its chain. Trust in their behavior is trust in the issuer, not something the code establishes.
 Only registry tokens can be transferred. There is no user-added token kind in v0.1.
 
-**Daemon enforcement.** At unlock the daemon keeps the anchor from the unsealed policy. No
-anchor, or one that does not parse, does not stop the unlock.
+**Daemon enforcement.** At unlock the daemon keeps the anchor (public key, generation, digest)
+from the unsealed policy, and nothing else of it. No anchor, or one that does not parse or has no
+salt (zwallet 0.1.0), does not stop the unlock.
 `unlock`, `create --unlock` and `status` show the session's view as `whitelist: {gen, verified:
 true, entries: [nicknames]}`, or `{gen (null without an anchor), verified: false, entries: [],
 reason}`; `status` reads the list again on every call. On every `sign_tx`, after
@@ -172,13 +194,14 @@ reason}`; `status` reads the list again on every call. On every `sign_tx`, after
      add <nick> <addr> --chains <chain>`); a forbidden action has none, and neither has a revoke of
      a registry token (see **What a refusal carries**);
    - **cannot be trusted** (`Unusable`: it does not verify, cannot be read or not in time, or
-     the sealed anchor is malformed): **every** signature, a native self-transfer included, is
-     **`WHITELIST_INVALID`**. The message gives the reason and points to `zwallet whitelist list
-     --verify`, with **no** `command` (an edit suggested from the refused transaction would name
-     an address an agent chose, and rebuild the list around it). A broken list never relaxes a
-     stricter signed fee cap. A `whitelist.json` above the sealed generation gets a reason by
-     its generation and signer: a rolled-back `wallet.json`, an edit or reset that never
-     finished sealing, a rollback across a reset, or a foreign file (see **Joint rollback**).
+     the sealed anchor is malformed or was sealed by zwallet 0.1.0): **every** signature, a
+     native self-transfer included, is **`WHITELIST_INVALID`**. The message gives the reason and
+     points to `zwallet whitelist list --verify`, with **no** `command` (an edit suggested from
+     the refused transaction would name an address an agent chose, and rebuild the list around
+     it). A broken list never relaxes a stricter signed fee cap. A `whitelist.json` above the
+     sealed generation gets a reason by its generation and signer: a rolled-back
+     `wallet.json`, an edit or reset that never finished sealing, a rollback across a reset, or
+     a foreign file (see **Joint rollback**).
 3. Decide by the decoded action:
 
 | Decoded action | Allowed only if |
@@ -291,9 +314,12 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
    absent), the change refuses before writing anything: "<file> changed after it was shown;
    nothing in the whitelist changed". So **the change is applied to exactly the list shown, or
    nothing changes.** The current list is the base only if it verifies against the anchor.
-   `whitelist.key` is decrypted after the base is picked (the first edit and a reset make a
-   new one), so what is wrong with the list, a rollback across a reset say, is named before a
-   key that does not match the seal.
+   The key is derived after the base is picked (an edit from the sealed salt; the first edit and
+   a reset draw a new one), so what is wrong with the list, a rollback across a reset say, is
+   named before a key that does not match the seal. An edit refuses, writing nothing, an anchor
+   without a salt (zwallet 0.1.0) and a derived key that is not the sealed one ("the
+   password-derived whitelist key is not the one wallet.json seals; ..."), which only a policy
+   sealed with the password, or a bug, can cause.
    - If it doesn't, and `whitelist.next.json` does, that is the base: a committed edit that died
      before it wrote `whitelist.json`. Its verified bytes are written as `whitelist.json` (from
      memory, never re-read from its path) before the change is staged over
@@ -308,8 +334,9 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
      planted file (whose values would make a loosening look like a tightening), or a first edit
      interrupted between staging and re-seal. The refusal and `list --verify` name the files
      found. A genuinely interrupted first edit leaves only `whitelist.next.json`, at gen 1,
-     signed by the key in `whitelist.key`, and no `whitelist.json`; the summary of any edit or
-     reset shows its generation and entries (no command checks its signature without a seal).
+     signed by the key that edit derived under a salt never sealed, and no `whitelist.json`;
+     the summary of any edit or reset shows its generation and entries (no command checks its
+     signature without a seal).
      A `whitelist.json`, or a staged list above gen 1, means a rollback or a planted file.
    - Both refusals give the reason (the cause, for a `whitelist.json` above the seal by its
      generation and signer: see **Joint rollback**), point to `zwallet whitelist list
@@ -321,9 +348,9 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
      `zwallet whitelist reset` starts over, and the message says what it costs: every fee cap
      back to the built-in default, no payee and no contract (native self-transfers under the
      default caps and approve-0 revokes still sign), so `fee-cap` is set again before
-     `--unlock`. Reset is for a lost or damaged key, a damaged list, or any list that does not
-     verify while the current `wallet.json` is in place (and, at no anchor, for an interrupted
-     first edit, where it loses nothing).
+     `--unlock`. Reset is for a damaged list, any list that does not verify while the current
+     `wallet.json` is in place, or a whitelist made by zwallet 0.1.0 (and, at no anchor, for an
+     interrupted first edit, where it loses nothing).
 4. Apply the change at `gen' = gen + 1`, validate, sign, and write `whitelist.next.json`. Re-seal
    `wallet.json` with the new anchor (refused if its ciphertext changed since step 2). Then write
    `whitelist.json` from the signed bytes in memory (never re-read from the staged path): the
@@ -335,15 +362,12 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
    only where there is a plain file or nothing"), and `--unlock` still runs. A
    whitelist.next.json left that way is shown by the next summary as "a copy of whitelist.json
    (e.g. left after a change)". A crash at any point is recovered by step 3 (and by the daemon's
-   `next` fallback): either the old generation stands, or the staged one is promoted. There are
-   two exceptions, and neither loosens anything:
-   - a first edit cut off between staging and re-seal: `wallet.json` still seals no whitelist,
-     so the staged `whitelist.next.json` makes every edit refuse, and `reset` is needed (it loses
-     nothing, since no list was ever sealed);
-   - a reset cut off after writing its new `whitelist.key` and before the re-seal: the old list
-     still verifies and signing goes on under it, but every edit refuses at the key
-     ("whitelist.key is not the key wallet.json seals for the whitelist; ..."), until `reset` is
-     run again.
+   `next` fallback): either the old generation stands, or the staged one is promoted. A reset
+   cut off before its re-seal leaves the old salt sealed, so the next edit derives the old key
+   and goes on from the old list. There is one exception, and it loosens nothing: a first edit
+   cut off between staging and re-seal: `wallet.json` still seals no whitelist, so the staged
+   `whitelist.next.json` makes every edit refuse, and `reset` is needed (it loses nothing, since
+   no list was ever sealed).
 5. The wallet **stays locked**, unless `--unlock <duration>` was given (the summary says which):
    then a new session starts for that duration, the one typed in this command, with the password
    just typed, through the staged unlock. No duration or expiry is taken from the session that
@@ -351,12 +375,12 @@ only with a typed password (terminal prompt or `--password-stdin`), in this orde
    the password is wiped. If the edit fails after step 1, nothing is unlocked and the error says
    that the daemons were already stopped, so the wallet is locked.
 
-The first `add` creates the key: it generates the ed25519 key, writes `whitelist.key`, and seals
-the anchor at generation 1. `whitelist reset` makes a new key and an empty list with the default
-policy at the next generation (the sealed one + 1, or 1 with no seal): every fee cap back to the
-built-in default, no payee and no contract. It is for when `whitelist.key` is lost or corrupted
-(which can happen independently of `wallet.json`), or the list does not verify and the current
-`wallet.json` is in place: the entries are then added again by hand. When the list
+The first `add` makes the key: it draws the salt, derives the key, and seals the anchor with the
+salt at generation 1. `whitelist reset` draws a new salt, so a new key, and makes an empty list
+with the default policy at the next generation (the sealed one + 1, or 1 with no seal): every fee
+cap back to the built-in default, no payee and no contract. It is for when the list does not
+verify and the current `wallet.json` is in place, or for a whitelist made by zwallet 0.1.0: the
+entries are then added again by hand. When the list
 it replaces did not verify (or `wallet.json` sealed none), its output shows it as `discarded`
 (the reason and its unverified entries as JSON; `null` when the file is missing, cannot be
 read or has no entries, and the human output then says on the line of what was dropped "no
@@ -364,7 +388,7 @@ verified entry; whitelist.json's entries unknown (it is missing, cannot be read,
 entries)"). A `whitelist.next.json` the reset drops that was not the sealed list (nor
 `whitelist.json`'s own bytes) is shown as `discardedNext: { entries }` the same way. An edit
 never has `discarded`: it refuses instead. A change's output: `{ change, gen, previousGen, base:
-"current" | "promoted-next" | "empty", keyCreated, entries: [nicknames], verified: true,
+"current" | "promoted-next" | "empty", entries: [nicknames], verified: true,
 stoppedDaemons, entry? | feeCap? | allowMessageSigning? | dropped?, discarded?, discardedNext?,
 warning?, locked, hint? }`, and with `--unlock` `{ duration, expiresAt, daemonPid, whitelist }`
 (or `unlockError` if the new session could not start).
@@ -416,7 +440,7 @@ From part A (core), accepted by the dispatcher:
 6. Address entries at a registry token address are allowed (the daemon's "`to` is not a token
    contract" rule still applies to token transfers).
 7. `whitelist.key` is `{version: 1, crypto: CryptoBox}` with AAD `zwallet/whitelist.key/v1` and
-   wallet.json's KDF parameters.
+   wallet.json's KDF parameters (replaced on 2026-10-21 by the derived key, below).
 8. Avalanche USDT's on-chain symbol is `USDt` (`Token::onchain_symbol`).
 
 From part B (daemon), dispatcher decisions, with review round 1:
@@ -501,18 +525,32 @@ From part C (CLI), with review round 1:
     the only recovery is the current `wallet.json` if that is what went back, otherwise
     `reset`. A test scans the code and these docs for any text that suggests restoring a copy.
 
+The derived key (2026-10-21, after v0.1.0; [`v0-1/ssot.md`](v0-1/ssot.md) item 20, the user's
+request):
+1. The random key in `whitelist.key` is gone with all its code: each edit derives the key from the
+   typed password and `whitelistSalt`, sealed next to the anchor (see **The key**). The first edit
+   and every reset draw a new salt; an edit checks the derived public key against the sealed one.
+2. The daemon is unchanged: it keeps `{pub, gen, digest}` and ignores the salt; a test pins that
+   its anchor holds nothing else.
+3. An anchor sealed by zwallet 0.1.0 (no salt) signs nothing and every edit refuses it until
+   `reset`. Nobody had to migrate: the owner's wallet had no whitelist yet.
+4. The output's `keyCreated` is dropped rather than renamed: every edit derives the key, and the
+   first edit (`previousGen: null`) and a reset (`change: "reset"`) already say when it is new.
+5. The crash exception "a reset cut off after writing its new key file" is gone: there is no key
+   file to get out of step with the seal.
+
 ## Acceptance
 
 | ID | Run | Observe |
 |---|---|---|
-| W1 | first `whitelist add alice 0x… --chains base` (password) | the change (address, chains, gen 1) is shown before the prompt; `whitelist.key` created; `list` (locked) shows alice, gen 1, `verified:false`; `--verify` gives `verified:true` |
+| W1 | first `whitelist add alice 0x… --chains base` (password) | the change (address, chains, gen 1) is shown before the prompt; a salt sealed in `wallet.json` and no key file written; `list` (locked) shows alice, gen 1, `verified:false`; `--verify` gives `verified:true` |
 | W2 | unlocked, no entry for X: `transfer --to X` | `WHITELIST_DENIED` with the exact add command; nothing signed; journal unchanged |
 | W3 | `transfer --chain base --to @alice …` | signed and sent; `transfer --chain ethereum --to @alice` gives `WHITELIST_DENIED` (chain scope) |
 | W4 | edit `whitelist.json` by hand, adding an address (or delete it) | every value send is `WHITELIST_INVALID`; every edit refuses, writes nothing and leaves a running session alone, pointing to `list --verify` and to the one recovery (the current `wallet.json` if an older one went back, otherwise `reset` with its cost), never to a copy of the list; `reset` starts over and shows what it dropped as `discarded` |
 | W5 | swap `whitelist.json` alone for an older signed copy; or restore an older `wallet.json` alone (two edits back, one edit back, from before a reset) | `WHITELIST_INVALID` (gen mismatch); for the older `wallet.json`, the reason, `list --verify` and every edit name, by generation and signer, a rolled-back `wallet.json`, an edit that never finished sealing or a rolled-back `wallet.json`, or a rollback across a reset, a reset that never finished sealing or a foreign file; the one recovery is the current `wallet.json` or `reset`, and no copy of the list is suggested |
-| W5b | restore an older `wallet.json` and `whitelist.json` together (an older `whitelist.key` is not needed: the daemon never reads it) | accepted, as documented. `unlock` prints the older gen and entries, so the human can see it |
+| W5b | restore an older `wallet.json` and `whitelist.json` together (the older `wallet.json` seals its own salt) | accepted, as documented. `unlock` prints the older gen and entries, so the human can see it |
 | W6 | `approve(spender, 1)`; `transferFrom`; `invoke` of an unlisted contract or an unlisted selector; a token transfer to a token-contract address | each `WHITELIST_DENIED`; `approve(spender, 0)` is allowed |
-| W7 | test-hook crash after each of the edit's writes | the list is either the old gen or the promoted new gen; never invalid-and-signed; the next CLI edit continues from it (crashes also after the files are read and after a promotion). A first edit cut off between staging and re-seal leaves only `whitelist.next.json`: every edit refuses, `list` and `list --verify` name it, and `reset` starts over, losing nothing. A reset cut off after writing its key: the old list still verifies, every edit refuses at the key until `reset` runs again. A `whitelist.next.json` that cannot be removed after the publish: the change succeeds with a `warning`, `--unlock` still starts the session, and the next summary labels the file "a copy of whitelist.json (e.g. left after a change)" |
+| W7 | test-hook crash after each of the edit's writes | the list is either the old gen or the promoted new gen; never invalid-and-signed; the next CLI edit continues from it (crashes also after the files are read and after a promotion). A first edit cut off between staging and re-seal leaves only `whitelist.next.json`: every edit refuses, `list` and `list --verify` name it, and `reset` starts over, losing nothing. A reset cut off before its re-seal: the old list and its key stay, and the next edit goes on from them. A `whitelist.next.json` that cannot be removed after the publish: the change succeeds with a `warning`, `--unlock` still starts the session, and the next summary labels the file "a copy of whitelist.json (e.g. left after a change)" |
 | W8 | edit while unlocked (tested). A signature racing the edit is not run as a test: it relies on step 1 returning only once no daemon is left | a wrong password or a refused change stops nothing; otherwise every daemon is stopped first (other homes' too) and the wallet stays locked; with `--unlock 10m` a new session runs until now + 10 min and reports the new generation |
 | W9 | fees above `maxFeeWei` (hostile RPC fixture, or a large `--max-fee-gwei`) | `FEE_CAP_EXCEEDED` from the daemon for an action the list allows; a forbidden or unlisted action over the cap is `WHITELIST_DENIED`, with no `fee-cap` command |
 | W10 | `sign-message` with `allowMessageSigning` off, then on | refused, then signed |
@@ -523,6 +561,7 @@ From part C (CLI), with review round 1:
 | W15 | a change with and without `--unlock` | the summary ends with "a new signing session for <dur> (until …)" or "the wallet stays locked", before the prompt |
 | W16 | restore a `wallet.json` from before the first edit under a real list | every edit refuses, nothing written; `reset` starts over; the daemon signs only native self-transfers under the built-in default caps |
 | W17 | an edit from an unfinished edit in `whitelist.next.json` | the summary shows both files and every outcome; the change lands on the staged list; `whitelist.json` is written from the verified bytes |
+| W18 | edits with the password; a sealed salt that does not derive the sealed key, or another password over the same seal; a seal from zwallet 0.1.0 (no salt) | every edit derives the same key from the same password and salt, and no key file is ever written; a reset draws a new salt and key; a key that is not the sealed one refuses, nothing written; a 0.1.0 seal: `unlock` shows it untrusted and nothing is signed, every edit refuses before anything is stopped, and `reset` starts over; the daemon's session holds the anchor and never the salt |
 
 ## Not in v0.1 (stays planned)
 
