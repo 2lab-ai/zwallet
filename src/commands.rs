@@ -18,6 +18,7 @@ use crate::core::seed::{DEFAULT_WORD_COUNT, Seed, VALID_WORD_COUNTS};
 use crate::core::store::{self, KeyEntry, MasterOptions, WalletFile};
 use crate::core::time::parse_duration;
 use crate::daemon;
+use crate::qr;
 use alloy::hex;
 use alloy::primitives::{B256, U256};
 use serde_json::{Map, Value, json};
@@ -251,6 +252,30 @@ fn with_note(value: Value, verified: bool) -> Out {
     Out::with_text(value, text)
 }
 
+/// What follows `scan to send to <address>` for a key's address on every chain.
+const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
+
+/// `out` with `address` as a QR code at the end of its human text, for a phone wallet to scan,
+/// under the line `scan to send to <address> <place>`. Only for an address reported
+/// `verified: true`, only with stdout on a terminal, and not with `--no-qr`: agents read zwallet
+/// through pipes, and `--json` prints no human text.
+fn with_qr(out: Out, verified: bool, address: Option<&str>, place: &str, no_qr: bool) -> Out {
+    let Some(address) = address.filter(|_| verified && !no_qr && std::io::stdout().is_terminal())
+    else {
+        return out;
+    };
+    // No colours when NO_COLOR is set and not empty (no-color.org).
+    let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+    let Some(code) = qr::render(address, color) else {
+        return out;
+    };
+    let text = out.text.unwrap_or_else(|| render_human(&out.value));
+    Out::with_text(
+        out.value,
+        format!("{text}\nscan to send to {address} {place}\n{code}"),
+    )
+}
+
 /// Decrypts wallet.json in this process with the human's password and checks every key's cached
 /// addresses against the seed (a mismatch is `VALIDATION_ERROR`). Addresses derived from this
 /// seed are the ones reported `verified: true`: no other process or file can make them.
@@ -368,7 +393,14 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
             "Write down your recovery phrase now: run `zwallet backup` before funding this wallet."
         );
     }
-    Ok(with_note(out, verified))
+    let address = address.as_deref();
+    Ok(with_qr(
+        with_note(out, verified),
+        verified,
+        address,
+        EVERY_EVM_NETWORK,
+        a.qr.no_qr,
+    ))
 }
 
 /// The error for a `create --unlock` whose new session shows another key: says whether locking
@@ -553,7 +585,14 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         if let Some(w) = index_warning(&file, &[key]) {
             out["warning"] = json!(w);
         }
-        return Ok(with_note(out, true));
+        let place = format!("on {}", chain.key);
+        return Ok(with_qr(
+            with_note(out, true),
+            true,
+            Some(&address),
+            &place,
+            a.qr.no_qr,
+        ));
     }
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
@@ -1362,7 +1401,13 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
     if let Some(w) = session_index_warning(&file, &session) {
         out["warning"] = json!(w);
     }
-    Ok(Out::json(out))
+    Ok(with_qr(
+        Out::json(out),
+        true,
+        session["address"].as_str(),
+        EVERY_EVM_NETWORK,
+        a.qr.no_qr,
+    ))
 }
 
 /// [`index_warning`] (as `address --verify` gives it) for the key a new session reports: its
