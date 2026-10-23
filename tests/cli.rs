@@ -3074,6 +3074,10 @@ fn field<'a>(text: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no {name} line in {text:?}"))
 }
 
+/// What the first `create` on a terminal shows where the QR code would be.
+const BACKUP_FIRST: &str =
+    "QR after backup: run `zwallet backup`, then `zwallet address --verify` (or unlock) to show it";
+
 /// The line above the QR code of an address that holds on every network.
 const EVERY_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
 
@@ -3126,20 +3130,43 @@ fn qr1_address_verify_on_a_terminal_shows_the_address_as_a_qr_code() {
 
 #[test]
 fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() {
+    let new_seed = ["New wallet password: ", "Repeat password: "];
     let home = Home::new();
-    // The first create: the address comes from the seed it just made.
-    let created = home.run_on_terminal(
-        &["create", "main"],
-        &["New wallet password: ", "Repeat password: "],
-        &[],
-    );
+    // The first create makes the seed (its address is verified), but its recovery phrase is not
+    // backed up yet: no code to fund it from, only a line saying how to get one.
+    let created = home.run_on_terminal(&["create", "main"], &new_seed, &[]);
     let addr = field(&created, "address").to_string();
     assert_eq!(field(&created, "verified"), "true");
     assert!(
-        created.contains(&format!("scan to send to {addr} {EVERY_NETWORK}\n")),
+        created.ends_with(&format!("verified: true\n{BACKUP_FIRST}\n")),
         "{created:?}"
     );
-    assert_eq!(common::scan_qr(&created), [addr.as_str()]);
+    assert!(!created.contains("scan to send") && !created.contains('\x1b'));
+    assert!(common::scan_qr(&created).is_empty(), "{created:?}");
+    // The same with --unlock; --no-qr leaves the line out too.
+    let other = Home::new();
+    let shown = other.run_on_terminal(&["create", "main", "--unlock", "10m"], &new_seed, &[]);
+    assert!(shown.ends_with(&format!("\n{BACKUP_FIRST}\n")), "{shown:?}");
+    assert!(!shown.contains("scan to send") && common::scan_qr(&shown).is_empty());
+    let other = Home::new();
+    let shown = other.run_on_terminal(&["create", "main", "--no-qr"], &new_seed, &[]);
+    assert!(!shown.contains("QR after backup") && !shown.contains("scan to send"));
+    assert!(shown.ends_with("verified: true\n"), "{shown:?}");
+    // --json and a pipe: as before.
+    let other = Home::new();
+    let json = other.run_on_terminal(&["create", "main", "--json"], &new_seed, &[]);
+    let v: serde_json::Value =
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}: {json:?}"));
+    assert_eq!(v["master"], "created");
+    let other = Home::new();
+    let piped = other.run_stdin(&["create", "main", "--password-stdin"], &format!("{PW}\n"));
+    assert_eq!(piped.code, 0, "{}", piped.stderr);
+    assert!(
+        piped.stdout.ends_with("verified: true\n"),
+        "{}",
+        piped.stdout
+    );
+    assert!(!piped.stdout.contains("QR after backup") && !piped.stdout.contains("scan to send"));
 
     // unlock: the address its daemon derived from the seed, the code under it.
     let unlocked = home.run_on_terminal(&["unlock", "10m"], &["Wallet password: "], &[]);
@@ -3179,6 +3206,15 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
         &[],
     );
     assert!(common::scan_qr(&quiet).is_empty() && !quiet.contains("scan to send"));
+    // A further key without --unlock, the password asked at the terminal: the code too.
+    let sub3 = home.run_on_terminal(&["create", "sub3"], &["Wallet password: "], &[]);
+    let sub3_addr = field(&sub3, "address").to_string();
+    assert_eq!(field(&sub3, "verified"), "true");
+    assert!(
+        sub3.contains(&format!("scan to send to {sub3_addr} {EVERY_NETWORK}\n")),
+        "{sub3:?}"
+    );
+    assert_eq!(common::scan_qr(&sub3), [sub3_addr]);
 
     // An agent's create while unlocked (stdin no terminal): derived by whatever daemon answers,
     // so not verified, and no code even with stdout on a terminal.
