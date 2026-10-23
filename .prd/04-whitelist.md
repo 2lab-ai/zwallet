@@ -87,9 +87,9 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
   (every fee cap back to the default, no payee and no contract).
 - **Independence from the password.** The separate key adds no second factor in v0.1: it is
   derived from the same password. What it buys is that the daemon never holds policy-signing
-  authority (a later version can move the key to the Secure Enclave or to hardware). A password
-  change, when zwallet has one (no command yet), must sign the list again under the key the new
-  password derives; until it does, every edit refuses the key.
+  authority (a later version can move the key to the Secure Enclave or to hardware). Any change
+  to the password or to wallet.json's KDF parameters (zwallet has no command for either yet) must
+  sign the list again under the key they then derive; until it does, every edit refuses the key.
 
 ## Design
 
@@ -110,20 +110,25 @@ edit's file signed at the same generation never verifies. The generation and the
 what the public key alone cannot give: without them an older list the same key signed would
 verify too.
 
-**The key** is derived, never stored. `whitelistSalt`, next to the anchor in the sealed policy,
-is 32 random bytes (lower-case hex) drawn by the first edit and by every reset. Each edit derives
-the ed25519 secret as scrypt(password, `"zwallet/whitelist-key/v1\n"` ‖ salt) with the scrypt
-parameters that opened `wallet.json` (validated as wallet.json's are, never re-read from disk),
-then checks that its public key is the sealed one. It is a scrypt run of its own, not derived
-from the AES key that opens `wallet.json`, so holding that key never yields the whitelist key;
-an edit costs one scrypt to open `wallet.json` and one to derive the key, as decrypting the
-0.1.0 key file did. The daemon keeps only the three anchor keys: at unlock it decrypts the
-whole policy, checks that the salt is there and well-formed, and drops it with the rest once the
-session starts; its session never holds the salt or any of the key. An anchor without a salt was sealed by zwallet 0.1.0: the daemon treats it as
-untrusted (`Unusable`, never `NoList`), `list --verify` gives the reason, every edit refuses it
-before anything is stopped ("this whitelist was made by zwallet 0.1.0, whose key file is no
-longer used ...; `zwallet whitelist reset` starts over ..."), and `reset` starts over under a new
-salt. The seed is not derived this way: it stays a random BIP39 mnemonic encrypted under the
+**The key** is derived, never stored. `whitelistSalt`, next to the anchor in the sealed policy, is
+32 random bytes (lower-case hex) drawn by the first edit and by every reset. Each edit derives the
+ed25519 secret as scrypt(password, `"zwallet/whitelist-key/v1\n"` ‖ salt) with the scrypt parameters
+that opened `wallet.json` (validated as wallet.json's are, never re-read from disk), then checks
+that its public key is the sealed one. It is a scrypt run of its own, not derived from the AES key
+that opens `wallet.json`, so holding that key never yields the whitelist key; an edit costs one
+scrypt to open `wallet.json` and one to derive the key, as decrypting the 0.1.0 key file did.
+`wallet.json`'s own envelope salt must be exactly 32 bytes (the only length any zwallet has drawn),
+so its AES key is never scrypt over this domain-prefixed input. The daemon keeps only the three
+anchor keys: at unlock it decrypts the whole policy, checks that the salt is there and well-formed,
+and drops it with the rest once the session starts; its session never holds the salt or any of the
+key. An anchor without a salt was sealed by zwallet 0.1.0 (or comes from a `wallet.json` restored
+from before the upgrade): the daemon treats it as untrusted (`Unusable`, never `NoList`) with the
+cause alone as its reason ("this whitelist was made by zwallet 0.1.0, whose key file is no longer
+used"), as every daemon reason names only a cause. `list --verify` and every edit, which refuses
+before anything is stopped, add the other cause and the one recovery: "... (a wallet zwallet 0.1.0
+made, or a wallet.json restored from before the upgrade). If wallet.json is an older copy, restore
+the current one ...; otherwise `zwallet whitelist reset` starts over ...". `reset` starts over under
+a new salt. The seed is not derived this way: it stays a random BIP39 mnemonic encrypted under the
 password, because a seed derived from the password would be a "brain wallet", open to password
 guessing against its public addresses.
 
@@ -531,14 +536,20 @@ request):
 1. The random key in `whitelist.key` is gone with all its code: each edit derives the key from the
    typed password and `whitelistSalt`, sealed next to the anchor (see **The key**). The first edit
    and every reset draw a new salt; an edit checks the derived public key against the sealed one.
-2. The daemon is unchanged: it keeps `{pub, gen, digest}` and ignores the salt; a test pins that
-   its anchor holds nothing else.
+2. The daemon's code is unchanged, but what it accepts is not: it keeps `{pub, gen, digest}`
+   and drops the salt, after the parse has checked that the salt is there and well-formed. An
+   anchor without one is untrusted, so the daemon signs nothing under it (item 3). A test pins
+   that its anchor holds nothing else.
 3. An anchor sealed by zwallet 0.1.0 (no salt) signs nothing and every edit refuses it until
-   `reset`. Nobody had to migrate: the owner's wallet had no whitelist yet.
+   `reset`. The daemon's reason is the cause alone; the editor and `list --verify` add the
+   recovery.
 4. The output's `keyCreated` is dropped rather than renamed: every edit derives the key, and the
    first edit (`previousGen: null`) and a reset (`change: "reset"`) already say when it is new.
 5. The crash exception "a reset cut off after writing its new key file" is gone: there is no key
    file to get out of step with the seal.
+6. Review: `wallet.json`'s envelope salt must be exactly 32 bytes (it was 16 or more), so the AES
+   key can never be scrypt over the whitelist key's domain-prefixed salt. Every zwallet build
+   has drawn 32 bytes, so no wallet it wrote is refused.
 
 ## Acceptance
 
@@ -562,7 +573,7 @@ request):
 | W15 | a change with and without `--unlock` | the summary ends with "a new signing session for <dur> (until …)" or "the wallet stays locked", before the prompt |
 | W16 | restore a `wallet.json` from before the first edit under a real list | every edit refuses, nothing written; `reset` starts over; the daemon signs only native self-transfers under the built-in default caps |
 | W17 | an edit from an unfinished edit in `whitelist.next.json` | the summary shows both files and every outcome; the change lands on the staged list; `whitelist.json` is written from the verified bytes |
-| W18 | edits with the password; a sealed salt that does not derive the sealed key, or another password over the same seal; a seal from zwallet 0.1.0 (no salt) | every edit derives the same key from the same password and salt, and no key file is ever written; a reset draws a new salt and key; a key that is not the sealed one refuses, nothing written; a 0.1.0 seal: `unlock` shows it untrusted and nothing is signed, every edit refuses before anything is stopped, and `reset` starts over; the daemon's session holds the anchor and never the salt |
+| W18 | edits with the password; a sealed salt that does not derive the sealed key, or another password over the same seal; a seal from zwallet 0.1.0 (no salt) | every edit derives the same key from the same password and salt, and no key file is ever written; a reset draws a new salt and key; a key that is not the sealed one refuses, nothing written; a 0.1.0 seal: `unlock` shows it untrusted, with the cause alone as the reason, and nothing is signed; every edit and `list --verify` add the recovery, every edit refuses before anything is stopped, and `reset` starts over; the daemon's session holds the anchor and never the salt; the key is derived with the KDF parameters that opened `wallet.json`, not ones edited on disk after |
 
 ## Not in v0.1 (stays planned)
 

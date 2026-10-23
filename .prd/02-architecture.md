@@ -182,8 +182,8 @@ built 2026-10-20):
   the digest stay in the anchor because the public key alone would also accept an older list the
   same key signed. The seed stays a random BIP39 mnemonic encrypted under the password, never
   derived from it: a password-derived seed is a "brain wallet", open to password guessing
-  against its public addresses. A future password change must sign the list again under the
-  new password's key (no command for it yet);
+  against its public addresses. Any change to the password or to the KDF parameters must sign
+  the list again under the key they then derive (no command for either yet);
 - native coin and the built-in registry tokens go only to listed payees on the listed chains
   (`WHITELIST_DENIED` otherwise, naming the `zwallet whitelist add` command only when one add
   would allow the action);
@@ -194,16 +194,16 @@ built 2026-10-20):
   refuses);
 - `sign-message` is gated (off by default).
 
-The list is edited only by the one-shot CLI with the typed password, from which it derives the
-key each time (`zwallet whitelist …`, never the daemon). An edit shows the change and what
-happens to signing before the password is read, applies it to exactly the list shown or changes
-nothing, and builds only on the list the seal names (an unverifiable list, or a list file without a sealed whitelist, is
-refused; only `reset` starts over, with every fee cap back to the default and no payee and no
-contract). It stops every daemon, signs the next generation, re-seals the anchor into
+The list is edited only by the one-shot CLI with the typed password, from which it derives the key
+each time (`zwallet whitelist …`, never the daemon). An edit shows the change and what happens to
+signing before the password is read, applies it to exactly the list shown or changes nothing, and
+builds only on the list the seal names (an unverifiable list, or a list file without a sealed
+whitelist, is refused; only `reset` starts over, with every fee cap back to the default and no payee
+and no contract). It stops every daemon, signs the next generation, re-seals the anchor into
 wallet.json, and leaves the wallet locked unless `--unlock <duration>` starts a new session. A
 dry-run runs the daemon's check on the list on disk first, when there is one, and asks for no
-signature when it refuses. Amount caps stay planned; README §Known limits lists what the
-whitelist does not stop.
+signature when it refuses. Amount caps stay planned; README §Known limits lists what the whitelist
+does not stop.
 
 The original WU1b plan below is superseded except for the amount caps, which stay planned. It is
 kept for reference:

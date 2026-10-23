@@ -43,12 +43,12 @@ Status: **in-progress**, 2026-10-20. This is the fixed target; do not reinterpre
   the user specified ([`../04-whitelist.md`](../04-whitelist.md); user text in
   [`../v0-2-tui/ssot.md`](../v0-2-tui/ssot.md)). It lands as WU1b before the v0.1.0 tag and
   before funding.
-- **Whitelist key** (20): the key that signs the whitelist is derived from the typed password
-  (with a per-wallet salt sealed in wallet.json) at every add or remove, and never stored;
-  after `unlock` the daemon keeps only the wallet seed and the whitelist's public key (with its
-  generation and digest), and verifies the list with it before signing a send. Decided after research
-  on 2026-10-21 (04-whitelist §Design, The key): the wallet seed stays a random mnemonic
-  encrypted under the password, not derived from it (a password-derived seed is a brain wallet).
+- **Whitelist key** (20): the key that signs the whitelist is derived from the typed password (with
+  a per-wallet salt sealed in wallet.json) at every add or remove, and never stored; after `unlock`
+  the daemon keeps only the wallet seed and the whitelist's public key (with its generation and
+  digest), and verifies the list with it before signing a send. Decided after research on 2026-10-21
+  (04-whitelist §Design, The key): the wallet seed stays a random mnemonic encrypted under the
+  password, not derived from it (a password-derived seed is a brain wallet).
 - **Chains** (10): EVM only in v0.1. The architecture leaves room for Solana and TON.
 - **No Trust Wallet anything** (5, 6, 7, 19): no Trust API, packages, keychain, or telemetry, and
   no relation to twak: it was only looked at during the 2026-10-20 research (01-spec §Problem).

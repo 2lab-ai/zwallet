@@ -261,9 +261,11 @@ Commands that act on a key take `--key <name>` (default: the active key).
     password-derived whitelist key is not the one wallet.json seals; …"). The first `add` draws the
     salt, so the key. `reset` draws a new salt, so a new key, and makes an empty list with the
     default caps, for when the list does not verify and the current `wallet.json` is in place (or
-    there is no copy of it), or for a whitelist made by zwallet 0.1.0, which every other change
-    refuses ("this whitelist was made by zwallet 0.1.0, whose key file is no longer used …") before
-    anything is stopped; when the list it replaces did not verify (or
+    there is no copy of it), or for a whitelist made by zwallet 0.1.0 (or a `wallet.json` restored
+    from before the upgrade), which every other change refuses before anything is stopped ("this
+    whitelist was made by zwallet 0.1.0, whose key file is no longer used …", with the one
+    recovery); the daemon signs nothing under it, and its reason names that cause alone; when the
+    list it replaces did not verify (or
     `wallet.json` sealed none), `discarded` shows it (the reason and its unverified entries, as
     JSON, `null` when the file is missing, cannot be read or has no entries; the human output then
     says "no verified entry; whitelist.json's entries unknown" where it says what was dropped), and
@@ -530,8 +532,9 @@ data).
 
 - **Home**: `$ZWALLET_HOME` or `~/.zwallet`, mode 0700.
 - **`wallet.json`** (0600, written atomically): a sealed section encrypted with AES-256-GCM under a
-  scrypt key (N=2^18, r=8, p=1, 256 MiB; parameters, salt and nonce stored in the file; only r=8,
-  p=1 and N from 2^15 to 2^18 are accepted, checked before any key derivation), plus non-secret
+  scrypt key (N=2^18, r=8, p=1, 256 MiB; parameters, a 32-byte salt and nonce stored in the file;
+  only r=8, p=1, N from 2^15 to 2^18 and a salt of exactly 32 bytes are accepted, checked before
+  any key derivation), plus non-secret
   metadata: `createdAt`, `active`, `nextIndex`, and
   `keys: [{ name, index, createdAt, addresses: { <chain>: <address> } }]`. The sealed plaintext is
   a versioned object `{ version, mnemonic, policy }`: one BIP39 English mnemonic (no BIP39
@@ -542,14 +545,14 @@ data).
   password because anything outside it can be edited by the same OS user without the password.
   The daemon keeps the anchor, never the salt.
 - **`whitelist.json`** (0600, next to `wallet.json`): the signed list in plain JSON. Its ed25519
-  signing key is in no file: each change derives it from the password and `whitelistSalt`
-  (scrypt over `zwallet/whitelist-key/v1` and the salt, with the parameters that opened
+  signing key is in no file: each change derives it from the password and `whitelistSalt` (scrypt
+  over `zwallet/whitelist-key/v1\n` followed by the salt, with the parameters that opened
   `wallet.json`), separately from the AES key that opens `wallet.json`. Only `whitelist` changes
   write the list, under `w.lock`, which orders zwallet's own writers but cannot stop a same-user
   process that ignores it: what exposes such a write is the signature and the seal.
   `whitelist.next.json` exists while a change is being published, or after one was cut off (see
-  **Known limits**). A `whitelist.key` left by zwallet 0.1.0 is no longer read and is not
-  removed; you can delete it after `whitelist reset`.
+  **Known limits**). A `whitelist.key` left by zwallet 0.1.0 is no longer read and is not removed;
+  you can delete it after `whitelist reset`.
 - **Password**: held by the human only, at least 12 characters. There is no password file and no
   password env variable; it is typed at a terminal prompt (no echo) or piped with
   `--password-stdin`, and read with raw reads into one wiped buffer. Nothing on disk decrypts the
@@ -701,19 +704,19 @@ signs for such an agent. What it does not do:
   arguments and native value, and the contract may forward value or act on those arguments. List
   only contracts and selectors whose effects you accept from any caller.
 - **Joint rollback.** The seal is authenticated but not fresh: an older `wallet.json` still opens
-  with the password. Restoring an older `wallet.json` and `whitelist.json` together brings back
-  the older list, revoked entries included; nothing stored in the home can tell. (The older
+  with the password. Restoring an older `wallet.json` and `whitelist.json` together brings back the
+  older list, revoked entries included; nothing stored in the home can tell. (The older
   `wallet.json` seals its own salt, so the same password derives the key it names.) `unlock`,
   `status` and `whitelist list` show the generation and the entries: check them. Restoring
-  `wallet.json` alone to an older edit fails closed: its anchor does not match the list, and
-  every signature is refused. The reason names the cause by the list it finds above the seal (gen N, the seal at
-  gen M): two or more edits above, under the sealed key, "whitelist.json (gen N) is newer than the
-  seal (gen M): wallet.json was rolled back"; one edit above, an edit that never finished sealing
-  or a rolled-back `wallet.json`; another key, a rollback across a reset, a reset that never
-  finished sealing, or a foreign file. If wallet.json is an older copy, restore the current one
-  if you have it; zwallet keeps no copy of `wallet.json` (`zwallet backup` prints only the
-  recovery phrase), so keep your own copy after each whitelist change. Otherwise `whitelist
-  reset`, and set the list up again.
+  `wallet.json` alone to an older edit fails closed: its anchor does not match the list, and every
+  signature is refused. The reason names the cause by the list it finds above the seal (gen N, the
+  seal at gen M): two or more edits above, under the sealed key, "whitelist.json (gen N) is newer
+  than the seal (gen M): wallet.json was rolled back"; one edit above, an edit that never finished
+  sealing or a rolled-back `wallet.json`; another key, a rollback across a reset, a reset that never
+  finished sealing, or a foreign file. If wallet.json is an older copy, restore the current one if
+  you have it; zwallet keeps no copy of `wallet.json` (`zwallet backup` prints only the recovery
+  phrase), so keep your own copy after each whitelist change. Otherwise `whitelist reset`, and set
+  the list up again.
 - **zwallet never suggests restoring an older whitelist.json.** A copy restored by hand that
   verifies against the sealed digest is the older list, so restoring one can complete a
   rollback (W5b). zwallet keeps no counter outside the home, so it cannot tell such a copy from
@@ -729,9 +732,9 @@ signs for such an agent. What it does not do:
   reset` (every fee cap back to the default, no payee and no contract).
 - **Same password.** The whitelist key is derived from the wallet password, so the whitelist
   adds no second factor: whoever has the password can change the list. What it buys is that the
-  daemon never holds the key that signs the list. A password change, when zwallet has one (it has
-  no such command yet), must sign the list again under the key the new password derives;
-  otherwise every change refuses the key.
+  daemon never holds the key that signs the list. Any change to the password or to
+  `wallet.json`'s KDF parameters (zwallet has no command for either yet) must sign the list again
+  under the key they then derive; otherwise every change refuses the key.
 - **The staged list.** A change cut off between its re-seal and writing `whitelist.json` leaves
   the new list in `whitelist.next.json`. The daemon and `whitelist list --verify` use it, since
   it is exactly the list the seal names (generation and digest), and the next change moves it
