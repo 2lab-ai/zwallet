@@ -1,20 +1,22 @@
 //! The signed whitelist (`.prd/04-whitelist.md`): a nickname → address list and a spend
-//! policy, signed with an ed25519 key kept apart from the seed and anchored in wallet.json's
-//! sealed policy ([`WhitelistAnchor`]: the public key, the generation, and the digest of the one
-//! list signed at that generation).
+//! policy, signed with an ed25519 key apart from the seed and anchored in wallet.json's sealed
+//! policy ([`WhitelistAnchor`]: the public key, the generation, and the digest of the one list
+//! signed at that generation).
+//!
+//! The key is never stored. Each edit derives it again from the typed password and a per-wallet
+//! salt sealed next to the anchor ([`WhitelistKey::derive`], [`store::derive_whitelist_secret`]);
+//! the first edit and every reset draw a new salt, so a new key.
 //!
 //! Files in the home, all 0600:
 //! - `whitelist.json`: the list and its signature, plaintext. Readable while locked; trusted
 //!   only after [`verify`] against the sealed anchor.
 //! - `whitelist.next.json`: an edit staged between signing it and publishing it as
 //!   `whitelist.json` (removed once that is done).
-//! - `whitelist.key`: the ed25519 secret, sealed under the wallet password with its own salt,
-//!   nonce and associated data. Read by the editor only, never by the daemon.
 //!
 //! What each part guarantees:
-//! - The **signature** (ed25519, by a key kept in `whitelist.key` apart from the seed) says the
-//!   list was made by whoever holds that key: the editor, with the wallet password. The daemon
-//!   only ever holds the public key, so it can check lists but never make one.
+//! - The **signature** (ed25519, by the key derived from the password and the sealed salt) says
+//!   the list was made by whoever holds the password: the editor. The daemon only ever holds the
+//!   public key, so it can check lists but never make one.
 //! - The sealed **digest** says this is the one list committed at the sealed generation, so a
 //!   list the key signed for an edit that never committed is not accepted in its place.
 //! - The sealed **generation** names that commit for humans (`unlock` and `whitelist list` show
@@ -47,14 +49,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
 
 pub const WHITELIST_FILE: &str = "whitelist.json";
 pub const NEXT_FILE: &str = "whitelist.next.json";
-pub const KEY_FILE: &str = "whitelist.key";
 /// The list format this zwallet reads and signs.
 pub const LIST_VERSION: u32 = 1;
-const KEY_FILE_VERSION: u32 = 1;
 /// The chains of an address entry usable on every chain (never a contract entry's).
 pub const ANY_CHAIN: &str = "*";
 /// Prefixed to the canonical bytes before signing, so a signature from this key can never be
@@ -684,12 +683,10 @@ impl SignedList {
 pub struct WhitelistKey(SigningKey);
 
 impl WhitelistKey {
-    /// A fresh key from the OS's randomness.
-    pub fn generate() -> Result<Self> {
-        let mut secret = Zeroizing::new([0u8; 32]);
-        OsRng
-            .try_fill_bytes(secret.as_mut())
-            .map_err(|_| WalletError::validation("could not read OS randomness"))?;
+    /// The wallet's whitelist key: derived from `password` and the sealed whitelist `salt` with
+    /// `kdf`, the parameters that opened wallet.json ([`store::derive_whitelist_secret`]).
+    pub fn derive(password: &str, salt: &[u8; 32], kdf: store::KdfParams) -> Result<Self> {
+        let secret = store::derive_whitelist_secret(password, salt, kdf)?;
         Ok(Self::from_secret(&secret))
     }
 
@@ -1147,7 +1144,7 @@ pub fn base_for_edit(
 /// (`None` otherwise, e.g. a fresh wallet): the refusal of every edit ([`base_for_edit`]), and
 /// what `whitelist list --verify` explains, each followed by [`recovery`]. A first edit
 /// interrupted between staging and re-seal leaves only `whitelist.next.json`, at generation 1,
-/// signed by the key in `whitelist.key`.
+/// signed by the key that edit derived (under a salt that was never sealed).
 pub fn unsealed_files_note(files: &ListFiles) -> Option<String> {
     let found: Vec<String> = [&files.current, &files.next]
         .into_iter()
@@ -1178,8 +1175,6 @@ pub enum EditStage<'a> {
     FilesRead(&'a Path),
     /// A staged list the seal names is in place as `whitelist.json` (see [`BaseSource::PromotedNext`]).
     Promoted(&'a Path),
-    /// A new `whitelist.key` is in place (first edit, or [`reset`]).
-    KeyWritten(&'a Path),
     /// The signed `whitelist.next.json` is in place.
     NextWritten(&'a Path),
     /// wallet.json is re-sealed with the new anchor.
@@ -1201,60 +1196,54 @@ pub struct Edited {
     /// while wallet.json sealed no whitelist). An edit never has one: it refuses instead
     /// ([`base_for_edit`]).
     pub discarded: Option<Discarded>,
-    /// A new `whitelist.key` was made (the first edit, or [`reset`]).
-    pub key_created: bool,
     /// Something the edit could not tidy up after it landed (the change itself is done): the
     /// staged `whitelist.next.json` not removed, or its removal not synced.
     pub warning: Option<String>,
 }
 
-/// `whitelist.key` on disk.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeyFile {
-    version: u32,
-    crypto: store::CryptoBox,
+/// For a human: why the whitelist an anchor without a salt names cannot be edited
+/// ([`store::SealedWhitelist::salt`]'s `cause`), the other way it comes about, and [`recovery`].
+/// The daemon shows the cause alone.
+pub fn without_salt(cause: &str) -> String {
+    format!(
+        "{cause} (a wallet zwallet 0.1.0 made, or a wallet.json restored from before the \
+         upgrade). {}",
+        recovery()
+    )
 }
 
-/// Decrypts `whitelist.key` with the password that opened wallet.json and checks it is the key
-/// the seal names.
-fn load_key(home: &Path, password: &str, anchor: &WhitelistAnchor) -> Result<WhitelistKey> {
-    let reset_hint = RESET_CAVEAT;
-    let path = home.join(KEY_FILE);
-    let bytes = store::read_wallet_bytes(&path).map_err(|e| {
+/// The sealed salt an edit derives the key from. For an anchor zwallet 0.1.0 sealed,
+/// `VALIDATION_ERROR` with [`without_salt`]'s advice; nothing is written.
+pub fn edit_salt(sealed: &store::SealedWhitelist) -> Result<[u8; 32]> {
+    sealed.salt().map_err(|e| {
         WalletError::validation(format!(
-            "cannot use {KEY_FILE}: {}; {reset_hint}",
-            e.message
+            "refusing to edit the whitelist: {}",
+            without_salt(&e.message)
         ))
-    })?;
-    let file: KeyFile = serde_json::from_slice(&bytes)
-        .ok()
-        .filter(|f: &KeyFile| f.version == KEY_FILE_VERSION)
-        .ok_or_else(|| {
-            WalletError::validation(format!(
-                "{KEY_FILE} is not a whitelist key file; {reset_hint}"
-            ))
-        })?;
-    // wallet.json just opened with this password, so a key file that does not was sealed
-    // under another one, or was damaged or replaced.
-    let secret = store::open_whitelist_key(&file.crypto, password).map_err(|e| {
-        WalletError::validation(format!(
-            "{KEY_FILE} does not open with the wallet password ({}); {reset_hint}",
-            e.message
-        ))
-    })?;
-    let key = WhitelistKey::from_secret(&secret);
-    if key.public_key() != anchor.public_key {
-        return Err(WalletError::validation(format!(
-            "{KEY_FILE} is not the key wallet.json seals for the whitelist; {reset_hint}"
-        )));
-    }
-    Ok(key)
+    })
+}
+
+/// The whitelist key under `salt`, from the password that opened wallet.json and the KDF
+/// parameters of the envelope that opened it: never a re-read of the file, whose parameters
+/// anyone who can write the home can edit after the open.
+fn derive_for(opened: &store::Opened, salt: &[u8; 32]) -> Result<WhitelistKey> {
+    let kdf = opened.file().crypto.kdf_params()?;
+    WhitelistKey::derive(opened.password(), salt, kdf)
+}
+
+/// A new whitelist salt from the OS's randomness: the first edit's, and every reset's.
+fn new_salt() -> Result<[u8; 32]> {
+    let mut salt = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut salt)
+        .map_err(|_| WalletError::validation("could not read OS randomness"))?;
+    Ok(salt)
 }
 
 /// Runs one whitelist edit (`.prd/04-whitelist.md` §Edits, steps 2–4) with the typed
-/// `password`: under `w.lock`, decrypt wallet.json, pick the base ([`pick_base`]), then decrypt
-/// `whitelist.key` (the first edit makes the key), apply `mutate`, set generation + 1, validate,
+/// `password`: under `w.lock`, decrypt wallet.json, pick the base ([`pick_base`]), then derive the
+/// whitelist key from the password and the sealed salt and check it is the sealed key (the first
+/// edit draws the salt), apply `mutate`, set generation + 1, validate,
 /// sign, write `whitelist.next.json`, re-seal wallet.json with the new anchor, publish the signed
 /// bytes as `whitelist.json` (then remove `next`, best-effort: [`Edited::warning`] if that
 /// fails), and read it back verified. `mutate` runs before anything is written, so its error (or
@@ -1303,11 +1292,12 @@ pub fn edit_as_shown(
     )
 }
 
-/// `whitelist reset`: a new key and an empty list with the default policy (every fee cap back to
-/// the built-in default, no payee and no contract), at the next generation, for when
-/// `whitelist.key` is lost or damaged, or the list does not verify and the current wallet.json is
-/// in place (or there is no copy of it). The old list stops verifying. This binds nothing to what
-/// a human saw (tests and seeding); the CLI uses [`reset_as_shown`].
+/// `whitelist reset`: a new salt, so a new key, and an empty list with the default policy (every
+/// fee cap back to the built-in default, no payee and no contract), at the next generation, for
+/// when the list does not verify and the current wallet.json is in place (or there is no copy of
+/// it), or the whitelist was made by zwallet 0.1.0 ([`store::SealedWhitelist::salt`]). The old
+/// list stops verifying. This binds nothing to what a human saw (tests and seeding); the CLI uses
+/// [`reset_as_shown`].
 pub fn reset(home: &Path, password: &str, rules: &ChainRules) -> Result<Edited> {
     reset_with_hook(home, password, rules, &|_| Ok(()))
 }
@@ -1346,7 +1336,10 @@ fn transact(
     store::read_wallet_file(home)?;
     let lock = MetaLock::acquire(home)?;
     let opened = lock.open(password)?;
-    let anchor = opened.unsealed().whitelist_anchor()?;
+    // The editor's read: an anchor zwallet 0.1.0 sealed (no salt) is still read here, so that a
+    // reset can go on from it; an edit refuses it below.
+    let sealed = opened.unsealed().sealed_whitelist()?;
+    let anchor = sealed.map(|s| s.anchor);
     let previous_generation = anchor.map(|a| a.generation);
 
     // Everything that can fail on its own happens before the first write. The list files are
@@ -1361,10 +1354,20 @@ fn transact(
         Some(_) => base_for_edit(&files, anchor.as_ref(), rules)?,
         None => pick_base_from(&files, anchor.as_ref(), rules),
     };
-    let (key, key_created) = match (&mutate, &anchor) {
-        (Some(_), Some(a)) => (load_key(home, password, a)?, false),
-        _ => (WhitelistKey::generate()?, true),
+    // The key, derived from the password that opened wallet.json and the sealed salt, with the
+    // KDF parameters that opened it (never a re-read). An edit keeps the sealed salt and must
+    // derive the sealed key; the first edit and a reset draw a new salt, so a new key.
+    let (salt, sealed_key) = match (&mutate, &sealed) {
+        (Some(_), Some(s)) => (edit_salt(s)?, Some(s.anchor.public_key)),
+        _ => (new_salt()?, None),
     };
+    let key = derive_for(&opened, &salt)?;
+    if sealed_key.is_some_and(|sealed| sealed != key.public_key()) {
+        return Err(WalletError::validation(format!(
+            "the password-derived whitelist key is not the one wallet.json seals; nothing in the \
+             whitelist changed. {RESET_CAVEAT}"
+        )));
+    }
     hook(EditStage::FilesRead(home))?;
     // The sealed list may still sit in `whitelist.next.json` (an edit that re-sealed and died
     // before it published `whitelist.json`, or an agent's copy). Staging this edit overwrites
@@ -1395,7 +1398,7 @@ fn transact(
     list.validate(rules)?;
     let signed = key.sign(&list);
     let new_anchor = key.anchor_for(&signed);
-    let policy = new_anchor.to_policy(&opened.unsealed().policy)?;
+    let policy = new_anchor.to_policy(&salt, &opened.unsealed().policy)?;
 
     if promote {
         // From memory: the bytes that verified, never what the path holds by now.
@@ -1405,19 +1408,6 @@ fn transact(
             .ok_or_else(|| WalletError::validation("the staged whitelist was not read"))?;
         lock.replace_file(WHITELIST_FILE, verified)?;
         hook(EditStage::Promoted(&home.join(WHITELIST_FILE)))?;
-    }
-    if key_created {
-        // The KDF parameters that opened wallet.json, never a re-read.
-        let kdf = opened.file().crypto.kdf_params()?;
-        let file = KeyFile {
-            version: KEY_FILE_VERSION,
-            crypto: store::seal_whitelist_key(&Zeroizing::new(key.0.to_bytes()), password, kdf)?,
-        };
-        let mut bytes = serde_json::to_vec_pretty(&file)
-            .map_err(|_| WalletError::validation("cannot serialize whitelist.key"))?;
-        bytes.push(b'\n');
-        lock.replace_file(KEY_FILE, &bytes)?;
-        hook(EditStage::KeyWritten(&home.join(KEY_FILE)))?;
     }
     let staged = signed.to_file_bytes()?;
     lock.replace_file(NEXT_FILE, &staged)?;
@@ -1452,7 +1442,6 @@ fn transact(
         previous_generation,
         base: base.source,
         discarded: base.discarded,
-        key_created,
         warning,
     })
 }
@@ -1840,7 +1829,6 @@ mod tests {
         let home = tmp.path();
         assert_eq!(sealed(home), None);
         let edited = edit(home, PW, &RULES, add(alice())).unwrap();
-        assert!(edited.key_created);
         assert_eq!(edited.previous_generation, None);
         assert_eq!(edited.base, BaseSource::Empty);
         assert_eq!(edited.discarded, None);
@@ -1853,28 +1841,27 @@ mod tests {
         assert_eq!(anchor.digest, digest(&edited.list));
         assert_eq!(load_verified(home, &anchor).unwrap(), edited.list);
         let names: Vec<_> = snapshot(home).into_keys().collect();
-        assert_eq!(names, ["wallet.json", "whitelist.json", "whitelist.key"]);
-        for f in [WHITELIST_FILE, KEY_FILE, store::WALLET_FILE] {
+        assert_eq!(names, ["wallet.json", "whitelist.json"], "no key file");
+        for f in [WHITELIST_FILE, store::WALLET_FILE] {
             let mode = fs::metadata(home.join(f)).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "{f}");
         }
-        // The key file opens with the wallet password, is the sealed key, and is no wallet.json.
-        let key = load_key(home, PW, &anchor).unwrap();
+        // The sealed key is the one the password derives under the sealed salt, with the
+        // wallet's KDF.
+        let file = store::read_wallet_file(home).unwrap();
+        let read = store::decrypt(&file.crypto, PW)
+            .unwrap()
+            .sealed_whitelist()
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.anchor, anchor);
+        let kdf = KdfParams {
+            log_n: KDF_MIN_LOG_N,
+            ..KdfParams::default()
+        };
+        assert_eq!(file.crypto.kdf_params().unwrap(), kdf);
+        let key = WhitelistKey::derive(PW, &read.salt().unwrap(), kdf).unwrap();
         assert_eq!(key.public_key(), anchor.public_key);
-        let text = fs::read_to_string(home.join(KEY_FILE)).unwrap();
-        assert!(
-            !text.contains(&hex::encode(key.0.to_bytes())),
-            "secret is sealed"
-        );
-        let file: KeyFile = serde_json::from_str(&text).unwrap();
-        assert_eq!(
-            file.crypto.kdfparams.log_n, KDF_MIN_LOG_N,
-            "the wallet's KDF"
-        );
-        assert_eq!(
-            store::decrypt(&file.crypto, PW).err().unwrap().code,
-            ErrorCode::WrongPassword
-        );
         // Readable while locked, unverified: the plain file parses on its own.
         let plain = read_list(&home.join(WHITELIST_FILE)).unwrap().unwrap();
         assert_eq!(plain.list, edited.list);
@@ -1898,7 +1885,6 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert!(!edited.key_created);
         assert_eq!(edited.previous_generation, Some(1));
         assert_eq!(edited.base, BaseSource::Current);
         assert_eq!(edited.list.generation, 2);
@@ -3016,19 +3002,18 @@ mod tests {
     }
 
     #[test]
-    fn a_crash_while_making_the_key_is_recovered_by_running_again() {
+    fn a_crash_in_the_first_edit_is_recovered_by_running_again() {
         // Every stage a first edit passes, in order (a first edit promotes nothing).
-        for stage in 0..5 {
+        for stage in 0..4 {
             let tmp = wallet();
             let home = tmp.path();
             let hook = |s: EditStage| {
                 let at = match s {
                     EditStage::FilesRead(_) => 0,
-                    EditStage::KeyWritten(_) => 1,
-                    EditStage::NextWritten(_) => 2,
-                    EditStage::Resealed(_) => 3,
-                    EditStage::Published(_) => 4,
-                    EditStage::Promoted(_) => 5,
+                    EditStage::NextWritten(_) => 1,
+                    EditStage::Resealed(_) => 2,
+                    EditStage::Published(_) => 3,
+                    EditStage::Promoted(_) => 4,
                 };
                 if at == stage {
                     Err(WalletError::validation("crash"))
@@ -3039,10 +3024,10 @@ mod tests {
             edit_with_hook(home, PW, &RULES, add(alice()), &hook).unwrap_err();
             match sealed(home) {
                 // Before the re-seal: still no whitelist, so every send stays refused.
-                None => assert!(stage < 3, "{stage}"),
+                None => assert!(stage < 2, "{stage}"),
                 // From the re-seal on: the first list is the sealed one.
                 Some(a) => {
-                    assert!(stage >= 3, "{stage}");
+                    assert!(stage >= 2, "{stage}");
                     assert_eq!(nicknames(&load_verified(home, &a).unwrap()), ["alice"]);
                 }
             }
@@ -3057,7 +3042,7 @@ mod tests {
                     "a crash before any write wrote a whitelist file"
                 );
             }
-            if stage == 2 {
+            if stage == 1 {
                 // Staged, not sealed: the leftover first list is refused like any list file
                 // without a sealed whitelist, and reset (losing nothing yet) clears the way.
                 let err = edit(
@@ -3084,15 +3069,16 @@ mod tests {
                 add(Entry::new_address("bob", BOB, &["base"])),
             );
             let edited = edited.unwrap();
-            let expect: &[&str] = if stage < 3 {
+            let expect: &[&str] = if stage < 2 {
                 &["bob"]
             } else {
                 &["alice", "bob"]
             };
             assert_eq!(nicknames(&edited.list), expect, "{stage}");
-            // Before the key was written, or after it with nothing staged, this edit is a first
-            // edit again; after stage 2 the reset made the key this edit used.
-            assert_eq!(edited.key_created, stage <= 1, "{stage}");
+            // Before any write this edit is a first edit again; after staging, the reset sealed
+            // gen 1 (and its salt), and from the re-seal on the first edit did.
+            let previous = if stage == 0 { None } else { Some(1) };
+            assert_eq!(edited.previous_generation, previous, "{stage}");
             load_verified(home, &sealed(home).unwrap()).unwrap();
         }
     }
@@ -3145,91 +3131,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_foreign_key_file_needs_a_reset() {
-        let tmp = wallet();
-        let home = tmp.path();
-        edit(home, PW, &RULES, add(alice())).unwrap();
-        let key_path = home.join(KEY_FILE);
-        let real_key = fs::read(&key_path).unwrap();
-        let before = snapshot(home);
-
-        fs::remove_file(&key_path).unwrap();
-        let err = edit(
-            home,
-            PW,
-            &RULES,
-            add(Entry::new_address("bob", BOB, &["base"])),
-        )
-        .unwrap_err();
-        assert!(err.message.contains("whitelist reset"), "{}", err.message);
-        assert!(err.message.contains(RESET_CAVEAT), "{}", err.message);
-
-        // Another wallet's key file, sealed under the same password.
-        let other = wallet();
-        edit(other.path(), PW, &RULES, add(alice())).unwrap();
-        fs::copy(other.path().join(KEY_FILE), &key_path).unwrap();
-        let err = edit(
-            home,
-            PW,
-            &RULES,
-            add(Entry::new_address("bob", BOB, &["base"])),
-        )
-        .unwrap_err();
-        assert!(err.message.contains("whitelist reset"), "{}", err.message);
-
-        fs::write(&key_path, b"{}").unwrap();
-        let err = edit(
-            home,
-            PW,
-            &RULES,
-            add(Entry::new_address("bob", BOB, &["base"])),
-        )
-        .unwrap_err();
-        assert!(err.message.contains("whitelist reset"), "{}", err.message);
-
-        // This wallet's own key, sealed under another password.
-        let kdf = KdfParams {
-            log_n: KDF_MIN_LOG_N,
-            ..KdfParams::default()
-        };
-        let secret = store::open_whitelist_key(
-            &serde_json::from_slice::<KeyFile>(&real_key).unwrap().crypto,
-            PW,
-        )
-        .unwrap();
-        let resealed = KeyFile {
-            version: KEY_FILE_VERSION,
-            crypto: store::seal_whitelist_key(&secret, "another password", kdf).unwrap(),
-        };
-        fs::write(&key_path, serde_json::to_vec(&resealed).unwrap()).unwrap();
-        let err = edit(
-            home,
-            PW,
-            &RULES,
-            add(Entry::new_address("bob", BOB, &["base"])),
-        )
-        .unwrap_err();
-        assert_eq!(err.code, ErrorCode::ValidationError);
-        assert!(
-            err.message
-                .contains("does not open with the wallet password"),
-            "{}",
-            err.message
-        );
-        assert!(err.message.contains("whitelist reset"), "{}", err.message);
-
-        fs::write(&key_path, &real_key).unwrap();
-        assert_eq!(snapshot(home), before, "nothing else was written");
-        edit(
-            home,
-            PW,
-            &RULES,
-            add(Entry::new_address("bob", BOB, &["base"])),
-        )
-        .unwrap();
-    }
-
-    #[test]
     fn reset_makes_a_new_key_and_an_empty_list() {
         let tmp = wallet();
         let home = tmp.path();
@@ -3241,10 +3142,8 @@ mod tests {
         .unwrap();
         let old_anchor = sealed(home).unwrap();
         let old_list = fs::read(home.join(WHITELIST_FILE)).unwrap();
-        fs::remove_file(home.join(KEY_FILE)).unwrap();
 
         let done = reset(home, PW, &RULES).unwrap();
-        assert!(done.key_created);
         assert_eq!(done.previous_generation, Some(1));
         assert_eq!(done.list.generation, 2);
         assert_eq!(done.list.entries, vec![]);
@@ -3277,24 +3176,253 @@ mod tests {
         assert_eq!(edited.base, BaseSource::Current);
         assert_eq!(edited.list.generation, 3);
 
-        // A reset that dies after writing its key: the old list still verifies; an edit asks for
-        // the reset again, which then completes.
+        // A reset that dies before its re-seal: its new salt was never sealed, so the old list
+        // still verifies and the next edit goes on from it with the sealed key (no key file to
+        // have gone out of step with the seal).
         let crash = |s: EditStage| match s {
-            EditStage::KeyWritten(_) => Err(WalletError::validation("crash")),
+            EditStage::NextWritten(_) => Err(WalletError::validation("crash")),
             _ => Ok(()),
         };
         reset_with_hook(home, PW, &RULES, &crash).unwrap_err();
         let anchor = sealed(home).unwrap();
         assert_eq!(nicknames(&load_verified(home, &anchor).unwrap()), ["alice"]);
-        let err = edit(
+        let edited = edit(
             home,
             PW,
             &RULES,
             add(Entry::new_address("bob", BOB, &["base"])),
         )
-        .unwrap_err();
-        assert!(err.message.contains("whitelist reset"), "{}", err.message);
-        assert_eq!(reset(home, PW, &RULES).unwrap().list.generation, 4);
+        .unwrap();
+        assert_eq!(edited.list.generation, 4);
+        assert_eq!(sealed(home).unwrap().public_key, anchor.public_key);
+        assert_eq!(reset(home, PW, &RULES).unwrap().list.generation, 5);
+    }
+
+    /// wallet.json's sealed policy right now.
+    fn sealed_policy(home: &Path) -> Value {
+        let file = store::read_wallet_file(home).unwrap();
+        store::decrypt(&file.crypto, PW).unwrap().policy
+    }
+
+    /// The sealed whitelist salt (lower-case hex), which must be there.
+    fn sealed_salt(home: &Path) -> String {
+        let policy = sealed_policy(home);
+        let salt = policy["whitelistSalt"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no whitelist salt sealed: {policy}"))
+            .to_string();
+        assert!(
+            salt.len() == 64 && salt.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "not 32 bytes of lower-case hex: {salt}"
+        );
+        salt
+    }
+
+    /// Re-seals wallet.json with `policy`, as only the password holder can.
+    fn reseal_policy(home: &Path, policy: &Value) {
+        let lock = MetaLock::acquire(home).unwrap();
+        let opened = lock.open(PW).unwrap();
+        lock.reseal(&opened, policy).unwrap();
+    }
+
+    #[test]
+    fn the_key_is_derived_from_the_password_and_a_sealed_salt_and_never_written() {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        // The first edit seals a salt next to the anchor and writes no key file.
+        let salt = sealed_salt(home);
+        let names: Vec<_> = snapshot(home).into_keys().collect();
+        assert_eq!(names, ["wallet.json", "whitelist.json"]);
+        // Every later edit derives the same key from the password and that salt.
+        let first = sealed(home).unwrap();
+        for (nick, address) in [("bob", BOB), ("carol", CAROL)] {
+            edit(
+                home,
+                PW,
+                &RULES,
+                add(Entry::new_address(nick, address, &["base"])),
+            )
+            .unwrap();
+            assert_eq!(sealed(home).unwrap().public_key, first.public_key);
+            assert_eq!(sealed_salt(home), salt);
+        }
+        let names: Vec<_> = snapshot(home).into_keys().collect();
+        assert_eq!(names, ["wallet.json", "whitelist.json"]);
+        // Another wallet under the same password draws another salt, so another key.
+        let other = wallet();
+        edit(other.path(), PW, &RULES, add(alice())).unwrap();
+        assert_ne!(sealed_salt(other.path()), salt);
+        assert_ne!(sealed(other.path()).unwrap().public_key, first.public_key);
+    }
+
+    #[test]
+    fn an_edit_refuses_a_key_the_password_does_not_derive() {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        let bob = || add(Entry::new_address("bob", BOB, &["base"]));
+        let mismatch = "the password-derived whitelist key is not the one wallet.json seals";
+
+        // A sealed salt that does not derive the sealed key (only the password holder can seal
+        // one, so it is tampering with the password, or a bug).
+        let good = sealed_policy(home);
+        let mut policy = good.clone();
+        policy["whitelistSalt"] = Value::from("ab".repeat(32));
+        reseal_policy(home, &policy);
+        let before = snapshot(home);
+        let err = edit(home, PW, &RULES, bob()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError);
+        assert!(err.message.contains(mismatch), "{}", err.message);
+        assert!(err.message.contains(RESET_CAVEAT), "{}", err.message);
+        assert_eq!(snapshot(home), before, "the refused edit wrote something");
+
+        // wallet.json under another password with the same sealed policy (a password change
+        // that did not sign the list again): that password derives another key.
+        reseal_policy(home, &good);
+        let file = store::read_wallet_file(home).unwrap();
+        let unsealed = store::decrypt(&file.crypto, PW).unwrap();
+        let other_pw = "another password, long enough";
+        let mut moved = file.clone();
+        moved.crypto = store::encrypt(
+            &unsealed.seed,
+            &unsealed.policy,
+            other_pw,
+            file.crypto.kdf_params().unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            home.join(store::WALLET_FILE),
+            serde_json::to_vec_pretty(&moved).unwrap(),
+        )
+        .unwrap();
+        let before = snapshot(home);
+        let err = edit(home, other_pw, &RULES, bob()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError);
+        assert!(err.message.contains(mismatch), "{}", err.message);
+        assert_eq!(snapshot(home), before, "the refused edit wrote something");
+    }
+
+    #[test]
+    fn a_whitelist_sealed_by_zwallet_0_1_0_refuses_every_edit_and_reset_starts_over() {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        // zwallet 0.1.0 sealed the anchor with no salt; its key sat in `whitelist.key`, which
+        // nothing reads or removes now.
+        let mut policy = sealed_policy(home);
+        policy.as_object_mut().unwrap().remove("whitelistSalt");
+        reseal_policy(home, &policy);
+        let stray = home.join("whitelist.key");
+        fs::write(&stray, b"{\"version\":1}\n").unwrap();
+        let made_by = "this whitelist was made by zwallet 0.1.0, whose key file is no longer used";
+
+        // The strict read (the daemon's) never takes it for "no whitelist", and names the cause
+        // alone.
+        let err = WhitelistAnchor::from_policy(&policy).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError);
+        assert_eq!(err.message, made_by);
+
+        let before = snapshot(home);
+        let changes: [Mutation; 2] = [
+            Box::new(add(Entry::new_address("bob", BOB, &["base"]))),
+            Box::new(|l: &mut Whitelist| {
+                l.remove("alice");
+                Ok(())
+            }),
+        ];
+        for mutate in changes {
+            let err = edit(home, PW, &RULES, mutate).unwrap_err();
+            assert_eq!(err.code, ErrorCode::ValidationError);
+            assert!(
+                err.message.starts_with("refusing to edit the whitelist: "),
+                "{}",
+                err.message
+            );
+            assert!(err.message.contains(made_by), "{}", err.message);
+            assert!(
+                err.message
+                    .contains("or a wallet.json restored from before the upgrade"),
+                "{}",
+                err.message
+            );
+            assert_recovery_only(&err.message);
+            assert_eq!(snapshot(home), before, "the refused edit wrote something");
+        }
+
+        // Reset starts over with a new salt and a new key, and edits work again.
+        let old_key = policy["whitelistPub"].clone();
+        let done = reset(home, PW, &RULES).unwrap();
+        assert_eq!(done.list.generation, 2);
+        sealed_salt(home);
+        assert_ne!(sealed_policy(home)["whitelistPub"], old_key);
+        let edited = edit(home, PW, &RULES, add(alice())).unwrap();
+        assert_eq!(edited.list.generation, 3);
+        assert_eq!(
+            fs::read(&stray).unwrap(),
+            b"{\"version\":1}\n",
+            "left alone"
+        );
+    }
+
+    #[test]
+    fn the_key_is_derived_with_the_kdf_that_opened_wallet_json_not_one_edited_after() {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        let sealed_key = sealed(home).unwrap().public_key;
+        let lock = MetaLock::acquire(home).unwrap();
+        let opened = lock.open(PW).unwrap();
+        let salt = opened
+            .unsealed()
+            .sealed_whitelist()
+            .unwrap()
+            .unwrap()
+            .salt()
+            .unwrap();
+        // After the open, log_n on disk is raised (no password is needed to edit it).
+        let mut file = store::read_wallet_file(home).unwrap();
+        assert_eq!(file.crypto.kdfparams.log_n, KDF_MIN_LOG_N);
+        file.crypto.kdfparams.log_n = KDF_MIN_LOG_N + 1;
+        fs::write(
+            home.join(store::WALLET_FILE),
+            serde_json::to_vec_pretty(&file).unwrap(),
+        )
+        .unwrap();
+        // The derivation keeps the opened envelope's parameters, so it is still the sealed key.
+        assert_eq!(derive_for(&opened, &salt).unwrap().public_key(), sealed_key);
+        // The edited parameters would derive another key, so this tells the two apart.
+        let edited = store::read_wallet_file(home)
+            .unwrap()
+            .crypto
+            .kdf_params()
+            .unwrap();
+        assert_ne!(
+            WhitelistKey::derive(PW, &salt, edited)
+                .unwrap()
+                .public_key(),
+            sealed_key
+        );
+    }
+
+    #[test]
+    fn reset_draws_a_new_salt_and_so_a_new_key() {
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        let (salt, key) = (sealed_salt(home), sealed(home).unwrap().public_key);
+        reset(home, PW, &RULES).unwrap();
+        let (new_salt, new_key) = (sealed_salt(home), sealed(home).unwrap().public_key);
+        assert_ne!(new_salt, salt);
+        assert_ne!(new_key, key);
+        // The next edit derives the new key from the new salt.
+        edit(home, PW, &RULES, add(alice())).unwrap();
+        assert_eq!(
+            (sealed_salt(home), sealed(home).unwrap().public_key),
+            (new_salt, new_key)
+        );
+        let names: Vec<_> = snapshot(home).into_keys().collect();
+        assert_eq!(names, ["wallet.json", "whitelist.json"]);
     }
 
     #[test]

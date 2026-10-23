@@ -3055,11 +3055,12 @@ fn w5_a_list_that_does_not_verify_refuses_every_send() {
 }
 
 #[test]
-fn w5b_an_older_wallet_list_and_key_restored_together_are_accepted_and_shown() {
+fn w5b_an_older_wallet_and_list_restored_together_are_accepted_and_shown() {
     let home = Home::new();
     home.create("t", &[]);
     home.allow("alice", ALICE, &["*"]);
-    let files = ["wallet.json", "whitelist.json", "whitelist.key"];
+    // Two files: the key is derived from the password and the salt the older wallet.json seals.
+    let files = ["wallet.json", "whitelist.json"];
     let old: Vec<Vec<u8>> = files
         .iter()
         .map(|f| std::fs::read(home.path().join(f)).unwrap())
@@ -3323,6 +3324,38 @@ fn a_malformed_sealed_anchor_unlocks_and_signs_nothing() {
     // An anchor that cannot be read is an untrusted list: the key's own address too.
     let r = home.run(&pay("ethereum", &me, &rpc.url, &[]));
     refused(&r, "WHITELIST_INVALID", &me, "ethereum", None);
+    assert!(rpc.sent().is_empty());
+}
+
+#[test]
+fn a_whitelist_sealed_by_zwallet_0_1_0_unlocks_and_signs_nothing() {
+    let home = Home::new();
+    home.create("t", &[]);
+    home.allow("alice", ALICE, &["*"]);
+    // zwallet 0.1.0 sealed the anchor (key, generation, digest) with no salt: its key sat in a
+    // file of its own.
+    let lock = zwallet::core::store::MetaLock::acquire(home.path()).unwrap();
+    let opened = lock.open(common::PW).unwrap();
+    let mut policy = opened.unsealed().policy.clone();
+    policy.as_object_mut().unwrap().remove("whitelistSalt");
+    lock.reseal(&opened, &policy).unwrap();
+    drop(lock);
+    let unlocked = home.unlock("10m");
+    let w = &unlocked["whitelist"];
+    assert_eq!(w["verified"], false, "{unlocked:#}");
+    // The cause alone: a reason an agent reads carries no remedy.
+    let cause = "this whitelist was made by zwallet 0.1.0, whose key file is no longer used";
+    assert_eq!(w["reason"], cause, "{unlocked:#}");
+    // Untrusted, not "no whitelist yet": neither the listed payee nor the key's own address.
+    let me = unlocked["address"].as_str().unwrap().to_string();
+    let rpc = mining_node();
+    for to in [ALICE, me.as_str()] {
+        let r = home.run(&pay("ethereum", to, &rpc.url, &[]));
+        let v = refused(&r, "WHITELIST_INVALID", to, "ethereum", None);
+        let msg = v["error"].as_str().unwrap();
+        assert!(msg.contains(cause), "{v:#}");
+        assert!(!msg.contains("whitelist reset"), "{v:#}");
+    }
     assert!(rpc.sent().is_empty());
 }
 
