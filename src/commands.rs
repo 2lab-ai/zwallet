@@ -18,6 +18,7 @@ use crate::core::seed::{DEFAULT_WORD_COUNT, Seed, VALID_WORD_COUNTS};
 use crate::core::store::{self, KeyEntry, MasterOptions, WalletFile};
 use crate::core::time::parse_duration;
 use crate::daemon;
+use crate::qr;
 use alloy::hex;
 use alloy::primitives::{B256, U256};
 use serde_json::{Map, Value, json};
@@ -251,6 +252,44 @@ fn with_note(value: Value, verified: bool) -> Out {
     Out::with_text(value, text)
 }
 
+/// The line under `scan to send to <address>`: the code carries no chain. Two lines, so both fit
+/// an 80-column terminal.
+const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
+
+/// `out` with `address` as a QR code at the end of its human text, for a phone wallet to scan,
+/// under the lines `scan to send to <address>` and [`EVERY_EVM_NETWORK`]. Only for an address
+/// reported `verified: true`, only with stdout on a terminal, and not with `--no-qr`: agents read
+/// zwallet through pipes, and `--json` prints no human text.
+fn with_qr(out: Out, verified: bool, address: Option<&str>, no_qr: bool) -> Out {
+    let Some(address) = address.filter(|_| verified && qr_shown(no_qr)) else {
+        return out;
+    };
+    // No colours when NO_COLOR is set and not empty (no-color.org).
+    let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+    match qr::render(address, color) {
+        Some(code) => with_line(
+            out,
+            &format!("scan to send to {address}\n{EVERY_EVM_NETWORK}\n{code}"),
+        ),
+        None => out,
+    }
+}
+
+/// Whether human output may end with a QR code: stdout on a terminal, and no `--no-qr`.
+fn qr_shown(no_qr: bool) -> bool {
+    !no_qr && std::io::stdout().is_terminal()
+}
+
+/// `out` with `line` at the end of its human text.
+fn with_line(out: Out, line: &str) -> Out {
+    let text = out.text.unwrap_or_else(|| render_human(&out.value));
+    Out::with_text(out.value, format!("{text}\n{line}"))
+}
+
+/// What the `create` that makes the master seed shows where the QR code would be.
+const QR_AFTER_BACKUP: &str =
+    "QR after backup: run `zwallet backup`, then `zwallet address --verify` (or unlock) to show it";
+
 /// Decrypts wallet.json in this process with the human's password and checks every key's cached
 /// addresses against the seed (a mismatch is `VALIDATION_ERROR`). Addresses derived from this
 /// seed are the ones reported `verified: true`: no other process or file can make them.
@@ -368,7 +407,17 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
             "Write down your recovery phrase now: run `zwallet backup` before funding this wallet."
         );
     }
-    Ok(with_note(out, verified))
+    let out = with_note(out, verified);
+    if master == "created" {
+        // The recovery phrase is not backed up yet, and funds sent before it is are at risk:
+        // no code to scan here, only how to get one.
+        return Ok(if qr_shown(a.qr.no_qr) {
+            with_line(out, QR_AFTER_BACKUP)
+        } else {
+            out
+        });
+    }
+    Ok(with_qr(out, verified, address.as_deref(), a.qr.no_qr))
 }
 
 /// The error for a `create --unlock` whose new session shows another key: says whether locking
@@ -553,7 +602,12 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         if let Some(w) = index_warning(&file, &[key]) {
             out["warning"] = json!(w);
         }
-        return Ok(with_note(out, true));
+        return Ok(with_qr(
+            with_note(out, true),
+            true,
+            Some(&address),
+            a.qr.no_qr,
+        ));
     }
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
@@ -1362,7 +1416,12 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
     if let Some(w) = session_index_warning(&file, &session) {
         out["warning"] = json!(w);
     }
-    Ok(Out::json(out))
+    Ok(with_qr(
+        Out::json(out),
+        true,
+        session["address"].as_str(),
+        a.qr.no_qr,
+    ))
 }
 
 /// [`index_warning`] (as `address --verify` gives it) for the key a new session reports: its

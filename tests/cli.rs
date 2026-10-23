@@ -3141,3 +3141,192 @@ fn a_whitelist_sealed_by_zwallet_0_1_0_is_refused_before_anything_stops_and_rese
     );
     assert_eq!(fs::read(&stray).unwrap(), b"{\"version\":1}\n");
 }
+
+/// The value of the `<name>: ` line in human output.
+fn field<'a>(text: &'a str, name: &str) -> &'a str {
+    let prefix = format!("{name}: ");
+    text.lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("no {name} line in {text:?}"))
+}
+
+/// What the first `create` on a terminal shows where the QR code would be.
+const BACKUP_FIRST: &str =
+    "QR after backup: run `zwallet backup`, then `zwallet address --verify` (or unlock) to show it";
+
+/// The line above the QR code of an address that holds on every network.
+const EVERY_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
+
+#[test]
+fn qr1_address_verify_on_a_terminal_shows_the_address_as_a_qr_code() {
+    let home = Home::new();
+    let addr = home.create("main", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = ["Wallet password: "];
+    let piped = home.run_stdin(
+        &["address", "--verify", "--password-stdin"],
+        &format!("{PW}\n"),
+    );
+    let shown = home.run_on_terminal(&["address", "--verify"], &prompt, &[]);
+    // The fields a pipe gets, then two lines repeating the address, then the code, in black on
+    // white; a phone scanning it reads the address. Verified: no note. All of it fits an
+    // 80-column terminal.
+    let (fields, code) = shown
+        .split_once(&format!("scan to send to {addr}\n{EVERY_NETWORK}\n"))
+        .unwrap_or_else(|| panic!("{shown:?}"));
+    assert_eq!(fields, piped.stdout);
+    for line in shown.lines() {
+        assert!(common::strip_ansi(line).chars().count() <= 80, "{line:?}");
+    }
+    assert!(field(fields, "verified") == "true", "{shown:?}");
+    assert!(code.lines().all(|l| l.starts_with('\x1b')), "{shown:?}");
+    assert_eq!(common::scan_qr(&shown), [addr.as_str()]);
+    assert!(!shown.contains("not verified"), "{shown:?}");
+    // NO_COLOR: no escape sequences, the light modules drawn for a dark terminal; it scans the
+    // same.
+    let plain = home.run_on_terminal(&["address", "--verify"], &prompt, &[("NO_COLOR", "1")]);
+    assert!(!plain.contains('\x1b'), "{plain:?}");
+    assert_eq!(common::scan_qr(&plain), [addr.as_str()]);
+    // Another chain: the code carries no chain, and the line says so.
+    let base = home.run_on_terminal(&["address", "--verify", "--chain", "base"], &prompt, &[]);
+    assert!(
+        base.contains(&format!("scan to send to {addr}\n{EVERY_NETWORK}\n")),
+        "{base:?}"
+    );
+    assert_eq!(common::scan_qr(&base), [addr.as_str()]);
+    // --no-qr: what a pipe gets. --json: the JSON only.
+    let quiet = home.run_on_terminal(&["address", "--verify", "--no-qr"], &prompt, &[]);
+    assert_eq!(quiet, piped.stdout);
+    let json = home.run_on_terminal(&["address", "--verify", "--json"], &prompt, &[]);
+    let v: serde_json::Value =
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}: {json:?}"));
+    assert_eq!(
+        (&v["address"], &v["verified"]),
+        (&json!(addr), &json!(true))
+    );
+}
+
+#[test]
+fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() {
+    let new_seed = ["New wallet password: ", "Repeat password: "];
+    let home = Home::new();
+    // The first create makes the seed (its address is verified), but its recovery phrase is not
+    // backed up yet: no code to fund it from, only a line saying how to get one.
+    let created = home.run_on_terminal(&["create", "main"], &new_seed, &[]);
+    let addr = field(&created, "address").to_string();
+    assert_eq!(field(&created, "verified"), "true");
+    assert!(
+        created.ends_with(&format!("verified: true\n{BACKUP_FIRST}\n")),
+        "{created:?}"
+    );
+    assert!(!created.contains("scan to send") && !created.contains('\x1b'));
+    assert!(common::scan_qr(&created).is_empty(), "{created:?}");
+    // The same with --unlock; --no-qr leaves the line out too.
+    let other = Home::new();
+    let shown = other.run_on_terminal(&["create", "main", "--unlock", "10m"], &new_seed, &[]);
+    assert!(shown.ends_with(&format!("\n{BACKUP_FIRST}\n")), "{shown:?}");
+    assert!(!shown.contains("scan to send") && common::scan_qr(&shown).is_empty());
+    let other = Home::new();
+    let shown = other.run_on_terminal(&["create", "main", "--no-qr"], &new_seed, &[]);
+    assert!(!shown.contains("QR after backup") && !shown.contains("scan to send"));
+    assert!(shown.ends_with("verified: true\n"), "{shown:?}");
+    // --json and a pipe: as before.
+    let other = Home::new();
+    let json = other.run_on_terminal(&["create", "main", "--json"], &new_seed, &[]);
+    let v: serde_json::Value =
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}: {json:?}"));
+    assert_eq!(v["master"], "created");
+    let other = Home::new();
+    let piped = other.run_stdin(&["create", "main", "--password-stdin"], &format!("{PW}\n"));
+    assert_eq!(piped.code, 0, "{}", piped.stderr);
+    assert!(
+        piped.stdout.ends_with("verified: true\n"),
+        "{}",
+        piped.stdout
+    );
+    assert!(!piped.stdout.contains("QR after backup") && !piped.stdout.contains("scan to send"));
+
+    // unlock: the address its daemon derived from the seed, the code under it.
+    let unlocked = home.run_on_terminal(&["unlock", "10m"], &["Wallet password: "], &[]);
+    assert_eq!(field(&unlocked, "address"), addr);
+    assert_eq!(field(&unlocked, "verified"), "true");
+    let label = format!("scan to send to {addr}\n{EVERY_NETWORK}\n");
+    let at = unlocked
+        .find(&label)
+        .unwrap_or_else(|| panic!("{unlocked:?}"));
+    assert!(at > unlocked.find("address: ").unwrap(), "{unlocked:?}");
+    assert_eq!(common::scan_qr(&unlocked), [addr.as_str()]);
+    let quiet = home.run_on_terminal(&["unlock", "10m", "--no-qr"], &["Wallet password: "], &[]);
+    assert!(!quiet.contains("scan to send"), "{quiet:?}");
+    assert!(common::scan_qr(&quiet).is_empty() && !quiet.contains('\x1b'));
+    let json = home.run_on_terminal(&["unlock", "10m", "--json"], &["Wallet password: "], &[]);
+    let v: serde_json::Value =
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}: {json:?}"));
+    assert_eq!(v["address"], addr.as_str());
+    // Into a pipe: the fields only, as before.
+    let piped = home.run_stdin(&["unlock", "10m", "--password-stdin"], &format!("{PW}\n"));
+    assert_eq!(piped.code, 0, "{}", piped.stderr);
+    assert_eq!(field(&piped.stdout, "address"), addr);
+    assert!(!piped.stdout.contains("scan to send") && !piped.stdout.contains('\x1b'));
+
+    // create --unlock: a new key from the seed the password opened, then its session.
+    let sub = home.run_on_terminal(
+        &["create", "sub", "--unlock", "10m"],
+        &["Wallet password: "],
+        &[],
+    );
+    let sub_addr = field(&sub, "address").to_string();
+    assert_ne!(sub_addr, addr);
+    assert_eq!(common::scan_qr(&sub), [sub_addr]);
+    let quiet = home.run_on_terminal(
+        &["create", "sub2", "--unlock", "10m", "--no-qr"],
+        &["Wallet password: "],
+        &[],
+    );
+    assert!(common::scan_qr(&quiet).is_empty() && !quiet.contains("scan to send"));
+    // A further key without --unlock, the password asked at the terminal: the code too.
+    let sub3 = home.run_on_terminal(&["create", "sub3"], &["Wallet password: "], &[]);
+    let sub3_addr = field(&sub3, "address").to_string();
+    assert_eq!(field(&sub3, "verified"), "true");
+    assert!(
+        sub3.contains(&format!("scan to send to {sub3_addr}\n{EVERY_NETWORK}\n")),
+        "{sub3:?}"
+    );
+    assert_eq!(common::scan_qr(&sub3), [sub3_addr]);
+
+    // An agent's create while unlocked (stdin no terminal): derived by whatever daemon answers,
+    // so not verified, and no code even with stdout on a terminal.
+    let mut cmd = home.command(&["create", "agent"]);
+    cmd.stdin(std::process::Stdio::null());
+    let (out, shown) = common::run_stdout_on_terminal(cmd);
+    assert!(out.status.success(), "{:?}", out.stderr);
+    assert_eq!(field(&shown, "verified"), "false", "{shown:?}");
+    assert!(shown.contains(NOT_VERIFIED), "{shown:?}");
+    assert!(!shown.contains("scan to send") && common::scan_qr(&shown).is_empty());
+}
+
+#[test]
+fn qr3_unverified_addresses_on_a_terminal_print_as_on_a_pipe() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let commands: [&[&str]; 3] = [
+        &["address"],
+        &["address", "--chain", "base"],
+        &["addresses"],
+    ];
+    for unlocked in [false, true] {
+        if unlocked {
+            // The daemon cross-checks the cache now; still not verified.
+            home.unlock("10m");
+        }
+        for args in commands {
+            let piped = home.run(args);
+            assert_eq!(piped.code, 0, "{args:?}: {}", piped.stderr);
+            let shown = home.run_on_terminal(args, &[], &[]);
+            assert_eq!(shown, piped.stdout, "{args:?} unlocked {unlocked}");
+            assert!(shown.contains(NOT_VERIFIED), "{shown:?}");
+        }
+    }
+}

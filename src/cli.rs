@@ -98,6 +98,14 @@ pub struct PasswordStdin {
 }
 
 #[derive(Debug, Args)]
+pub struct QrArg {
+    /// Do not print the address as a QR code. It is printed only for an address verified with
+    /// the password, only in human output to a terminal (never with --json or into a pipe).
+    #[arg(long)]
+    pub no_qr: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct CreateArgs {
     /// Key name: 1-32 of a-z 0-9 _ -.
     pub name: String,
@@ -112,6 +120,8 @@ pub struct CreateArgs {
     /// Mnemonic length for a new master seed: 12, 15, 18, 21 or 24 (default 24).
     #[arg(long, value_name = "N")]
     pub words: Option<usize>,
+    #[command(flatten)]
+    pub qr: QrArg,
 }
 
 #[derive(Debug, Args)]
@@ -122,6 +132,8 @@ pub struct AddressArgs {
     pub key: KeyArg,
     #[command(flatten)]
     pub verify: VerifyArgs,
+    #[command(flatten)]
+    pub qr: QrArg,
 }
 
 #[derive(Debug, Args)]
@@ -298,6 +310,8 @@ pub struct UnlockArgs {
     /// i.e. any same-user process can attach to it during start-up.
     #[arg(long)]
     pub allow_ptrace_scope_0: bool,
+    #[command(flatten)]
+    pub qr: QrArg,
 }
 
 #[derive(Debug, Subcommand)]

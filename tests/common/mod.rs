@@ -177,6 +177,29 @@ impl Home {
         command_in(self.path(), args)
     }
 
+    /// `zwallet <args>` (plus `env`) as a human runs it: stdin and the controlling terminal on a
+    /// pty, stdout on a terminal ([`PtyChild::spawn_on_terminal`]). Types [`PW`] at each of
+    /// `prompts` in turn, and returns what stdout's terminal showed, `\r\n` read as `\n`. Panics
+    /// unless the command succeeds.
+    pub fn run_on_terminal(&self, args: &[&str], prompts: &[&str], env: &[(&str, &str)]) -> String {
+        let mut cmd = self.command(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut pty = PtyChild::spawn_on_terminal(cmd);
+        for prompt in prompts {
+            pty.wait_for(prompt, Duration::from_secs(30));
+            pty.type_line(PW);
+        }
+        let (out, shown) = pty.finish_terminal();
+        assert!(
+            out.status.success(),
+            "{args:?}: {shown:?}; stderr {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        shown
+    }
+
     /// `create <name> --password-stdin --json` with the shared test password.
     pub fn create(&self, name: &str, extra: &[&str]) -> Value {
         let mut args = vec!["create", name, "--password-stdin", "--json"];
@@ -564,6 +587,11 @@ pub fn openpty() -> (File, OwnedFd) {
 
 /// Reads whatever the pty master has buffered right now, without blocking.
 pub fn drain_pty(master: &File) -> String {
+    String::from_utf8_lossy(&drain_pty_bytes(master)).into_owned()
+}
+
+/// [`drain_pty`] as bytes: a read may end inside a multi-byte character.
+pub fn drain_pty_bytes(master: &File) -> Vec<u8> {
     use std::os::fd::AsRawFd;
     let fd = master.as_raw_fd();
     // SAFETY: fcntl on an fd we own.
@@ -579,7 +607,7 @@ pub fn drain_pty(master: &File) -> String {
             Ok(n) => out.extend_from_slice(&buf[..n]),
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 /// `TIOCSCTTY` (make this terminal the controlling one); libc does not define it for macOS.
@@ -596,13 +624,31 @@ pub struct PtyChild {
     seen: String,
     /// Kept open: on macOS the pty drops unread output once every slave is closed.
     _slave: OwnedFd,
+    /// With [`PtyChild::spawn_on_terminal`]: the master of the terminal stdout is on (and its
+    /// slave, kept open), and the bytes it showed.
+    out: Option<(File, OwnedFd)>,
+    shown: Vec<u8>,
 }
 
 impl PtyChild {
-    pub fn spawn(mut cmd: Command) -> Self {
+    pub fn spawn(cmd: Command) -> Self {
+        Self::spawn_with(cmd, None)
+    }
+
+    /// [`PtyChild::spawn`] with stdout on a terminal too, as when a human reads the output;
+    /// [`PtyChild::finish_terminal`] returns what it printed. That terminal is a second pty, so
+    /// the output is not mixed with the password prompts on the controlling one.
+    pub fn spawn_on_terminal(cmd: Command) -> Self {
+        Self::spawn_with(cmd, Some(openpty()))
+    }
+
+    fn spawn_with(mut cmd: Command, out: Option<(File, OwnedFd)>) -> Self {
         let (master, slave) = openpty();
         cmd.stdin(Stdio::from(slave.try_clone().unwrap()))
-            .stdout(Stdio::piped())
+            .stdout(match &out {
+                Some((_, out_slave)) => Stdio::from(out_slave.try_clone().unwrap()),
+                None => Stdio::piped(),
+            })
             .stderr(Stdio::piped());
         // SAFETY: setsid and ioctl are async-signal-safe; fd 0 is the pty slave by now.
         unsafe {
@@ -619,6 +665,8 @@ impl PtyChild {
             master,
             seen: String::new(),
             _slave: slave,
+            out,
+            shown: Vec::new(),
         }
     }
 
@@ -627,6 +675,7 @@ impl PtyChild {
         let start = Instant::now();
         loop {
             self.seen.push_str(&drain_pty(&self.master));
+            self.drain_out();
             if self.seen.contains(needle) {
                 self.seen.clear();
                 return;
@@ -646,6 +695,13 @@ impl PtyChild {
         }
     }
 
+    /// Reads what stdout's terminal holds, so the child never blocks on a full one.
+    fn drain_out(&mut self) {
+        if let Some((master, _)) = &self.out {
+            self.shown.extend(drain_pty_bytes(master));
+        }
+    }
+
     /// Types one line, as a human would at the prompt.
     pub fn type_line(&self, line: &str) {
         (&self.master)
@@ -655,7 +711,13 @@ impl PtyChild {
 
     /// Waits (bounded) for the exit and collects stdout and stderr. The terminal is drained
     /// meanwhile: a session leader's exit waits until its terminal output has been read.
-    pub fn finish(mut self) -> Output {
+    pub fn finish(self) -> Output {
+        self.finish_terminal().0
+    }
+
+    /// [`PtyChild::finish`], plus what stdout's terminal showed (with
+    /// [`PtyChild::spawn_on_terminal`]), its `\r\n` read as `\n`.
+    pub fn finish_terminal(mut self) -> (Output, String) {
         let pipe = |r: Option<Box<dyn Read + Send>>| {
             std::thread::spawn(move || {
                 let mut v = Vec::new();
@@ -670,6 +732,7 @@ impl PtyChild {
         let start = Instant::now();
         let status = loop {
             self.seen.push_str(&drain_pty(&self.master));
+            self.drain_out();
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
             }
@@ -679,12 +742,150 @@ impl PtyChild {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        Output {
+        // What it wrote just before exiting.
+        self.drain_out();
+        let output = Output {
             status,
             stdout: out.join().unwrap(),
             stderr: err.join().unwrap(),
+        };
+        (
+            output,
+            String::from_utf8(std::mem::take(&mut self.shown))
+                .expect("UTF-8 output")
+                .replace("\r\n", "\n"),
+        )
+    }
+}
+
+/// Runs `cmd` (stdin as it has it) with stdout on a terminal of its own and stderr piped, reading
+/// the terminal all along: a pty nobody reads holds a writer after about 1 KB on macOS, so a
+/// command that prints more never exits. Fails after 60 s rather than hang. Returns the output
+/// and what the terminal showed, `\r\n` read as `\n`.
+pub fn run_stdout_on_terminal(mut cmd: Command) -> (Output, String) {
+    let (master, slave) = openpty();
+    cmd.stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn with stdout on a pty");
+    drop(cmd);
+    let mut stderr = child.stderr.take().unwrap();
+    let err = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = stderr.read_to_end(&mut v);
+        v
+    });
+    let mut shown = Vec::new();
+    let start = Instant::now();
+    let status = loop {
+        shown.extend(drain_pty_bytes(&master));
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(60) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "still running after 60s; terminal {:?}",
+                String::from_utf8_lossy(&shown)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // What it wrote just before exiting (the slave is still open here).
+    shown.extend(drain_pty_bytes(&master));
+    drop(slave);
+    let output = Output {
+        status,
+        stdout: Vec::new(),
+        stderr: err.join().unwrap(),
+    };
+    let shown = String::from_utf8(shown).expect("UTF-8 output");
+    (output, shown.replace("\r\n", "\n"))
+}
+
+/// The QR codes in `terminal` (as [`PtyChild::finish_terminal`] returns it), decoded: each run
+/// of lines drawn only with half blocks and spaces once ANSI escapes are removed, read as two rows
+/// of modules per line. In a coloured code (zwallet's default) a block is a dark module; in a
+/// plain one (`NO_COLOR`) a block is a light one, as on a dark terminal. Read from a picture of
+/// the code on a dark terminal, so the code must carry its own quiet zone.
+pub fn scan_qr(terminal: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut block: Vec<String> = Vec::new();
+    let mut colored = false;
+    for line in terminal.lines().chain([""]) {
+        let plain = strip_ansi(line);
+        if !plain.is_empty() && plain.chars().all(|c| " ▀▄█".contains(c)) {
+            colored |= plain.len() < line.len();
+            block.push(plain);
+            continue;
+        }
+        if !block.is_empty() {
+            found.push(decode_qr_lines(&std::mem::take(&mut block), colored));
+            colored = false;
         }
     }
+    found
+}
+
+/// `text` without its ANSI escape sequences (`ESC [`, up to a final byte from `@` to `~`).
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn decode_qr_lines(lines: &[String], colored: bool) -> String {
+    // Modules, `true` for dark: the block characters draw the dark modules in colour, the light
+    // ones without.
+    let mut rows: Vec<Vec<bool>> = Vec::new();
+    for line in lines {
+        let (mut top, mut bottom) = (Vec::new(), Vec::new());
+        for c in line.chars() {
+            let (t, b) = match c {
+                '█' => (true, true),
+                '▀' => (true, false),
+                '▄' => (false, true),
+                _ => (false, false),
+            };
+            top.push(if colored { t } else { !t });
+            bottom.push(if colored { b } else { !b });
+        }
+        rows.push(top);
+        rows.push(bottom);
+    }
+    // A picture of a dark terminal showing them: 4 px per module, 8 modules of background around.
+    let (scale, pad) = (4, 8);
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0) + 2 * pad;
+    let height = rows.len() + 2 * pad;
+    let mut img =
+        rqrr::PreparedImage::prepare_from_greyscale(width * scale, height * scale, |x, y| {
+            let (x, y) = (x / scale, y / scale);
+            let dark = x < pad
+                || y < pad
+                || rows
+                    .get(y - pad)
+                    .is_none_or(|r| r.get(x - pad).is_none_or(|&d| d));
+            if dark { 0 } else { 255 }
+        });
+    let grids = img.detect_grids();
+    assert_eq!(grids.len(), 1, "one QR code in {lines:#?}");
+    grids[0]
+        .decode()
+        .unwrap_or_else(|e| panic!("{e:?}: {lines:#?}"))
+        .1
 }
 
 impl Drop for PtyChild {

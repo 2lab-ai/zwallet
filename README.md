@@ -54,10 +54,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | Command | Output (`--json`) | While locked |
 |---|---|---|
 | `chains` | `[{ key, name, family, symbol, chainId, rpc }]` | works |
-| `create <name> [--password-stdin] [--unlock <dur> [--allow-ptrace-scope-0]] [--words 12\|15\|18\|21\|24]` | `{ name, index, address, active, master, home, chains, verified }` (+ `locked, expiresAt, daemonPid, whitelist` with `--unlock`) | see below |
+| `create <name> [--password-stdin] [--unlock <dur> [--allow-ptrace-scope-0]] [--words 12\|15\|18\|21\|24] [--no-qr]` | `{ name, index, address, active, master, home, chains, verified }` (+ `locked, expiresAt, daemonPid, whitelist` with `--unlock`) | see below |
 | `list [--verify [--password-stdin]]` | `{ active, keys: [{ name, index, address, active }], verified, warning? }` | works |
 | `change <name>` | `{ active, address, verified }` | works |
-| `address [--chain <key>] [--verify [--password-stdin]]` | `{ chain, key, address, verified }` (EIP-55; `--verify` adds `index` and `warning?`) | works |
+| `address [--chain <key>] [--verify [--password-stdin]] [--no-qr]` | `{ chain, key, address, verified }` (EIP-55; `--verify` adds `index` and `warning?`) | works |
 | `addresses` | `{ key, addresses: [{ chainId: <key>, address }], verified }` | works |
 | `status` | `{ wallet, locked, home, daemonPids?, otherDaemonPids, daemonPid?, expiresAt?, whitelist?, active?, address?, verified? }` | works |
 | `balance` | `{ key, address, verified: false, chains: [{ chain, chainId, native: { symbol, decimals, balance, raw }, tokens: [{ symbol, address, decimals, balance, raw }] }] }`; a network that failed has `{ chain, chainId, error, errorCode }` instead, a token whose read failed `{ symbol, address, decimals, error, errorCode }` (see below) | works |
@@ -67,7 +67,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `transfer --chain <key> --to <0x\|@nick> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
 | `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191; refused unless the whitelist allows it) | `WALLET_LOCKED` |
 | `tx --chain <key> <txHash> [--rpc <url>]` | `{ chain, txHash, found, status, from, to, nonce, value, valueRaw, symbol, explorerUrl, blockNumber?, gasUsed?, success?, hint? }` | works (no wallet needed) |
-| `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, whitelist, warning? }` | - |
+| `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0] [--no-qr]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, whitelist, warning? }` | - |
 | `lock` | `{ locked: true, wasUnlocked, stopped: [<pid>] }` | - |
 | `backup` | prints the recovery phrase; interactive terminal only | asks for the password |
 | `whitelist list [--verify [--password-stdin]]` | `{ gen, entries: [{ nickname, kind, address, chains, selectors? }], policy: { maxFeeWei, allowMessageSigning }, verified, source?, sealedGen?, reason? }` | works |
@@ -115,6 +115,17 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `change` still compare the cache with its derivation and fail with `VALIDATION_ERROR` on a
   mismatch, but a match only means nothing visibly tampered: it is never `verified`. Take a
   funding address from `address --verify` (or `unlock`) on your own terminal.
+- **QR code**: where the address is `verified: true` (`unlock`, `create` and `create --unlock`
+  with a verified key, `address --verify`), human output on a terminal ends with the lines
+  `scan to send to <address>` and ``(the same address on every EVM network in `zwallet chains`)``,
+  then the address as a QR code for a phone wallet: the plain EIP-55 address (no URI scheme, no
+  chain), error correction level M, a quiet zone of 4 modules, black on white in ANSI colours, or
+  with `NO_COLOR` plain blocks for a dark terminal. Scan that one and save it in the phone
+  wallet's address book. The `create` that makes the master seed shows no code, only a line to run
+  `zwallet backup` first: funds sent before the recovery phrase is written down are at risk.
+  `--no-qr` leaves either out. Nothing that reads the cache prints one (`address` without
+  `--verify`, `addresses`, `balance`), and neither `--json` nor output into a pipe ever has one, so
+  agents see the same text as before.
 - **The whitelist** ([`.prd/04-whitelist.md`](.prd/04-whitelist.md)): the key daemon signs a
   transaction that moves value only when a list signed with this wallet's whitelist key allows
   it. That ed25519 key is not derived from the seed, and it is never stored: every whitelist
