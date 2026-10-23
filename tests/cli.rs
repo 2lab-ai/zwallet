@@ -632,14 +632,26 @@ fn c7_poisoned_cache_while_unlocked_is_a_validation_error() {
     let home = Home::new();
     home.create("main", &["--unlock", "30s"]);
     poison_cache(&home);
+    // `balance` too: while a session is live it reads the daemon's derivation, not the cache
+    // alone. Every network points at a closed port, so nothing would be read anyway.
+    let closed: Vec<(String, String)> = chains::CHAINS
+        .iter()
+        .map(|c| (c.rpc_env_var(), "http://127.0.0.1:1".to_string()))
+        .collect();
+    let closed: Vec<(&str, &str)> = closed
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     for args in [
         &["address", "--json"][..],
         &["addresses", "--json"],
         &["list", "--json"],
         &["status", "--json"],
         &["change", "main", "--json"],
+        &["balance", "--json"],
+        &["balance", "--chain", "base", "--json"],
     ] {
-        let msg = home.run(args).err("VALIDATION_ERROR");
+        let msg = home.run_env(args, &closed).err("VALIDATION_ERROR");
         assert!(msg.contains("does not match"), "{args:?}: {msg}");
     }
 }
@@ -1056,7 +1068,20 @@ fn k4_daemon_asks_for_the_password_before_anything_is_written() {
     assert_eq!(v["result"]["stage"], "input", "{v}");
 }
 
+/// The note on an address shown unverified while a key daemon answers.
 const NOT_VERIFIED: &str = "not verified: run `zwallet address --verify` before funding";
+
+/// The note on an address shown while the wallet is locked.
+const LOCKED_NOTE: &str = "not verified: the wallet is locked; `zwallet unlock <dur>` or `zwallet address --verify` \
+     checks it";
+
+/// Whether a live session verifies an address on this OS. On macOS the CLI reads the
+/// executable of the process answering on `d.sock` from the kernel. On Linux every zwallet
+/// process is non-dumpable, which hides its `/proc/<pid>/exe` from its own user, so the key
+/// daemon's executable cannot be checked and nothing is verified by session.
+fn session_verifies() -> bool {
+    cfg!(target_os = "macos")
+}
 
 /// The commands that show an address without the human's password.
 const ADDRESS_VIEWS: [&[&str]; 4] = [
@@ -1066,8 +1091,29 @@ const ADDRESS_VIEWS: [&[&str]; 4] = [
     &["status", "--json"],
 ];
 
+/// The commands that show an address verified by a live session (where [`session_verifies`]).
+const SESSION_VIEWS: [&[&str]; 5] = [
+    &["address", "--json"],
+    &["address", "--chain", "base", "--json"],
+    &["addresses", "--json"],
+    &["status", "--json"],
+    &["change", "main", "--json"],
+];
+
+/// The address a result shows: `address`, or the first row of `addresses`.
+fn shown_address(v: &serde_json::Value) -> &str {
+    v["address"]
+        .as_str()
+        .or_else(|| v["addresses"][0]["address"].as_str())
+        .unwrap_or_else(|| panic!("no address in {v}"))
+}
+
+/// The residual risk the README names: a same-user process swaps in its own wallet.json and
+/// unlocks it with its own password through a genuine zwallet daemon. Where a session verifies,
+/// that daemon's address is reported verified by session; only the address the human saved from
+/// their own first unlock tells them apart. The human's password never opens it.
 #[test]
-fn k1_swapped_wallet_with_a_genuine_attacker_daemon_is_never_verified() {
+fn k1_swapped_wallet_with_a_genuine_attacker_daemon_is_the_named_residual_risk() {
     const ATTACKER_PW: &str = "attacker chosen password";
     let home = Home::new();
     let human = home.create("main", &[])["address"]
@@ -1092,18 +1138,17 @@ fn k1_swapped_wallet_with_a_genuine_attacker_daemon_is_never_verified() {
         &format!("{ATTACKER_PW}\n"),
     )
     .ok();
-    for args in ADDRESS_VIEWS
-        .iter()
-        .copied()
-        .chain([&["change", "main", "--json"][..]])
-    {
+    for args in SESSION_VIEWS {
         let v = home.run(args).ok();
-        assert_eq!(v["verified"], false, "{args:?}: {v}");
+        assert_eq!(v["verified"], session_verifies(), "{args:?}: {v}");
+        assert_eq!(shown_address(&v), evil, "{args:?}: {v}");
     }
-    assert_eq!(home.run(&["address", "--json"]).ok()["address"], evil);
+    // `list` is never verified without the password.
+    assert_eq!(home.run(&["list", "--json"]).ok()["verified"], false);
     let human_out = home.run(&["address"]);
-    assert!(
+    assert_eq!(
         human_out.stdout.contains(NOT_VERIFIED),
+        !session_verifies(),
         "{}",
         human_out.stdout
     );
@@ -1145,7 +1190,11 @@ fn k1_squatter_answering_the_cached_address_is_never_verified() {
 fn k1_verify_derives_from_the_password_and_checks_the_cache() {
     let home = Home::new();
     let created = home.create("main", &[]);
-    assert_eq!(created["verified"], true, "first create derives in-process");
+    assert_eq!(
+        (&created["verified"], &created["verifiedBy"]),
+        (&json!(true), &json!("password")),
+        "first create derives in-process"
+    );
     let addr = created["address"].as_str().unwrap().to_string();
     let pw = format!("{PW}\n");
 
@@ -1153,23 +1202,31 @@ fn k1_verify_derives_from_the_password_and_checks_the_cache() {
         .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
         .ok();
     assert_eq!(
-        (&v["verified"], &v["address"]),
-        (&json!(true), &json!(addr))
+        (&v["verified"], &v["verifiedBy"], &v["address"]),
+        (&json!(true), &json!("password"), &json!(addr))
     );
     let human = home.run_stdin(&["address", "--verify", "--password-stdin"], &pw);
     assert!(!human.stdout.contains("not verified"), "{}", human.stdout);
     let l = home
         .run_stdin(&["list", "--verify", "--password-stdin", "--json"], &pw)
         .ok();
-    assert_eq!(l["verified"], true);
+    assert_eq!(
+        (&l["verified"], &l["verifiedBy"]),
+        (&json!(true), &json!("password"))
+    );
     assert_eq!(l["keys"][0]["address"], addr.as_str());
 
-    // unlock reports what its own child derived after the password: verified.
-    assert_eq!(home.unlock("30s")["verified"], true);
-    // Without --verify, even unlocked: cross-checked against the daemon, not verified.
+    // unlock reports what its own child derived after the password: verified by the password.
+    let unlocked = home.unlock("30s");
+    assert_eq!(
+        (&unlocked["verified"], &unlocked["verifiedBy"]),
+        (&json!(true), &json!("password"))
+    );
+    // Without --verify, while unlocked: derived by this build's key daemon of this home, so
+    // verified by the session where the OS lets the CLI check that (see `session_verifies`).
     let v = home.run(&["address", "--json"]).ok();
-    assert_eq!(v["verified"], false);
-    // balance shows the cached address: not verified either.
+    assert_eq!(v["verified"], session_verifies(), "{v}");
+    // balance asks the daemon too, rather than trusting the cache alone.
     let rpc = common::tiny_rpc(|method| match method {
         "eth_chainId" => json!("0x1"),
         _ => json!("0x0"),
@@ -1179,7 +1236,7 @@ fn k1_verify_derives_from_the_password_and_checks_the_cache() {
         .ok();
     assert_eq!(
         (&b["verified"], &b["address"]),
-        (&json!(false), &json!(addr))
+        (&json!(session_verifies()), &json!(addr))
     );
     home.stop_daemons();
 
@@ -3218,7 +3275,9 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
     let addr = field(&created, "address").to_string();
     assert_eq!(field(&created, "verified"), "true");
     assert!(
-        created.ends_with(&format!("verified: true\n{BACKUP_FIRST}\n")),
+        created.ends_with(&format!(
+            "verified: true\nverifiedBy: password\n{BACKUP_FIRST}\n"
+        )),
         "{created:?}"
     );
     assert!(!created.contains("scan to send") && !created.contains('\x1b'));
@@ -3231,7 +3290,10 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
     let other = Home::new();
     let shown = other.run_on_terminal(&["create", "main", "--no-qr"], &new_seed, &[]);
     assert!(!shown.contains("QR after backup") && !shown.contains("scan to send"));
-    assert!(shown.ends_with("verified: true\n"), "{shown:?}");
+    assert!(
+        shown.ends_with("verified: true\nverifiedBy: password\n"),
+        "{shown:?}"
+    );
     // --json and a pipe: as before.
     let other = Home::new();
     let json = other.run_on_terminal(&["create", "main", "--json"], &new_seed, &[]);
@@ -3242,7 +3304,9 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
     let piped = other.run_stdin(&["create", "main", "--password-stdin"], &format!("{PW}\n"));
     assert_eq!(piped.code, 0, "{}", piped.stderr);
     assert!(
-        piped.stdout.ends_with("verified: true\n"),
+        piped
+            .stdout
+            .ends_with("verified: true\nverifiedBy: password\n"),
         "{}",
         piped.stdout
     );
@@ -3311,22 +3375,264 @@ fn qr2_unlock_and_create_on_a_terminal_show_the_verified_address_as_a_qr_code() 
 fn qr3_unverified_addresses_on_a_terminal_print_as_on_a_pipe() {
     let home = Home::new();
     home.create("main", &[]);
-    let commands: [&[&str]; 3] = [
+    // `status` is left out of the pipe comparison: its `otherDaemonPids` follows the daemons of
+    // tests running alongside.
+    let commands: [&[&str]; 5] = [
         &["address"],
         &["address", "--chain", "base"],
         &["addresses"],
+        &["change", "main"],
+        &["status"],
     ];
-    for unlocked in [false, true] {
-        if unlocked {
-            // The daemon cross-checks the cache now; still not verified.
-            home.unlock("10m");
+    // Locked: the cache, with the note saying how to check it, and no code.
+    for args in commands {
+        let piped = home.run(args);
+        assert_eq!(piped.code, 0, "{args:?}: {}", piped.stderr);
+        let shown = home.run_on_terminal(args, &[], &[]);
+        if args[0] != "status" {
+            assert_eq!(shown, piped.stdout, "{args:?}");
         }
-        for args in commands {
-            let piped = home.run(args);
-            assert_eq!(piped.code, 0, "{args:?}: {}", piped.stderr);
-            let shown = home.run_on_terminal(args, &[], &[]);
-            assert_eq!(shown, piped.stdout, "{args:?} unlocked {unlocked}");
-            assert!(shown.contains(NOT_VERIFIED), "{shown:?}");
+        assert!(shown.contains(&format!("\n{LOCKED_NOTE}\n")), "{shown:?}");
+        assert!(!shown.contains(NOT_VERIFIED), "{shown:?}");
+        assert!(!shown.contains("scan to send") && common::scan_qr(&shown).is_empty());
+        let mut json = args.to_vec();
+        json.push("--json");
+        let v = home.run(&json).ok();
+        assert_eq!(v["verified"], false, "{args:?}: {v}");
+        assert!(
+            v.get("verifiedBy").is_none() && v.get("warning").is_none(),
+            "{args:?}: {v}"
+        );
+    }
+    if session_verifies() {
+        return;
+    }
+    // Where no session verifies (Linux): unlocked, the daemon's derivation, still unverified, and
+    // no warning (the daemon's executable is hidden, not another one).
+    home.unlock("10m");
+    for args in commands {
+        let piped = home.run(args);
+        assert_eq!(piped.code, 0, "{args:?}: {}", piped.stderr);
+        let shown = home.run_on_terminal(args, &[], &[]);
+        if args[0] != "status" {
+            assert_eq!(shown, piped.stdout, "{args:?}");
+        }
+        assert!(shown.contains(NOT_VERIFIED), "{shown:?}");
+        assert!(!shown.contains("warning"), "{shown:?}");
+    }
+}
+
+// ---- Verified by session: after unlock, without the password ----
+
+#[test]
+fn s1_after_unlock_the_address_views_are_verified_by_the_session() {
+    let home = Home::new();
+    let addr = home.create("main", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    home.unlock("10m");
+    for args in SESSION_VIEWS {
+        let v = home.run(args).ok();
+        assert_eq!(shown_address(&v), addr, "{args:?}: {v}");
+        assert!(v.get("warning").is_none(), "{args:?}: {v}");
+        if session_verifies() {
+            assert_eq!(
+                (&v["verified"], &v["verifiedBy"]),
+                (&json!(true), &json!("session")),
+                "{args:?}: {v}"
+            );
+        } else {
+            assert_eq!(v["verified"], false, "{args:?}: {v}");
+            assert!(v.get("verifiedBy").is_none(), "{args:?}: {v}");
+        }
+    }
+    // Human, into a pipe: no note when the session verified it, and never a code.
+    for args in [
+        &["address"][..],
+        &["addresses"],
+        &["status"],
+        &["change", "main"],
+    ] {
+        let out = home.run(args);
+        assert_eq!(out.code, 0, "{args:?}: {}", out.stderr);
+        assert_eq!(
+            out.stdout.contains("not verified"),
+            !session_verifies(),
+            "{args:?}: {}",
+            out.stdout
+        );
+        assert!(!out.stdout.contains("scan to send"), "{}", out.stdout);
+        // `addresses` prints its rows only; the others print their fields.
+        if session_verifies() && args[0] != "addresses" {
+            assert!(
+                out.stdout.contains("verifiedBy: session\n"),
+                "{}",
+                out.stdout
+            );
+        }
+    }
+    // `list` stays as it was: never verified without the password.
+    let l = home.run(&["list", "--json"]).ok();
+    assert_eq!(l["verified"], false, "{l}");
+}
+
+#[test]
+fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
+    let home = Home::new();
+    let addr = home.create("main", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    home.unlock("10m");
+    let label = format!("scan to send to {addr}\n{EVERY_NETWORK}\n");
+    for args in [
+        &["address"][..],
+        &["address", "--chain", "base"],
+        &["addresses"],
+        &["status"],
+        &["change", "main"],
+    ] {
+        let shown = home.run_on_terminal(args, &[], &[]);
+        // --no-qr is taken everywhere a code may show; then the terminal gets the pipe's text.
+        let mut quiet = args.to_vec();
+        quiet.push("--no-qr");
+        let q = home.run_on_terminal(&quiet, &[], &[]);
+        assert!(
+            !q.contains("scan to send") && common::scan_qr(&q).is_empty(),
+            "{q:?}"
+        );
+        if args[0] != "status" {
+            assert_eq!(q, home.run(&quiet).stdout, "{args:?}");
+        }
+        if !session_verifies() {
+            assert!(!shown.contains("scan to send") && common::scan_qr(&shown).is_empty());
+            continue;
+        }
+        // The fields, then the two lines and the code, last: one code, also for `addresses`
+        // (the same address on every EVM chain).
+        let at = shown
+            .find(&label)
+            .unwrap_or_else(|| panic!("{args:?}: {shown:?}"));
+        if args[0] != "addresses" {
+            assert!(shown[..at].contains("verifiedBy: session\n"), "{shown:?}");
+        }
+        assert_eq!(common::scan_qr(&shown), [addr.as_str()], "{args:?}");
+        assert!(!shown.contains("not verified"), "{shown:?}");
+        let plain = home.run_on_terminal(args, &[], &[("NO_COLOR", "1")]);
+        assert!(!plain.contains('\x1b'), "{plain:?}");
+        assert_eq!(common::scan_qr(&plain), [addr.as_str()], "{args:?}");
+        // --json: the JSON only.
+        let mut json = args.to_vec();
+        json.push("--json");
+        let j = home.run_on_terminal(&json, &[], &[]);
+        let v: serde_json::Value =
+            serde_json::from_str(&j).unwrap_or_else(|e| panic!("{e}: {j:?}"));
+        assert_eq!(v["verifiedBy"], "session", "{v}");
+    }
+}
+
+#[test]
+fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
+    let home = Home::new();
+    home.create("main", &[]);
+    // An agent's script edits the cache and listens on d.sock, answering the edited address.
+    poison_cache(&home);
+    let fake = FakeDaemon::answering(
+        &home.sock(),
+        serde_json::json!({
+            "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z",
+            "chain": "ethereum", "index": 0, "active": "main", "address": POISON,
+        }),
+    );
+    // The listener runs in this test process, so its executable is this test binary.
+    let me = std::process::id();
+    let exe = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let warning = format!(
+        "the process answering on the key daemon socket (pid {me}) is not this zwallet build \
+         ({}); run `zwallet lock` and unlock again",
+        exe.display()
+    );
+    let rpc = common::tiny_rpc(|method| match method {
+        "eth_chainId" => json!("0x1"),
+        _ => json!("0x0"),
+    });
+    for args in [
+        &["address", "--json"][..],
+        &["addresses", "--json"],
+        &["change", "main", "--json"],
+        &["balance", "--chain", "ethereum", "--rpc", &rpc, "--json"],
+    ] {
+        let v = home.run(args).ok();
+        assert_eq!(shown_address(&v), POISON, "{args:?}: {v}");
+        assert_eq!(v["verified"], false, "{args:?}: {v}");
+        assert!(v.get("verifiedBy").is_none(), "{args:?}: {v}");
+        assert_eq!(v["warning"], warning.as_str(), "{args:?}: {v}");
+    }
+    // Human: the warning and the note; no code on a terminal either.
+    let piped = home.run(&["address"]);
+    assert_eq!(piped.code, 0, "{}", piped.stderr);
+    assert!(
+        piped.stdout.contains(&format!("warning: {warning}\n")),
+        "{}",
+        piped.stdout
+    );
+    assert!(piped.stdout.contains(NOT_VERIFIED), "{}", piped.stdout);
+    let shown = home.run_on_terminal(&["address"], &[], &[]);
+    assert_eq!(shown, piped.stdout);
+    assert!(common::scan_qr(&shown).is_empty());
+    let addresses = home.run(&["addresses"]);
+    assert!(
+        addresses.stdout.contains(&format!("warning: {warning}\n")),
+        "{}",
+        addresses.stdout
+    );
+    drop(fake);
+}
+
+#[test]
+fn s4_a_daemon_started_from_another_copy_of_zwallet_is_not_verified() {
+    let home = Home::new();
+    home.create("main", &[]);
+    // A byte-identical copy at another path is another file: what `unlock` started is not the
+    // binary this CLI runs.
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let copy = dir.path().join("zwallet");
+    fs::copy(env!("CARGO_BIN_EXE_zwallet"), &copy).unwrap();
+    let mut cmd = std::process::Command::new(&copy);
+    cmd.env_clear().env("ZWALLET_HOME", home.path()).args([
+        "unlock",
+        "10m",
+        "--password-stdin",
+        "--json",
+    ]);
+    if common::ptrace_scope_is_open() {
+        cmd.arg("--allow-ptrace-scope-0");
+    }
+    common::run_command(cmd, Some(&format!("{PW}\n"))).ok();
+    let pids = home.daemon_pids();
+    assert_eq!(pids.len(), 1, "{pids:?}");
+    let copy = fs::canonicalize(&copy).unwrap();
+    for args in SESSION_VIEWS {
+        let v = home.run(args).ok();
+        assert_eq!(v["verified"], false, "{args:?}: {v}");
+        assert!(v.get("verifiedBy").is_none(), "{args:?}: {v}");
+        if session_verifies() {
+            assert_eq!(
+                v["warning"],
+                format!(
+                    "the process answering on the key daemon socket (pid {}) is not this \
+                     zwallet build ({}); run `zwallet lock` and unlock again",
+                    pids[0],
+                    copy.display()
+                ),
+                "{args:?}: {v}"
+            );
+        } else {
+            assert!(v.get("warning").is_none(), "{args:?}: {v}");
         }
     }
 }

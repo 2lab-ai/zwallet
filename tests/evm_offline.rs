@@ -1986,6 +1986,81 @@ fn balance_on_a_terminal_prints_as_on_a_pipe() {
     }
 }
 
+#[test]
+fn balance_after_unlock_is_verified_by_the_session_with_the_code_last() {
+    // Where a live session verifies an address (macOS; see `session_verifies` in tests/cli.rs).
+    let session = cfg!(target_os = "macos");
+    let home = Home::new();
+    let me = home.create("t", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    home.unlock("10m");
+    let nodes = every_chain_node(Duration::ZERO);
+    let env = rpc_env(&nodes, &[]);
+    let base = nodes
+        .iter()
+        .find(|(k, _)| *k == "base")
+        .unwrap()
+        .1
+        .url
+        .clone();
+    let every = home.run_env(&["balance", "--json"], &env_refs(&env)).ok();
+    let one = home
+        .run(&["balance", "--chain", "base", "--rpc", &base, "--json"])
+        .ok();
+    for v in [&every, &one] {
+        assert_eq!(
+            (&v["address"], &v["verified"]),
+            (&json!(me), &json!(session)),
+            "{v:#}"
+        );
+        assert_eq!(
+            v.get("verifiedBy"),
+            session.then(|| json!("session")).as_ref(),
+            "{v:#}"
+        );
+        assert!(v.get("warning").is_none(), "{v:#}");
+    }
+    // Every field it had before is still there.
+    assert_eq!(one["balance"], "1.5");
+    assert_eq!(every["chains"].as_array().unwrap().len(), 8);
+
+    // Human: into a pipe, the text it always had; on a terminal, that text and then the code,
+    // after the networks. --no-qr leaves the code out.
+    let label = format!(
+        "scan to send to {me}\n(the same address on every EVM network in `zwallet chains`)\n"
+    );
+    for args in [
+        &["balance"][..],
+        &["balance", "--chain", "base", "--rpc", &base],
+    ] {
+        let piped = home.run_env(args, &env_refs(&env));
+        assert_eq!(piped.code, 0, "{args:?}: {}", piped.stderr);
+        assert!(!piped.stdout.contains("not verified"), "{}", piped.stdout);
+        let shown = home.run_on_terminal(args, &[], &env_refs(&env));
+        let mut quiet = args.to_vec();
+        quiet.push("--no-qr");
+        let q = home.run_on_terminal(&quiet, &[], &env_refs(&env));
+        assert_eq!(q, piped.stdout, "{args:?}");
+        if !session {
+            assert_eq!(shown, piped.stdout, "{args:?}");
+            continue;
+        }
+        let (fields, _code) = shown
+            .split_once(&label)
+            .unwrap_or_else(|| panic!("{args:?}: {shown:?}"));
+        assert_eq!(fields, piped.stdout, "{args:?}");
+        assert_eq!(common::scan_qr(&shown), [me.as_str()], "{args:?}");
+    }
+    let piped = home.run_env(&["balance"], &env_refs(&env));
+    assert!(
+        piped.stdout.ends_with("2 of 8 networks have a balance\n"),
+        "{}",
+        piped.stdout
+    );
+}
+
 /// A node whose nonces count what it accepted, mined at once (`latest` = `pending`).
 fn mining_node() -> MockRpc {
     let accepted = Arc::new(AtomicUsize::new(0));
