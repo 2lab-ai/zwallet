@@ -260,21 +260,31 @@ const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwal
 /// `verified: true`, only with stdout on a terminal, and not with `--no-qr`: agents read zwallet
 /// through pipes, and `--json` prints no human text.
 fn with_qr(out: Out, verified: bool, address: Option<&str>, place: &str, no_qr: bool) -> Out {
-    let Some(address) = address.filter(|_| verified && !no_qr && std::io::stdout().is_terminal())
-    else {
+    let Some(address) = address.filter(|_| verified && qr_shown(no_qr)) else {
         return out;
     };
     // No colours when NO_COLOR is set and not empty (no-color.org).
     let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
-    let Some(code) = qr::render(address, color) else {
-        return out;
-    };
-    let text = out.text.unwrap_or_else(|| render_human(&out.value));
-    Out::with_text(
-        out.value,
-        format!("{text}\nscan to send to {address} {place}\n{code}"),
-    )
+    match qr::render(address, color) {
+        Some(code) => with_line(out, &format!("scan to send to {address} {place}\n{code}")),
+        None => out,
+    }
 }
+
+/// Whether human output may end with a QR code: stdout on a terminal, and no `--no-qr`.
+fn qr_shown(no_qr: bool) -> bool {
+    !no_qr && std::io::stdout().is_terminal()
+}
+
+/// `out` with `line` at the end of its human text.
+fn with_line(out: Out, line: &str) -> Out {
+    let text = out.text.unwrap_or_else(|| render_human(&out.value));
+    Out::with_text(out.value, format!("{text}\n{line}"))
+}
+
+/// What the `create` that makes the master seed shows where the QR code would be.
+const QR_AFTER_BACKUP: &str =
+    "QR after backup: run `zwallet backup`, then `zwallet address --verify` (or unlock) to show it";
 
 /// Decrypts wallet.json in this process with the human's password and checks every key's cached
 /// addresses against the seed (a mismatch is `VALIDATION_ERROR`). Addresses derived from this
@@ -393,11 +403,20 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
             "Write down your recovery phrase now: run `zwallet backup` before funding this wallet."
         );
     }
-    let address = address.as_deref();
+    let out = with_note(out, verified);
+    if master == "created" {
+        // The recovery phrase is not backed up yet, and funds sent before it is are at risk:
+        // no code to scan here, only how to get one.
+        return Ok(if qr_shown(a.qr.no_qr) {
+            with_line(out, QR_AFTER_BACKUP)
+        } else {
+            out
+        });
+    }
     Ok(with_qr(
-        with_note(out, verified),
+        out,
         verified,
-        address,
+        address.as_deref(),
         EVERY_EVM_NETWORK,
         a.qr.no_qr,
     ))
