@@ -3343,26 +3343,18 @@ fn a_whitelist_sealed_by_zwallet_0_1_0_unlocks_and_signs_nothing() {
     let unlocked = home.unlock("10m");
     let w = &unlocked["whitelist"];
     assert_eq!(w["verified"], false, "{unlocked:#}");
-    assert!(
-        w["reason"]
-            .as_str()
-            .unwrap()
-            .contains("made by zwallet 0.1.0"),
-        "{unlocked:#}"
-    );
+    // The cause alone: a reason an agent reads carries no remedy.
+    let cause = "this whitelist was made by zwallet 0.1.0, whose key file is no longer used";
+    assert_eq!(w["reason"], cause, "{unlocked:#}");
     // Untrusted, not "no whitelist yet": neither the listed payee nor the key's own address.
     let me = unlocked["address"].as_str().unwrap().to_string();
     let rpc = mining_node();
     for to in [ALICE, me.as_str()] {
         let r = home.run(&pay("ethereum", to, &rpc.url, &[]));
         let v = refused(&r, "WHITELIST_INVALID", to, "ethereum", None);
-        assert!(
-            v["error"]
-                .as_str()
-                .unwrap()
-                .contains("made by zwallet 0.1.0"),
-            "{v:#}"
-        );
+        let msg = v["error"].as_str().unwrap();
+        assert!(msg.contains(cause), "{v:#}");
+        assert!(!msg.contains("whitelist reset"), "{v:#}");
     }
     assert!(rpc.sent().is_empty());
 }

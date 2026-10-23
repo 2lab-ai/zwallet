@@ -3286,13 +3286,13 @@ mod tests {
         reseal_policy(home, &policy);
         let stray = home.join("whitelist.key");
         fs::write(&stray, b"{\"version\":1}\n").unwrap();
-        let made_by = "made by zwallet 0.1.0";
+        let made_by = "this whitelist was made by zwallet 0.1.0, whose key file is no longer used";
 
-        // The strict read (the daemon's, and `list --verify`'s) never takes it for "no
-        // whitelist".
+        // The strict read (the daemon's) never takes it for "no whitelist", and names the cause
+        // alone.
         let err = WhitelistAnchor::from_policy(&policy).unwrap_err();
         assert_eq!(err.code, ErrorCode::ValidationError);
-        assert!(err.message.contains(made_by), "{}", err.message);
+        assert_eq!(err.message, made_by);
 
         let before = snapshot(home);
         let changes: [Mutation; 2] = [
@@ -3305,8 +3305,19 @@ mod tests {
         for mutate in changes {
             let err = edit(home, PW, &RULES, mutate).unwrap_err();
             assert_eq!(err.code, ErrorCode::ValidationError);
+            assert!(
+                err.message.starts_with("refusing to edit the whitelist: "),
+                "{}",
+                err.message
+            );
             assert!(err.message.contains(made_by), "{}", err.message);
-            assert!(err.message.contains(RESET_CAVEAT), "{}", err.message);
+            assert!(
+                err.message
+                    .contains("or a wallet.json restored from before the upgrade"),
+                "{}",
+                err.message
+            );
+            assert_recovery_only(&err.message);
             assert_eq!(snapshot(home), before, "the refused edit wrote something");
         }
 

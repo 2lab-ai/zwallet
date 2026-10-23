@@ -1093,7 +1093,11 @@ mod tests {
         let Anchor::Malformed(reason) = &anchor else {
             panic!("a 0.1.0 anchor is not Malformed: {anchor:?}");
         };
-        assert!(reason.contains("made by zwallet 0.1.0"), "{reason}");
+        // The cause alone, as every daemon reason: a remedy is the editor's to give.
+        assert_eq!(
+            reason,
+            "this whitelist was made by zwallet 0.1.0, whose key file is no longer used"
+        );
         let never: ListReader = Arc::new(|_, _| unreachable!("no list is read"));
         let f = fixture(never, GENEROUS, GENEROUS);
         let loaded = f.shared.load(&anchor).await;

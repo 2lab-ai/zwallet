@@ -3089,13 +3089,27 @@ fn a_whitelist_sealed_by_zwallet_0_1_0_is_refused_before_anything_stops_and_rese
     drop(lock);
     let stray = home.path().join("whitelist.key");
     fs::write(&stray, b"{\"version\":1}\n").unwrap();
-    let made_by = "made by zwallet 0.1.0";
+    let made_by = "this whitelist was made by zwallet 0.1.0, whose key file is no longer used";
+    let restored = "or a wallet.json restored from before the upgrade";
 
+    // `list --verify` names the cause, the other way it comes about, and the one recovery.
     let v = verify_list(&home);
     assert_eq!(v["verified"], false, "{v}");
-    assert!(v["reason"].as_str().unwrap_or("").contains(made_by), "{v}");
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(reason.contains(made_by), "{v}");
+    assert!(reason.contains(restored), "{v}");
+    assert_recovery_only(reason);
+    // W18: the daemon's view is untrusted, with the cause alone (no remedy for an agent).
+    let unlocked = home.unlock("10m");
+    let w = &unlocked["whitelist"];
+    assert_eq!(
+        (&w["verified"], &w["entries"]),
+        (&json!(false), &json!([])),
+        "{unlocked}"
+    );
+    assert_eq!(w["reason"], made_by, "{unlocked}");
+    let pid = unlocked["daemonPid"].as_i64().unwrap() as i32;
     // Every edit refuses before any daemon is stopped, and writes nothing.
-    let pid = home.unlock("10m")["daemonPid"].as_i64().unwrap() as i32;
     let before = files_of(&home);
     for args in [
         &["add", "bob", BOB, "--chains", "base"][..],
@@ -3103,7 +3117,8 @@ fn a_whitelist_sealed_by_zwallet_0_1_0_is_refused_before_anything_stops_and_rese
     ] {
         let msg = whitelist_edit(&home, args).err("VALIDATION_ERROR");
         assert!(msg.contains(made_by), "{args:?}: {msg}");
-        assert!(msg.contains("zwallet whitelist reset"), "{args:?}: {msg}");
+        assert!(msg.contains(restored), "{args:?}: {msg}");
+        assert_recovery_only(&msg);
         assert!(!msg.contains("already stopped"), "{args:?}: {msg}");
         assert_eq!(files_of(&home), before, "{args:?} wrote something");
     }

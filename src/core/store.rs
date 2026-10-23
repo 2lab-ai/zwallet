@@ -2052,6 +2052,30 @@ mod tests {
     }
 
     #[test]
+    fn a_wallet_salt_of_any_length_but_32_bytes_is_refused_before_the_kdf() {
+        // Every zwallet seals wallet.json with a 32-byte salt. Any other length is refused as
+        // corrupt before scrypt runs, so wallet.json's AES key can never be scrypt over the
+        // whitelist key's domain-prefixed salt (25 + 32 bytes).
+        let sealed = encrypt(&test_seed(), &empty(), PW, fast_kdf()).unwrap();
+        assert_eq!(hex::decode(&sealed.kdfparams.salt).unwrap().len(), 32);
+        let mut prefixed = b"zwallet/whitelist-key/v1\n".to_vec();
+        prefixed.extend_from_slice(&[7u8; 32]);
+        for salt in [vec![0u8; 16], vec![0u8; 31], vec![0u8; 33], prefixed] {
+            let mut bad = sealed.clone();
+            bad.kdfparams.salt = hex::encode(&salt);
+            let err = decrypt(&bad, PW).err().unwrap();
+            assert_eq!(err.code, ErrorCode::ValidationError, "{} bytes", salt.len());
+            assert!(
+                err.message.contains("bad salt or nonce length"),
+                "{} bytes: {}",
+                salt.len(),
+                err.message
+            );
+        }
+        decrypt(&sealed, PW).unwrap();
+    }
+
+    #[test]
     fn whitelist_anchor_rides_in_the_sealed_policy() {
         assert_eq!(WhitelistAnchor::from_policy(&empty()).unwrap(), None);
         assert_eq!(SealedWhitelist::from_policy(&empty()).unwrap(), None);
@@ -2091,15 +2115,10 @@ mod tests {
         assert_eq!(read.anchor, anchor);
         let err = read.salt().unwrap_err();
         assert_eq!(err.code, ErrorCode::ValidationError);
-        assert!(
-            err.message.contains("made by zwallet 0.1.0"),
-            "{}",
-            err.message
-        );
-        assert!(
-            err.message.contains(crate::core::whitelist::RESET_CAVEAT),
-            "{}",
-            err.message
+        // The cause only: the daemon shows it as is, and the editor adds the recovery.
+        assert_eq!(
+            err.message,
+            "this whitelist was made by zwallet 0.1.0, whose key file is no longer used"
         );
         assert_eq!(
             WhitelistAnchor::from_policy(&old).unwrap_err().message,
