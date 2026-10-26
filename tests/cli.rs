@@ -7,7 +7,7 @@ use common::{DaemonChild, FakeDaemon, Home, PW, pid_alive, run_in, wait_dead};
 use serde_json::json;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zwallet::chains;
 use zwallet::core::store;
 
@@ -3692,6 +3692,32 @@ fn have(tool: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Waits (bounded) until something accepts a connection on `home`'s `d.sock`, i.e. a listener is
+/// ready (not merely that the socket file exists: `bind` precedes `accept`, and under load the
+/// CLI could connect in between). Panics with a clear message if nothing answers in `limit`.
+fn wait_until_answering(home: &Home, limit: Duration) {
+    use std::io::Read;
+    let start = Instant::now();
+    let sock = home.sock();
+    loop {
+        if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&sock) {
+            // Complete the exchange the way the real client does: signal EOF, then drain the
+            // reply. A probe that connected and dropped would leave the listener writing to a
+            // gone peer (SIGPIPE), which can kill a simple test double mid-reply.
+            let _ = s.shutdown(std::net::Shutdown::Write);
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf);
+            return;
+        }
+        assert!(
+            start.elapsed() < limit,
+            "nothing is answering on {} within {limit:?}",
+            sock.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// A tiny attacker: binds `$1/d.sock` and answers every request with an ok reply carrying the
 /// POISON address, from its own code. Built with `cc` in the test, so its cdhash and executable
 /// are not zwallet's.
@@ -3702,8 +3728,10 @@ const ATTACKER_C: &str = r#"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 int main(int argc, char **argv) {
   if (argc < 3) return 2;              /* argv: daemon --home <HOME> */
+  signal(SIGPIPE, SIG_IGN);            /* a client that hangs up must not kill us mid-reply */
   char path[512];
   snprintf(path, sizeof path, "%s/d.sock", argv[argc - 1]);
   unlink(path);
@@ -3761,13 +3789,7 @@ fn s6_an_attacker_running_its_own_code_on_the_socket_is_not_verified() {
     let mut cmd = std::process::Command::new(&bin);
     cmd.arg("daemon").arg("--home").arg(&canonical);
     let mut child = cmd.spawn().expect("spawn attacker");
-    // Wait for the socket.
-    for _ in 0..200 {
-        if home.sock().exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until_answering(&home, Duration::from_secs(15));
     let want = if session_verifies() {
         "runs other code than this zwallet build"
     } else {
@@ -3783,6 +3805,173 @@ fn s6_an_attacker_running_its_own_code_on_the_socket_is_not_verified() {
             "{args:?}: {v}"
         );
     }
+    child.kill().ok();
+    child.wait().ok();
+}
+
+#[test]
+fn every_balance_aborts_on_a_cache_mismatch_even_with_good_rows() {
+    // `balance` without `--chain`, while unlocked: a cache entry the daemon's derivation
+    // contradicts aborts the whole command (VALIDATION_ERROR) before any RPC, even though the
+    // other chains' rows would succeed. A derive/transport failure would be a per-chain row
+    // instead; this is a tamper signal, not a read failure.
+    let home = Home::new();
+    home.create("main", &["--unlock", "30s"]);
+    // Poison one chain's cache only; every EVM chain shares the derived address, so ethereum still
+    // agrees and base does not.
+    home.edit_wallet(|v| {
+        v["keys"][0]["addresses"]["base"] = serde_json::json!(POISON);
+    });
+    // Every RPC points at a closed port: if the command did not abort first, those rows would be
+    // per-chain errors, never a VALIDATION_ERROR.
+    let closed: Vec<(String, String)> = chains::CHAINS
+        .iter()
+        .map(|c| (c.rpc_env_var(), "http://127.0.0.1:1".to_string()))
+        .collect();
+    let closed: Vec<(&str, &str)> = closed
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let msg = home
+        .run_env(&["balance", "--json"], &closed)
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains("does not match"), "{msg}");
+}
+
+/// The LC_UUID of a thin little-endian 64-bit Mach-O (what `cargo` and `cc` emit for the host on
+/// this machine). `None` if it is not one, or has no LC_UUID.
+#[cfg(target_os = "macos")]
+fn macho_uuid(bytes: &[u8]) -> Option<[u8; 16]> {
+    const MH_MAGIC_64: u32 = 0xFEED_FACF;
+    const LC_UUID: u32 = 0x1B;
+    let word = |o: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(bytes.get(o..o + 4)?.try_into().ok()?))
+    };
+    if word(0)? != MH_MAGIC_64 {
+        return None;
+    }
+    let ncmds = word(16)? as usize;
+    let mut off = 32; // sizeof(mach_header_64)
+    for _ in 0..ncmds {
+        let cmd = word(off)?;
+        let size = word(off + 4)? as usize;
+        if cmd == LC_UUID {
+            return bytes.get(off + 8..off + 24)?.try_into().ok();
+        }
+        off = off.checked_add(size)?;
+    }
+    None
+}
+
+/// Overwrites the LC_UUID of the thin Mach-O at `path` with `uuid`.
+#[cfg(target_os = "macos")]
+fn set_macho_uuid(path: &std::path::Path, uuid: [u8; 16]) {
+    const LC_UUID: u32 = 0x1B;
+    let mut bytes = fs::read(path).unwrap();
+    let word = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let ncmds = word(&bytes, 16) as usize;
+    let mut off = 32;
+    for _ in 0..ncmds {
+        let cmd = word(&bytes, off);
+        let size = word(&bytes, off + 4) as usize;
+        if cmd == LC_UUID {
+            bytes[off + 8..off + 24].copy_from_slice(&uuid);
+            fs::write(path, &bytes).unwrap();
+            return;
+        }
+        off += size;
+    }
+    panic!("no LC_UUID in {}", path.display());
+}
+
+/// The round-9 exploit, end to end: an attacker's own code that (a) carries the genuine binary's
+/// LC_UUID and (b) runs from a path later symlinked to the genuine binary, so the old macOS
+/// identity check (`proc_pidpath` + dev/ino + `LOCAL_PEERUUID`) is fully satisfied. The cdhash the
+/// kernel validates against the attacker's own code pages still differs, so the current check
+/// reports `verified: false`. The RED-critical assertions are the verdict only (no string): at
+/// 3005dba this test reports `verified: true`, `verifiedBy: "session"`.
+#[cfg(target_os = "macos")]
+#[test]
+fn s7_own_code_behind_a_symlink_to_zwallet_with_its_uuid_is_not_verified() {
+    if !(have("cc") && have("codesign")) {
+        eprintln!("skipping s7: cc or codesign not found");
+        return;
+    }
+    let genuine = std::path::PathBuf::from(env!("CARGO_BIN_EXE_zwallet"));
+    let genuine_uuid = macho_uuid(&fs::read(&genuine).unwrap()).expect("genuine LC_UUID");
+
+    let home = Home::new();
+    home.create("main", &[]);
+    // The attacker answers its own (poisoned) address; the cache is set to it so the daemon-vs-cache
+    // check does not short-circuit before the identity verdict.
+    poison_cache(&home);
+
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let src = dir.path().join("attacker.c");
+    let p = dir.path().join("P");
+    fs::write(&src, ATTACKER_C).unwrap();
+    let cc = std::process::Command::new("cc")
+        .arg("-o")
+        .arg(&p)
+        .arg(&src)
+        .output()
+        .expect("run cc");
+    assert!(
+        cc.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+    // Forge the genuine LC_UUID into the attacker, then ad-hoc re-sign (arm64 will not run a
+    // modified Mach-O otherwise). The re-sign must not disturb the forged UUID.
+    set_macho_uuid(&p, genuine_uuid);
+    let signed = std::process::Command::new("codesign")
+        .args(["-f", "-s", "-"])
+        .arg(&p)
+        .output()
+        .expect("run codesign");
+    assert!(
+        signed.status.success(),
+        "codesign: {}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    assert_eq!(
+        macho_uuid(&fs::read(&p).unwrap()),
+        Some(genuine_uuid),
+        "re-signing changed the attacker's LC_UUID"
+    );
+
+    // Run the attacker from P with the daemon argv (so it is in `daemon_pids`), then replace P
+    // with a symlink to the genuine binary so `proc_pidpath` + stat resolve to genuine's dev/ino.
+    let canonical = fs::canonicalize(home.path()).unwrap();
+    let mut child = std::process::Command::new(&p)
+        .arg("daemon")
+        .arg("--home")
+        .arg(&canonical)
+        .spawn()
+        .expect("spawn attacker from P");
+    wait_until_answering(&home, Duration::from_secs(15));
+    fs::remove_file(&p).unwrap();
+    std::os::unix::fs::symlink(&genuine, &p).unwrap();
+
+    // RED-critical: the verdict only, no warning string.
+    for args in [&["address", "--json"][..], &["addresses", "--json"]] {
+        let v = home.run(args).ok();
+        assert_eq!(shown_address(&v), POISON, "{args:?}: {v}");
+        assert_eq!(v["verified"], false, "{args:?}: {v}");
+        assert!(v.get("verifiedBy").is_none(), "{args:?}: {v}");
+    }
+    // At HEAD the warning names the mismatch (checked here, not in the RED-critical block).
+    let v = home.run(&["address", "--json"]).ok();
+    assert!(
+        v["warning"]
+            .as_str()
+            .unwrap_or("")
+            .contains("runs other code than this zwallet build"),
+        "{v}"
+    );
     child.kill().ok();
     child.wait().ok();
 }
