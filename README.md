@@ -152,8 +152,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   lets through only printable ASCII (`0x20`–`0x7E`), the newline and `₮` (U+20AE, in the
   registry's `USD₮0`); any other character — `\r`, tab, ESC, DEL, C1, bidi controls, line
   separators, block and box-drawing glyphs, emoji, accented letters — is written as a `\u{…}`
-  escape. The one exception is zwallet's own QR code of a verified address, printed after the
-  text. `--json` is printable ASCII too: every other character inside a string is a JSON
+  escape. Two writes do not go through it: zwallet's own QR code of a verified address, printed
+  after the text, and clap's help, version, usage and argument errors (`--help`, `--version`, a
+  mistyped command line without `--json`), which repeat only the command line the invoker typed
+  (no argument is read from the environment). `--json` is printable ASCII too: every other character inside a string is a JSON
   `\uXXXX` escape (two for a character above U+FFFF), so a JSON parser reads back the exact
   string.
 
@@ -170,15 +172,36 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - a cached address or an answer that is not an address: 64; an executable path in a warning:
     200;
   - `whitelist.json` in a message: each value 64, a reason 512; in `whitelist list`, see below;
-  - the send journal: each value 64, at most 5 entries per message.
+  - the send journal: each value 64, at most 5 entries per message; its values are escaped like
+    every value from a file, `₮` included (a journal line is anyone of this user's to write).
 
-  A QR code holding an Ethereum address needs at least version 2: 25 × 25 = 625 modules without
-  a quiet zone. At one character per module that is more than one source's 512, so no single
-  source can draw one in printable ASCII. What a source can still do inside its budget is pad to
-  the terminal's width so its text starts a visual row at column 0 (soft wrap), and on a terminal
-  exactly 21 columns wide, draw a version-1 code (441 modules, at most 17 bytes: a short link,
-  not an address) with no quiet zone. Both are the capability a same-user process already has by
-  writing to the terminal directly (**Known limits**), so they are documented, not mitigated.
+  A QR code holding an Ethereum address needs at least version 2: a block of 25 × 25 = 625
+  modules without a quiet zone, which at one character per module is 25 rows of 25 cells from
+  one source, 93 of them light (the three finder patterns' light rings and the separators around
+  them). A source bounded to 512 characters cannot fill one. These exceed 512 in one command:
+  - `whitelist list`: a list the seal verified (`--verify`) shows up to 100 entries, but it is the
+    human's own, signed by the key only the password derives. Any other list shows its entry
+    lines within one 512-character budget.
+  - its fee caps line: at most 16 caps on one line, the file giving only each amount's digits and
+    one point; the chain keys, symbols, commas and spaces are zwallet's. The line has fewer than
+    93 blank or point-like cells, so it cannot hold a code's light modules.
+  - the send journal in a message: at most 5 entries on one line, each with 4 values of at most
+    64 characters (the time, the kind, the amount, the recipient) and a hash that is 66 hex
+    characters (shown 3 times: with its lookup command and link) or `?`, with zwallet's own words
+    between one entry's values and the next's.
+  - `status` from a process on `d.sock`: its `expiresAt` (64), its whitelist (512) and, from
+    another process, its executable path in the warning (200), each on its own labelled line.
+  - a relayed error from another process: its message (512) and its executable path (64).
+  - `call`: the result (512) and the returned bytes as hex (512) on two labelled lines; a decode
+    error: the hex (256) and the decoder's message (512).
+
+  What a source can still do inside these bounds is pad to the terminal's width so that its text
+  starts a visual row at column 0 (soft wrap). On a terminal exactly 21 columns wide, a
+  512-character budget fits a version-1 code (441 modules, at most 17 bytes: a short link, not an
+  address) with no quiet zone. The journal's runs of text, with zwallet's words between them,
+  have not been shown unable to tile a code around those words on a wide terminal. All of this is
+  what a same-user process can already do by writing to the terminal directly (**Known limits**),
+  so it is documented, not mitigated.
 
   One exception, which is zwallet's own text: a registry token whose `symbol()` is exactly the
   symbol the registry records shows it as is (USDT0's `USD₮0`); any other symbol, from that
@@ -300,10 +323,11 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false`. Human
     output shows a field of an entry as it is only when it passes the check `add` applies to it
     (the nickname rule, `address` or `contract`, `0x` and 40 hex digits, a known chain key or
-    `*`, `0x` and 8 hex digits), else `<invalid>`; `gen` is a number or `<invalid>`; at most 100
-    entries and 16 chains, selectors and fee caps each. A file that cannot be read as a list
-    shows a count and its entries within one 512-character budget. `--json` keeps every entry,
-    its strings escaped.
+    `*`, `0x` and 8 hex digits), else `<invalid>`; `gen` is a number or `<invalid>`; at most 16
+    chains, selectors and fee caps each. A list that is not `verified: true` shows its entry lines
+    within one 512-character budget (about 5 entries), then "... N more; `zwallet whitelist list
+    --verify` shows them all"; a file that cannot be read as a list is also counted. A verified
+    list (`--verify`) shows up to 100 entries. `--json` keeps every entry, its strings escaped.
     `--verify` (password) checks it against the seal: `verified: true` with
     `source` and `sealedGen`, or `verified: false` with the `reason` (with no whitelist sealed
     but a list file there, why every edit refuses and what to do, not the first `add`; for a
