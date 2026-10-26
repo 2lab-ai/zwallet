@@ -574,6 +574,46 @@ impl Drop for FakeDaemon {
     }
 }
 
+/// Whether `c` must never reach a terminal raw: Cc (C0, DEL, C1), Cf (bidi overrides and
+/// isolates, zero-width characters, the BOM, …), Zl or Zp. The tests' own table, independent of
+/// how zwallet escapes.
+pub fn terminal_unsafe(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c as u32,
+            0x00AD
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x180E
+                | 0x200B..=0x200F
+                | 0x2028..=0x202E
+                | 0x2060..=0x2064
+                | 0x2066..=0x206F
+                | 0xFEFF
+                | 0xFFF9..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0001
+                | 0xE0020..=0xE007F
+        )
+}
+
+/// The characters in `text` that must never reach a terminal raw ([`terminal_unsafe`]), other
+/// than the line feeds that separate the lines of zwallet's own output. One assertion for every
+/// test of text from outside.
+pub fn unsafe_chars(text: &str) -> Vec<char> {
+    text.chars()
+        .filter(|&c| c != '\n' && terminal_unsafe(c))
+        .collect()
+}
+
 /// A pseudo-terminal pair: `(master, slave)`.
 pub fn openpty() -> (File, OwnedFd) {
     let (mut master, mut slave) = (-1, -1);

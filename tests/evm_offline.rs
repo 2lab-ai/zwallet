@@ -3023,7 +3023,7 @@ fn daemon_prefix() -> &'static str {
     if cfg!(target_os = "macos") {
         ""
     } else {
-        "the key daemon reported: "
+        "the process answering on the key daemon socket reported: "
     }
 }
 

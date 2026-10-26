@@ -3979,10 +3979,11 @@ fn a_mismatch_answered_by_an_impostor_aborts_and_names_it() {
     drop(fake);
 }
 
-/// Whether `text` holds a raw ESC or carriage return (in a value that should have been escaped;
-/// a raw line feed is checked on its own where the text is one line).
-fn has_raw_control(text: &str) -> bool {
-    text.contains('\u{1b}') || text.contains('\r')
+/// Whether `text` holds a character that must never reach a terminal raw (control, format, line
+/// or paragraph separator: [`common::unsafe_chars`]); a raw line feed is checked on its own where
+/// the text is one line.
+fn has_unsafe_char(text: &str) -> bool {
+    !common::unsafe_chars(text).is_empty()
 }
 
 #[test]
@@ -4030,7 +4031,7 @@ fn an_answer_that_is_no_address_is_rejected_and_shown_escaped() {
             "{args:?}: the impostor is named: {v}"
         );
         assert!(
-            !has_raw_control(msg) && !msg.contains('\n'),
+            !has_unsafe_char(msg) && !msg.contains('\n'),
             "{args:?}: {msg:?}"
         );
         assert!(
@@ -4042,7 +4043,7 @@ fn an_answer_that_is_no_address_is_rejected_and_shown_escaped() {
     let human = home.run(&["address"]);
     assert_eq!(human.code, 1);
     assert!(human.stdout.is_empty(), "{:?}", human.stdout);
-    assert!(!has_raw_control(&human.stderr), "{:?}", human.stderr);
+    assert!(!has_unsafe_char(&human.stderr), "{:?}", human.stderr);
     assert_eq!(
         human.stderr.trim_end().lines().count(),
         1,
@@ -4078,13 +4079,13 @@ fn a_cached_value_that_is_no_address_is_rejected_and_shown_escaped() {
                 "unlocked {unlocked} {args:?}: {msg}"
             );
             assert!(
-                !has_raw_control(&msg) && !msg.contains('\n'),
+                !has_unsafe_char(&msg) && !msg.contains('\n'),
                 "{args:?}: {msg:?}"
             );
         }
         let human = home.run(&["address"]);
         assert_eq!(human.code, 1);
-        assert!(!has_raw_control(&human.stderr), "{:?}", human.stderr);
+        assert!(!has_unsafe_char(&human.stderr), "{:?}", human.stderr);
     }
 }
 
@@ -4137,10 +4138,10 @@ fn an_impostor_executable_path_is_shown_escaped() {
     assert_eq!(v["verified"], false, "{v}");
     let w = v["warning"].as_str().unwrap_or("");
     assert!(w.contains("zw\\u{1b}[31mallet\\nfake line"), "{w:?}");
-    assert!(!has_raw_control(w) && !w.contains('\n'), "{w:?}");
+    assert!(!has_unsafe_char(w) && !w.contains('\n'), "{w:?}");
     let human = home.run(&["address"]);
     assert_eq!(human.code, 0, "{}", human.stderr);
-    assert!(!has_raw_control(&human.stdout), "{:?}", human.stdout);
+    assert!(!has_unsafe_char(&human.stdout), "{:?}", human.stdout);
     let warning_lines: Vec<&str> = human
         .stdout
         .lines()
@@ -4408,7 +4409,7 @@ fn an_impostor_error_reply_is_named_escaped_and_on_one_line() {
     assert_eq!(out.code, 1, "{}", out.stdout);
     let v = out.json();
     let msg = v["error"].as_str().unwrap_or("");
-    assert!(!has_raw_control(msg) && !msg.contains('\n'), "{msg:?}");
+    assert!(!has_unsafe_char(msg) && !msg.contains('\n'), "{msg:?}");
     assert!(
         msg.starts_with(&format!(
             "the process answering on the key daemon socket (pid {})",
@@ -4425,7 +4426,7 @@ fn an_impostor_error_reply_is_named_escaped_and_on_one_line() {
     let human = home.run(&["address"]);
     assert_eq!(human.code, 1);
     assert!(human.stdout.is_empty(), "{:?}", human.stdout);
-    assert!(!has_raw_control(&human.stderr), "{:?}", human.stderr);
+    assert!(!has_unsafe_char(&human.stderr), "{:?}", human.stderr);
     assert_eq!(human.stderr.lines().count(), 1, "{:?}", human.stderr);
     assert!(!human.stderr.contains("command:"), "{:?}", human.stderr);
     drop(fake);
@@ -4449,10 +4450,10 @@ fn a_key_name_with_a_control_character_is_refused() {
         for args in [&["address", "--json"][..], &["list", "--json"]] {
             let msg = home.run(args).err("VALIDATION_ERROR");
             assert!(msg.contains("invalid key name"), "{edit} {args:?}: {msg}");
-            assert!(!has_raw_control(&msg) && !msg.contains('\n'), "{msg:?}");
+            assert!(!has_unsafe_char(&msg) && !msg.contains('\n'), "{msg:?}");
         }
         let human = home.run(&["list"]);
-        assert!(!has_raw_control(&human.stderr), "{:?}", human.stderr);
+        assert!(!has_unsafe_char(&human.stderr), "{:?}", human.stderr);
     }
 }
 
@@ -4483,7 +4484,7 @@ fn status_shows_an_impostor_expiry_and_whitelist_escaped() {
     let v = home.run(&["status", "--json"]).ok();
     let expires = v["expiresAt"].as_str().unwrap_or("");
     assert!(
-        !has_raw_control(expires) && expires.contains("\\u{1b}[2J"),
+        !has_unsafe_char(expires) && expires.contains("\\u{1b}[2J"),
         "{v}"
     );
     let entries = v["whitelist"]["entries"].to_string();
@@ -4553,7 +4554,7 @@ fn address_verify_repairs_a_tampered_cache_and_unlock_works_again() {
         assert_eq!((&eth["key"], &eth["now"]), (&json!("main"), &json!(addr)));
         let shown_was = eth["was"].as_str().unwrap();
         assert!(
-            !has_raw_control(shown_was) && !shown_was.contains('\n'),
+            !has_unsafe_char(shown_was) && !shown_was.contains('\n'),
             "{v}"
         );
         if !garbage {
@@ -4577,7 +4578,7 @@ fn address_verify_repairs_a_tampered_cache_and_unlock_works_again() {
             "{}",
             human.stdout
         );
-        assert!(!has_raw_control(&human.stdout), "{:?}", human.stdout);
+        assert!(!has_unsafe_char(&human.stdout), "{:?}", human.stdout);
         // Repaired once: the next check finds nothing, and unlock works.
         let again = home
             .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
@@ -4629,7 +4630,7 @@ fn rpc_text_reaches_human_output_escaped_and_on_one_line() {
     args.extend([failing.as_str(), "--json"]);
     let msg = nowallet.run(&args).err("RPC_ERROR");
     assert!(msg.starts_with("eth_call failed: "), "{msg}");
-    assert!(!has_raw_control(&msg) && !msg.contains('\n'), "{msg:?}");
+    assert!(!has_unsafe_char(&msg) && !msg.contains('\n'), "{msg:?}");
     assert!(
         !msg.contains('\u{9b}') && !msg.contains('\u{202e}'),
         "{msg:?}"
@@ -4641,7 +4642,7 @@ fn rpc_text_reaches_human_output_escaped_and_on_one_line() {
     args.pop();
     let human = nowallet.run(&args);
     assert_eq!(human.code, 1);
-    assert!(!has_raw_control(&human.stderr), "{:?}", human.stderr);
+    assert!(!has_unsafe_char(&human.stderr), "{:?}", human.stderr);
     assert_eq!(human.stderr.lines().count(), 1, "{:?}", human.stderr);
     // 2. A token whose `symbol()` is a terminal escape.
     let home = Home::new();
@@ -4673,13 +4674,13 @@ fn rpc_text_reaches_human_output_escaped_and_on_one_line() {
     let v = home.run(&json_args).ok();
     let sym = v["symbol"].as_str().unwrap_or("");
     assert!(
-        !has_raw_control(sym) && !sym.contains('\n') && !sym.contains('\u{202e}'),
+        !has_unsafe_char(sym) && !sym.contains('\n') && !sym.contains('\u{202e}'),
         "{v}"
     );
     assert!(sym.starts_with("\\r\\u{1b}[2Kbalance"), "{v}");
     let human = home.run(&b);
     assert_eq!(human.code, 0, "{}", human.stderr);
-    assert!(!has_raw_control(&human.stdout), "{:?}", human.stdout);
+    assert!(!has_unsafe_char(&human.stdout), "{:?}", human.stdout);
     assert!(
         !human
             .stdout
@@ -4717,7 +4718,7 @@ fn a_call_string_result_is_faithful_in_json_and_escaped_on_the_terminal() {
     assert_eq!(v["result"], json!([FORGED]), "{v}");
     let human = home.run(&args);
     assert_eq!(human.code, 0, "{}", human.stderr);
-    assert!(!has_raw_control(&human.stdout), "{:?}", human.stdout);
+    assert!(!has_unsafe_char(&human.stdout), "{:?}", human.stdout);
     assert!(!human.stdout.contains('\u{9b}') && !human.stdout.contains('\u{202e}'));
     let result: Vec<&str> = human
         .stdout
@@ -4733,4 +4734,218 @@ fn a_call_string_result_is_faithful_in_json_and_escaped_on_the_terminal() {
         "{:?}",
         human.stdout
     );
+}
+
+/// Kilobytes of padding, then rows of half blocks, then a fake label: what a sender writes to
+/// draw a QR code of its own address by letting the terminal soft-wrap one long line.
+fn qr_by_wrapping() -> String {
+    let row = "\u{2588}\u{2580}\u{2584} ".repeat(20);
+    format!(
+        "{}{}scan to send to 0x000000000000000000000000000000000000dEaD",
+        " ".repeat(4000),
+        format!("{row}\n").repeat(30)
+    )
+}
+
+/// Whether `text` holds a block-drawing character (Block Elements, Geometric Shapes, Braille:
+/// the stuff of a QR code).
+fn draws_blocks(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c as u32, 0x2580..=0x25FF | 0x2800..=0x28FF))
+}
+
+#[test]
+fn a_long_relayed_error_is_cut_and_draws_nothing_and_its_code_shows() {
+    // An impostor's ok:false reply padded to draw a QR code by soft-wrap: the message and its
+    // detail come out cut and with no block character, on one line ending in the code.
+    let home = Home::new();
+    home.create("main", &[]);
+    let payload = qr_by_wrapping();
+    let fake = FakeDaemon::replying(
+        &home.sock(),
+        serde_json::json!({
+            "v": 2, "ok": false, "errorCode": "RPC_ERROR", "error": payload,
+            "details": { "command": payload },
+        }),
+    );
+    let v = home.run(&["address", "--json"]).json();
+    let msg = v["error"].as_str().unwrap_or("");
+    assert!(
+        !draws_blocks(msg) && !has_unsafe_char(msg),
+        "{:?}",
+        &msg[..200]
+    );
+    assert!(msg.chars().count() < 1200, "{}", msg.chars().count());
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 1);
+    let line = human.stderr.trim_end();
+    assert_eq!(line.lines().count(), 1, "{:?}", &line[..200]);
+    assert!(
+        line.starts_with("error: ") && line.ends_with(" [RPC_ERROR]"),
+        "{:?}",
+        &line[line.len() - 80..]
+    );
+    assert!(line.chars().count() < 1250, "{}", line.chars().count());
+    assert!(!draws_blocks(line), "{:?}", &line[..200]);
+    drop(fake);
+}
+
+#[test]
+fn a_long_rpc_error_and_call_string_are_cut_on_the_terminal() {
+    // The same from an RPC endpoint: its error text is cut where the error is built; a `call`
+    // string is cut on the terminal and kept whole in `--json`.
+    let payload = qr_by_wrapping();
+    let failing = common::tiny_rpc_reply(move |method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        _ => Err(json!({ "code": -32000, "message": qr_by_wrapping() })),
+    });
+    let home = Home::new();
+    let token = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    let call = |rpc: &str, json_out: bool| {
+        let mut args = vec![
+            "call",
+            "--chain",
+            "ethereum",
+            "--to",
+            token,
+            "--sig",
+            "name()(string)",
+            "--rpc",
+            rpc,
+        ];
+        if json_out {
+            args.push("--json");
+        }
+        home.run(&args)
+    };
+    let msg = call(&failing, true).err("RPC_ERROR");
+    assert!(msg.chars().count() < 700, "{}", msg.chars().count());
+    assert!(!draws_blocks(&msg), "{:?}", &msg[..200]);
+    let human = call(&failing, false);
+    assert_eq!(human.stderr.trim_end().lines().count(), 1);
+    assert!(human.stderr.trim_end().ends_with(" [RPC_ERROR]"));
+    let encoded = abi_string(&payload);
+    let node = common::tiny_rpc_reply(move |method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        "eth_call" => Ok(json!(encoded.clone())),
+        _ => Ok(json!("0x0")),
+    });
+    let v = call(&node, true).ok();
+    assert_eq!(v["result"], json!([payload]), "--json is exact");
+    let human = call(&node, false);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    let result: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("result: "))
+        .collect();
+    assert_eq!(result.len(), 1, "{:?}", &human.stdout[..200]);
+    assert!(
+        result[0].chars().count() < 700,
+        "{}",
+        result[0].chars().count()
+    );
+    assert!(!draws_blocks(&human.stdout), "{:?}", &human.stdout[..200]);
+}
+
+#[test]
+fn unlock_and_create_show_a_whitelist_reason_from_the_file_escaped() {
+    // whitelist.json is anyone's to edit: a key the parser does not know is quoted by its message,
+    // which the daemon reports as the list's reason, and `unlock` and `create --unlock` show it.
+    // A bidi override, an isolate and a line separator there come out escaped.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow(
+        "alice",
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        &["base"],
+    );
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    v.as_object_mut()
+        .unwrap()
+        .insert("ok\u{202e}evil\u{2066}\u{2028}\u{1b}[2J".into(), json!(1));
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let pw = format!("{PW}\n");
+    for args in [
+        &["unlock", "10m", "--password-stdin", "--json"][..],
+        &[
+            "create",
+            "b",
+            "--unlock",
+            "10m",
+            "--password-stdin",
+            "--json",
+        ],
+    ] {
+        let out = home.run_stdin(args, &pw);
+        assert_eq!(out.code, 0, "{args:?}: {}", out.stdout);
+        let w = out.json()["whitelist"].clone();
+        assert_eq!(w["verified"], false, "{args:?}: {w}");
+        let reason = w["reason"].as_str().unwrap_or("");
+        assert!(
+            reason.contains("evil"),
+            "{args:?}: the key is still named: {reason}"
+        );
+        assert!(!has_unsafe_char(reason), "{args:?}: {reason:?}");
+        home.stop_daemons();
+    }
+    let human = home.run_stdin(&["unlock", "10m", "--password-stdin"], &pw);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(!has_unsafe_char(&human.stdout), "{:?}", human.stdout);
+    home.stop_daemons();
+}
+
+#[test]
+fn a_repair_keeps_the_sealed_whitelist_and_the_running_session() {
+    // The repair rewrites metadata only: the sealed master (with its whitelist anchor) is
+    // untouched, so a session running meanwhile goes on and the whitelist still verifies.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow(
+        "alice",
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        &["base"],
+    );
+    let pid = home.unlock("10m")["daemonPid"].clone();
+    poison_cache(&home);
+    let pw = format!("{PW}\n");
+    let v = home
+        .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
+        .ok();
+    assert!(v["repaired"].is_array(), "{v}");
+    // The human form marks the old value.
+    poison_cache(&home);
+    let human = home.run_stdin(&["address", "--verify", "--password-stdin"], &pw);
+    assert!(
+        human
+            .stdout
+            .contains(&format!("was {POISON} (do not fund), now 0x")),
+        "{}",
+        human.stdout
+    );
+    let s = home.run(&["status", "--json"]).ok();
+    assert_eq!(
+        (&s["locked"], &s["daemonPid"]),
+        (&json!(false), &pid),
+        "{s}"
+    );
+    assert_eq!(
+        (&s["whitelist"]["verified"], &s["whitelist"]["gen"]),
+        (&json!(true), &json!(1)),
+        "{s}"
+    );
+    let w = home
+        .run_stdin(
+            &[
+                "whitelist",
+                "list",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
+            &pw,
+        )
+        .ok();
+    assert_eq!(w["verified"], true, "{w}");
 }
