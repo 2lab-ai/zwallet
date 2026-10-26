@@ -3692,26 +3692,50 @@ fn have(tool: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Waits (bounded) until something accepts a connection on `home`'s `d.sock`, i.e. a listener is
-/// ready (not merely that the socket file exists: `bind` precedes `accept`, and under load the
-/// CLI could connect in between). Panics with a clear message if nothing answers in `limit`.
+/// A child process killed and reaped when this drops, so a failing assertion never leaves a test
+/// double's `accept()` loop running (as [`DaemonChild`] does for a daemon).
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Waits (bounded by `limit`) until the listener on `home`'s `d.sock` answers a request with a
+/// non-empty reply. The socket file exists from `bind`, but a connect before `listen` is refused
+/// (ECONNREFUSED), so existence alone is not readiness. Each attempt is one full exchange, as the
+/// CLI does it (a status request, EOF, then the reply read with a timeout): a probe that hung up
+/// early would leave the listener writing to a gone peer (SIGPIPE), and one that read without a
+/// timeout would hang on a listener that accepts but never replies. A refused connect, an error,
+/// a timeout or an empty reply is retried; after `limit` this panics saying which it last saw.
 fn wait_until_answering(home: &Home, limit: Duration) {
-    use std::io::Read;
+    use std::io::{Read, Write};
     let start = Instant::now();
     let sock = home.sock();
     loop {
-        if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&sock) {
-            // Complete the exchange the way the real client does: signal EOF, then drain the
-            // reply. A probe that connected and dropped would leave the listener writing to a
-            // gone peer (SIGPIPE), which can kill a simple test double mid-reply.
-            let _ = s.shutdown(std::net::Shutdown::Write);
-            let mut buf = Vec::new();
-            let _ = s.read_to_end(&mut buf);
-            return;
-        }
+        let last = match std::os::unix::net::UnixStream::connect(&sock) {
+            Err(e) => format!("connect: {e}"),
+            Ok(mut s) => {
+                let exchange = s
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .and_then(|()| s.write_all(b"{\"op\":\"status\"}\n"))
+                    .and_then(|()| s.shutdown(std::net::Shutdown::Write))
+                    .and_then(|()| {
+                        let mut buf = Vec::new();
+                        s.read_to_end(&mut buf).map(|_| buf)
+                    });
+                match exchange {
+                    Ok(reply) if !reply.is_empty() => return,
+                    Ok(_) => "an empty reply".to_string(),
+                    Err(e) => format!("exchange: {e}"),
+                }
+            }
+        };
         assert!(
             start.elapsed() < limit,
-            "nothing is answering on {} within {limit:?}",
+            "nothing answered on {} within {limit:?}; last attempt: {last}",
             sock.display()
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -3788,7 +3812,7 @@ fn s6_an_attacker_running_its_own_code_on_the_socket_is_not_verified() {
     let canonical = fs::canonicalize(home.path()).unwrap();
     let mut cmd = std::process::Command::new(&bin);
     cmd.arg("daemon").arg("--home").arg(&canonical);
-    let mut child = cmd.spawn().expect("spawn attacker");
+    let _attacker = KillOnDrop(cmd.spawn().expect("spawn attacker"));
     wait_until_answering(&home, Duration::from_secs(15));
     let want = if session_verifies() {
         "runs other code than this zwallet build"
@@ -3805,25 +3829,78 @@ fn s6_an_attacker_running_its_own_code_on_the_socket_is_not_verified() {
             "{args:?}: {v}"
         );
     }
-    child.kill().ok();
-    child.wait().ok();
 }
 
 #[test]
 fn every_balance_aborts_on_a_cache_mismatch_even_with_good_rows() {
     // `balance` without `--chain`, while unlocked: a cache entry the daemon's derivation
-    // contradicts aborts the whole command (VALIDATION_ERROR) before any RPC, even though the
-    // other chains' rows would succeed. A derive/transport failure would be a per-chain row
-    // instead; this is a tamper signal, not a read failure.
+    // contradicts aborts the whole command (VALIDATION_ERROR) before any RPC, even though another
+    // chain's row would be good. Without the abort that entry would be one error row among good
+    // ones and the command would exit 0; this is a tamper signal, not a read failure.
     let home = Home::new();
     home.create("main", &["--unlock", "30s"]);
-    // Poison one chain's cache only; every EVM chain shares the derived address, so ethereum still
-    // agrees and base does not.
+    // Poison base's cache only; every EVM chain shares the derived address, so ethereum still
+    // agrees.
     home.edit_wallet(|v| {
         v["keys"][0]["addresses"]["base"] = serde_json::json!(POISON);
     });
-    // Every RPC points at a closed port: if the command did not abort first, those rows would be
-    // per-chain errors, never a VALIDATION_ERROR.
+    // Ethereum answers from a node (a good row: chain id 1, zero balances); every other chain
+    // points at a closed port.
+    let node = common::tiny_rpc(|method| match method {
+        "eth_chainId" => json!("0x1"),
+        "eth_call" => json!(format!("0x{:064x}", 0)),
+        _ => json!("0x0"),
+    });
+    let env: Vec<(String, String)> = chains::CHAINS
+        .iter()
+        .map(|c| {
+            let url = if c.key == "ethereum" {
+                node.clone()
+            } else {
+                "http://127.0.0.1:1".to_string()
+            };
+            (c.rpc_env_var(), url)
+        })
+        .collect();
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let out = home.run_env(&["balance", "--json"], &env);
+    assert_eq!(
+        out.code, 1,
+        "expected the whole command to abort on the mismatch; stdout {}",
+        out.stdout
+    );
+    let v = out.json();
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
+    assert!(
+        v["error"].as_str().unwrap_or("").contains("does not match"),
+        "{v}"
+    );
+    // The good row really is good: the same node serves `balance --chain ethereum`.
+    let one = home
+        .run(&["balance", "--chain", "ethereum", "--rpc", &node, "--json"])
+        .ok();
+    assert_eq!(one["balance"], "0", "{one}");
+}
+
+#[test]
+fn a_mismatch_answered_by_an_impostor_aborts_and_names_it() {
+    // An impostor on d.sock answers an address the cache contradicts: the command still aborts
+    // with VALIDATION_ERROR, and the error names the impostor (in the message and as `warning`).
+    let home = Home::new();
+    home.create("main", &[]);
+    let fake = FakeDaemon::answering(
+        &home.sock(),
+        serde_json::json!({
+            "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z",
+            "chain": "ethereum", "index": 0, "active": "main", "address": POISON,
+        }),
+    );
+    let pid = format!("(pid {})", std::process::id());
+    let want = if session_verifies() {
+        "runs other code than this zwallet build"
+    } else {
+        "is not this zwallet build"
+    };
     let closed: Vec<(String, String)> = chains::CHAINS
         .iter()
         .map(|c| (c.rpc_env_var(), "http://127.0.0.1:1".to_string()))
@@ -3832,10 +3909,20 @@ fn every_balance_aborts_on_a_cache_mismatch_even_with_good_rows() {
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let msg = home
-        .run_env(&["balance", "--json"], &closed)
-        .err("VALIDATION_ERROR");
-    assert!(msg.contains("does not match"), "{msg}");
+    for args in [&["balance", "--json"][..], &["address", "--json"]] {
+        let out = home.run_env(args, &closed);
+        assert_eq!(out.code, 1, "{args:?}: {}", out.stdout);
+        let v = out.json();
+        assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{args:?}: {v}");
+        let msg = v["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("does not match") && msg.contains(want) && msg.contains(&pid),
+            "{args:?}: {v}"
+        );
+        let w = v["warning"].as_str().unwrap_or("");
+        assert!(w.contains(want) && w.contains(&pid), "{args:?}: {v}");
+    }
+    drop(fake);
 }
 
 /// The LC_UUID of a thin little-endian 64-bit Mach-O (what `cargo` and `cc` emit for the host on
@@ -3893,10 +3980,12 @@ fn set_macho_uuid(path: &std::path::Path, uuid: [u8; 16]) {
 #[cfg(target_os = "macos")]
 #[test]
 fn s7_own_code_behind_a_symlink_to_zwallet_with_its_uuid_is_not_verified() {
-    if !(have("cc") && have("codesign")) {
-        eprintln!("skipping s7: cc or codesign not found");
-        return;
-    }
+    // The only test that reproduces the round-9 exploit: on macOS it must run, never skip.
+    // `cc` and `codesign` both ship with the Xcode Command Line Tools, which rustc needs anyway.
+    assert!(
+        have("cc") && have("codesign"),
+        "s7 needs cc and codesign (Xcode Command Line Tools) to reproduce the round-9 exploit"
+    );
     let genuine = std::path::PathBuf::from(env!("CARGO_BIN_EXE_zwallet"));
     let genuine_uuid = macho_uuid(&fs::read(&genuine).unwrap()).expect("genuine LC_UUID");
 
@@ -3946,12 +4035,14 @@ fn s7_own_code_behind_a_symlink_to_zwallet_with_its_uuid_is_not_verified() {
     // Run the attacker from P with the daemon argv (so it is in `daemon_pids`), then replace P
     // with a symlink to the genuine binary so `proc_pidpath` + stat resolve to genuine's dev/ino.
     let canonical = fs::canonicalize(home.path()).unwrap();
-    let mut child = std::process::Command::new(&p)
-        .arg("daemon")
-        .arg("--home")
-        .arg(&canonical)
-        .spawn()
-        .expect("spawn attacker from P");
+    let _attacker = KillOnDrop(
+        std::process::Command::new(&p)
+            .arg("daemon")
+            .arg("--home")
+            .arg(&canonical)
+            .spawn()
+            .expect("spawn attacker from P"),
+    );
     wait_until_answering(&home, Duration::from_secs(15));
     fs::remove_file(&p).unwrap();
     std::os::unix::fs::symlink(&genuine, &p).unwrap();
@@ -3972,6 +4063,4 @@ fn s7_own_code_behind_a_symlink_to_zwallet_with_its_uuid_is_not_verified() {
             .contains("runs other code than this zwallet build"),
         "{v}"
     );
-    child.kill().ok();
-    child.wait().ok();
 }
