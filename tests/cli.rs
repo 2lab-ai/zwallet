@@ -4520,13 +4520,23 @@ fn address_verify_repairs_a_tampered_cache_and_unlock_works_again() {
             poison_cache(&home);
             POISON.to_string()
         };
-        let msg = home
-            .run_stdin(&["unlock", "10m", "--password-stdin", "--json"], &pw)
-            .err("VALIDATION_ERROR");
-        assert!(
-            msg.contains("run `zwallet address --verify` to check the cache against the seed"),
-            "{msg}"
-        );
+        for args in [
+            &["unlock", "10m", "--password-stdin", "--json"][..],
+            &["list", "--verify", "--password-stdin", "--json"],
+            &[
+                "whitelist",
+                "list",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
+        ] {
+            let msg = home.run_stdin(args, &pw).err("VALIDATION_ERROR");
+            assert!(
+                msg.contains("run `zwallet address --verify` to check the cache against the seed"),
+                "{args:?}: {msg}"
+            );
+        }
         let v = home
             .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
             .ok();

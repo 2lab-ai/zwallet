@@ -3017,6 +3017,16 @@ fn invoke<'a>(to: &'a str, call: &[&'a str], rpc: &'a str, extra: &[&'a str]) ->
     args
 }
 
+/// How the CLI shows an error the key daemon sent: as it is where the CLI knows this build's
+/// daemon answered (macOS), prefixed where it cannot tell (Linux: every daemon is non-dumpable).
+fn daemon_prefix() -> &'static str {
+    if cfg!(target_os = "macos") {
+        ""
+    } else {
+        "the key daemon reported: "
+    }
+}
+
 /// Asserts a daemon refusal with `code` whose `command` detail (when `command` is `Some`) is
 /// that exact command and appears in the message. Returns the error object.
 fn refused(
@@ -3037,7 +3047,10 @@ fn refused(
         }
         None => assert!(v.get("command").is_none(), "{v:#}"),
     }
-    assert!(msg.starts_with("refusing to sign"), "{msg}");
+    assert!(
+        msg.starts_with(&format!("{}refusing to sign", daemon_prefix())),
+        "{msg}"
+    );
     v
 }
 
@@ -3060,7 +3073,7 @@ fn w2_a_send_to_an_unlisted_address_is_denied_and_nothing_is_signed() {
     assert_eq!(r.code, 1);
     let lines: Vec<&str> = r.stderr.lines().collect();
     assert!(
-        lines[0].starts_with("error: refusing to sign: ")
+        lines[0].starts_with(&format!("error: {}refusing to sign: ", daemon_prefix()))
             && lines[0].ends_with(" [WHITELIST_DENIED]"),
         "{}",
         r.stderr

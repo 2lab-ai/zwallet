@@ -101,8 +101,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
       address (of every key) that differs from the seed: it rewrites them in `wallet.json` under
       the writer lock (the encrypted master untouched), and says so in `repaired: [{key, chain,
       was, now}]` (`was` escaped) and a `warning` that something modified `wallet.json`. `list
-      --verify`, `unlock`, `backup` and the whitelist commands refuse such a cache with
-      `VALIDATION_ERROR` and say to run `zwallet address --verify`.
+      --verify`, `unlock`, `create` of a further key with the password, `backup`, the whitelist
+      changes and `whitelist list --verify` refuse such a cache with `VALIDATION_ERROR` and say to
+      run `zwallet address --verify`.
       Both show each key's derivation `index`, and add a `warning` when an index is one zwallet
       never assigns (at or past `nextIndex`, or with an unused index below it): the key list in
       `wallet.json` was edited. Such an address is still this seed's, but a wallet restored from
