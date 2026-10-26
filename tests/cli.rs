@@ -5476,7 +5476,9 @@ fn an_unverified_lists_fee_caps_spend_the_same_budget_as_its_entries() {
 fn a_reset_shows_each_discarded_files_entries_as_one_line_of_at_most_512() {
     // N1. A reset drops a whitelist.json and a whitelist.next.json that are no lists, here each
     // with 2000 characters of `#` and space for its entries: each file's unverified entries are
-    // one escaped line of at most 512 characters.
+    // one escaped line of at most 512 characters. A reset stops every daemon of this user, so no
+    // other test may run meanwhile.
+    let _alone = common::exclusive();
     let home = Home::new();
     home.create("main", &[]);
     home.allow("alice", PAYEE, &["base"]);
