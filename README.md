@@ -132,7 +132,13 @@ Commands that act on a key take `--key <name>` (default: the active key).
     is, ending ``run `zwallet lock` and unlock again``. `balance` adds no note line.
 
   While a daemon answers, a cache that its derivation contradicts fails these commands (and
-  `list`) with `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
+  `list`) with `VALIDATION_ERROR`. When the process that answered is not this build's key daemon,
+  that error does not blame the cache: it says the process reported an address that contradicts
+  the cached one, that neither is to be funded, and names the process; the same warning is in the
+  error's `warning` field. An answer that is not an address, or a cached value that is not one, is
+  `VALIDATION_ERROR` too and is never shown as an address; values zwallet does not control (the
+  cache, an answer on `d.sock`, an executable path) appear in messages with control characters
+  escaped. What a session cannot rule out: a process of this user that
   swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
   genuine daemon of a wallet the human did not make), or injects code into the genuine binary
   (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, `LD_PRELOAD`) — the same
