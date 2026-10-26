@@ -2289,10 +2289,7 @@ mod tests {
                 .values()
                 .map(|v| v.as_str().map_or(0, |s| s.chars().count()))
                 .sum::<usize>();
-        assert!(
-            total <= prefix.chars().count() + PROSE_MAX + "...(cut)".len(),
-            "{total}"
-        );
+        assert!(total <= prefix.chars().count() + PROSE_MAX, "{total}");
         assert!(ascii_printable(&e.message), "{:?}", &e.message[..80]);
     }
 
@@ -2346,10 +2343,7 @@ mod tests {
                 .map(|v| v.as_str().map_or(0, |s| s.chars().count()))
                 .sum::<usize>();
         let prefix = "the process answering on the key daemon socket reported: ";
-        assert!(
-            total <= prefix.chars().count() + PROSE_MAX + "...(cut)".len(),
-            "{total}"
-        );
+        assert!(total <= prefix.chars().count() + PROSE_MAX, "{total}");
     }
 
     /// A session-ending reply from this build's own daemon (it answers, then drops the socket

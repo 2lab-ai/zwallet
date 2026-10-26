@@ -433,15 +433,19 @@ fn entry_error(e: &Entry, why: &str) -> WalletError {
 const SHOWN_CHARS: usize = 64;
 
 /// A value that may come from a file, for a message a human reads (possibly while typing the
-/// password): printable ASCII only, cut after [`SHOWN_CHARS`] characters, so a planted terminal
-/// escape or a fake instruction is shown inert.
+/// password): in double quotes, so it never blends into the sentence around it, its own `"` as
+/// `\"`, and inside them printable ASCII only ([`crate::core::text::ascii_inert`], which escapes
+/// `\` as `\u{5c}`), cut after [`SHOWN_CHARS`] characters. So a planted terminal escape or a fake
+/// instruction is shown inert and plainly quoted.
 fn quote(value: &str) -> String {
-    crate::core::text::ascii_inert(value, SHOWN_CHARS)
+    format!(
+        "\"{}\"",
+        crate::core::text::ascii_inert(value, SHOWN_CHARS).replace('"', "\\\"")
+    )
 }
 
 /// A parser's message that may repeat file content (an unknown field's name is the file's own
-/// text): escaped as [`crate::core::text::printable`] does (control, format and bidi characters,
-/// line separators, block characters) and cut after `max` characters.
+/// text): printable ASCII only ([`crate::core::text::ascii_inert`]) and cut to `max` characters.
 fn clip(message: &str, max: usize) -> String {
     crate::core::text::ascii_inert(message, max)
 }

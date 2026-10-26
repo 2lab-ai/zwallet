@@ -4037,17 +4037,17 @@ fn a_mismatch_answered_by_an_impostor_aborts_and_names_it() {
     drop(fake);
 }
 
-/// Whether `text` holds a character that must never reach a terminal raw (control, format, line
 /// Whether `value` (one value from outside, on one line) is printable ASCII only: [`common::
 /// ascii_printable`], which does NOT exempt `\n`, so an injected line break fails it.
 fn inert(value: &str) -> bool {
     common::ascii_printable(value)
 }
 
-/// Whether every line of a whole output is printable ASCII (the `\n` separators aside). Pair it
-/// with a line-count assertion so an injected line break cannot pass as another output line.
+/// Whether every byte of a whole output is printable ASCII or the `\n` separator. Split on `\n`
+/// only (not `str::lines`, which would also eat a `\r` before it). Pair it with a line-count
+/// assertion so an injected line break cannot pass as another output line.
 fn inert_output(text: &str) -> bool {
-    text.lines().all(common::ascii_printable)
+    text.split('\n').all(common::ascii_printable)
 }
 
 #[test]

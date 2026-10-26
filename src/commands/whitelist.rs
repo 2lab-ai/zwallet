@@ -1430,7 +1430,10 @@ mod tests {
         assert_eq!(shown("a\u{202e}b"), "a\\u{202e}b");
         assert_eq!(shown(""), "");
         let long = "x".repeat(SHOWN_CHARS + 1);
-        assert_eq!(shown(&long), format!("{}...(cut)", &long[..SHOWN_CHARS]));
+        assert_eq!(
+            shown(&long),
+            format!("{}...(cut)", &long[..SHOWN_CHARS - "...(cut)".len()])
+        );
         assert_eq!(
             printable("entry \"m\u{1b}\": bad \u{202e}"),
             "entry \"m\\u{1b}\": bad \\u{202e}"
