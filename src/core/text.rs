@@ -1,149 +1,80 @@
 //! Text zwallet does not control (a file anyone of this user can edit, a process answering on
-//! the daemon socket, an executable path) made inert before it goes into a message, so the same
-//! safe text reaches the terminal and `--json`.
+//! the daemon socket or an RPC endpoint, an executable path) made inert before it goes into a
+//! message, by one rule: only printable ASCII (0x20..=0x7E) passes; every other character,
+//! `\n` and `\t` and every non-ASCII char included, becomes a `\u{…}` escape. So nothing from
+//! outside can move a terminal's cursor, start a new line, or draw a shape (a QR code). The same
+//! escaped text reaches the terminal and `--json`, and totals are bounded where they are shown.
 
-/// `value` as it may appear inside a message: as is when it is 1 to `max` characters of
-/// printable ASCII (no spaces), else quoted with control and format characters escaped (`{:?}`,
-/// which escapes ESC, CR, LF and the like) and cut after `max` characters. So a planted terminal
-/// escape, a line break that fakes a second line, or an overlong value is shown inert.
-pub fn shown(value: &str, max: usize) -> String {
-    if !value.is_empty() && value.len() <= max && value.bytes().all(|b| b.is_ascii_graphic()) {
-        return value.to_string();
-    }
-    match value.char_indices().nth(max) {
-        Some((cut, _)) => format!("{:?}…", &value[..cut]),
-        None => format!("{value:?}"),
-    }
-}
-
-/// The most characters of free text from outside (an error relayed from the daemon socket or
-/// an RPC endpoint) a message shows. A terminal soft-wraps a long line, so a long enough text of
-/// block characters could draw a QR code of another address: the smallest code that holds an
-/// address (version 2, 25 x 25 modules, 13 rows of half blocks) takes 13 rows of the terminal's
-/// width, more than this on any terminal 40 or more columns wide; and block characters are
-/// escaped anyway ([`draws_blocks`]).
+/// How many characters of free text from outside (an error relayed from the daemon socket or an
+/// RPC endpoint, a whitelist reason) one message shows.
 pub const PROSE_MAX: usize = 512;
 
-/// The most characters of one short value from outside (an error detail, a whitelist entry as
-/// relayed) a message shows.
+/// How many characters of one short value from outside (an error detail, a cached address, an
+/// executable path, a whitelist entry field) a message shows.
 pub const VALUE_MAX: usize = 256;
 
-/// The most items of an array or object from outside that is relayed ([`inert_json_capped`]).
-pub const ITEMS_MAX: usize = 64;
+/// The marker a cut leaves, in ASCII so it is inert itself.
+const CUT: &str = "...(cut)";
 
-/// Whether `c` must never reach a terminal raw: a control character (Cc: C0, DEL, C1), a format
-/// character (Cf: bidi overrides and isolates, zero-width characters, the BOM, …), or a line or
-/// paragraph separator (Zl, Zp). The same rule the tests assert, independent of how
-/// [`printable`] escapes.
-pub fn is_terminal_unsafe(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c as u32,
-            0x00AD
-                | 0x0600..=0x0605
-                | 0x061C
-                | 0x06DD
-                | 0x070F
-                | 0x0890..=0x0891
-                | 0x08E2
-                | 0x180E
-                | 0x200B..=0x200F
-                | 0x2028..=0x202E
-                | 0x2060..=0x2064
-                | 0x2066..=0x206F
-                | 0xFEFF
-                | 0xFFF9..=0xFFFB
-                | 0x110BD
-                | 0x110CD
-                | 0x13430..=0x1343F
-                | 0x1BCA0..=0x1BCA3
-                | 0x1D173..=0x1D17A
-                | 0xE0001
-                | 0xE0020..=0xE007F
-        )
+/// Whether `b` is a printable ASCII byte (space through `~`): the only bytes that pass [`escape`].
+fn ok(b: u32) -> bool {
+    (0x20..=0x7e).contains(&b)
 }
 
-/// Whether `c` draws a solid shape on a terminal (Block Elements, Geometric Shapes, Braille):
-/// the stuff of a QR code. zwallet's own messages never contain one.
-pub fn draws_blocks(c: char) -> bool {
-    matches!(c as u32, 0x2580..=0x25FF | 0x2800..=0x28FF)
-}
-
-/// Free text that may quote what zwallet does not control (a reason, an error relayed from the
-/// daemon socket or an RPC endpoint), for a terminal and for JSON alike: every character that is
-/// not printable as it is ([`is_terminal_unsafe`], and whatever else `{:?}` escapes) and every
-/// block-drawing character ([`draws_blocks`]) escaped, quotes and backslashes left as they are.
-/// The result has no line break of its own and moves no cursor, but a long text still wraps on
-/// a terminal: cut what may be long ([`printable_cut`], [`PROSE_MAX`]).
-pub fn printable(text: &str) -> String {
+/// `text` with every character that is not printable ASCII (0x20..=0x7E) turned into a `\u{hex}`
+/// escape: control characters, `\n`, `\t`, all non-ASCII (blocks, emoji, bidi controls, letters
+/// with accents). The result is all printable ASCII, so it has no line of its own and draws
+/// nothing; backslash, quote and the rest of ASCII pass through.
+pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if matches!(c, '"' | '\\' | '\'') {
+        if ok(c as u32) {
             out.push(c);
-            continue;
-        }
-        let debug: String = c.escape_debug().collect();
-        if debug.chars().count() > 1 {
-            out.push_str(&debug);
-        } else if is_terminal_unsafe(c) || draws_blocks(c) {
-            out.push_str(&format!("\\u{{{:x}}}", c as u32));
         } else {
-            out.push(c);
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
         }
     }
     out
 }
 
-/// [`printable`] `text`, cut after `max` characters (with `…`): free text from outside that has
-/// no business being long, such as a token's `symbol()`.
-pub fn printable_cut(text: &str, max: usize) -> String {
-    let p = printable(text);
-    match p.char_indices().nth(max) {
-        Some((cut, _)) => format!("{}…", &p[..cut]),
-        None => p,
+/// [`escape`] `text`, then cut to at most `max` characters with an ASCII [`CUT`] marker. For any
+/// one value from outside a message shows.
+pub fn ascii_inert(text: &str, max: usize) -> String {
+    let escaped = escape(text);
+    match escaped.char_indices().nth(max) {
+        // `escaped` is all ASCII, so the nth char boundary is byte `cut`.
+        Some((cut, _)) => format!("{}{CUT}", &escaped[..cut]),
+        None => escaped,
     }
 }
 
-/// [`inert_json`], and bounded: every string cut after `max_str` characters, object keys after
-/// 64, and arrays and objects after [`ITEMS_MAX`] items (an array then ends with a string
-/// saying how many were left out). For a JSON value relayed from outside.
-pub fn inert_json_capped(value: &serde_json::Value, max_str: usize) -> serde_json::Value {
-    use serde_json::Value;
+/// A value from outside, as a short identifier in a message: [`ascii_inert`] to `max`.
+pub fn shown(value: &str, max: usize) -> String {
+    ascii_inert(value, max)
+}
+
+/// A whole JSON value from outside rendered for a human and bounded: compact JSON, then the ASCII
+/// rule, then cut to `budget`. A string value is shown bare (no quotes). So a nested object or a
+/// long array from the daemon socket becomes one inert, bounded line, never a block to draw with.
+pub fn human_capped(value: &serde_json::Value, budget: usize) -> String {
     match value {
-        Value::String(s) => Value::String(printable_cut(s, max_str)),
-        Value::Array(a) => {
-            let mut out: Vec<Value> = a
-                .iter()
-                .take(ITEMS_MAX)
-                .map(|v| inert_json_capped(v, max_str))
-                .collect();
-            if a.len() > ITEMS_MAX {
-                out.push(Value::String(format!("… {} more", a.len() - ITEMS_MAX)));
-            }
-            Value::Array(out)
-        }
-        Value::Object(o) => Value::Object(
-            o.iter()
-                .take(ITEMS_MAX)
-                .map(|(k, v)| (printable_cut(k, 64), inert_json_capped(v, max_str)))
-                .collect(),
-        ),
-        other => other.clone(),
+        serde_json::Value::String(s) => ascii_inert(s, budget),
+        other => ascii_inert(&other.to_string(), budget),
     }
 }
 
-/// `value` with every string in it, object keys included, made [`printable`]: a JSON value from
-/// the daemon socket, relayed as it is otherwise.
+/// `value` with every string and object key made [`escape`]d; its structure and counts kept, so
+/// `--json` consumers still see every entry. For a JSON value relayed from outside into `--json`.
+/// Strings are not cut here (cap prose fields such as `reason` on their own); `--json` is machine
+/// output, and [`human_capped`] bounds the human side.
 pub fn inert_json(value: &serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
     match value {
-        Value::String(s) => Value::String(printable(s)),
+        Value::String(s) => Value::String(escape(s)),
         Value::Array(a) => Value::Array(a.iter().map(inert_json).collect()),
-        Value::Object(o) => Value::Object(
-            o.iter()
-                .map(|(k, v)| (printable(k), inert_json(v)))
-                .collect(),
-        ),
+        Value::Object(o) => {
+            Value::Object(o.iter().map(|(k, v)| (escape(k), inert_json(v))).collect())
+        }
         other => other.clone(),
     }
 }
@@ -153,66 +84,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shown_leaves_plain_values_and_escapes_the_rest() {
-        assert_eq!(shown("0xAbC", 64), "0xAbC");
-        assert_eq!(shown("/usr/bin/zwallet", 64), "/usr/bin/zwallet");
-        let evil = shown("/tmp/x\u{1b}[2J\nPWNED", 64);
-        assert!(!evil.contains('\u{1b}') && !evil.contains('\n'), "{evil}");
-        assert!(evil.contains("\\u{1b}") && evil.contains("\\n"), "{evil}");
-        // Right-to-left override (a format character) is escaped too.
-        assert!(!shown("a\u{202e}b", 64).contains('\u{202e}'));
-        // A space or an empty value is quoted, so where it starts and ends is visible.
-        assert_eq!(shown("a b", 64), "\"a b\"");
-        assert_eq!(shown("", 64), "\"\"");
-        // Cut after `max` characters.
-        assert_eq!(shown(&"x".repeat(70), 64), format!("{:?}…", "x".repeat(64)));
-    }
-
-    #[test]
-    fn printable_escapes_every_unsafe_and_block_character() {
-        for c in [
-            '\u{1b}', '\r', '\n', '\u{9b}', '\u{202e}', '\u{2066}', '\u{2028}', '\u{2029}',
-            '\u{200b}', '\u{feff}', '\u{2580}', '\u{2588}', '\u{25a0}', '\u{2800}',
-        ] {
-            let p = printable(&format!("a{c}b"));
-            assert!(!p.contains(c), "{c:?} -> {p:?}");
-            assert!(
-                !p.chars().any(|x| is_terminal_unsafe(x) || draws_blocks(x)),
-                "{p:?}"
-            );
+    fn escape_output_is_always_printable_ascii() {
+        // Every scalar Unicode code point: escaped, it is nothing but printable ASCII.
+        for u in 0..=0x10FFFF_u32 {
+            if let Some(c) = char::from_u32(u) {
+                let e = escape(&c.to_string());
+                assert!(e.bytes().all(|b| ok(b as u32)), "U+{u:04X} -> {e:?}");
+            }
         }
-        // Text a human reads is left alone.
-        assert_eq!(
-            printable("USD₮0 a-b \"q\" 'x' \\ é"),
-            "USD₮0 a-b \"q\" 'x' \\ é"
-        );
-        // Bounded.
-        let long = printable_cut(&"\u{2588}".repeat(5000), PROSE_MAX);
-        assert!(long.chars().count() <= PROSE_MAX + 1, "{}", long.len());
-        let v = inert_json_capped(&serde_json::json!(vec!["x".repeat(900); 100]), VALUE_MAX);
-        let a = v.as_array().unwrap();
-        assert_eq!(a.len(), ITEMS_MAX + 1);
-        assert!(a[0].as_str().unwrap().chars().count() <= VALUE_MAX + 1);
-        assert_eq!(a[ITEMS_MAX], "… 36 more");
+        // And a cut result is still all printable ASCII (the marker included).
+        let cut = ascii_inert(&"\u{1f7e5}".repeat(1000), 8);
+        assert!(cut.bytes().all(|b| ok(b as u32)), "{cut:?}");
+        assert!(cut.ends_with(CUT), "{cut:?}");
     }
 
     #[test]
-    fn printable_keeps_prose_on_one_inert_line() {
-        let said =
-            printable("refusing \"x\" \\ ok\r\u{1b}[2Kaddress: 0xA\nverified: true\u{9b}\u{202e}");
-        assert!(
-            !said.chars().any(|c| c.is_control() || c == '\u{202e}'),
-            "{said}"
-        );
-        assert!(
-            said.starts_with("refusing \"x\" \\ ok\\r\\u{1b}[2Kaddress"),
-            "{said}"
-        );
-        assert!(said.contains("\\nverified: true\\u{9b}\\u{202e}"), "{said}");
-        let v = inert_json(&serde_json::json!({ "c\u{1b}": ["a\nb", 1, { "k": "\r" }] }));
+    fn escape_turns_every_non_ascii_or_control_into_a_u_escape() {
+        for c in [
+            '\u{1b}',
+            '\r',
+            '\n',
+            '\t',
+            '\u{9b}',
+            '\u{202e}',
+            '\u{2066}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{200b}',
+            '\u{feff}',
+            '\u{2580}',
+            '\u{2588}',
+            '\u{25a0}',
+            '\u{2800}',
+            '\u{2b1b}',
+            '\u{2b1c}',
+            '\u{1f7e5}',
+            '\u{1fb00}',
+            '\u{1cd00}',
+            '₮',
+            'é',
+            '…',
+            '—',
+        ] {
+            let e = escape(&format!("a{c}b"));
+            assert_eq!(e, format!("a\\u{{{:x}}}b", c as u32), "{c:?}");
+        }
+        // Printable ASCII, backslash and quotes pass through unchanged.
+        assert_eq!(escape("USDC a-b \"q\" 'x' \\ /"), "USDC a-b \"q\" 'x' \\ /");
+    }
+
+    #[test]
+    fn inert_json_escapes_strings_and_keys_but_keeps_structure() {
+        let v = inert_json(&serde_json::json!({
+            "c\u{1b}": ["a\nb", 1, true, { "k": "\u{202e}" }],
+        }));
         assert_eq!(
             v,
-            serde_json::json!({ "c\\u{1b}": ["a\\nb", 1, { "k": "\\r" }] })
+            serde_json::json!({ "c\\u{1b}": ["a\\u{a}b", 1, true, { "k": "\\u{202e}" }] })
+        );
+        // Counts are kept: a long array is not trimmed.
+        let big = serde_json::json!(vec!["x"; 100]);
+        assert_eq!(inert_json(&big).as_array().unwrap().len(), 100);
+    }
+
+    #[test]
+    fn human_capped_bounds_a_nested_value_to_one_inert_line() {
+        let v = serde_json::json!({ "entries": vec!["\u{2588}".repeat(50); 64] });
+        let line = human_capped(&v, PROSE_MAX);
+        assert!(line.bytes().all(|b| ok(b as u32)), "{line:?}");
+        assert!(
+            line.chars().count() <= PROSE_MAX + CUT.len(),
+            "{}",
+            line.len()
+        );
+        // A bare string loses no boundary and keeps its content inert.
+        assert_eq!(
+            human_capped(&serde_json::json!("0xAbC"), PROSE_MAX),
+            "0xAbC"
         );
     }
 }

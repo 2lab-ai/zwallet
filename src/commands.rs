@@ -199,6 +199,21 @@ fn shown(value: &str) -> String {
     crate::core::text::shown(value, VALUE_SHOWN)
 }
 
+/// The session whitelist a daemon reports, inert for `--json`: every string and key is
+/// ASCII-escaped and its structure and counts are kept, but its `reason` (the only unbounded
+/// prose field, which can quote whitelist.json) is cut to a prose budget. The human side is
+/// bounded by `render_human`.
+fn inert_whitelist(value: &Value) -> Value {
+    let mut w = crate::core::text::inert_json(value);
+    if let Some(reason) = w.get("reason").and_then(Value::as_str) {
+        w["reason"] = json!(crate::core::text::ascii_inert(
+            reason,
+            crate::core::text::PROSE_MAX
+        ));
+    }
+    w
+}
+
 /// Whether `value` has the shape of an address on `chain`: for EVM, `0x` and 40 hex digits (any
 /// case). Says nothing about whose address it is.
 fn address_shaped(chain: &Chain, value: &str) -> bool {
@@ -707,10 +722,7 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
         out["daemonPid"] = session["pid"].clone();
         // The whitelist this session signs under, as `unlock` shows it.
         // Its reason can quote whitelist.json, a file anyone of this user can write.
-        out["whitelist"] = crate::core::text::inert_json_capped(
-            &session["whitelist"],
-            crate::core::text::PROSE_MAX,
-        );
+        out["whitelist"] = inert_whitelist(&session["whitelist"]);
     }
     if master == "created" && std::io::stderr().is_terminal() {
         eprintln!(
@@ -1308,8 +1320,8 @@ fn brief(message: &str) -> String {
     if line.chars().count() <= BRIEF_ERROR_CHARS {
         return line.to_string();
     }
-    let cut: String = line.chars().take(BRIEF_ERROR_CHARS - 1).collect();
-    format!("{cut}…")
+    let cut: String = line.chars().take(BRIEF_ERROR_CHARS - 3).collect();
+    format!("{cut}...")
 }
 
 /// Returns (from, index) of the selected key on `chain`.
@@ -1357,14 +1369,10 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
         "result": result,
         "raw": format!("0x{}", hex::encode(&raw)),
     });
-    // A decoded `string` is data the caller asked for: `--json` keeps it exactly as the
-    // contract returned it (JSON encodes its control characters), the human text shows it
-    // escaped, since a contract chose it.
-    let text = render_human(&crate::core::text::inert_json_capped(
-        &out,
-        crate::core::text::PROSE_MAX,
-    ));
-    Ok(Out::with_text(out, text))
+    // A decoded `string` is data the caller asked for: `--json` keeps it exactly as the contract
+    // returned it; `render_human` (the human path of `Out::json`) makes the `result` and every
+    // other nested value inert and bounded, since a contract chose that text.
+    Ok(Out::json(out))
 }
 
 async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
@@ -1748,8 +1756,7 @@ async fn status(home: &Path, no_qr: bool) -> Result<Out> {
         // one is plain RFC 3339 and passes as it is), the whitelist with every string escaped.
         out["expiresAt"] = json!(d["expiresAt"].as_str().map(shown));
         // The whitelist as the serving daemon verifies it right now.
-        out["whitelist"] =
-            crate::core::text::inert_json_capped(&d["whitelist"], crate::core::text::PROSE_MAX);
+        out["whitelist"] = inert_whitelist(&d["whitelist"]);
     }
     // The active key's address, and what verifies it.
     let mut shown = None;
@@ -1860,10 +1867,7 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
         // The whitelist this session signs under, as its daemon verified it: the generation and
         // the entries, so a rolled-back list is visible.
         // Its reason can quote whitelist.json, a file anyone of this user can write.
-        "whitelist": crate::core::text::inert_json_capped(
-            &session["whitelist"],
-            crate::core::text::PROSE_MAX,
-        ),
+        "whitelist": inert_whitelist(&session["whitelist"]),
     });
     if let Some(w) = session_index_warning(&file, &session) {
         out["warning"] = json!(w);

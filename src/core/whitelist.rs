@@ -433,20 +433,17 @@ fn entry_error(e: &Entry, why: &str) -> WalletError {
 const SHOWN_CHARS: usize = 64;
 
 /// A value that may come from a file, for a message a human reads (possibly while typing the
-/// password): quoted with control characters escaped (`{:?}`), and cut after [`SHOWN_CHARS`]
-/// characters, so a planted terminal escape or a fake instruction is shown inert.
+/// password): printable ASCII only, cut after [`SHOWN_CHARS`] characters, so a planted terminal
+/// escape or a fake instruction is shown inert.
 fn quote(value: &str) -> String {
-    match value.char_indices().nth(SHOWN_CHARS) {
-        Some((cut, _)) => format!("{:?}…", &value[..cut]),
-        None => format!("{value:?}"),
-    }
+    crate::core::text::ascii_inert(value, SHOWN_CHARS)
 }
 
 /// A parser's message that may repeat file content (an unknown field's name is the file's own
 /// text): escaped as [`crate::core::text::printable`] does (control, format and bidi characters,
 /// line separators, block characters) and cut after `max` characters.
 fn clip(message: &str, max: usize) -> String {
-    crate::core::text::printable_cut(message, max)
+    crate::core::text::ascii_inert(message, max)
 }
 
 /// Nicknames: `^[a-z0-9][a-z0-9_-]{0,31}$`.
@@ -2920,12 +2917,13 @@ mod tests {
         SignedList::from_file_bytes(text.as_bytes()).unwrap();
     }
 
-    /// No control character (a terminal escape) and never more than 64 characters of a value
-    /// that came from a file (the planted value ends in a run of 200 `x`).
+    /// Printable ASCII only (0x20..=0x7E: no control, no `\n`, no non-ASCII), and never more than
+    /// 64 characters of a value that came from a file (the planted value ends in a run of 200
+    /// `x`).
     fn assert_clean(msg: &str) {
         assert!(
-            !msg.chars().any(crate::core::text::is_terminal_unsafe),
-            "control, format or separator character in {msg:?}"
+            msg.bytes().all(|b| (0x20..=0x7e).contains(&b)),
+            "non printable-ASCII in {msg:?}"
         );
         assert!(!msg.contains(&"x".repeat(65)), "unbounded: {msg:?}");
     }

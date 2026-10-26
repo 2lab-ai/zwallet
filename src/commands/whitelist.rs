@@ -30,7 +30,6 @@ use crate::core::error::{Result, WalletError};
 use crate::core::password::read_password;
 use crate::core::protocol::{self, DaemonExe};
 use crate::core::store::{self, WhitelistAnchor};
-use crate::core::text::printable;
 use crate::core::time::{parse_duration, rfc3339_utc, unix_secs};
 use crate::core::whitelist::{
     self, ANY_CHAIN, Base, BaseSource, Edited, Entry, EntryKind, ListFiles, NEXT_FILE, SignedList,
@@ -1094,11 +1093,21 @@ fn join(v: &Value) -> String {
 /// The most characters of one value from a file that human output shows.
 const SHOWN_CHARS: usize = 64;
 
+/// The most whitelist entries `whitelist list` prints before saying how many are left (the file
+/// is anyone's to write); `--json` keeps them all.
+const ENTRIES_SHOWN: usize = 100;
+
 /// A value from a file (a hand-edited whitelist.json is anything) for a terminal: as is when it
 /// is at most [`SHOWN_CHARS`] of printable ASCII, else quoted with escapes (`{:?}`, which escapes
 /// control and format characters such as ESC and U+202E) and cut there.
 fn shown(value: &str) -> String {
     crate::core::text::shown(value, SHOWN_CHARS)
+}
+
+/// A reason or free text that may quote a file, for a human: printable ASCII only, cut to a
+/// prose budget.
+fn printable(text: &str) -> String {
+    crate::core::text::ascii_inert(text, crate::core::text::PROSE_MAX)
 }
 
 /// `value` as compact JSON in printable ASCII: every other character as a `\u` escape, which
@@ -1144,8 +1153,11 @@ fn list(home: &Path, a: WhitelistListArgs) -> Result<Out> {
     } else {
         unverified_view(home, None)
     };
+    // whitelist.json is anyone of this user's to edit, so its entries, nicknames and the reason
+    // that quotes it reach `--json` escaped (every string ASCII-inert, structure and counts kept,
+    // `reason` cut to a prose budget); the human text is already bounded in `list_text`.
     let text = list_text(&out, a.verify);
-    Ok(Out::with_text(out, text))
+    Ok(Out::with_text(super::inert_whitelist(&out), text))
 }
 
 fn verified_view(home: &Path, anchor: Result<Option<WhitelistAnchor>>) -> Value {
@@ -1253,14 +1265,20 @@ fn list_text(out: &Value, verify: bool) -> String {
             (None, None) => String::new(),
         }
     )];
-    for e in out["entries"].as_array().into_iter().flatten() {
+    // The entries come from whitelist.json, which anyone of this user can write: show at most
+    // [`ENTRIES_SHOWN`], each a bounded, printable-ASCII line, then how many were left out.
+    let entries: Vec<&Value> = out["entries"].as_array().into_iter().flatten().collect();
+    for e in entries.iter().take(ENTRIES_SHOWN) {
         if !e.is_object() {
-            lines.push(format!("  {}", ascii_json(e)));
+            lines.push(format!(
+                "  {}",
+                crate::core::text::ascii_inert(&ascii_json(e), SHOWN_CHARS)
+            ));
             continue;
         }
         let field = |k: &str| match &e[k] {
             Value::String(s) => shown(s),
-            other => ascii_json(other),
+            other => crate::core::text::ascii_inert(&ascii_json(other), SHOWN_CHARS),
         };
         let mut line = format!(
             "  {:<16} {:<8} {} {}",
@@ -1273,6 +1291,9 @@ fn list_text(out: &Value, verify: bool) -> String {
             line.push_str(&format!("  selectors {}", join(&e["selectors"])));
         }
         lines.push(line);
+    }
+    if entries.len() > ENTRIES_SHOWN {
+        lines.push(format!("  ... {} more", entries.len() - ENTRIES_SHOWN));
     }
     if let Some(caps) = out["policy"]["maxFeeWei"].as_object() {
         let caps: Vec<String> = caps
@@ -1405,11 +1426,11 @@ mod tests {
     #[test]
     fn file_values_reach_human_output_escaped() {
         assert_eq!(shown("alice"), "alice");
-        assert_eq!(shown("mallory\u{1b}[2J"), "\"mallory\\u{1b}[2J\"");
-        assert_eq!(shown("a\u{202e}b"), "\"a\\u{202e}b\"");
-        assert_eq!(shown(""), "\"\"");
+        assert_eq!(shown("mallory\u{1b}[2J"), "mallory\\u{1b}[2J");
+        assert_eq!(shown("a\u{202e}b"), "a\\u{202e}b");
+        assert_eq!(shown(""), "");
         let long = "x".repeat(SHOWN_CHARS + 1);
-        assert_eq!(shown(&long), format!("{:?}…", &long[..SHOWN_CHARS]));
+        assert_eq!(shown(&long), format!("{}...(cut)", &long[..SHOWN_CHARS]));
         assert_eq!(
             printable("entry \"m\u{1b}\": bad \u{202e}"),
             "entry \"m\\u{1b}\": bad \\u{202e}"

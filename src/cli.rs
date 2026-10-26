@@ -628,10 +628,16 @@ pub fn render_human(value: &Value) -> String {
     }
 }
 
+/// One field's human value: a scalar as it is (addresses, keys, numbers zwallet builds), but a
+/// nested value (an array or object that may come from outside: a relayed whitelist, a decoded
+/// view, a `call` result) made inert and bounded ([`crate::core::text::human_capped`]), so one
+/// field is one printable-ASCII line of at most [`PROSE_MAX`](crate::core::text::PROSE_MAX)
+/// characters, never a block to draw a QR code with.
 fn scalar(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        other => other.to_string(),
+        Value::Null | Value::Bool(_) | Value::Number(_) => v.to_string(),
+        nested => crate::core::text::human_capped(nested, crate::core::text::PROSE_MAX),
     }
 }
 

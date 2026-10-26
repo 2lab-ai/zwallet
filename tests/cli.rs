@@ -2632,6 +2632,17 @@ fn hand_edited_values_reach_the_terminal_escaped() {
         }
         assert!(r.stdout.contains("mallory"), "{}", r.stdout);
     }
+    // `--json` keeps every entry (no trimming) but escapes each string: the bidi override and the
+    // bell in the hand-edited entry come out as `\u{...}`, so every printed line is ASCII.
+    let r = home.run(&["whitelist", "list", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    let v = r.json();
+    assert_eq!(v["entries"].as_array().unwrap().len(), 2, "{v}");
+    let e = &v["entries"][1];
+    assert_eq!(e["nickname"], json!("mallory\\u{1b}[2J"), "{v}");
+    assert_eq!(e["address"], json!("0x6666\\u{202e}6666"), "{v}");
+    assert_eq!(e["chains"][0], json!("base\\u{7}"), "{v}");
 }
 
 #[test]
@@ -2751,7 +2762,7 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
         PW,
         &[
             "reset: a new whitelist key and an empty list",
-            "every entry is dropped: alice, router, \"mallory\\u{1b}[2J\"",
+            "every entry is dropped: alice, router, mallory\\u{1b}[2J",
             "not verified yet",
         ],
     );
@@ -3980,10 +3991,16 @@ fn a_mismatch_answered_by_an_impostor_aborts_and_names_it() {
 }
 
 /// Whether `text` holds a character that must never reach a terminal raw (control, format, line
-/// or paragraph separator: [`common::unsafe_chars`]); a raw line feed is checked on its own where
-/// the text is one line.
-fn has_unsafe_char(text: &str) -> bool {
-    !common::unsafe_chars(text).is_empty()
+/// Whether `value` (one value from outside, on one line) is printable ASCII only: [`common::
+/// ascii_printable`], which does NOT exempt `\n`, so an injected line break fails it.
+fn inert(value: &str) -> bool {
+    common::ascii_printable(value)
+}
+
+/// Whether every line of a whole output is printable ASCII (the `\n` separators aside). Pair it
+/// with a line-count assertion so an injected line break cannot pass as another output line.
+fn inert_output(text: &str) -> bool {
+    text.lines().all(common::ascii_printable)
 }
 
 #[test]
@@ -4030,12 +4047,9 @@ fn an_answer_that_is_no_address_is_rejected_and_shown_escaped() {
             v["warning"].is_string(),
             "{args:?}: the impostor is named: {v}"
         );
+        assert!(inert(msg), "{args:?}: {msg:?}");
         assert!(
-            !has_unsafe_char(msg) && !msg.contains('\n'),
-            "{args:?}: {msg:?}"
-        );
-        assert!(
-            msg.contains("\\u{1b}") && msg.contains("\\n"),
+            msg.contains("\\u{1b}") && msg.contains("\\u{a}"),
             "{args:?}: {msg:?}"
         );
     }
@@ -4043,7 +4057,7 @@ fn an_answer_that_is_no_address_is_rejected_and_shown_escaped() {
     let human = home.run(&["address"]);
     assert_eq!(human.code, 1);
     assert!(human.stdout.is_empty(), "{:?}", human.stdout);
-    assert!(!has_unsafe_char(&human.stderr), "{:?}", human.stderr);
+    assert!(inert_output(&human.stderr), "{:?}", human.stderr);
     assert_eq!(
         human.stderr.trim_end().lines().count(),
         1,
@@ -4078,14 +4092,11 @@ fn a_cached_value_that_is_no_address_is_rejected_and_shown_escaped() {
                 msg.contains("which is not an address"),
                 "unlocked {unlocked} {args:?}: {msg}"
             );
-            assert!(
-                !has_unsafe_char(&msg) && !msg.contains('\n'),
-                "{args:?}: {msg:?}"
-            );
+            assert!(inert(&msg), "{args:?}: {msg:?}");
         }
         let human = home.run(&["address"]);
         assert_eq!(human.code, 1);
-        assert!(!has_unsafe_char(&human.stderr), "{:?}", human.stderr);
+        assert!(inert_output(&human.stderr), "{:?}", human.stderr);
     }
 }
 
@@ -4137,11 +4148,11 @@ fn an_impostor_executable_path_is_shown_escaped() {
     let v = home.run(&["address", "--json"]).ok();
     assert_eq!(v["verified"], false, "{v}");
     let w = v["warning"].as_str().unwrap_or("");
-    assert!(w.contains("zw\\u{1b}[31mallet\\nfake line"), "{w:?}");
-    assert!(!has_unsafe_char(w) && !w.contains('\n'), "{w:?}");
+    assert!(w.contains("zw\\u{1b}[31mallet\\u{a}fake line"), "{w:?}");
+    assert!(inert(w), "{w:?}");
     let human = home.run(&["address"]);
     assert_eq!(human.code, 0, "{}", human.stderr);
-    assert!(!has_unsafe_char(&human.stdout), "{:?}", human.stdout);
+    assert!(inert_output(&human.stdout), "{:?}", human.stdout);
     let warning_lines: Vec<&str> = human
         .stdout
         .lines()
@@ -4409,12 +4420,12 @@ fn an_impostor_error_reply_is_named_escaped_and_on_one_line() {
     assert_eq!(out.code, 1, "{}", out.stdout);
     let v = out.json();
     let msg = v["error"].as_str().unwrap_or("");
-    assert!(!has_unsafe_char(msg) && !msg.contains('\n'), "{msg:?}");
+    assert!(inert(msg), "{msg:?}");
     assert!(
         msg.starts_with(&format!(
             "the process answering on the key daemon socket (pid {})",
             std::process::id()
-        )) && msg.contains(", and it reported: \\r\\u{1b}[2Kaddress: 0x"),
+        )) && msg.contains(", and it reported: \\u{d}\\u{1b}[2Kaddress: 0x"),
         "{msg}"
     );
     assert!(
@@ -4426,7 +4437,7 @@ fn an_impostor_error_reply_is_named_escaped_and_on_one_line() {
     let human = home.run(&["address"]);
     assert_eq!(human.code, 1);
     assert!(human.stdout.is_empty(), "{:?}", human.stdout);
-    assert!(!has_unsafe_char(&human.stderr), "{:?}", human.stderr);
+    assert!(inert_output(&human.stderr), "{:?}", human.stderr);
     assert_eq!(human.stderr.lines().count(), 1, "{:?}", human.stderr);
     assert!(!human.stderr.contains("command:"), "{:?}", human.stderr);
     drop(fake);
@@ -4450,10 +4461,10 @@ fn a_key_name_with_a_control_character_is_refused() {
         for args in [&["address", "--json"][..], &["list", "--json"]] {
             let msg = home.run(args).err("VALIDATION_ERROR");
             assert!(msg.contains("invalid key name"), "{edit} {args:?}: {msg}");
-            assert!(!has_unsafe_char(&msg) && !msg.contains('\n'), "{msg:?}");
+            assert!(inert(&msg), "{msg:?}");
         }
         let human = home.run(&["list"]);
-        assert!(!has_unsafe_char(&human.stderr), "{:?}", human.stderr);
+        assert!(inert_output(&human.stderr), "{:?}", human.stderr);
     }
 }
 
@@ -4483,10 +4494,7 @@ fn status_shows_an_impostor_expiry_and_whitelist_escaped() {
     );
     let v = home.run(&["status", "--json"]).ok();
     let expires = v["expiresAt"].as_str().unwrap_or("");
-    assert!(
-        !has_unsafe_char(expires) && expires.contains("\\u{1b}[2J"),
-        "{v}"
-    );
+    assert!(inert(expires) && expires.contains("\\u{1b}[2J"), "{v}");
     let entries = v["whitelist"]["entries"].to_string();
     assert!(
         !entries.contains('\u{1b}') && !entries.contains('\u{202e}') && !entries.contains('\u{9b}'),
@@ -4553,10 +4561,7 @@ fn address_verify_repairs_a_tampered_cache_and_unlock_works_again() {
             .unwrap_or_else(|| panic!("{v}"));
         assert_eq!((&eth["key"], &eth["now"]), (&json!("main"), &json!(addr)));
         let shown_was = eth["was"].as_str().unwrap();
-        assert!(
-            !has_unsafe_char(shown_was) && !shown_was.contains('\n'),
-            "{v}"
-        );
+        assert!(inert(shown_was), "{v}");
         if !garbage {
             assert_eq!(shown_was, was);
             assert_eq!(repaired.len(), chains::CHAINS.len(), "{v}");
@@ -4578,7 +4583,7 @@ fn address_verify_repairs_a_tampered_cache_and_unlock_works_again() {
             "{}",
             human.stdout
         );
-        assert!(!has_unsafe_char(&human.stdout), "{:?}", human.stdout);
+        assert!(inert_output(&human.stdout), "{:?}", human.stdout);
         // Repaired once: the next check finds nothing, and unlock works.
         let again = home
             .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
@@ -4630,19 +4635,19 @@ fn rpc_text_reaches_human_output_escaped_and_on_one_line() {
     args.extend([failing.as_str(), "--json"]);
     let msg = nowallet.run(&args).err("RPC_ERROR");
     assert!(msg.starts_with("eth_call failed: "), "{msg}");
-    assert!(!has_unsafe_char(&msg) && !msg.contains('\n'), "{msg:?}");
+    assert!(inert(&msg), "{msg:?}");
     assert!(
         !msg.contains('\u{9b}') && !msg.contains('\u{202e}'),
         "{msg:?}"
     );
     assert!(
-        msg.contains("\\r\\u{1b}[2Kbalance: 999 ETH\\nverified: true"),
+        msg.contains("\\u{d}\\u{1b}[2Kbalance: 999 ETH\\u{a}verified: true"),
         "{msg}"
     );
     args.pop();
     let human = nowallet.run(&args);
     assert_eq!(human.code, 1);
-    assert!(!has_unsafe_char(&human.stderr), "{:?}", human.stderr);
+    assert!(inert_output(&human.stderr), "{:?}", human.stderr);
     assert_eq!(human.stderr.lines().count(), 1, "{:?}", human.stderr);
     // 2. A token whose `symbol()` is a terminal escape.
     let home = Home::new();
@@ -4673,14 +4678,11 @@ fn rpc_text_reaches_human_output_escaped_and_on_one_line() {
     json_args.push("--json");
     let v = home.run(&json_args).ok();
     let sym = v["symbol"].as_str().unwrap_or("");
-    assert!(
-        !has_unsafe_char(sym) && !sym.contains('\n') && !sym.contains('\u{202e}'),
-        "{v}"
-    );
-    assert!(sym.starts_with("\\r\\u{1b}[2Kbalance"), "{v}");
+    assert!(inert(sym) && !sym.contains('\u{202e}'), "{v}");
+    assert!(sym.starts_with("\\u{d}\\u{1b}[2Kbalance"), "{v}");
     let human = home.run(&b);
     assert_eq!(human.code, 0, "{}", human.stderr);
-    assert!(!has_unsafe_char(&human.stdout), "{:?}", human.stdout);
+    assert!(inert_output(&human.stdout), "{:?}", human.stdout);
     assert!(
         !human
             .stdout
@@ -4718,7 +4720,7 @@ fn a_call_string_result_is_faithful_in_json_and_escaped_on_the_terminal() {
     assert_eq!(v["result"], json!([FORGED]), "{v}");
     let human = home.run(&args);
     assert_eq!(human.code, 0, "{}", human.stderr);
-    assert!(!has_unsafe_char(&human.stdout), "{:?}", human.stdout);
+    assert!(inert_output(&human.stdout), "{:?}", human.stdout);
     assert!(!human.stdout.contains('\u{9b}') && !human.stdout.contains('\u{202e}'));
     let result: Vec<&str> = human
         .stdout
@@ -4747,13 +4749,6 @@ fn qr_by_wrapping() -> String {
     )
 }
 
-/// Whether `text` holds a block-drawing character (Block Elements, Geometric Shapes, Braille:
-/// the stuff of a QR code).
-fn draws_blocks(text: &str) -> bool {
-    text.chars()
-        .any(|c| matches!(c as u32, 0x2580..=0x25FF | 0x2800..=0x28FF))
-}
-
 #[test]
 fn a_long_relayed_error_is_cut_and_draws_nothing_and_its_code_shows() {
     // An impostor's ok:false reply padded to draw a QR code by soft-wrap: the message and its
@@ -4770,11 +4765,7 @@ fn a_long_relayed_error_is_cut_and_draws_nothing_and_its_code_shows() {
     );
     let v = home.run(&["address", "--json"]).json();
     let msg = v["error"].as_str().unwrap_or("");
-    assert!(
-        !draws_blocks(msg) && !has_unsafe_char(msg),
-        "{:?}",
-        &msg[..200]
-    );
+    assert!(inert(msg), "{:?}", &msg[..200]);
     assert!(msg.chars().count() < 1200, "{}", msg.chars().count());
     let human = home.run(&["address"]);
     assert_eq!(human.code, 1);
@@ -4786,7 +4777,47 @@ fn a_long_relayed_error_is_cut_and_draws_nothing_and_its_code_shows() {
         &line[line.len() - 80..]
     );
     assert!(line.chars().count() < 1250, "{}", line.chars().count());
-    assert!(!draws_blocks(line), "{:?}", &line[..200]);
+    assert!(inert(line), "{:?}", &line[..200]);
+    drop(fake);
+}
+
+#[test]
+fn a_relayed_error_of_solid_glyphs_draws_nothing() {
+    // Glyphs an earlier blacklist missed — ⬛⬜ (U+2B1B/2B1C), a sextant (U+1FB00) and an octant
+    // (U+1CD00) — would tile a QR on a terminal as well as the old block elements. The allowlist
+    // escapes every one, so `--json` and the human line are printable ASCII, on one line.
+    let home = Home::new();
+    home.create("main", &[]);
+    let payload = format!(
+        "{}{}{}",
+        "\u{2b1b}\u{2b1c} ".repeat(400),
+        "\u{1fb00}".repeat(200),
+        "\u{1cd00}".repeat(200)
+    );
+    let fake = FakeDaemon::replying(
+        &home.sock(),
+        serde_json::json!({
+            "v": 2, "ok": false, "errorCode": "RPC_ERROR", "error": payload,
+            "details": { "command": payload },
+        }),
+    );
+    let v = home.run(&["address", "--json"]).json();
+    let msg = v["error"].as_str().unwrap_or("");
+    assert!(inert(msg), "{:?}", msg.chars().take(80).collect::<String>());
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 1);
+    let line = human.stderr.trim_end();
+    assert_eq!(
+        line.lines().count(),
+        1,
+        "{:?}",
+        line.chars().take(120).collect::<String>()
+    );
+    assert!(
+        inert_output(line),
+        "{:?}",
+        line.chars().take(120).collect::<String>()
+    );
     drop(fake);
 }
 
@@ -4820,7 +4851,7 @@ fn a_long_rpc_error_and_call_string_are_cut_on_the_terminal() {
     };
     let msg = call(&failing, true).err("RPC_ERROR");
     assert!(msg.chars().count() < 700, "{}", msg.chars().count());
-    assert!(!draws_blocks(&msg), "{:?}", &msg[..200]);
+    assert!(inert(&msg), "{:?}", &msg[..200]);
     let human = call(&failing, false);
     assert_eq!(human.stderr.trim_end().lines().count(), 1);
     assert!(human.stderr.trim_end().ends_with(" [RPC_ERROR]"));
@@ -4845,7 +4876,7 @@ fn a_long_rpc_error_and_call_string_are_cut_on_the_terminal() {
         "{}",
         result[0].chars().count()
     );
-    assert!(!draws_blocks(&human.stdout), "{:?}", &human.stdout[..200]);
+    assert!(inert_output(&human.stdout), "{:?}", &human.stdout[..200]);
 }
 
 #[test]
@@ -4887,12 +4918,12 @@ fn unlock_and_create_show_a_whitelist_reason_from_the_file_escaped() {
             reason.contains("evil"),
             "{args:?}: the key is still named: {reason}"
         );
-        assert!(!has_unsafe_char(reason), "{args:?}: {reason:?}");
+        assert!(inert(reason), "{args:?}: {reason:?}");
         home.stop_daemons();
     }
     let human = home.run_stdin(&["unlock", "10m", "--password-stdin"], &pw);
     assert_eq!(human.code, 0, "{}", human.stderr);
-    assert!(!has_unsafe_char(&human.stdout), "{:?}", human.stdout);
+    assert!(inert_output(&human.stdout), "{:?}", human.stdout);
     home.stop_daemons();
 }
 

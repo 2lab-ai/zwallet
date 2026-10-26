@@ -233,7 +233,7 @@ pub fn decode_output(func: &Function, data: &[u8]) -> Result<Vec<Value>> {
             "return data (0x{}) does not match {}: {}",
             hex::encode(data),
             func.signature_with_outputs(),
-            crate::core::text::printable_cut(&e.to_string(), crate::core::text::PROSE_MAX)
+            crate::core::text::ascii_inert(&e.to_string(), crate::core::text::PROSE_MAX)
         ))
     })?;
     Ok(values.iter().map(to_json).collect())

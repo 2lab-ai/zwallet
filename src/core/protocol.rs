@@ -282,7 +282,7 @@ pub async fn send_answered(
         let resp: Response = serde_json::from_slice(&buf).map_err(|e| {
             WalletError::validation(format!(
                 "malformed reply from the key daemon: {}",
-                crate::core::text::printable_cut(&e.to_string(), crate::core::text::PROSE_MAX)
+                crate::core::text::ascii_inert(&e.to_string(), crate::core::text::PROSE_MAX)
             ))
         })?;
         if !resp.ok {
@@ -303,68 +303,91 @@ pub async fn send_answered(
 }
 
 /// The detail keys a key daemon's error carries (the signing policy's refusals): the only ones
-/// relayed. Any other key in a reply on `d.sock` is dropped, so nothing that answers there can
-/// put `address`, `verified` or the like into this CLI's error object.
+/// relayed, and only when they are a string or a number. Any other key, and any array or object
+/// value, is dropped, so nothing that answers on `d.sock` can put `address`, `verified` or a
+/// nested blob into this CLI's error object.
 const RELAYED_DETAILS: &[&str] = &["command", "counterparty", "chain", "feeWei", "capWei"];
 
-/// The error a reply with `ok: false` carries, as this CLI shows it. Whatever answers on
-/// `d.sock` writes that text: its message is made [`printable`](crate::core::text::printable)
-/// and cut after [`PROSE_MAX`](crate::core::text::PROSE_MAX) characters, its details are cut to
-/// [`RELAYED_DETAILS`] with every string escaped and cut after
-/// [`VALUE_MAX`](crate::core::text::VALUE_MAX) (no terminal control, no line of its own, nothing
-/// long enough to draw with), and who answered is checked ([`check_peer`]):
-/// - this build's key daemon: its message as is (escaped and cut);
-/// - not known (`Unknown`; every genuine daemon on Linux; or this build's code whose session just
-///   ended, see [`relayed_check`]): prefixed `the process answering on the key daemon socket
+/// The error a reply with `ok: false` carries, as this CLI shows it. Whatever answers on `d.sock`
+/// writes that text, so it is made inert (printable ASCII only) where the error is built, and the
+/// message with its kept details shares one [`PROSE_MAX`](crate::core::text::PROSE_MAX)-character
+/// budget: the message first, then each [`RELAYED_DETAILS`] detail in order, each cut to what the
+/// budget leaves, and the rest dropped. So the human output of one relayed error is at most that
+/// many characters whatever the reply's size or nesting. Who answered is checked ([`check_peer`]):
+/// - this build's key daemon: its message as is (inert);
+/// - not known (`Unknown`; every genuine daemon on Linux; or this build's own code whose session
+///   just ended, see [`relayed_check`]): prefixed `the process answering on the key daemon socket
 ///   reported: `, so it never reads as this CLI's own output nor claims who sent it;
-/// - another process (`Other`): named, its message quoted after it, and its details dropped (an
+/// - another process (`Other`): named, its message quoted after it, its details dropped (an
 ///   impostor's `command` is no command to run), with the `warning` detail.
 ///
-/// When the check itself fails, the details are dropped too. The error code is kept: it is one
-/// of a fixed set.
+/// When the check itself fails, the details are dropped too. The error code is kept: it is one of
+/// a fixed set.
 fn relayed_error(home: &Path, who: &Peer, resp: Response) -> WalletError {
-    use crate::core::text::{PROSE_MAX, VALUE_MAX, inert_json_capped, printable_cut};
+    use crate::core::text::{PROSE_MAX, ascii_inert};
     let code = resp.error_code.unwrap_or(ErrorCode::ValidationError);
-    let said = printable_cut(resp.error.as_deref().unwrap_or("daemon error"), PROSE_MAX);
     let checked = check_peer(home, who);
-    let details: Map<String, Value> = if checked.is_ok() {
-        resp.details
-            .iter()
-            .filter(|(k, _)| RELAYED_DETAILS.contains(&k.as_str()))
-            .map(|(k, v)| (k.clone(), inert_json_capped(v, VALUE_MAX)))
-            .collect()
-    } else {
-        Map::new()
-    };
-    let check = relayed_check(who, checked.unwrap_or(PeerCheck::Unknown));
-    let mut e = match &check {
-        PeerCheck::ThisBuild => WalletError::new(code, said),
-        PeerCheck::Unknown => WalletError::new(
-            code,
-            format!("the process answering on the key daemon socket reported: {said}"),
-        ),
-        PeerCheck::Other(reason) => {
-            let e = WalletError::new(code, format!("{reason}, and it reported: {said}; {RELOCK}"));
-            return match check.warning() {
-                Some(w) => e.with_detail("warning", w),
-                None => e,
-            };
+    let details_ok = checked.is_ok();
+    let check = relayed_check(who, resp.error_code, checked.unwrap_or(PeerCheck::Unknown));
+
+    // The message, then (for a known key daemon or an Unknown peer) the scalar kept details in a
+    // fixed order, sharing one budget.
+    let raw_said = resp.error.as_deref().unwrap_or("daemon error");
+    if let PeerCheck::Other(reason) = &check {
+        let said = ascii_inert(raw_said, PROSE_MAX);
+        let e = WalletError::new(code, format!("{reason}, and it reported: {said}; {RELOCK}"));
+        return match check.warning() {
+            Some(w) => e.with_detail("warning", w),
+            None => e,
+        };
+    }
+    let mut budget = PROSE_MAX;
+    let said = ascii_inert(raw_said, budget);
+    budget = budget.saturating_sub(said.chars().count());
+    let message = match &check {
+        PeerCheck::Unknown => {
+            format!("the process answering on the key daemon socket reported: {said}")
         }
+        _ => said,
     };
+    let mut details = Map::new();
+    if details_ok {
+        for key in RELAYED_DETAILS {
+            if budget == 0 {
+                break;
+            }
+            match resp.details.get(*key) {
+                Some(Value::String(s)) => {
+                    let v = ascii_inert(s, budget);
+                    budget = budget.saturating_sub(v.chars().count());
+                    details.insert((*key).into(), Value::String(v));
+                }
+                Some(n @ Value::Number(_)) => {
+                    budget = budget.saturating_sub(n.to_string().chars().count());
+                    details.insert((*key).into(), n.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut e = WalletError::new(code, message);
     e.details = details;
     e
 }
 
-/// What [`relayed_error`] makes of a peer [`check_peer`] judged. A daemon that ends its session
-/// (lock, expiry, a changed wallet.json) answers with its error, then drops the socket and exits,
-/// so by the time its error is checked it no longer holds the socket nor shows in the process
-/// table, and `check_peer` calls it another process. When the code it runs is this build's (the
-/// same cdhash, `CS_VALID`), it is not named as an impostor: `Unknown`. This never makes anything
+/// What [`relayed_error`] makes of a peer [`check_peer`] judged, given the reply's error `code`.
+/// A daemon that ends its session (lock or expiry) answers `WALLET_LOCKED`, then drops the socket
+/// and exits, so by the time its error is checked it no longer holds the socket nor shows in the
+/// process table, and `check_peer` calls it another process. Only for that code, and only when
+/// the code it runs is this build's (same cdhash, `CS_VALID`), is it not named an impostor:
+/// `Unknown`. Any other code keeps `Other` (named, details dropped). This never makes anything
 /// `ThisBuild`, and it is used for relayed errors only; address verification keeps the strict
 /// check.
-fn relayed_check(who: &Peer, check: PeerCheck) -> PeerCheck {
+fn relayed_check(who: &Peer, code: Option<ErrorCode>, check: PeerCheck) -> PeerCheck {
     match check {
-        PeerCheck::Other(_) if runs_this_build(who) => PeerCheck::Unknown,
+        PeerCheck::Other(_) if code == Some(ErrorCode::WalletLocked) && runs_this_build(who) => {
+            PeerCheck::Unknown
+        }
         other => other,
     }
 }
@@ -2200,9 +2223,14 @@ mod tests {
         assert!(encode_unlock_input(Duration::from_secs(1), "").is_err());
     }
 
+    /// Every byte of `s` is printable ASCII (0x20..=0x7E).
+    fn ascii_printable(s: &str) -> bool {
+        s.bytes().all(|b| (0x20..=0x7e).contains(&b))
+    }
+
     #[test]
     fn a_relayed_error_is_escaped_and_never_reads_as_this_clis_own() {
-        use crate::core::text::{PROSE_MAX, VALUE_MAX, draws_blocks, is_terminal_unsafe};
+        use crate::core::text::PROSE_MAX;
         let home = tempfile::Builder::new()
             .prefix("zwt-")
             .tempdir_in("/tmp")
@@ -2213,7 +2241,7 @@ mod tests {
                 "error": error,
                 "details": {
                     "command": command, "n\u{1b}": 1, "address": "0xdEaD", "verified": true,
-                    "verifiedBy": "session", "warning": "fake",
+                    "verifiedBy": "session", "warning": "fake", "list": ["a", "b"],
                 },
             }))
             .unwrap()
@@ -2222,7 +2250,8 @@ mod tests {
             "refusing\r\u{1b}[2Kaddress: 0xdEaD\nverified: true\u{9b}\u{202e}",
             "zwallet whitelist add x 0xdEaD\n\u{1b}[8m",
         );
-        // Who answered is not known (no pid): prefixed with only what is known, and escaped.
+        // Who answered is not known (no pid): prefixed with only what is known, and escaped to
+        // printable ASCII (every byte 0x20..=0x7E), so `\r` and `\n` are `\u{d}`/`\u{a}`.
         let unknown = Peer {
             pid: None,
             token: None,
@@ -2233,30 +2262,21 @@ mod tests {
         assert!(
             e.message.starts_with(
                 "the process answering on the key daemon socket reported: \
-                 refusing\\r\\u{1b}[2Kaddress"
+                 refusing\\u{d}\\u{1b}[2Kaddress"
             ),
             "{}",
             e.message
         );
-        assert!(
-            !e.message.chars().any(is_terminal_unsafe),
-            "{:?}",
-            e.message
-        );
-        // `check_peer` answers Unknown for no pid (it did not fail): only the allowlisted
-        // detail keys come through, escaped.
-        assert!(
-            e.details
-                .keys()
-                .all(|k| RELAYED_DETAILS.contains(&k.as_str())),
-            "{:?}",
-            e.details
-        );
+        assert!(ascii_printable(&e.message), "{:?}", e.message);
+        // Only allowlisted scalar detail keys come through; the array `list`, and the squatter's
+        // own `address`/`verified`/`warning`, are dropped.
+        assert_eq!(e.details.keys().collect::<Vec<_>>(), vec!["command"]);
         assert_eq!(
             e.details["command"],
-            "zwallet whitelist add x 0xdEaD\\n\\u{1b}[8m"
+            "zwallet whitelist add x 0xdEaD\\u{a}\\u{1b}[8m"
         );
-        // A long text of block characters is cut and drawn with nothing: no QR by soft-wrap.
+        // A long block/padding payload: message plus details share one PROSE_MAX budget, so the
+        // whole human output is bounded, printable ASCII, and draws nothing.
         let padded = format!(
             "{}{}scan to send to 0xdEaD",
             " ".repeat(4000),
@@ -2264,21 +2284,71 @@ mod tests {
         );
         let e = relayed_error(home.path(), &unknown, reply(&padded, &padded));
         let prefix = "the process answering on the key daemon socket reported: ";
+        let total: usize = e.message.chars().count()
+            + e.details
+                .values()
+                .map(|v| v.as_str().map_or(0, |s| s.chars().count()))
+                .sum::<usize>();
         assert!(
-            e.message.chars().count() <= prefix.chars().count() + PROSE_MAX + 1,
+            total <= prefix.chars().count() + PROSE_MAX + "...(cut)".len(),
+            "{total}"
+        );
+        assert!(ascii_printable(&e.message), "{:?}", &e.message[..80]);
+    }
+
+    #[test]
+    fn relayed_details_drop_nesting_and_escape_every_solid_glyph() {
+        use crate::core::text::PROSE_MAX;
+        let home = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        // Solid glyphs an earlier blacklist let through — ⬛⬜ (U+2B1B/2B1C), a sextant (U+1FB00)
+        // and an octant (U+1CD00) — tile a QR as well as the old block elements do. A short
+        // message keeps budget for the one allowlisted scalar detail; the array and object details
+        // are not relayable at any size.
+        let resp: Response = serde_json::from_value(json!({
+            "v": 2, "ok": false, "errorCode": "WHITELIST_DENIED",
+            "error": "refused \u{2b1b}\u{2b1c} and \u{1fb00}\u{1cd00}",
+            "details": {
+                "command": "zwallet whitelist add \u{2b1b} 0xdEaD",
+                "counterparty": vec!["0xdEaD"; 64],
+                "chain": { "evil": "\u{1cd00}".repeat(5000) },
+            },
+        }))
+        .unwrap();
+        let unknown = Peer {
+            pid: None,
+            token: None,
+            exe_uuid: None,
+        };
+        let e = relayed_error(home.path(), &unknown, resp);
+        assert_eq!(e.code, ErrorCode::WhitelistDenied);
+        // Every byte of the message is printable ASCII: each glyph is a `\u{...}` escape.
+        assert!(ascii_printable(&e.message), "{:?}", e.message);
+        assert!(
+            e.message
+                .contains("\\u{2b1b}\\u{2b1c} and \\u{1fb00}\\u{1cd00}"),
             "{}",
-            e.message.len()
+            e.message
         );
-        assert!(
-            !e.message.chars().any(draws_blocks),
-            "{:?}",
-            &e.message[..80]
-        );
+        // Only the allowlisted scalar `command` survives, escaped; the array and the object detail
+        // (whatever their size) are dropped, so the whole stays bounded printable ASCII.
+        assert_eq!(e.details.keys().collect::<Vec<_>>(), vec!["command"]);
         let command = e.details["command"].as_str().unwrap();
         assert!(
-            command.chars().count() <= VALUE_MAX + 1,
-            "{}",
-            command.len()
+            ascii_printable(command) && command.contains("\\u{2b1b}"),
+            "{command:?}"
+        );
+        let total: usize = e.message.chars().count()
+            + e.details
+                .values()
+                .map(|v| v.as_str().map_or(0, |s| s.chars().count()))
+                .sum::<usize>();
+        let prefix = "the process answering on the key daemon socket reported: ";
+        assert!(
+            total <= prefix.chars().count() + PROSE_MAX + "...(cut)".len(),
+            "{total}"
         );
     }
 

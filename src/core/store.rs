@@ -555,7 +555,7 @@ fn parse_wallet_file(path: &Path) -> Result<WalletFile> {
         WalletError::validation(format!(
             "{} is not valid: {}",
             path.display(),
-            crate::core::text::printable_cut(&e.to_string(), crate::core::text::PROSE_MAX)
+            crate::core::text::ascii_inert(&e.to_string(), crate::core::text::PROSE_MAX)
         ))
     })?;
     if file.version != STORE_VERSION {

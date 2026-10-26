@@ -136,7 +136,7 @@ impl EvmProvider {
         // inert, bounded text.
         WalletError::rpc(format!(
             "{what} failed: {}",
-            crate::core::text::printable_cut(&why, crate::core::text::PROSE_MAX)
+            crate::core::text::ascii_inert(&why, crate::core::text::PROSE_MAX)
         ))
     }
 }
@@ -232,7 +232,7 @@ pub async fn erc20_meta(p: &EvmProvider, net: &Net, token: Address) -> Result<To
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "?".to_string());
     // The contract writes `symbol()`: escaped and cut where it enters the output.
-    let symbol = crate::core::text::printable_cut(&symbol, SYMBOL_SHOWN);
+    let symbol = crate::core::text::ascii_inert(&symbol, SYMBOL_SHOWN);
     Ok(TokenMeta { symbol, decimals })
 }
 
