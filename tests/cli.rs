@@ -4741,6 +4741,44 @@ fn rpc_text_reaches_human_output_escaped_and_on_one_line() {
 }
 
 #[test]
+fn a_registry_tokens_recorded_symbol_shows_as_itself_and_any_other_is_escaped() {
+    // USDT0 on Arbitrum answers `symbol()` with `USD₮0`, which the registry records: shown as is.
+    // The same text from a contract not in the registry, or anything else from the registry's
+    // address, is text from outside: escaped to printable ASCII.
+    let usdt0 = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9";
+    let other = "0x1111111111111111111111111111111111111111";
+    let home = Home::new();
+    home.create("main", &[]);
+    let symbol_of = |token: &str, symbol: &'static str| {
+        let node = common::tiny_rpc_reply(move |method, params| match method {
+            "eth_chainId" => Ok(json!("0xa4b1")),
+            "eth_call" => {
+                let tx = &params[0];
+                let data = tx["input"].as_str().or(tx["data"].as_str()).unwrap_or("");
+                Ok(json!(match &data[..10.min(data.len())] {
+                    "0x313ce567" => format!("0x{:064x}", 6),
+                    "0x95d89b41" => abi_string(symbol),
+                    _ => format!("0x{:064x}", 5),
+                }))
+            }
+            _ => Ok(json!("0x0")),
+        });
+        let v = home
+            .run(&[
+                "balance", "--chain", "arbitrum", "--token", token, "--rpc", &node, "--json",
+            ])
+            .ok();
+        v["symbol"].as_str().unwrap_or("").to_string()
+    };
+    assert_eq!(symbol_of(usdt0, "USD\u{20ae}0"), "USD\u{20ae}0");
+    assert_eq!(symbol_of(other, "USD\u{20ae}0"), "USD\\u{20ae}0");
+    assert_eq!(
+        symbol_of(usdt0, "USD\u{20ae}0\u{1b}[2J"),
+        "USD\\u{20ae}0\\u{1b}[2J"
+    );
+}
+
+#[test]
 fn a_call_string_result_is_faithful_in_json_and_escaped_on_the_terminal() {
     // `call` decodes what the caller asked for: `--json` keeps the contract's string exactly
     // (JSON encodes its control characters), the human text shows it escaped and on one line.

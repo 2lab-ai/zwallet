@@ -157,8 +157,11 @@ Commands that act on a key take `--key <name>` (default: the active key).
   glyphs, emoji, accented letters) — becomes a `\u{…}` escape. Free text from there is then cut to
   a total (512 characters per source; 256 per detail), so one relayed error is bounded whatever
   its size or nesting. Nothing from outside has a line of its own or can draw a shape (there is no
-  character left that would draw a QR code by soft-wrapping). A `string` that `call` decodes is
-  kept exact in `--json` and escaped and cut in human output. An error from the process on `d.sock`
+  character left that would draw a QR code by soft-wrapping). One exception, which is zwallet's own
+  text: a registry token whose `symbol()` is exactly the symbol the registry records shows it as
+  is (USDT0's `USD₮0`); any other symbol, from that address or another, is escaped. A `string`
+  that `call` decodes is kept exact in `--json` and escaped and cut in human output. An error from
+  the process on `d.sock`
   keeps
   only the detail fields a key daemon sends, and reads as its own: prefixed ``the process
   answering on the key daemon socket reported:`` unless it is this build's key daemon (or this

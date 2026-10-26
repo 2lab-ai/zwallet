@@ -203,7 +203,9 @@ pub struct TokenMeta {
 const SYMBOL_SHOWN: usize = 32;
 
 /// `decimals()` and `symbol()` of `token`, read from the chain. The symbol is whatever the
-/// contract returns, escaped and cut ([`SYMBOL_SHOWN`]).
+/// contract returns, escaped and cut ([`SYMBOL_SHOWN`]), except that a registry token on this chain
+/// whose `symbol()` is exactly the registry's recorded `onchain_symbol` shows that constant (so
+/// USDT0's `USD₮0` reads as itself): those bytes are zwallet's own, not text from outside.
 pub async fn erc20_meta(p: &EvmProvider, net: &Net, token: Address) -> Result<TokenMeta> {
     let not_token = || {
         WalletError::invalid_address(format!(
@@ -231,8 +233,12 @@ pub async fn erc20_meta(p: &EvmProvider, net: &Net, token: Address) -> Result<To
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "?".to_string());
-    // The contract writes `symbol()`: escaped and cut where it enters the output.
-    let symbol = crate::core::text::ascii_inert(&symbol, SYMBOL_SHOWN);
+    // The contract writes `symbol()`: escaped and cut where it enters the output, unless it is
+    // the recorded symbol of this registry token.
+    let symbol = match super::registry::lookup(config(net.chain).chain_id, &token) {
+        Some(t) if t.onchain_symbol == symbol => t.onchain_symbol.to_string(),
+        _ => crate::core::text::ascii_inert(&symbol, SYMBOL_SHOWN),
+    };
     Ok(TokenMeta { symbol, decimals })
 }
 
