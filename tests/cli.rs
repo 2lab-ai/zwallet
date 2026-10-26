@@ -1075,8 +1075,9 @@ const NOT_VERIFIED: &str = "not verified: run `zwallet address --verify` before 
 const LOCKED_NOTE: &str = "not verified: the wallet is locked; `zwallet unlock <dur>` or `zwallet address --verify` \
      checks it";
 
-/// Whether a live session verifies an address on this OS. On macOS the CLI reads the
-/// executable of the process answering on `d.sock` from the kernel. On Linux every zwallet
+/// Whether a live session verifies an address on this OS. On macOS the CLI asks the kernel for
+/// the code-signing hash (cdhash) of the code the process answering on `d.sock` runs, through
+/// that connection's audit token, and compares it with its own. On Linux every zwallet
 /// process is non-dumpable, which hides its `/proc/<pid>/exe` from its own user, so the key
 /// daemon's executable cannot be checked and nothing is verified by session.
 fn session_verifies() -> bool {
@@ -3639,10 +3640,11 @@ fn s5_a_resigned_copy_is_other_code_so_it_is_not_verified() {
     if !session_verifies() {
         return; // The cdhash is only read on macOS.
     }
-    if !have("codesign") {
-        eprintln!("skipping s5: codesign not found");
-        return;
-    }
+    // macOS ships codesign: a missing one is a broken host, not a reason to pass silently.
+    assert!(
+        have("codesign"),
+        "s5 needs codesign, which ships with macOS"
+    );
     let home = Home::new();
     home.create("main", &[]);
     let dir = tempfile::Builder::new()
@@ -3763,10 +3765,13 @@ int main(int argc, char **argv) {
   struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
   strncpy(a.sun_path, path, sizeof a.sun_path - 1);
   if (bind(l, (struct sockaddr *)&a, sizeof a) || listen(l, 8)) return 3;
-  const char *reply =
-    "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":1,"
+  /* Its own pid, so `status` takes the reply as coming from a listed daemon process. */
+  char reply[512];
+  snprintf(reply, sizeof reply,
+    "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
     "\"expiresAt\":\"2099-01-01T00:00:00Z\",\"chain\":\"ethereum\",\"index\":0,"
-    "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n";
+    "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n",
+    (int)getpid());
   for (;;) {
     int s = accept(l, 0, 0);
     if (s < 0) continue;
@@ -3779,10 +3784,11 @@ int main(int argc, char **argv) {
 
 #[test]
 fn s6_an_attacker_running_its_own_code_on_the_socket_is_not_verified() {
-    if !have("cc") {
-        eprintln!("skipping s6: cc not found");
-        return;
-    }
+    // rustc links with cc, so a host that built this test has it.
+    assert!(
+        have("cc"),
+        "s6 needs cc (rustc's linker) to build its attacker"
+    );
     let home = Home::new();
     home.create("main", &[]);
     // The cache is edited to the attacker's address: a daemon-vs-cache mismatch would hide the
@@ -3915,14 +3921,222 @@ fn a_mismatch_answered_by_an_impostor_aborts_and_names_it() {
         let v = out.json();
         assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{args:?}: {v}");
         let msg = v["error"].as_str().unwrap_or("");
+        // It does not present the impostor's answer as the seed's derivation, nor blame the cache.
         assert!(
-            msg.contains("does not match") && msg.contains(want) && msg.contains(&pid),
-            "{args:?}: {v}"
+            !msg.contains("the cache was modified") && !msg.contains("derives from the seed"),
+            "{args:?}: {msg}"
         );
+        for part in [
+            format!(
+                "the process answering on the key daemon socket reported {POISON} as key \
+                 'main''s ethereum address, which contradicts the "
+            ),
+            " cached in wallet.json. That process is not this build's key daemon: ".to_string(),
+            want.to_string(),
+            pid.clone(),
+            ". Do not send funds to either address; run `zwallet lock`, then unlock again"
+                .to_string(),
+        ] {
+            assert!(msg.contains(&part), "{args:?}: missing {part:?} in {msg}");
+        }
         let w = v["warning"].as_str().unwrap_or("");
         assert!(w.contains(want) && w.contains(&pid), "{args:?}: {v}");
     }
     drop(fake);
+}
+
+/// Whether `text` holds a raw ESC or carriage return (in a value that should have been escaped;
+/// a raw line feed is checked on its own where the text is one line).
+fn has_raw_control(text: &str) -> bool {
+    text.contains('\u{1b}') || text.contains('\r')
+}
+
+#[test]
+fn an_answer_that_is_no_address_is_rejected_and_shown_escaped() {
+    // An impostor answers a terminal escape and a fake second line where an address belongs: it
+    // is never shown, compared or verified as an address, and the error shows it escaped, in
+    // `--json` and in the human error alike.
+    let home = Home::new();
+    home.create("main", &[]);
+    let evil = "\u{1b}[2J\nwarning: all good, send funds";
+    let fake = FakeDaemon::answering(
+        &home.sock(),
+        serde_json::json!({
+            "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z",
+            "chain": "ethereum", "index": 0, "active": "main", "address": evil,
+        }),
+    );
+    for args in [
+        &["address", "--json"][..],
+        &["addresses", "--json"],
+        &["change", "main", "--json"],
+    ] {
+        let out = home.run(args);
+        assert_eq!(out.code, 1, "{args:?}: {}", out.stdout);
+        let v = out.json();
+        assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{args:?}: {v}");
+        assert!(
+            v.get("address").is_none() && v.get("verified").is_none(),
+            "{v}"
+        );
+        let msg = v["error"].as_str().unwrap_or("");
+        assert!(msg.contains("which is not an address"), "{args:?}: {msg}");
+        assert!(
+            !has_raw_control(msg) && !msg.contains('\n'),
+            "{args:?}: {msg:?}"
+        );
+        assert!(
+            msg.contains("\\u{1b}") && msg.contains("\\n"),
+            "{args:?}: {msg:?}"
+        );
+    }
+    // Human: one error line on stderr, nothing on stdout, no raw control character.
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 1);
+    assert!(human.stdout.is_empty(), "{:?}", human.stdout);
+    assert!(!has_raw_control(&human.stderr), "{:?}", human.stderr);
+    assert_eq!(
+        human.stderr.trim_end().lines().count(),
+        1,
+        "{:?}",
+        human.stderr
+    );
+    drop(fake);
+}
+
+#[test]
+fn a_cached_value_that_is_no_address_is_rejected_and_shown_escaped() {
+    // wallet.json is anyone's to edit: a cached "address" carrying a terminal escape is never
+    // printed as one, locked or unlocked.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.edit_wallet(|v| {
+        v["keys"][0]["addresses"]["ethereum"] = serde_json::json!("\u{1b}]0;pwned\u{7}\n0xabc");
+    });
+    for args in [&["address", "--json"][..], &["status", "--json"]] {
+        let msg = home.run(args).err("VALIDATION_ERROR");
+        assert!(msg.contains("which is not an address"), "{args:?}: {msg}");
+        assert!(
+            !has_raw_control(&msg) && !msg.contains('\n'),
+            "{args:?}: {msg:?}"
+        );
+    }
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 1);
+    assert!(!has_raw_control(&human.stderr), "{:?}", human.stderr);
+}
+
+/// Builds [`ATTACKER_C`] at `bin` with `cc`.
+fn build_attacker(src_dir: &std::path::Path, bin: &std::path::Path) {
+    let src = src_dir.join("attacker.c");
+    fs::write(&src, ATTACKER_C).unwrap();
+    let cc = std::process::Command::new("cc")
+        .arg("-o")
+        .arg(bin)
+        .arg(&src)
+        .output()
+        .expect("run cc");
+    assert!(
+        cc.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+}
+
+#[test]
+fn an_impostor_executable_path_is_shown_escaped() {
+    // The warning names the impostor's executable path, which its starter chose: a terminal
+    // escape and a line break in it come out escaped, in `--json` and on the terminal alike.
+    assert!(
+        have("cc"),
+        "needs cc (rustc's linker) to build the attacker"
+    );
+    let home = Home::new();
+    home.create("main", &[]);
+    // The cache is set to the attacker's answer, so the command shows its warning, not a mismatch.
+    poison_cache(&home);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let bin = dir.path().join("zw\u{1b}[31mallet\nfake line");
+    build_attacker(dir.path(), &bin);
+    let canonical = fs::canonicalize(home.path()).unwrap();
+    let _attacker = KillOnDrop(
+        std::process::Command::new(&bin)
+            .arg("daemon")
+            .arg("--home")
+            .arg(&canonical)
+            .spawn()
+            .expect("spawn attacker"),
+    );
+    wait_until_answering(&home, Duration::from_secs(15));
+    let v = home.run(&["address", "--json"]).ok();
+    assert_eq!(v["verified"], false, "{v}");
+    let w = v["warning"].as_str().unwrap_or("");
+    assert!(w.contains("zw\\u{1b}[31mallet\\nfake line"), "{w:?}");
+    assert!(!has_raw_control(w) && !w.contains('\n'), "{w:?}");
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(!has_raw_control(&human.stdout), "{:?}", human.stdout);
+    let warning_lines: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("warning: "))
+        .collect();
+    assert_eq!(warning_lines.len(), 1, "{:?}", human.stdout);
+    assert!(!human.stdout.contains("\nfake line"), "{:?}", human.stdout);
+}
+
+#[test]
+fn status_names_a_daemon_argv_impostor_that_contradicts_the_cache() {
+    // `status` derives only through a daemon the process table lists that says it serves this
+    // session. An impostor started with the daemon's argv is listed and says so (its own pid);
+    // answering an address the genuine cache contradicts, it makes `status` abort, named.
+    assert!(
+        have("cc"),
+        "needs cc (rustc's linker) to build the attacker"
+    );
+    let home = Home::new();
+    home.create("main", &[]);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let bin = dir.path().join("attacker");
+    build_attacker(dir.path(), &bin);
+    let canonical = fs::canonicalize(home.path()).unwrap();
+    let attacker = KillOnDrop(
+        std::process::Command::new(&bin)
+            .arg("daemon")
+            .arg("--home")
+            .arg(&canonical)
+            .spawn()
+            .expect("spawn attacker"),
+    );
+    let pid = format!("(pid {})", attacker.0.id());
+    wait_until_answering(&home, Duration::from_secs(15));
+    assert!(home.daemon_pids().contains(&(attacker.0.id() as i32)));
+    let want = if session_verifies() {
+        "runs other code than this zwallet build"
+    } else {
+        "is not this zwallet build"
+    };
+    let out = home.run(&["status", "--json"]);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    let v = out.json();
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
+    let msg = v["error"].as_str().unwrap_or("");
+    assert!(
+        msg.contains(&format!(
+            "reported {POISON} as key 'main''s ethereum address"
+        )),
+        "{msg}"
+    );
+    assert!(msg.contains(want) && msg.contains(&pid), "{msg}");
+    assert!(!msg.contains("the cache was modified"), "{msg}");
+    let w = v["warning"].as_str().unwrap_or("");
+    assert!(w.contains(want) && w.contains(&pid), "{v}");
 }
 
 /// The LC_UUID of a thin little-endian 64-bit Mach-O (what `cargo` and `cc` emit for the host on
