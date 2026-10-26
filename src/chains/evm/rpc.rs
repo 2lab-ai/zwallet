@@ -131,11 +131,12 @@ impl EvmProvider {
             }
             other => self.net.redact(&other.to_string()),
         };
-        // The node (or whatever answers at the URL) writes this text: escaped where the error is
-        // built, after the key is scrubbed, so the terminal and `--json` get the same inert text.
+        // The node (or whatever answers at the URL) writes this text: escaped and cut where the
+        // error is built, after the key is scrubbed, so the terminal and `--json` get the same
+        // inert, bounded text.
         WalletError::rpc(format!(
             "{what} failed: {}",
-            crate::core::text::printable(&why)
+            crate::core::text::printable_cut(&why, crate::core::text::PROSE_MAX)
         ))
     }
 }

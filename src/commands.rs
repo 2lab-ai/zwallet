@@ -706,7 +706,11 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
         out["expiresAt"] = session["expiresAt"].clone();
         out["daemonPid"] = session["pid"].clone();
         // The whitelist this session signs under, as `unlock` shows it.
-        out["whitelist"] = session["whitelist"].clone();
+        // Its reason can quote whitelist.json, a file anyone of this user can write.
+        out["whitelist"] = crate::core::text::inert_json_capped(
+            &session["whitelist"],
+            crate::core::text::PROSE_MAX,
+        );
     }
     if master == "created" && std::io::stderr().is_terminal() {
         eprintln!(
@@ -945,12 +949,35 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
                 }
             ));
         }
-        warnings.extend(index_warning(&file, &[key]));
+        // A repaired file was edited: its whole key list is checked for indices zwallet never
+        // assigns, not only the key shown.
+        let checked: Vec<&KeyEntry> = if repairs.is_empty() {
+            vec![key]
+        } else {
+            file.keys.iter().collect()
+        };
+        warnings.extend(index_warning(&file, &checked));
         if !warnings.is_empty() {
             out["warning"] = json!(warnings.join(". "));
         }
+        // Human text: the fields, then one line per repaired entry; the old value is marked so
+        // nobody funds it.
+        let mut shown_out = out.clone();
+        if let Some(o) = shown_out.as_object_mut() {
+            o.remove("repaired");
+        }
+        let mut text = render_human(&shown_out);
+        for r in &repairs {
+            text.push_str(&format!(
+                "\nrepaired: key '{}' {}: was {} (do not fund), now {}",
+                r.key,
+                r.chain,
+                shown(&r.was),
+                r.now
+            ));
+        }
         return Ok(with_qr(
-            with_note(out, None),
+            Out::with_text(out, text),
             true,
             Some(&address),
             a.qr.no_qr,
@@ -1333,7 +1360,10 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
     // A decoded `string` is data the caller asked for: `--json` keeps it exactly as the
     // contract returned it (JSON encodes its control characters), the human text shows it
     // escaped, since a contract chose it.
-    let text = render_human(&crate::core::text::inert_json(&out));
+    let text = render_human(&crate::core::text::inert_json_capped(
+        &out,
+        crate::core::text::PROSE_MAX,
+    ));
     Ok(Out::with_text(out, text))
 }
 
@@ -1718,7 +1748,8 @@ async fn status(home: &Path, no_qr: bool) -> Result<Out> {
         // one is plain RFC 3339 and passes as it is), the whitelist with every string escaped.
         out["expiresAt"] = json!(d["expiresAt"].as_str().map(shown));
         // The whitelist as the serving daemon verifies it right now.
-        out["whitelist"] = crate::core::text::inert_json(&d["whitelist"]);
+        out["whitelist"] =
+            crate::core::text::inert_json_capped(&d["whitelist"], crate::core::text::PROSE_MAX);
     }
     // The active key's address, and what verifies it.
     let mut shown = None;
@@ -1828,7 +1859,11 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
         "verifiedBy": BY_PASSWORD,
         // The whitelist this session signs under, as its daemon verified it: the generation and
         // the entries, so a rolled-back list is visible.
-        "whitelist": session["whitelist"],
+        // Its reason can quote whitelist.json, a file anyone of this user can write.
+        "whitelist": crate::core::text::inert_json_capped(
+            &session["whitelist"],
+            crate::core::text::PROSE_MAX,
+        ),
     });
     if let Some(w) = session_index_warning(&file, &session) {
         out["warning"] = json!(w);
