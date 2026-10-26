@@ -616,8 +616,10 @@ pub enum PeerCheck {
 //
 // A key daemon is non-dumpable, so its `/proc/<pid>/exe` is unreadable even to its own user:
 // `check_peer` can never read it and returns `Unknown` for the genuine daemon. Nothing is
-// verified by session on Linux. The code is here so the cross-check (`list`) still names a
-// readable impostor.
+// verified by session on Linux. The code is here so that `address`, `addresses`, `change`,
+// `status` and `balance` still name an impostor whose executable is readable (another program)
+// in their `warning`. `list` does not ask who answered (it compares the cache with whatever
+// derivation comes back and never claims verification without the password).
 
 /// The executable of a running process, as the kernel names it.
 #[cfg(target_os = "linux")]
@@ -902,11 +904,18 @@ fn peer_exe_uuid(stream: &UnixStream) -> Option<[u8; 16]> {
     }
 }
 
-/// The warning that names why a [`Peer`] (pid `pid`) is not this build's key daemon.
+/// The advice that ends every [`PeerCheck::Other`] warning.
+pub const RELOCK: &str = "run `zwallet lock` and unlock again";
+
+/// The most characters of an executable path a warning shows (escaped, see
+/// [`crate::core::text::shown`]): the path is chosen by whoever started that process.
+const EXE_SHOWN: usize = 200;
+
+/// The warning that names why a [`Peer`] (pid `pid`) is not this build's key daemon: `what`,
+/// then `; ` and [`RELOCK`]. Any value from that process in `what` must already be escaped.
 fn peer_not_ours(pid: i32, what: &str) -> PeerCheck {
     PeerCheck::Other(format!(
-        "the process answering on the key daemon socket (pid {pid}) {what}; run `zwallet lock` \
-         and unlock again"
+        "the process answering on the key daemon socket (pid {pid}) {what}; {RELOCK}"
     ))
 }
 
@@ -998,30 +1007,36 @@ fn check_peer_macos(home: &Path, peer: &Peer, pid: i32, own: &OwnExe) -> Result<
 /// [`check_peer`] on Linux. Nothing is ever verified by session here: the genuine key daemon is
 /// non-dumpable, so its `/proc/<pid>/exe` is unreadable to its own user (`process_exe` returns
 /// `Unreadable`) — this never returns `ThisBuild`. A *readable* executable therefore belongs to
-/// some other process; if it runs other code it is named for the cross-check, and if it happens
-/// to run this very build it is still not a genuine daemon (which would be unreadable), so
-/// `Unknown`. `home` is unused; the socket/daemon-table legs that would need it only matter where
+/// some other process; if it runs other code it is named in the commands' `warning`, and if it
+/// happens to run this very build it is still not a genuine daemon (which would be unreadable),
+/// so `Unknown`. `home` is unused; the socket/daemon-table legs that would need it only matter where
 /// a session can verify.
 #[cfg(target_os = "linux")]
 fn check_peer_linux(_home: &Path, pid: i32, own: &OwnExe) -> Result<PeerCheck> {
     match process_exe(pid) {
         ProcessExe::File(path, id) if id != Some(own.id) => Ok(peer_not_ours(
             pid,
-            &format!("is not this zwallet build ({})", path.display()),
+            &format!(
+                "is not this zwallet build ({})",
+                crate::core::text::shown(&path.to_string_lossy(), EXE_SHOWN)
+            ),
         )),
         _ => Ok(PeerCheck::Unknown),
     }
 }
 
-/// The path of `pid`'s executable (`proc_pidpath`), for a warning message only. `?` if the kernel
-/// will not say.
+/// The path of `pid`'s executable (`proc_pidpath`), for a warning message only, escaped (the
+/// path is chosen by whoever started that process, and may carry a terminal escape or a line
+/// break). `?` if the kernel will not say.
 #[cfg(target_os = "macos")]
 fn macos_exe_path(pid: i32) -> String {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: the kernel writes at most `buf.len()` bytes into `buf`.
     let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
     match usize::try_from(n) {
-        Ok(n) if n > 0 && n <= buf.len() => String::from_utf8_lossy(&buf[..n]).into_owned(),
+        Ok(n) if n > 0 && n <= buf.len() => {
+            crate::core::text::shown(&String::from_utf8_lossy(&buf[..n]), EXE_SHOWN)
+        }
         _ => "?".to_string(),
     }
 }
@@ -2169,9 +2184,18 @@ mod tests {
         // test binary; until then it still reads as own's id.
         #[cfg(target_os = "linux")]
         {
+            /// Killed and reaped on drop, so a failing assertion or panic below never leaves the
+            /// `sleep 30` child behind.
+            struct Reaped(std::process::Child);
+            impl Drop for Reaped {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
             let own_id = file_id(Path::new("/proc/self/exe")).unwrap();
-            let mut sleep = Command::new("sleep").arg("30").spawn().unwrap();
-            let spid = sleep.id() as i32;
+            let sleep = Reaped(Command::new("sleep").arg("30").spawn().unwrap());
+            let spid = sleep.0.id() as i32;
             let exe = PathBuf::from(format!("/proc/{spid}/exe"));
             let start = Instant::now();
             while file_id(&exe) == Some(own_id) && start.elapsed() < Duration::from_secs(5) {
@@ -2192,8 +2216,7 @@ mod tests {
                 w.contains("is not this zwallet build (") && w.contains("sleep)"),
                 "{w}"
             );
-            sleep.kill().unwrap();
-            sleep.wait().unwrap();
+            drop(sleep);
             // Gone: unreadable, so Unknown.
             assert_eq!(check_peer(home.path(), &other).unwrap(), PeerCheck::Unknown);
         }
