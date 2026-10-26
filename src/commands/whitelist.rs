@@ -261,7 +261,7 @@ async fn edit(home: &Path, change: Change, opts: &WhitelistEditArgs) -> Result<O
         unlock.as_ref().map(|(d, ttl, _)| (d.as_str(), *ttl)),
     );
     let password = if opts.password.password_stdin {
-        eprintln!("{told}");
+        crate::core::terminal::eprint_line(&told);
         read_password(true, "", false)?
     } else {
         read_password(false, &format!("{told}\nWallet password: "), false)?

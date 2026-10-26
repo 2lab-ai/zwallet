@@ -463,7 +463,7 @@ fn ptrace_scope_check(path: &Path, allow_scope_0: bool) -> Result<()> {
     };
     Err(WalletError::validation(format!(
         "{found}: any same-user process can attach to the daemon during start-up and read the \
-         password; set kernel.yama.ptrace_scope ≥ 1 (sysctl), or pass --allow-ptrace-scope-0 to \
+         password; set kernel.yama.ptrace_scope >= 1 (sysctl), or pass --allow-ptrace-scope-0 to \
          accept that risk"
     )))
 }
@@ -2846,7 +2846,7 @@ mod tests {
         let missing = ptrace_scope_check(&path, false).unwrap_err();
         assert_eq!(missing.code, ErrorCode::ValidationError);
         assert!(
-            missing.message.contains("missing") && missing.message.contains("ptrace_scope ≥ 1"),
+            missing.message.contains("missing") && missing.message.contains("ptrace_scope >= 1"),
             "{}",
             missing.message
         );

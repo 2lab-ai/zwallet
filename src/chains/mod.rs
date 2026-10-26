@@ -1087,13 +1087,12 @@ impl SendRecord {
                  hash up before sending again ({lookup})"
             ),
         };
-        // Not `eprintln!`: a closed stderr must not panic the send.
-        let _ = writeln!(
-            std::io::stderr(),
+        // A closed stderr must not panic the send (`eprint_line` ignores it).
+        crate::core::terminal::eprint_line(&format!(
             "{line}. Journal {}: {}",
             self.journal.display(),
             self.entry
-        );
+        ));
         Ok(())
     }
 }

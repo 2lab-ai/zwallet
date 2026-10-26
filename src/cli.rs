@@ -588,11 +588,12 @@ const HUMAN_DETAILS: &[&str] = &[
     "command",
 ];
 
+/// Every error zwallet prints, through the write point ([`crate::core::terminal`]).
 fn print_error(json: bool, e: &WalletError) {
     if json {
-        println!("{}", e.to_json());
+        crate::core::terminal::print_json(&e.to_json().to_string());
     } else {
-        eprintln!("{}", human_error(e));
+        crate::core::terminal::eprint_line(&human_error(e));
     }
 }
 
@@ -607,23 +608,25 @@ fn human_error(e: &WalletError) -> String {
     text
 }
 
+/// Every result zwallet prints, through the write point ([`crate::core::terminal`]): `--json` as
+/// printable ASCII, the human text filtered, then the QR code (zwallet's own rendering of a
+/// verified address, the one thing printed as it is).
 fn print_out(json: bool, out: &Out) {
+    use crate::core::terminal::{print_json, print_line};
     if json {
         if !out.value.is_null() {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&out.value).unwrap_or_default()
-            );
+            print_json(&serde_json::to_string_pretty(&out.value).unwrap_or_default());
         }
         return;
     }
     match &out.text {
         Some(t) if t.is_empty() => {}
-        Some(t) => println!("{t}"),
-        None => println!("{}", render_human(&out.value)),
+        Some(t) => print_line(t),
+        None => print_line(&render_human(&out.value)),
     }
     if let Some(qr) = &out.qr {
-        println!("{qr}");
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout().lock(), "{qr}");
     }
 }
 

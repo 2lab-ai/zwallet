@@ -4779,6 +4779,43 @@ fn a_registry_tokens_recorded_symbol_shows_as_itself_and_any_other_is_escaped() 
 }
 
 #[test]
+fn call_json_is_ascii_on_the_wire_and_parses_back_to_the_contracts_exact_string() {
+    // `--json` keeps a contract's string exactly, but the bytes printed are printable ASCII (and
+    // the newlines of pretty printing): solid glyphs, an octant, C1 CSI and DEL go out as JSON
+    // `\uXXXX` escapes, which a parser turns back into the same string.
+    let s = "\u{2b1b}\u{2b1c}\u{1cd00}\u{9b}2J\u{7f}\u{1b}[2J USD\u{20ae}0";
+    let encoded = abi_string(s);
+    let node = common::tiny_rpc_reply(move |method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        "eth_call" => Ok(json!(encoded.clone())),
+        _ => Ok(json!("0x0")),
+    });
+    let home = Home::new();
+    let out = home.run(&[
+        "call",
+        "--chain",
+        "ethereum",
+        "--to",
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "--sig",
+        "name()(string)",
+        "--rpc",
+        &node,
+        "--json",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout
+            .bytes()
+            .all(|b| b == b'\n' || (0x20..=0x7e).contains(&b)),
+        "{:?}",
+        out.stdout
+    );
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["result"], json!([s]), "the exact string, after parsing");
+}
+
+#[test]
 fn a_call_string_result_is_faithful_in_json_and_escaped_on_the_terminal() {
     // `call` decodes what the caller asked for: `--json` keeps the contract's string exactly
     // (JSON encodes its control characters), the human text shows it escaped and on one line.

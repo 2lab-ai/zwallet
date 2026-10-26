@@ -732,8 +732,8 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
         out["whitelist"] = inert_whitelist(&session["whitelist"]);
     }
     if master == "created" && std::io::stderr().is_terminal() {
-        eprintln!(
-            "Write down your recovery phrase now: run `zwallet backup` before funding this wallet."
+        crate::core::terminal::eprint_line(
+            "Write down your recovery phrase now: run `zwallet backup` before funding this wallet.",
         );
     }
     // Unverified only when derived through the daemon, so while unlocked.
