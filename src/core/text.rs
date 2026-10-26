@@ -50,7 +50,8 @@ pub fn escape(text: &str) -> String {
 /// `ascii` (printable ASCII only, as [`escape`] makes it) cut so that the whole result, [`CUT`]
 /// marker included, is at most `max` characters. Below the marker's own length the cut has no
 /// marker.
-pub fn cut_to(ascii: String, max: usize) -> String {
+pub(crate) fn cut_to(ascii: String, max: usize) -> String {
+    debug_assert!(ascii.is_ascii(), "cut_to takes ASCII only");
     if ascii.len() <= max {
         return ascii;
     }
