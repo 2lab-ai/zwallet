@@ -819,6 +819,7 @@ struct OwnExe {
     id: (u64, u64),
     #[cfg(target_os = "macos")]
     cdhash: [u8; CDHASH_LEN],
+    #[cfg(target_os = "macos")]
     uuid: Option<[u8; 16]>,
 }
 
@@ -827,7 +828,6 @@ fn own_exe() -> Option<OwnExe> {
     {
         Some(OwnExe {
             id: file_id(Path::new("/proc/self/exe"))?,
-            uuid: None,
         })
     }
     #[cfg(target_os = "macos")]
@@ -2125,20 +2125,19 @@ mod tests {
             .unwrap();
         let tail = "; run `zwallet lock` and unlock again";
         let me = std::process::id() as i32;
-        let own = own_exe().unwrap();
         // This test process: this build's code (cdhash/exe and uuid match its own), but no key
         // daemon of the home, so the check stops there.
         #[cfg(target_os = "macos")]
         let this = Peer {
             pid: Some(me),
             token: Some(own_token()),
-            exe_uuid: own.uuid,
+            exe_uuid: own_exe().unwrap().uuid,
         };
         #[cfg(not(target_os = "macos"))]
         let this = Peer {
             pid: Some(me),
             token: None,
-            exe_uuid: own.uuid,
+            exe_uuid: None,
         };
         assert_eq!(
             check_peer(home.path(), &this).unwrap(),
