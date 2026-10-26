@@ -654,11 +654,12 @@ fn nonce_taken_by_another_tx_says_look_up_before_sending_again() {
         assert!(!msg.contains("next nonce"), "{msg}");
         // The journal's earlier send is named, with how to look it up; the refused retry is
         // not offered as it.
-        assert!(msg.contains(&earlier), "{msg}");
+        assert!(msg.contains(&format!("{earlier} (nonce 7, sent ")), "{msg}");
         assert!(
-            msg.contains(&format!(
-                "`zwallet tx --chain ethereum {earlier}` or https://etherscan.io/tx/{earlier}"
-            )),
+            msg.contains(
+                "look each hash up with `zwallet tx --chain ethereum <txHash>` or \
+                 https://etherscan.io/tx/<txHash>"
+            ),
             "{msg}"
         );
         assert!(!msg.contains(&format!("{refused} (")), "{msg}");
@@ -778,10 +779,13 @@ fn replacing_a_pending_nonce_must_name_the_transaction_it_replaces() {
             ),
             "{msg}"
         );
-        // The journal names it, with the command that looks it up.
-        assert!(msg.contains(&six), "{msg}");
+        // The journal names it, with the command that looks a hash up.
+        assert!(msg.contains(&format!("{six} (nonce 6, sent ")), "{msg}");
         assert!(
-            msg.contains(&format!("`zwallet tx --chain ethereum {six}`")),
+            msg.contains(
+                "look each hash up with `zwallet tx --chain ethereum <txHash>` or \
+                 https://etherscan.io/tx/<txHash>"
+            ),
             "{msg}"
         );
         // The pending transaction may be another payment: never replace that one.
@@ -1292,9 +1296,15 @@ fn a_fresh_send_while_one_is_pending_is_refused_unless_allow_pending() {
     ] {
         assert!(msg.contains(part), "{part}: {msg}");
     }
-    assert!(msg.contains(&first_hash), "{msg}");
     assert!(
-        msg.contains(&format!("`zwallet tx --chain ethereum {first_hash}`")),
+        msg.contains(&format!("{first_hash} (nonce 7, sent ")),
+        "{msg}"
+    );
+    assert!(
+        msg.contains(
+            "look each hash up with `zwallet tx --chain ethereum <txHash>` or \
+             https://etherscan.io/tx/<txHash>"
+        ),
         "{msg}"
     );
     let v = r.json();
@@ -2215,13 +2225,12 @@ fn a_repeat_of_a_recent_send_is_refused_unless_allow_duplicate() {
         "{msg}"
     );
     assert!(
-        msg.contains(&format!(
-            "look it up: `zwallet tx --chain ethereum {first_hash}` or \
-             https://etherscan.io/tx/{first_hash})"
-        )),
+        msg.ends_with(
+            "; look each hash up with `zwallet tx --chain ethereum <txHash>` or \
+             https://etherscan.io/tx/<txHash>; nothing was signed"
+        ),
         "{msg}"
     );
-    assert!(msg.ends_with("; nothing was signed"), "{msg}");
     let v = r.json();
     let dup = &v["duplicateSends"][0];
     assert_eq!(dup["txHash"], first_hash.as_str(), "{v:#}");

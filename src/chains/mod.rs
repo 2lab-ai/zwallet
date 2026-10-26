@@ -686,9 +686,16 @@ pub struct SendJournal {
 
 /// How many journal entries an error message names at most (the newest).
 const JOURNAL_SHOWN: usize = 5;
-/// How many characters of one journal value (a time, a kind, an amount, an address) a message
-/// shows: the journal is a file any process of this user can write.
-const JOURNAL_VALUE_SHOWN: usize = 64;
+/// How many characters the send journal gives one message in all: every shown entry's hash,
+/// nonce, time, kind, amount and recipient together. Entries are shown whole, newest first, while
+/// they fit; the journal is a file any process of this user can write.
+const JOURNAL_TEXT_MAX: usize = crate::core::text::PROSE_MAX;
+/// The most digits an amount in the journal shows on either side of its point (a U256 has 78).
+const AMOUNT_DIGITS: usize = 78;
+/// The most characters of the symbol in a journal amount (zwallet keeps 32 of an on-chain one).
+const SYMBOL_CHARS: usize = 32;
+/// The kinds of send zwallet journals: what `transfer` and `invoke` pass as `kind`.
+const SEND_KINDS: [&str; 3] = ["transfer", "token-transfer", "invoke"];
 
 /// A journal entry's `txHash` when it is a transaction hash (32 bytes of hex), as alloy writes
 /// one; anything else in that field is not shown, nor made into a lookup command.
@@ -699,22 +706,113 @@ fn entry_hash(e: &Value) -> Option<String> {
         .map(|h| format!("{h:#x}"))
 }
 
-/// A journal entry's string field `k` for a message: escaped and cut ([`JOURNAL_VALUE_SHOWN`]),
-/// `?` when it is missing or not a string.
-fn entry_text(e: &Value, k: &str) -> String {
-    e[k].as_str().map_or_else(
-        || "?".to_string(),
-        |v| crate::core::text::shown(v, JOURNAL_VALUE_SHOWN),
-    )
+/// `0x` and 40 hex digits: an address as zwallet writes one.
+fn is_address(s: &str) -> bool {
+    s.len() == 42 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// How to look up a journal entry's transaction: the command and the explorer link for its hash,
-/// or that the line holds no transaction hash.
-fn entry_lookup(chain: &Chain, hash: Option<&str>) -> String {
-    match hash {
-        Some(h) => format!("look it up: {}", lookup_hint(chain, h)),
-        None => "its txHash in the journal is not a transaction hash".to_string(),
+/// `<digits>[.<digits>] <symbol>`, as zwallet writes a journal amount: at most
+/// [`AMOUNT_DIGITS`] digits on either side of the point, then one space and a symbol of letters,
+/// digits and `₮` (one point inside allowed, as in `USDC.e`), at most [`SYMBOL_CHARS`] long.
+fn is_amount_value(s: &str) -> bool {
+    let digits = |d: &str| {
+        !d.is_empty() && d.len() <= AMOUNT_DIGITS && d.bytes().all(|b| b.is_ascii_digit())
+    };
+    let word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '₮');
+    let Some((amount, symbol)) = s.split_once(' ') else {
+        return false;
+    };
+    let amount_ok = match amount.split_once('.') {
+        Some((int, frac)) => digits(int) && digits(frac),
+        None => digits(amount),
+    };
+    let symbol_ok = symbol.chars().count() <= SYMBOL_CHARS
+        && match symbol.split_once('.') {
+            Some((a, b)) => word(a) && word(b),
+            None => word(symbol),
+        };
+    amount_ok && symbol_ok
+}
+
+/// A journal entry's fields as a message shows them: each only in the shape zwallet itself writes
+/// it, else [`INVALID`](crate::core::text::INVALID); the hash only when it is one (`?` else); the
+/// time re-rendered from the instant it names, never the file's bytes.
+struct EntryText {
+    hash: String,
+    nonce: String,
+    ts: String,
+    kind: String,
+    value: String,
+    to: String,
+}
+
+impl EntryText {
+    fn of(e: &Value) -> Self {
+        use crate::core::text::INVALID;
+        use crate::core::time::{parse_rfc3339_utc, rfc3339_utc};
+        let shaped = |k: &str, ok: fn(&str) -> bool| {
+            e[k].as_str()
+                .filter(|v| ok(v))
+                .map_or_else(|| INVALID.to_string(), str::to_string)
+        };
+        Self {
+            hash: entry_hash(e).unwrap_or_else(|| "?".to_string()),
+            nonce: e["nonce"]
+                .as_u64()
+                .map_or_else(|| "?".to_string(), |n| n.to_string()),
+            ts: e["ts"]
+                .as_str()
+                .and_then(parse_rfc3339_utc)
+                .map_or_else(|| INVALID.to_string(), rfc3339_utc),
+            kind: shaped("kind", |k| SEND_KINDS.contains(&k)),
+            value: shaped("value", is_amount_value),
+            to: shaped("to", is_address),
+        }
     }
+}
+
+/// The newest of `entries` (at most [`JOURNAL_SHOWN`]) as `text` renders each, oldest first: as
+/// many as fit one [`JOURNAL_TEXT_MAX`] budget of journal text (`text` also says how much of the
+/// rendering is the journal's), each whole, so a hash is never cut. Then `(and N more there)` for
+/// the entries not shown.
+fn entries_shown(entries: &[Value], text: impl Fn(&EntryText) -> (String, usize)) -> String {
+    let mut shown = Vec::new();
+    let mut used = 0;
+    for e in entries.iter().rev().take(JOURNAL_SHOWN) {
+        let (line, len) = text(&EntryText::of(e));
+        if used + len > JOURNAL_TEXT_MAX {
+            break;
+        }
+        used += len;
+        shown.push(line);
+    }
+    let more = entries.len() - shown.len();
+    shown.reverse();
+    let mut out = shown.join("; ");
+    if more > 0 {
+        out.push_str(&format!(" (and {more} more there)"));
+    }
+    out
+}
+
+/// A journal entry as a message names it: `0xab.. (nonce 6, sent 2026-10-20T04:05:06Z: transfer
+/// 0.01 ETH to 0x..)`, and how many of its characters are the journal's.
+fn describe_entry(e: &EntryText) -> (String, usize) {
+    let line = format!(
+        "{} (nonce {}, sent {}: {} {} to {})",
+        e.hash, e.nonce, e.ts, e.kind, e.value, e.to
+    );
+    let len = [&e.hash, &e.nonce, &e.ts, &e.kind, &e.value, &e.to]
+        .iter()
+        .map(|s| s.len())
+        .sum();
+    (line, len)
+}
+
+/// How to look up the hashes a journal message names: one command and one link, with the hash as
+/// a placeholder, so the journal's text is not repeated.
+fn journal_lookup(chain: &Chain) -> String {
+    format!("look each hash up with {}", lookup_hint(chain, "<txHash>"))
 }
 
 /// Journal entries for an error's `--json` fields: every string and key escaped
@@ -937,17 +1035,11 @@ impl SendJournal {
             );
             return (text, entries);
         }
-        let shown: Vec<String> = entries
-            .iter()
-            .rev()
-            .take(JOURNAL_SHOWN)
-            .rev()
-            .map(|e| self.describe_entry(e))
-            .collect();
         let text = format!(
-            "The send journal {} has at {at}: {}",
+            "The send journal {} has at {at}: {}; {}",
             self.display(),
-            shown.join("; ")
+            entries_shown(&entries, describe_entry),
+            journal_lookup(self.chain)
         );
         // The entries for an error's `pendingSends`: escaped, as the text is.
         let entries = entries.iter().map(crate::core::text::inert_json).collect();
@@ -999,55 +1091,21 @@ impl SendJournal {
             .collect())
     }
 
-    /// A journal entry as text, with how to look it up: `0xab.. (nonce 6, sent
-    /// 2026-10-20T04:05:06Z: transfer 0.01 ETH to 0x..; look it up: `zwallet tx ...` or <url>)`.
-    /// Every value is the journal's (a file anyone of this user can write): escaped and cut, and
-    /// the hash only when it is one.
-    fn describe_entry(&self, e: &Value) -> String {
-        let nonce = e["nonce"]
-            .as_u64()
-            .map_or_else(|| "?".to_string(), |n| n.to_string());
-        let hash = entry_hash(e);
-        format!(
-            "{} (nonce {nonce}, sent {}: {} {} to {}; {})",
-            hash.as_deref().unwrap_or("?"),
-            entry_text(e, "ts"),
-            entry_text(e, "kind"),
-            entry_text(e, "value"),
-            entry_text(e, "to"),
-            entry_lookup(self.chain, hash.as_deref())
-        )
-    }
-
     /// The refusal of a send without `--nonce` that repeats `duplicates` (from
     /// [`Self::recent_duplicates`], not empty): nothing was signed.
     pub fn duplicate_error(&self, duplicates: Vec<Value>) -> WalletError {
-        let shown: Vec<String> = duplicates
-            .iter()
-            .rev()
-            .take(JOURNAL_SHOWN)
-            .rev()
-            .map(|e| {
-                let hash = entry_hash(e);
-                format!(
-                    "{} (nonce {}, sent {}; {})",
-                    hash.as_deref().unwrap_or("?"),
-                    e["nonce"]
-                        .as_u64()
-                        .map_or_else(|| "?".to_string(), |n| n.to_string()),
-                    entry_text(e, "ts"),
-                    entry_lookup(self.chain, hash.as_deref())
-                )
-            })
-            .collect();
+        let shown = entries_shown(&duplicates, |e| {
+            let line = format!("{} (nonce {}, sent {})", e.hash, e.nonce, e.ts);
+            (line, e.hash.len() + e.nonce.len() + e.ts.len())
+        });
         WalletError::validation(format!(
             "this looks like a repeat of a recent send; look those hashes up first. If this \
              really is a second payment, pass --allow-duplicate. The send journal {} has the same \
-             send (chain, kind, recipient, amount and token) from the last {} minutes: {}; \
-             nothing was signed",
+             send (chain, kind, recipient, amount and token) from the last {} minutes: {shown}; \
+             {}; nothing was signed",
             self.display(),
             DUPLICATE_WINDOW_SECS / 60,
-            shown.join("; ")
+            journal_lookup(self.chain)
         ))
         .with_detail("duplicateSends", inert_entries(&duplicates))
         .with_detail("journal", self.display())
@@ -1940,43 +1998,118 @@ mod tests {
     }
 
     #[test]
-    fn journal_text_reaches_messages_escaped_and_bounded_and_a_bad_hash_is_never_named() {
-        // The journal is a file any process of this user can write. A line whose every field is
-        // a terminal escape, CR, LF, a fake line and a run of solid glyphs comes out of the
-        // pointer text and the duplicate refusal as bounded printable ASCII, its `txHash` (no
-        // hash) is not shown nor made into a lookup command, and the `--json` entries are inert.
+    fn journal_fields_show_only_in_the_shape_zwallet_writes_within_one_budget() {
+        // The journal is a file any process of this user can write. Five entries use every field
+        // to try to draw or forge a line: spaces and points in the amount, a kind zwallet never
+        // writes, a time that is not RFC 3339, a long run of digits, and terminal escapes. Each
+        // such field shows as `<invalid>`; the rest show as zwallet writes them; and all the
+        // journal's text in one message fits one budget, whole entries only.
+        use crate::core::text::{INVALID, PROSE_MAX};
         let home = temp_home();
         let chain = find("ethereum").unwrap();
         let journal = SendJournal::new(home.path(), chain, "0xF00");
-        let evil = format!(
-            "\u{1b}[2J\u{1b}[H\r\nverified: true\n{}",
-            "\u{2b1b}".repeat(500)
-        );
-        let line = json!({
-            "ts": evil, "chain": "ethereum", "nonce": 1, "txHash": evil, "to": evil,
-            "value": evil, "kind": evil,
-        });
-        journal.append(&line).unwrap();
-        let printable = |s: &str| s.bytes().all(|b| (0x20..=0x7e).contains(&b));
-        let (text, entries) = journal.pointer(1..=1, None);
-        assert!(printable(&text), "{text:?}");
-        assert!(text.len() < 4 * JOURNAL_VALUE_SHOWN + 400, "{}", text.len());
+        let h = |n: u8| format!("0x{n:064x}");
+        let to = "0x000000000000000000000000000000000000dEaD";
+        let lines = [
+            json!({ "nonce": 1, "txHash": h(1), "ts": "2026-10-20T04:05:06Z", "kind": "transfer",
+                    "value": "## ## ## ETH", "to": to }),
+            json!({ "nonce": 1, "txHash": h(2), "ts": "2026-10-20T04:05:06Z", "kind": "invoke",
+                    "value": "1.2.3 ETH", "to": to }),
+            json!({ "nonce": 1, "txHash": h(3), "ts": "2026-10-20T04:05:06Z",
+                    "kind": "xfer\u{1b}[2J", "value": "0.5 USD\u{20ae}0", "to": to }),
+            json!({ "nonce": 2, "txHash": h(4), "ts": "2026-10-20 04:05:06",
+                    "kind": "token-transfer", "value": "1 USDC.e", "to": "0x## ##" }),
+            json!({ "nonce": 2, "txHash": "\u{1b}[2J", "ts": "\r\nverified: true",
+                    "kind": "transfer", "value": format!("{} ETH", "8".repeat(200)), "to": to }),
+        ];
+        for line in &lines {
+            journal.append(line).unwrap();
+        }
+        let printable = |s: &str| {
+            s.chars()
+                .all(|c| (' '..='~').contains(&c) || c == '\u{20ae}')
+        };
+        // Three at nonce 1 and two at nonce 2, so each message shows all of its own.
+        let (one, entries) = journal.pointer(1..=1, None);
+        let (two, _) = journal.pointer(2..=2, None);
         assert!(
-            text.contains("? (nonce 1, sent \\u{1b}[2J")
-                && text.contains("its txHash in the journal is not a transaction hash")
-                && !text.contains("zwallet tx"),
+            !one.contains("more there") && !two.contains("more there"),
+            "{one}\n{two}"
+        );
+        for text in [&one, &two] {
+            assert!(printable(text), "{text:?}");
+            // One lookup hint for all of them, with a placeholder, not the journal's hash.
+            assert!(
+                text.ends_with(
+                    "; look each hash up with `zwallet tx --chain ethereum <txHash>` or \
+                     https://etherscan.io/tx/<txHash>"
+                ),
+                "{text}"
+            );
+        }
+        let text = format!("{one}\n{two}");
+        // Spaces in an amount, points in an amount, a bogus kind, a non-RFC 3339 time, an
+        // address with spaces, a 200-digit amount and a hash that is none: never their own text.
+        for bad in [
+            "## ##",
+            "1.2.3",
+            "xfer",
+            "2026-10-20 04",
+            "0x## ##",
+            "88888888888",
+            "[2J",
+        ] {
+            assert!(!text.contains(bad), "{bad}: {text}");
+        }
+        assert_eq!(text.matches(INVALID).count(), 7, "{text}");
+        // What zwallet writes shows as it is: a time, a kind, `USD₮0` and `USDC.e`.
+        for good in [
+            "sent 2026-10-20T04:05:06Z: transfer <invalid> to 0x000000000000000000000000000000000000dEaD",
+            "0.5 USD\u{20ae}0",
+            "token-transfer 1 USDC.e to <invalid>",
+            "? (nonce 2, sent <invalid>: transfer <invalid> to 0x",
+        ] {
+            assert!(text.contains(good), "{good}: {text}");
+        }
+        // `--json` keeps every entry's own data, escaped, not `<invalid>`.
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["value"], "## ## ## ETH");
+        assert_eq!(entries[2]["kind"], "xfer\\u{1b}[2J");
+
+        // The budget: five entries at the most each field allows (a 20-digit nonce, an amount of
+        // 78 + 78 digits and a 32-character symbol) are 352 characters of journal text each, so
+        // one fits and the other four are counted.
+        let big = SendJournal::new(home.path(), chain, "0xB16");
+        let amount = format!("{}.{} {}", "9".repeat(78), "9".repeat(78), "A".repeat(32));
+        for n in 1..=5u8 {
+            big.append(&json!({
+                "nonce": u64::MAX, "txHash": h(n), "ts": "2026-10-20T04:05:06Z",
+                "kind": "token-transfer", "value": amount, "to": to,
+            }))
+            .unwrap();
+        }
+        let (text, _) = big.pointer(u64::MAX..=u64::MAX, None);
+        assert_eq!(text.matches(" (nonce ").count(), 1, "{text}");
+        assert!(
+            text.contains(&h(5)) && text.contains(" (and 4 more there)"),
             "{text}"
         );
-        let json = serde_json::to_string(&Value::Array(entries)).unwrap();
-        assert!(printable(&json), "{json}");
-        let e = journal.duplicate_error(vec![line]);
+        let one = 66 + 20 + 20 + "token-transfer".len() + amount.len() + 42;
+        assert!(one <= PROSE_MAX && 2 * one > PROSE_MAX, "{one}");
+        // The same five in the duplicate refusal: hash, nonce and time are 106 characters each,
+        // so four fit (an ordinary nonce of a few digits lets all five fit).
+        let e = big.duplicate_error(big.entries_at(0..=u64::MAX, None).unwrap());
+        assert_eq!(e.message.matches(" (nonce ").count(), 4, "{}", e.message);
+        assert!(e.message.contains(" (and 1 more there)"), "{}", e.message);
         assert!(printable(&e.message), "{:?}", e.message);
-        assert!(e.message.len() < 1000, "{}", e.message.len());
-        assert!(!e.message.contains("zwallet tx"), "{}", e.message);
+        assert!(
+            !e.message.contains("zwallet tx --chain ethereum 0x"),
+            "{}",
+            e.message
+        );
         let json = e.to_json().to_string();
-        assert!(printable(&json), "{json}");
+        assert!(json.bytes().all(|b| (0x20..=0x7e).contains(&b)), "{json}");
     }
-
     #[test]
     fn recent_duplicates_key_on_base_units_not_on_the_display_value() {
         use crate::core::time::rfc3339_utc;

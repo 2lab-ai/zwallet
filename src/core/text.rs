@@ -16,6 +16,10 @@ pub const VALUE_MAX: usize = 256;
 /// The marker a cut leaves, in ASCII so it is inert itself.
 const CUT: &str = "...(cut)";
 
+/// What a message shows for a value from a file that is not in the shape zwallet writes there:
+/// this fixed text, never the value.
+pub const INVALID: &str = "<invalid>";
+
 /// Whether `b` is a printable ASCII byte (space through `~`).
 fn ok(b: u32) -> bool {
     (0x20..=0x7e).contains(&b)

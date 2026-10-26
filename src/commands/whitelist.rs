@@ -1107,10 +1107,10 @@ const ENTRIES_SHOWN: usize = 100;
 /// prints before saying how many are left.
 const ITEMS_SHOWN: usize = 16;
 
-/// What `whitelist list` shows for a value from whitelist.json that is not what `add` would have
-/// written there: this fixed text, never the value (the file is anyone's to edit, and a value
-/// that is not a nickname, an address, a chain or a selector can be anything, a picture too).
-const INVALID: &str = "<invalid>";
+// What `whitelist list` shows for a value from whitelist.json that is not what `add` would have
+// written there: this fixed text, never the value (the file is anyone's to edit, and a value
+// that is not a nickname, an address, a chain or a selector can be anything, a picture too).
+use crate::core::text::INVALID;
 
 /// `v` when it is a string that passes `check`, else [`INVALID`].
 fn valid_or_invalid(v: &Value, check: fn(&str) -> bool) -> String {
