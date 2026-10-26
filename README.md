@@ -111,29 +111,35 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - `verified: true, verifiedBy: "session"`: while unlocked, `address`, `addresses`, `status`,
     `change` and `balance` (with or without `--chain`) ask the key daemon to derive the address
     (once per chain family), compare it with the cache, and check with the kernel which process
-    answered: its executable must be the very file this CLI runs (same device and inode, read by
-    `proc_pidpath` on macOS), on macOS the kernel must also record that file's executable UUID
-    for the process's use of the socket (`LOCAL_PEERUUID`, so a program that opened the socket and
-    then started zwallet does not pass), and the process table must list it as a key daemon of
-    this home. That daemon decrypted this home's `wallet.json` with the password typed at
-    `unlock`. On Linux every zwallet process is non-dumpable, which hides `/proc/<pid>/exe` from
-    its own user, so the daemon's executable cannot be checked there and nothing is verified by
-    session: the address is shown as below.
+    answered. On **macOS** that check identifies the code actually running, not a path or a value
+    the binary declares about itself (both of which a same-user attacker can forge): using the
+    peer's audit token (`LOCAL_PEERTOKEN`, so pid reuse cannot swap the target), the peer's
+    code-signing hash (`csops` `CS_OPS_CDHASH`, the hash the kernel validates against the mapped
+    code pages — arm64 macOS runs only signed code, and a Rust binary is linker ad-hoc signed)
+    must equal this process's own, the peer must be `CS_VALID`, its argv must be in the process
+    table as a key daemon of this home, it must hold the listening `d.sock` of this home, and the
+    executable UUID it used the socket with (`LOCAL_PEERUUID`) must match. That daemon decrypted
+    this home's `wallet.json` with the password typed at `unlock`. On **Linux** every zwallet
+    process is non-dumpable, which hides `/proc/<pid>/exe` from its own user, so the daemon's code
+    cannot be checked there and nothing is verified by session: the address is shown as below.
   - `verified: false`: the cache while locked, with the line ``not verified: the wallet is locked;
     `zwallet unlock <dur>` or `zwallet address --verify` checks it`` in human output; or, while
     unlocked, an address no session verified (an agent's `create`, `list` without `--verify`, or
     Linux), with ``not verified: run `zwallet address --verify` before funding``. When the
     process answering on `d.sock` is not this build's key daemon of this home (another program,
-    or another zwallet build, such as the one running before a `brew upgrade`), the command still
-    succeeds, unverified, with a `warning`: ``the process answering on the key daemon socket (pid
-    N) is not this zwallet build (<its executable>); run `zwallet lock` and unlock again``.
-    `balance` adds no note line.
+    another zwallet build such as the one before a `brew upgrade`, or one that does not hold the
+    socket), the command still succeeds, unverified, with a `warning` naming the pid and what it
+    is, ending ``run `zwallet lock` and unlock again``. `balance` adds no note line.
 
   While a daemon answers, a cache that its derivation contradicts fails these commands (and
   `list`) with `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
-  swaps in its own `wallet.json` and unlocks it with its own password through this very binary,
-  or injects code into it (`DYLD_INSERT_LIBRARIES`, `LD_PRELOAD`), the same as replacing the
-  binary itself. So keep the address you saved from your first unlock; if it ever changes, stop.
+  swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
+  genuine daemon of a wallet the human did not make), or injects code into the genuine binary
+  (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, `LD_PRELOAD`) — the same
+  class as replacing the binary, which nothing here can prevent. So keep the address you saved
+  from your first unlock; if it ever changes, stop. **Piped and `--json` output changed with
+  this check**: the locked note now names `zwallet unlock`, and a session-verified result gains
+  `verifiedBy: "session"` and drops the unverified note; agents should read `--json`.
 - **QR code**: where the address is `verified: true`, by the password (`unlock`, `create` and
   `create --unlock` with a verified key, `address --verify`) or by the session (`address`,
   `addresses`, `status`, `change` and `balance` while unlocked), human output on a terminal ends
