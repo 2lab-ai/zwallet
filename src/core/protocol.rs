@@ -185,6 +185,32 @@ fn is_disconnect(e: &std::io::Error) -> bool {
 
 /// Sends one request. `Ok(None)` means no daemon is listening, i.e. the wallet is locked.
 pub async fn send(home: &Path, req: &Request, timeout: Duration) -> Result<Option<Value>> {
+    Ok(send_answered(home, req, timeout).await?.map(|a| a.value))
+}
+
+/// The process at the other end of a connection to `d.sock`, as the kernel reports it when the
+/// connection is made: on macOS the process that last used the listening socket
+/// (`LOCAL_PEERPID`) and the UUID of the executable it ran then (`LOCAL_PEERUUID`); on Linux the
+/// process that called listen(2) (`SO_PEERCRED`). Asked at connect time: once the daemon has
+/// answered and closed its end, macOS no longer says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Peer {
+    pub pid: Option<i32>,
+    exe_uuid: Option<[u8; 16]>,
+}
+
+/// A daemon's answer to one request, and the [`Peer`] that gave it.
+pub struct Answer {
+    pub value: Value,
+    pub peer: Peer,
+}
+
+/// [`send`], with the [`Peer`] that answered.
+pub async fn send_answered(
+    home: &Path,
+    req: &Request,
+    timeout: Duration,
+) -> Result<Option<Answer>> {
     let path = socket_path(home)?;
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.uid() != current_uid() => {
@@ -221,6 +247,10 @@ pub async fn send(home: &Path, req: &Request, timeout: Duration) -> Result<Optio
                 "refusing to talk to a key daemon run by another user",
             ));
         }
+        let who = Peer {
+            pid: peer.pid(),
+            exe_uuid: peer_exe_uuid(&stream),
+        };
         let mut line = Zeroizing::new(
             serde_json::to_vec(req)
                 .map_err(|e| WalletError::validation(format!("cannot encode request: {e}")))?,
@@ -245,7 +275,8 @@ pub async fn send(home: &Path, req: &Request, timeout: Duration) -> Result<Optio
         let resp: Response = serde_json::from_slice(&buf).map_err(|e| {
             WalletError::validation(format!("malformed reply from the key daemon: {e}"))
         })?;
-        resp.into_result().map(Some)
+        resp.into_result()
+            .map(|value| Some(Answer { value, peer: who }))
     };
     match tokio::time::timeout(timeout, exchange).await {
         Ok(r) => r,
@@ -542,6 +573,178 @@ impl DaemonExe {
         }
         Ok(())
     }
+}
+
+// ---- Who answered on `d.sock` ----
+//
+// The peer uid check lets any process of this user answer, so an address a daemon derives proves
+// nothing by itself: a 20-line script on `d.sock` answers what it likes. [`check_peer`] asks the
+// kernel instead which program answered: only this build's own key daemon for the home counts.
+
+/// What [`check_peer`] found out about a [`Peer`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PeerCheck {
+    /// This build's key daemon for the home: its executable is the file this CLI runs (and on
+    /// macOS it ran that file when it last used the listening socket), and the process table
+    /// lists it as a key daemon of the home.
+    ThisBuild,
+    /// Another program, another zwallet build, or not a key daemon of the home: the warning
+    /// that says which.
+    Other(String),
+    /// Its executable cannot be read. On Linux every zwallet process is non-dumpable (see
+    /// `password::disable_core_dumps`), which hides `/proc/<pid>/exe` from its own user too, so
+    /// a key daemon's always is; a process that exited is unknown as well.
+    Unknown,
+}
+
+/// The identity of a file, as `stat` follows links to it: `(dev, ino)`.
+pub fn file_id(path: &Path) -> Option<(u64, u64)> {
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// The executable of a running process, as the kernel names it.
+enum ProcessExe {
+    /// Its path, and the identity of the file there (`None` when it no longer exists).
+    File(PathBuf, Option<(u64, u64)>),
+    /// Hidden from this process, or the process is gone.
+    Unreadable,
+}
+
+/// The executable `pid` runs: macOS `proc_pidpath`, the path of its text vnode.
+#[cfg(target_os = "macos")]
+fn process_exe(pid: i32) -> ProcessExe {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: the kernel writes at most `buf.len()` bytes into `buf`.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    let Ok(n) = usize::try_from(n) else {
+        return ProcessExe::Unreadable;
+    };
+    if n == 0 || n > buf.len() {
+        return ProcessExe::Unreadable;
+    }
+    let path = PathBuf::from(OsStr::from_bytes(&buf[..n]));
+    let id = file_id(&path);
+    ProcessExe::File(path, id)
+}
+
+/// The executable `pid` runs: Linux `/proc/<pid>/exe`, stat'ed through the link (the very file,
+/// whatever its path holds now). A target the kernel marks ` (deleted)` is no file at all.
+#[cfg(target_os = "linux")]
+fn process_exe(pid: i32) -> ProcessExe {
+    let link = PathBuf::from(format!("/proc/{pid}/exe"));
+    let Ok(meta) = std::fs::metadata(&link) else {
+        // EACCES for a non-dumpable process (every zwallet daemon), ENOENT once it exited.
+        return ProcessExe::Unreadable;
+    };
+    let Ok(path) = std::fs::read_link(&link) else {
+        return ProcessExe::Unreadable;
+    };
+    let deleted = path.as_os_str().as_bytes().ends_with(b" (deleted)");
+    let id = (!deleted).then(|| (meta.dev(), meta.ino()));
+    ProcessExe::File(path, id)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_exe(_pid: i32) -> ProcessExe {
+    ProcessExe::Unreadable
+}
+
+/// The executable this process runs: its identity, and on macOS its UUID as the kernel records
+/// it on a socket this process uses (so in the same terms as a [`Peer`]'s).
+struct OwnExe {
+    id: (u64, u64),
+    uuid: Option<[u8; 16]>,
+}
+
+fn own_exe() -> Option<OwnExe> {
+    #[cfg(target_os = "linux")]
+    let id = file_id(Path::new("/proc/self/exe"))?;
+    #[cfg(not(target_os = "linux"))]
+    let id = file_id(&std::env::current_exe().ok()?)?;
+    #[cfg(target_os = "macos")]
+    let uuid = {
+        let (a, b) = ChildChannel::pair().ok()?;
+        (&a).write_all(&[0]).ok()?;
+        Some(local_peer_uuid(std::os::fd::AsRawFd::as_raw_fd(&b))?)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let uuid = None;
+    Some(OwnExe { id, uuid })
+}
+
+/// `LOCAL_PEERUUID` of the connected unix socket `fd`: the UUID of the executable the peer
+/// process ran when it last used its end.
+#[cfg(target_os = "macos")]
+fn local_peer_uuid(fd: RawFd) -> Option<[u8; 16]> {
+    let mut uuid = [0u8; 16];
+    let mut len = uuid.len() as libc::socklen_t;
+    // SAFETY: the kernel writes at most `len` bytes into `uuid`.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERUUID,
+            uuid.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    (rc == 0 && len as usize == uuid.len()).then_some(uuid)
+}
+
+fn peer_exe_uuid(stream: &UnixStream) -> Option<[u8; 16]> {
+    #[cfg(target_os = "macos")]
+    return local_peer_uuid(std::os::fd::AsRawFd::as_raw_fd(stream));
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = stream;
+        None
+    }
+}
+
+/// Whether `peer` is this build's key daemon for `home` ([`PeerCheck`]). First its executable:
+/// the file this CLI runs, by identity, not by name; on macOS also the executable it ran when it
+/// last used the listening socket, which a process that opened the socket and then exec'd zwallet
+/// fails. Then the process table: a key daemon of `home`.
+///
+/// This stops a script, or another zwallet build (say the one before a `brew upgrade`), from
+/// passing for the session. It cannot stop a process of this user that runs this very binary over
+/// its own `wallet.json` with its own password, or injects code into it (`DYLD_INSERT_LIBRARIES`,
+/// `LD_PRELOAD`): that is the same as replacing the binary, which nothing here can prevent.
+pub fn check_peer(home: &Path, peer: &Peer) -> Result<PeerCheck> {
+    let (Some(pid), Some(own)) = (peer.pid, own_exe()) else {
+        return Ok(PeerCheck::Unknown);
+    };
+    let other = |what: String| {
+        PeerCheck::Other(format!(
+            "the process answering on the key daemon socket (pid {pid}) {what}; run `zwallet \
+             lock` and unlock again"
+        ))
+    };
+    let path = match process_exe(pid) {
+        ProcessExe::Unreadable => return Ok(PeerCheck::Unknown),
+        ProcessExe::File(path, id) if id != Some(own.id) => {
+            return Ok(other(format!(
+                "is not this zwallet build ({})",
+                path.display()
+            )));
+        }
+        ProcessExe::File(path, _) => path,
+    };
+    if cfg!(target_os = "macos") {
+        if own.uuid.is_none() {
+            return Ok(PeerCheck::Unknown);
+        }
+        if peer.exe_uuid != own.uuid {
+            return Ok(other(format!(
+                "runs this zwallet build ({}) but opened the socket as another program",
+                path.display()
+            )));
+        }
+    }
+    if !daemon_pids(home, None)?.contains(&pid) {
+        return Ok(other("is not a key daemon of this wallet home".into()));
+    }
+    Ok(PeerCheck::ThisBuild)
 }
 
 /// Starts a new key daemon for `home` holding the seed for `ttl`, and returns its readiness
@@ -1578,6 +1781,88 @@ mod tests {
             assert_eq!(err.code, ErrorCode::ValidationError, "{bad:?}");
         }
         assert!(encode_unlock_input(Duration::from_secs(1), "").is_err());
+    }
+
+    #[test]
+    fn file_id_is_the_file_not_its_name_or_its_bytes() {
+        let dir = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::write(&a, b"zwallet").unwrap();
+        std::fs::write(&b, b"zwallet").unwrap();
+        // The same bytes in another file: another file.
+        assert!(file_id(&a).is_some());
+        assert_ne!(file_id(&a), file_id(&b));
+        // Another name for the same file: the same file.
+        let hard = dir.path().join("hard");
+        std::fs::hard_link(&a, &hard).unwrap();
+        assert_eq!(file_id(&hard), file_id(&a));
+        let soft = dir.path().join("soft");
+        std::os::unix::fs::symlink(&a, &soft).unwrap();
+        assert_eq!(file_id(&soft), file_id(&a));
+        assert_eq!(file_id(&dir.path().join("missing")), None);
+    }
+
+    #[test]
+    fn check_peer_names_what_answered() {
+        let home = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let tail = "; run `zwallet lock` and unlock again";
+        // This test process: the executable this process runs, but no key daemon of the home.
+        let me = std::process::id() as i32;
+        let this = Peer {
+            pid: Some(me),
+            exe_uuid: own_exe().unwrap().uuid,
+        };
+        assert_eq!(
+            check_peer(home.path(), &this).unwrap(),
+            PeerCheck::Other(format!(
+                "the process answering on the key daemon socket (pid {me}) is not a key daemon \
+                 of this wallet home{tail}"
+            ))
+        );
+        // On macOS: this executable now, but another one when it used the socket.
+        if cfg!(target_os = "macos") {
+            let forged = Peer {
+                exe_uuid: Some([7; 16]),
+                ..this
+            };
+            let PeerCheck::Other(w) = check_peer(home.path(), &forged).unwrap() else {
+                panic!("a forged uuid passed");
+            };
+            assert!(w.contains("opened the socket as another program"), "{w}");
+        }
+        // Another program.
+        let mut sleep = Command::new("sleep").arg("30").spawn().unwrap();
+        let other = Peer {
+            pid: Some(sleep.id() as i32),
+            exe_uuid: None,
+        };
+        let PeerCheck::Other(w) = check_peer(home.path(), &other).unwrap() else {
+            panic!("sleep passed for a key daemon");
+        };
+        assert!(
+            w.starts_with(&format!(
+                "the process answering on the key daemon socket (pid {}) is not this zwallet \
+                 build (",
+                sleep.id()
+            )) && w.contains("sleep)")
+                && w.ends_with(tail),
+            "{w}"
+        );
+        // Gone, or no pid at all: nothing is known, nothing is claimed.
+        sleep.kill().unwrap();
+        sleep.wait().unwrap();
+        assert_eq!(check_peer(home.path(), &other).unwrap(), PeerCheck::Unknown);
+        let none = Peer {
+            pid: None,
+            exe_uuid: None,
+        };
+        assert_eq!(check_peer(home.path(), &none).unwrap(), PeerCheck::Unknown);
     }
 
     #[test]
