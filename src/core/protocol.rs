@@ -599,15 +599,16 @@ pub enum PeerCheck {
     /// This build's key daemon for the home. On macOS: the kernel-validated code-signing hash
     /// (cdhash) of the code the peer is running equals this process's own, the peer is
     /// `CS_VALID`, it holds the listening `d.sock` of this home, its argv is in `daemon_pids`,
-    /// and its socket-use executable UUID matches. On Linux: see [`check_peer`].
+    /// and its socket-use executable UUID matches. Never on Linux.
     ThisBuild,
     /// Another program, another zwallet build (say the one before a `brew upgrade`), or not the
     /// key daemon of this home: the warning naming which.
     Other(String),
-    /// The kernel will not say (a syscall failed), so nothing is verified. On Linux every zwallet
-    /// process is non-dumpable (see `password::disable_core_dumps`), which hides
-    /// `/proc/<pid>/exe` from its own user, so a key daemon's executable is always unreadable
-    /// there; a process that exited is unknown as well.
+    /// Nothing can be established, so nothing is verified: a kernel query failed or the process
+    /// is gone, or (on Linux) the peer cannot be the genuine key daemon's but may be this build.
+    /// On Linux every zwallet process is non-dumpable (see `password::disable_core_dumps`), which
+    /// hides `/proc/<pid>/exe` from its own user, so a key daemon's executable is always
+    /// unreadable there; a readable one that runs this very build is no genuine daemon either.
     Unknown,
 }
 
@@ -2182,8 +2183,10 @@ mod tests {
                 token: None,
                 exe_uuid: None,
             };
-            let PeerCheck::Other(w) = check_peer(home.path(), &other).unwrap() else {
-                panic!("sleep passed for a key daemon");
+            let w = match check_peer(home.path(), &other).unwrap() {
+                PeerCheck::Other(w) => w,
+                PeerCheck::ThisBuild => panic!("sleep passed for this build's key daemon"),
+                PeerCheck::Unknown => panic!("sleep's readable executable gave Unknown, not Other"),
             };
             assert!(
                 w.contains("is not this zwallet build (") && w.contains("sleep)"),
