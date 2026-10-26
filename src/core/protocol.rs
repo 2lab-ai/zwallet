@@ -994,27 +994,22 @@ fn check_peer_macos(home: &Path, peer: &Peer, pid: i32, own: &OwnExe) -> Result<
     Ok(PeerCheck::ThisBuild)
 }
 
-/// [`check_peer`] on Linux. A key daemon is non-dumpable, so `process_exe` returns `Unreadable`
-/// for it and this returns `Unknown`; a readable impostor is named for the cross-check.
+/// [`check_peer`] on Linux. Nothing is ever verified by session here: the genuine key daemon is
+/// non-dumpable, so its `/proc/<pid>/exe` is unreadable to its own user (`process_exe` returns
+/// `Unreadable`) — this never returns `ThisBuild`. A *readable* executable therefore belongs to
+/// some other process; if it runs other code it is named for the cross-check, and if it happens
+/// to run this very build it is still not a genuine daemon (which would be unreadable), so
+/// `Unknown`. `home` is unused; the socket/daemon-table legs that would need it only matter where
+/// a session can verify.
 #[cfg(target_os = "linux")]
-fn check_peer_linux(home: &Path, pid: i32, own: &OwnExe) -> Result<PeerCheck> {
+fn check_peer_linux(_home: &Path, pid: i32, own: &OwnExe) -> Result<PeerCheck> {
     match process_exe(pid) {
-        ProcessExe::Unreadable => return Ok(PeerCheck::Unknown),
-        ProcessExe::File(path, id) if id != Some(own.id) => {
-            return Ok(peer_not_ours(
-                pid,
-                &format!("is not this zwallet build ({})", path.display()),
-            ));
-        }
-        ProcessExe::File(..) => {}
-    }
-    if !daemon_pids(home, None)?.contains(&pid) {
-        return Ok(peer_not_ours(
+        ProcessExe::File(path, id) if id != Some(own.id) => Ok(peer_not_ours(
             pid,
-            "is not a key daemon of this wallet home",
-        ));
+            &format!("is not this zwallet build ({})", path.display()),
+        )),
+        _ => Ok(PeerCheck::Unknown),
     }
-    Ok(PeerCheck::ThisBuild)
 }
 
 /// The path of `pid`'s executable (`proc_pidpath`), for a warning message only. `?` if the kernel
@@ -2123,39 +2118,26 @@ mod tests {
             .prefix("zwt-")
             .tempdir_in("/tmp")
             .unwrap();
-        let tail = "; run `zwallet lock` and unlock again";
         let me = std::process::id() as i32;
-        // This test process: this build's code (cdhash/exe and uuid match its own), but no key
-        // daemon of the home, so the check stops there.
-        #[cfg(target_os = "macos")]
-        let this = Peer {
-            pid: Some(me),
-            token: Some(own_token()),
-            exe_uuid: own_exe().unwrap().uuid,
-        };
-        #[cfg(not(target_os = "macos"))]
-        let this = Peer {
-            pid: Some(me),
-            token: None,
-            exe_uuid: None,
-        };
-        assert_eq!(
-            check_peer(home.path(), &this).unwrap(),
-            PeerCheck::Other(format!(
-                "the process answering on the key daemon socket (pid {me}) is not a key daemon \
-                 of this wallet home{tail}"
-            ))
-        );
-        // No pid at all: nothing is known, nothing is claimed.
-        let none = Peer {
-            pid: None,
-            token: None,
-            exe_uuid: None,
-        };
-        assert_eq!(check_peer(home.path(), &none).unwrap(), PeerCheck::Unknown);
-        // macOS: no token means the kernel will not say, so Unknown (fail closed).
+        // This test process runs this build's code. On macOS that gets past the cdhash leg but is
+        // no key daemon of the home, so it is named. On Linux its executable is readable, so it is
+        // not the non-dumpable genuine daemon: Unknown (nothing is verified by session there).
         #[cfg(target_os = "macos")]
         {
+            let tail = "; run `zwallet lock` and unlock again";
+            let this = Peer {
+                pid: Some(me),
+                token: Some(own_token()),
+                exe_uuid: own_exe().unwrap().uuid,
+            };
+            assert_eq!(
+                check_peer(home.path(), &this).unwrap(),
+                PeerCheck::Other(format!(
+                    "the process answering on the key daemon socket (pid {me}) is not a key \
+                     daemon of this wallet home{tail}"
+                ))
+            );
+            // No token means the kernel will not say, so Unknown (fail closed).
             let no_token = Peer {
                 token: None,
                 ..this
@@ -2165,12 +2147,38 @@ mod tests {
                 PeerCheck::Unknown
             );
         }
-        // Linux: another program's readable executable is not this build's.
         #[cfg(target_os = "linux")]
         {
+            let this = Peer {
+                pid: Some(me),
+                token: None,
+                exe_uuid: None,
+            };
+            assert_eq!(check_peer(home.path(), &this).unwrap(), PeerCheck::Unknown);
+        }
+        // No pid at all: nothing is known, nothing is claimed.
+        let none = Peer {
+            pid: None,
+            token: None,
+            exe_uuid: None,
+        };
+        assert_eq!(check_peer(home.path(), &none).unwrap(), PeerCheck::Unknown);
+        // Linux: another program's readable executable is not this build's. `spawn()` returns
+        // before the child has exec'd `sleep`, so poll until `/proc/<pid>/exe` is no longer this
+        // test binary; until then it still reads as own's id.
+        #[cfg(target_os = "linux")]
+        {
+            let own_id = file_id(Path::new("/proc/self/exe")).unwrap();
             let mut sleep = Command::new("sleep").arg("30").spawn().unwrap();
+            let spid = sleep.id() as i32;
+            let exe = PathBuf::from(format!("/proc/{spid}/exe"));
+            let start = Instant::now();
+            while file_id(&exe) == Some(own_id) && start.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_ne!(file_id(&exe), Some(own_id), "sleep did not exec within 5s");
             let other = Peer {
-                pid: Some(sleep.id() as i32),
+                pid: Some(spid),
                 token: None,
                 exe_uuid: None,
             };
