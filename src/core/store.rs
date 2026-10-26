@@ -1938,6 +1938,14 @@ mod tests {
                 "{}",
                 err.message
             );
+            // Two remedies, each named; no vague "(or the file)".
+            assert!(
+                err.message.contains(
+                    "Restore the indices in wallet.json, or delete key 'b''s cached address"
+                ) && !err.message.contains("(or the file)"),
+                "{}",
+                err.message
+            );
             assert!(
                 !err.message.contains("run `zwallet address --verify`"),
                 "{}",
