@@ -33,6 +33,16 @@ pub fn printable(text: &str) -> String {
         .collect()
 }
 
+/// [`printable`] `text`, cut after `max` characters (with `…`): free text from outside that has
+/// no business being long, such as a token's `symbol()`.
+pub fn printable_cut(text: &str, max: usize) -> String {
+    let p = printable(text);
+    match p.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &p[..cut]),
+        None => p,
+    }
+}
+
 /// `value` with every string in it, object keys included, made [`printable`]: a JSON value from
 /// the daemon socket, relayed as it is otherwise.
 pub fn inert_json(value: &serde_json::Value) -> serde_json::Value {

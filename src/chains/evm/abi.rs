@@ -228,10 +228,12 @@ fn split_list(s: &str, open: char, close: char) -> Result<Vec<&str>> {
 /// Decodes return data into JSON (scalars as strings, arrays/tuples as arrays).
 pub fn decode_output(func: &Function, data: &[u8]) -> Result<Vec<Value>> {
     let values = func.abi_decode_output(data).map_err(|e| {
+        // The decoder's message can quote the returned data, which the contract chose.
         WalletError::validation(format!(
-            "return data (0x{}) does not match {}: {e}",
+            "return data (0x{}) does not match {}: {}",
             hex::encode(data),
-            func.signature_with_outputs()
+            func.signature_with_outputs(),
+            crate::core::text::printable(&e.to_string())
         ))
     })?;
     Ok(values.iter().map(to_json).collect())

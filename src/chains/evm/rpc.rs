@@ -131,7 +131,12 @@ impl EvmProvider {
             }
             other => self.net.redact(&other.to_string()),
         };
-        WalletError::rpc(format!("{what} failed: {why}"))
+        // The node (or whatever answers at the URL) writes this text: escaped where the error is
+        // built, after the key is scrubbed, so the terminal and `--json` get the same inert text.
+        WalletError::rpc(format!(
+            "{what} failed: {}",
+            crate::core::text::printable(&why)
+        ))
     }
 }
 
@@ -193,6 +198,11 @@ pub struct TokenMeta {
     pub decimals: u8,
 }
 
+/// The most characters of a token's on-chain `symbol()` that output shows.
+const SYMBOL_SHOWN: usize = 32;
+
+/// `decimals()` and `symbol()` of `token`, read from the chain. The symbol is whatever the
+/// contract returns, escaped and cut ([`SYMBOL_SHOWN`]).
 pub async fn erc20_meta(p: &EvmProvider, net: &Net, token: Address) -> Result<TokenMeta> {
     let not_token = || {
         WalletError::invalid_address(format!(
@@ -220,6 +230,8 @@ pub async fn erc20_meta(p: &EvmProvider, net: &Net, token: Address) -> Result<To
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "?".to_string());
+    // The contract writes `symbol()`: escaped and cut where it enters the output.
+    let symbol = crate::core::text::printable_cut(&symbol, SYMBOL_SHOWN);
     Ok(TokenMeta { symbol, decimals })
 }
 
