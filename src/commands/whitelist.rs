@@ -414,6 +414,8 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
         FileView::of(&next_read)
     };
     let fresh = Whitelist::empty(&WHITELIST_RULES);
+    // Every nickname this summary names from the files shares one budget.
+    let names = NameBudget::new();
     let mut lines = vec!["The password authorizes this whitelist change:".to_string()];
     match change {
         Change::Add(e) => {
@@ -460,12 +462,19 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
                 on_off(*on)
             ));
         }
-        Change::Reset => reset_lines(&mut lines, &current, &next, &fresh, unlock.is_some()),
+        Change::Reset => reset_lines(
+            &mut lines,
+            &current,
+            &next,
+            &fresh,
+            unlock.is_some(),
+            &names,
+        ),
     }
     match &current {
         FileView::List(l) => lines.push(format!(
             "  whitelist.json now: {}, not verified yet",
-            gen_entries(l)
+            gen_entries(l, &names)
         )),
         FileView::Absent => lines.push("  whitelist.json: none yet".to_string()),
         FileView::Unreadable(why) => lines.push(unreadable_line(WHITELIST_FILE, why)),
@@ -473,7 +482,7 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
     match &next {
         FileView::List(l) => lines.push(format!(
             "  whitelist.next.json: {}, an unfinished edit, not verified yet",
-            gen_entries(l)
+            gen_entries(l, &names)
         )),
         FileView::Absent if leftover => lines.push(
             "  whitelist.next.json: a copy of whitelist.json (e.g. left after a change)"
@@ -526,8 +535,13 @@ fn reset_lines(
     next: &FileView,
     fresh: &Whitelist,
     unlocking: bool,
+    budget: &NameBudget,
 ) {
-    let names = |view: &FileView| view.list().map(list_names).filter(|n| !n.is_empty());
+    let names = |view: &FileView| {
+        view.list()
+            .map(|l| list_names(l, budget))
+            .filter(|n| !n.is_empty())
+    };
     let unknown =
         |name: &str| format!("{name} is there but cannot be read, so its entries are unknown");
     let part = |view: &FileView, name: &str| match view {
@@ -551,11 +565,16 @@ fn reset_lines(
         .into_iter()
         .filter_map(|(name, view)| view.list().map(|l| (name, l)))
         .collect();
-    let mut keys: Vec<&String> = fresh.policy.max_fee_wei.keys().collect();
-    for (_, l) in &shown {
-        keys.extend(l.policy.max_fee_wei.keys());
-    }
-    keys.sort();
+    // The chains with a cap in the defaults or either file, each once, by zwallet's own key for
+    // it (a file's key is only ever looked up, never printed).
+    let mut keys: Vec<&'static str> = fresh
+        .policy
+        .max_fee_wei
+        .keys()
+        .chain(shown.iter().flat_map(|(_, l)| l.policy.max_fee_wei.keys()))
+        .filter_map(|k| chains::find(k).ok().map(|c| c.key))
+        .collect();
+    keys.sort_unstable();
     keys.dedup();
     for key in keys {
         let Ok(chain) = chains::find(key) else {
@@ -695,14 +714,14 @@ fn headline(change: &Change) -> String {
     }
 }
 
-/// `gen G, n entries (names)` of a list read from a file.
-fn gen_entries(list: &Whitelist) -> String {
+/// `gen G, n entries (names)` of a list read from a file, its names out of `budget`.
+fn gen_entries(list: &Whitelist, budget: &NameBudget) -> String {
     let n = list.entries.len();
     format!(
         "gen {}, {n} {} ({})",
         list.generation,
         if n == 1 { "entry" } else { "entries" },
-        list_names(list)
+        list_names(list, budget)
     )
 }
 
@@ -773,16 +792,21 @@ fn checksummed(address: &str) -> String {
         .unwrap_or_else(|_| shown(address))
 }
 
-/// `["*"]` spelled out; chain keys otherwise.
+/// `["*"]` spelled out; otherwise each chain as zwallet's own key for it ([`INVALID`] for one it
+/// does not know), at most [`ITEMS_SHOWN`], then how many more.
 fn chains_text(chains: &[String]) -> String {
     if chains.len() == 1 && chains[0] == ANY_CHAIN {
         return "every chain (*)".to_string();
     }
-    chains
+    let mut shown: Vec<String> = chains
         .iter()
-        .map(|c| shown(c))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .take(ITEMS_SHOWN)
+        .map(|c| chain_shown(&json!(c)))
+        .collect();
+    if chains.len() > ITEMS_SHOWN {
+        shown.push(format!("and {} more", chains.len() - ITEMS_SHOWN));
+    }
+    shown.join(", ")
 }
 
 fn fee_text(chain: &Chain, wei: U256) -> String {
@@ -800,17 +824,41 @@ fn on_off(on: bool) -> &'static str {
 /// The most nicknames a summary names from one list; the rest are counted.
 const NAMES_SHOWN: usize = 20;
 
-/// A list's nicknames, each [`shown`], comma-separated, at most [`NAMES_SHOWN`] of them and then
-/// `and M more`, so a long list cannot push the change off the screen.
-fn list_names(list: &Whitelist) -> String {
-    let mut names: Vec<String> = list
-        .entries
-        .iter()
-        .take(NAMES_SHOWN)
-        .map(|e| shown(&e.nickname))
-        .collect();
-    if list.entries.len() > NAMES_SHOWN {
-        names.push(format!("and {} more", list.entries.len() - NAMES_SHOWN));
+/// One budget of characters for every nickname a command's human output names from the list
+/// files (anyone of this user's to write): a parsed list's nicknames are in `add`'s shape
+/// (`[a-z0-9_-]`, at most 32), but 20 of them per file in a column are a grid of their own.
+struct NameBudget(std::cell::Cell<usize>);
+
+impl NameBudget {
+    fn new() -> Self {
+        Self(std::cell::Cell::new(crate::core::text::PROSE_MAX))
+    }
+
+    /// Takes `n` characters if they are left.
+    fn take(&self, n: usize) -> bool {
+        let left = self.0.get();
+        if n > left {
+            return false;
+        }
+        self.0.set(left - n);
+        true
+    }
+}
+
+/// A list's nicknames, comma-separated, at most [`NAMES_SHOWN`] of them and as many as `budget`
+/// has room for, then `and M more`, so a long list cannot push the change off the screen. Each
+/// is [`shown`] (a parsed list's nicknames are in `add`'s shape already).
+fn list_names(list: &Whitelist, budget: &NameBudget) -> String {
+    let mut names: Vec<String> = Vec::new();
+    for e in list.entries.iter().take(NAMES_SHOWN) {
+        let name = shown(&e.nickname);
+        if !budget.take(name.len()) {
+            break;
+        }
+        names.push(name);
+    }
+    if list.entries.len() > names.len() {
+        names.push(format!("and {} more", list.entries.len() - names.len()));
     }
     names.join(", ")
 }
@@ -1372,6 +1420,10 @@ fn list_text(out: &Value, verify: bool) -> String {
             (true, true) => {
                 format!("  ... {more} more; `zwallet whitelist list --json` shows them")
             }
+            // `--verify` just ran and did not verify: running it again shows the same.
+            (true, false) if verify => {
+                format!("  ... {more} more; `zwallet whitelist list --json` shows them")
+            }
             (true, false) => {
                 format!("  ... {more} more; `zwallet whitelist list --verify` shows them all")
             }
@@ -1379,23 +1431,26 @@ fn list_text(out: &Value, verify: bool) -> String {
         });
     }
     if let Some(caps) = out["policy"]["maxFeeWei"].as_object() {
-        // Keys and amounts from the file: a known chain and a decimal amount, or [`INVALID`].
-        let mut shown_caps: Vec<String> = caps
-            .iter()
-            .take(ITEMS_SHOWN)
-            .map(|(key, wei)| {
-                let wei = wei.as_str().map(|w| U256::from_str_radix(w, 10));
-                match (chains::find(key), wei) {
-                    (Ok(c), Some(Ok(w))) => {
-                        format!("{} {} {}", c.key, format_units(w, c.decimals), c.symbol)
-                    }
-                    (Ok(c), _) => format!("{} {INVALID}", c.key),
-                    _ => INVALID.to_string(),
+        // Keys and amounts from the file: a known chain and a decimal amount, or [`INVALID`]. At
+        // most [`ITEMS_SHOWN`]; a list that is not verified also spends the entry lines' budget.
+        let mut shown_caps: Vec<String> = Vec::new();
+        for (key, wei) in caps.iter().take(ITEMS_SHOWN) {
+            let wei = wei.as_str().map(|w| U256::from_str_radix(w, 10));
+            let cap = match (chains::find(key), wei) {
+                (Ok(c), Some(Ok(w))) => {
+                    format!("{} {} {}", c.key, format_units(w, c.decimals), c.symbol)
                 }
-            })
-            .collect();
-        if caps.len() > ITEMS_SHOWN {
-            shown_caps.push(format!("and {} more", caps.len() - ITEMS_SHOWN));
+                (Ok(c), _) => format!("{} {INVALID}", c.key),
+                _ => INVALID.to_string(),
+            };
+            if bounded && used + cap.len() > crate::core::text::PROSE_MAX {
+                break;
+            }
+            used += cap.len();
+            shown_caps.push(cap);
+        }
+        if caps.len() > shown_caps.len() {
+            shown_caps.push(format!("and {} more", caps.len() - shown_caps.len()));
         }
         lines.push(format!("fee caps: {}", shown_caps.join(", ")));
         lines.push(format!(
@@ -2131,6 +2186,7 @@ mod tests {
             &FileView::Absent,
             &fresh,
             false,
+            &NameBudget::new(),
         );
         let text = lines.join("\n");
         assert!(

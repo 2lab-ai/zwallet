@@ -5234,6 +5234,197 @@ fn whitelist_list_shows_an_unverified_parseable_list_within_one_budget() {
     assert_eq!(v["entries"].as_array().unwrap().len(), 33, "{v}");
 }
 
+/// Rows of a picture made only of `#` and space (quotes around a row aside).
+fn grid_row(l: &str) -> bool {
+    let core = l.trim().trim_matches('"');
+    !core.trim().is_empty() && core.chars().all(|c| c == '#' || c == ' ')
+}
+
+/// whitelist.json with its first entry's `field` set to `value` (the signature is then not
+/// theirs: the list does not verify, but it is still read and shown).
+fn plant_entry(home: &Home, field: &str, value: serde_json::Value) {
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    v["entries"][0][field] = value;
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+}
+
+#[test]
+fn r6_the_change_summary_shows_no_file_value_outside_adds_shape() {
+    // R6-B1. The summary printed before the password once showed an entry's chains as found,
+    // each up to 64 characters with spaces, only `, ` between them: one line of 50 rows of `#`
+    // and space is a QR code. Such a file is no whitelist now (its chain is not a chain key's
+    // shape), so the summary says it cannot be read, naming the field, never the value.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let rows: Vec<String> = (0..50)
+        .map(|i| {
+            (0..64)
+                .map(|j| if (i * 7 + j * 3) % 5 < 2 { '#' } else { ' ' })
+                .collect()
+        })
+        .collect();
+    plant_entry(&home, "chains", json!(rows));
+    let r = whitelist_with(&home, &["remove", "alice"], "not the password");
+    assert!(inert_output(&r.stderr), "{}", r.stderr);
+    assert!(!r.stderr.lines().any(grid_row), "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("whitelist.json is there but cannot be read (")
+            && r.stderr.contains(
+                "not a whitelist file: a chain of entry 1 is not in the shape zwallet writes"
+            ),
+        "{}",
+        r.stderr
+    );
+    // Chains in a chain key's shape that zwallet does not know: `<invalid>`, at most 16.
+    let keys: Vec<String> = (0..50).map(|i| format!("m-m{i:02}-mm-m--m")).collect();
+    plant_entry(&home, "chains", json!(keys));
+    let r = whitelist_with(&home, &["remove", "alice"], "not the password");
+    assert!(inert_output(&r.stderr), "{}", r.stderr);
+    assert!(!r.stderr.contains("m-m0"), "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains(&format!("{}and 34 more", "<invalid>, ".repeat(16))),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn r6_the_names_a_summary_shows_from_the_files_share_one_budget() {
+    // Both list files with 20 nicknames of 32 characters each, rows of `m` and `_`: what the
+    // reset summary names from them, on its "dropped" line and on each file's line, is at most
+    // one 512-character budget in all; the rest are counted.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let grid = |file: usize| -> Vec<serde_json::Value> {
+        (0..20)
+            .map(|i| {
+                let row: String = (0..32)
+                    .map(|j| {
+                        if j == 0 || (i * 5 + j * 3 + file) % 7 < 3 {
+                            'm'
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                json!({
+                    "nickname": row,
+                    "kind": "address",
+                    "address": format!("0x{:040x}", file * 100 + i + 1),
+                    "chains": ["*"],
+                })
+            })
+            .collect()
+    };
+    v["entries"] = json!(grid(0));
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    v["entries"] = json!(grid(1));
+    v["gen"] = json!(2);
+    fs::write(
+        home.path().join("whitelist.next.json"),
+        serde_json::to_vec(&v).unwrap(),
+    )
+    .unwrap();
+    let r = whitelist_with(&home, &["reset"], "not the password");
+    assert!(inert_output(&r.stderr), "{}", r.stderr);
+    let named: usize = r
+        .stderr
+        .split([' ', ',', '(', ')', '\n'])
+        .filter(|w| w.len() == 32 && w.starts_with('m') && w.chars().all(|c| c == 'm' || c == '_'))
+        .map(str::len)
+        .sum();
+    assert!(named > 0 && named <= 512, "{named}: {}", r.stderr);
+    assert!(r.stderr.contains(" more"), "{}", r.stderr);
+}
+
+#[test]
+fn whitelist_list_shows_a_file_with_a_value_outside_adds_shape_as_no_list() {
+    // A parseable file whose nickname is not one `add` writes is no whitelist: `whitelist list`
+    // shows the count and `<invalid>` under one budget, and the reason names the field only.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    plant_entry(&home, "nickname", json!("## ## ## ##"));
+    let r = home.run(&["whitelist", "list"]);
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    assert!(
+        r.stdout
+            .contains("1 entries, in a file that is not a whitelist")
+            && r.stdout.contains(
+                "not a whitelist file: the nickname of entry 1 is not in the shape zwallet writes"
+            )
+            && !r.stdout.contains("##"),
+        "{}",
+        r.stdout
+    );
+    // `--json` still has the entry as found, escaped.
+    let v = home.run(&["whitelist", "list", "--json"]).ok();
+    assert_eq!(v["entries"][0]["nickname"], "## ## ## ##", "{v}");
+}
+
+#[test]
+fn whitelist_list_verify_shows_every_entry_of_a_verified_list() {
+    // N3. A list the seal verifies is the human's own: all its entries, no "more" line.
+    let home = Home::new();
+    home.create("main", &[]);
+    for i in 0..8 {
+        home.allow(
+            &format!("payee{i}"),
+            &format!("0x{:040x}", i + 1),
+            &["base"],
+        );
+    }
+    let r = home.run_stdin(
+        &["whitelist", "list", "--verify", "--password-stdin"],
+        &format!("{PW}\n"),
+    );
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    for i in 0..8 {
+        assert!(
+            r.stdout.contains(&format!("  payee{i} ")),
+            "{i}: {}",
+            r.stdout
+        );
+    }
+    assert!(!r.stdout.contains(" more"), "{}", r.stdout);
+}
+
+#[test]
+fn whitelist_list_verify_that_fails_points_to_json_not_to_verify_again() {
+    // N2. After a `--verify` that did not verify, the hint for the entries left out is `--json`:
+    // running `--verify` again would show the same few.
+    let home = Home::new();
+    home.create("main", &[]);
+    for i in 0..12 {
+        home.allow(
+            &format!("payee{i:02}"),
+            &format!("0x{:040x}", i + 1),
+            &["base"],
+        );
+    }
+    plant_entry(&home, "nickname", json!("renamed"));
+    let r = home.run_stdin(
+        &["whitelist", "list", "--verify", "--password-stdin"],
+        &format!("{PW}\n"),
+    );
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout
+            .contains("more; `zwallet whitelist list --json` shows them")
+            && !r.stdout.contains("--verify` shows them all"),
+        "{}",
+        r.stdout
+    );
+}
+
 #[test]
 fn whitelist_list_shows_a_value_add_would_refuse_as_invalid() {
     // A parseable list with a forged signature: its nickname is a 32-character `#`/space row,
