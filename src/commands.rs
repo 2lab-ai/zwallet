@@ -1640,7 +1640,14 @@ async fn sign_and_send<F: ChainFamily>(
         if !duplicates.is_empty() && !send.dry_run && !send.allow_duplicate {
             return Err(journal.duplicate_error(duplicates));
         }
-        out.insert("duplicateSends".into(), Value::Array(duplicates));
+        // The journal's own lines, which anyone of this user can write: escaped.
+        out.insert(
+            "duplicateSends".into(),
+            duplicates
+                .iter()
+                .map(crate::core::text::inert_json)
+                .collect(),
+        );
     }
     // A dry-run the whitelist on disk refuses is explained without asking the daemon to sign.
     let checked = if send.dry_run {
