@@ -1,9 +1,11 @@
-//! Text zwallet does not control (a file anyone of this user can edit, a process answering on
-//! the daemon socket or an RPC endpoint, an executable path, the send journal) made inert where it
-//! comes in, by one rule: only printable ASCII (0x20..=0x7E) other than the backslash passes;
-//! every other character, `\n`, `\t`, `\` and every non-ASCII char included, becomes a `\u{…}`
-//! escape. Each source also cuts what it takes in to a total, here or where it is shown. The write
-//! point ([`crate::core::terminal`]) filters again whatever a source missed, but cannot cut.
+//! Text zwallet does not control (a process answering on the daemon socket or an RPC endpoint,
+//! an executable path, a value a file holds) made inert where it comes in, by one rule: only
+//! printable ASCII (0x20..=0x7E) other than the backslash passes; every other character, `\n`,
+//! `\t`, `\` and every non-ASCII char included, becomes a `\u{…}` escape. Each source also cuts
+//! what it takes in to a total, here or where it is shown. Two files are shown only in the shapes
+//! zwallet writes into them, else as [`INVALID`]: the whitelist files (checked when parsed) and
+//! the send journal (checked per field, whose amounts may carry `₮`). The write point
+//! ([`crate::core::terminal`]) filters again whatever a source missed, but cannot cut.
 
 /// How many characters of free text from outside (an error relayed from the daemon socket or an
 /// RPC endpoint, a whitelist reason, a whole relayed value) one message shows, cut marker included.
