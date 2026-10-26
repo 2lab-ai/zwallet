@@ -151,11 +151,15 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `--json` get the same text: cached values, an answer on `d.sock`, an error the process on
   `d.sock` sends (and its details), the `expiresAt` and whitelist `status`, `unlock` and `create
   --unlock` show (the whitelist's reason can quote `whitelist.json`), an executable path, an RPC
-  endpoint's error text, and a token's on-chain `symbol()` have control and format characters
-  (ESC, CR, LF, C1, bidi overrides and isolates, line separators) and block-drawing characters
-  escaped, and free text from there is cut (512 characters; 256 per detail): no line of its own,
-  nothing long enough to draw a QR code by wrapping. A `string` that `call` decodes is kept exact
-  in `--json` and escaped and cut in human output. An error from the process on `d.sock` keeps
+  endpoint's error text, and a token's on-chain `symbol()` are made inert by one rule: only
+  printable ASCII (`0x20`–`0x7E`) passes; every other character — control characters, newline,
+  tab, and all non-ASCII (C1, bidi overrides and isolates, line separators, block and box-drawing
+  glyphs, emoji, accented letters) — becomes a `\u{…}` escape. Free text from there is then cut to
+  a total (512 characters per source; 256 per detail), so one relayed error is bounded whatever
+  its size or nesting. Nothing from outside has a line of its own or can draw a shape (there is no
+  character left that would draw a QR code by soft-wrapping). A `string` that `call` decodes is
+  kept exact in `--json` and escaped and cut in human output. An error from the process on `d.sock`
+  keeps
   only the detail fields a key daemon sends, and reads as its own: prefixed ``the process
   answering on the key daemon socket reported:`` unless it is this build's key daemon (or this
   build's code whose session just ended), or, from a process known to be another one, named, with
@@ -268,9 +272,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
       `command: zwallet whitelist allow-message-signing on` while the verified list has it off;
       `WHITELIST_INVALID` with that `command` while there is no whitelist; `WHITELIST_INVALID`
       with no `command`, pointing to `list --verify`, while the list cannot be trusted.
-  - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false` (human
-    output shows a value from the file as is only when it is short printable ASCII, else quoted
-    with escapes). `--verify` (password) checks it against the seal: `verified: true` with
+  - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false` (every
+    value from the file is escaped by the rule above — printable ASCII as is, everything else
+    `\u{…}` — and cut to a bounded length; `--json` keeps every entry, only its strings escaped).
+    `--verify` (password) checks it against the seal: `verified: true` with
     `source` and `sealedGen`, or `verified: false` with the `reason` (with no whitelist sealed
     but a list file there, why every edit refuses and what to do, not the first `add`; for a
     `whitelist.json` that does not verify and is not above the seal (deleted, unreadable, not a
@@ -735,6 +740,10 @@ things a same-user process can still do, and what to do about them:
 - **Read the human's terminal** while the password is typed: a same-user process can open the
   terminal device the prompt reads. The same access lets it write there too, so it can draw
   whatever it likes on that terminal: the escaping above covers zwallet's own output only.
+- **A `call` result printed with `--json` on a terminal** keeps the contract's string exactly (so
+  a tool reading the JSON gets the true bytes), which means a contract that returns block glyphs
+  can draw on a terminal that `--json` output is piped to. Human output (`call` without `--json`)
+  escapes and cuts it; read contract calls as data, not on a live terminal.
 - **Read a piped password** (`--password-stdin` from a pipe, Linux): the process writing into the
   pipe, and zwallet itself until its first step makes it non-dumpable, are dumpable, so a
   same-user process can open the pipe through `/proc/<pid>/fd` and race zwallet to read the
