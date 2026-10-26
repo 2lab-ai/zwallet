@@ -1998,13 +1998,12 @@ mod tests {
     }
 
     #[test]
-    fn journal_fields_show_only_in_the_shape_zwallet_writes_within_one_budget() {
+    fn journal_fields_show_only_in_the_shape_zwallet_writes() {
         // The journal is a file any process of this user can write. Five entries use every field
         // to try to draw or forge a line: spaces and points in the amount, a kind zwallet never
         // writes, a time that is not RFC 3339, a long run of digits, and terminal escapes. Each
-        // such field shows as `<invalid>`; the rest show as zwallet writes them; and all the
-        // journal's text in one message fits one budget, whole entries only.
-        use crate::core::text::{INVALID, PROSE_MAX};
+        // such field shows as `<invalid>`, and the rest show as zwallet writes them.
+        use crate::core::text::INVALID;
         let home = temp_home();
         let chain = find("ethereum").unwrap();
         let journal = SendJournal::new(home.path(), chain, "0xF00");
@@ -2032,21 +2031,6 @@ mod tests {
         // Three at nonce 1 and two at nonce 2, so each message shows all of its own.
         let (one, entries) = journal.pointer(1..=1, None);
         let (two, _) = journal.pointer(2..=2, None);
-        assert!(
-            !one.contains("more there") && !two.contains("more there"),
-            "{one}\n{two}"
-        );
-        for text in [&one, &two] {
-            assert!(printable(text), "{text:?}");
-            // One lookup hint for all of them, with a placeholder, not the journal's hash.
-            assert!(
-                text.ends_with(
-                    "; look each hash up with `zwallet tx --chain ethereum <txHash>` or \
-                     https://etherscan.io/tx/<txHash>"
-                ),
-                "{text}"
-            );
-        }
         let text = format!("{one}\n{two}");
         // Spaces in an amount, points in an amount, a bogus kind, a non-RFC 3339 time, an
         // address with spaces, a 200-digit amount and a hash that is none: never their own text.
@@ -2071,14 +2055,38 @@ mod tests {
         ] {
             assert!(text.contains(good), "{good}: {text}");
         }
+        for text in [&one, &two] {
+            assert!(printable(text), "{text:?}");
+            assert!(!text.contains("more there"), "{text}");
+            // One lookup hint for all of them, with a placeholder, not the journal's hash.
+            assert!(
+                text.ends_with(
+                    "; look each hash up with `zwallet tx --chain ethereum <txHash>` or \
+                     https://etherscan.io/tx/<txHash>"
+                ),
+                "{text}"
+            );
+        }
         // `--json` keeps every entry's own data, escaped, not `<invalid>`.
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0]["value"], "## ## ## ETH");
         assert_eq!(entries[2]["kind"], "xfer\\u{1b}[2J");
+    }
 
-        // The budget: five entries at the most each field allows (a 20-digit nonce, an amount of
-        // 78 + 78 digits and a 32-character symbol) are 352 characters of journal text each, so
-        // one fits and the other four are counted.
+    #[test]
+    fn journal_text_in_one_message_is_one_budget_of_whole_entries() {
+        // Five entries at the most each field allows (a 20-digit nonce, an amount of 78 + 78
+        // digits and a 32-character symbol) are 352 characters of journal text each: one fits
+        // the 512 budget whole and the other four are counted, never cut.
+        use crate::core::text::PROSE_MAX;
+        let home = temp_home();
+        let chain = find("ethereum").unwrap();
+        let h = |n: u8| format!("0x{n:064x}");
+        let to = "0x000000000000000000000000000000000000dEaD";
+        let printable = |s: &str| {
+            s.chars()
+                .all(|c| (' '..='~').contains(&c) || c == '\u{20ae}')
+        };
         let big = SendJournal::new(home.path(), chain, "0xB16");
         let amount = format!("{}.{} {}", "9".repeat(78), "9".repeat(78), "A".repeat(32));
         for n in 1..=5u8 {
@@ -2110,6 +2118,7 @@ mod tests {
         let json = e.to_json().to_string();
         assert!(json.bytes().all(|b| (0x20..=0x7e).contains(&b)), "{json}");
     }
+
     #[test]
     fn recent_duplicates_key_on_base_units_not_on_the_display_value() {
         use crate::core::time::rfc3339_utc;
