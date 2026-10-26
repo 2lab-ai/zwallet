@@ -147,25 +147,47 @@ Commands that act on a key take `--key <name>` (default: the active key).
   answer that is not an address, or a cached value that is not one, is `VALIDATION_ERROR` too and
   is never shown, compared or verified as an address.
 
-  Text zwallet does not control is made inert where messages are composed, so the terminal and
-  `--json` get the same text: cached values, an answer on `d.sock`, an error the process on
-  `d.sock` sends (and its details), the `expiresAt` and whitelist `status`, `unlock` and `create
-  --unlock` show (the whitelist's reason can quote `whitelist.json`), an executable path, an RPC
-  endpoint's error text, and a token's on-chain `symbol()` are made inert by one rule: only
-  printable ASCII (`0x20`–`0x7E`) passes; every other character — control characters, newline,
-  tab, and all non-ASCII (C1, bidi overrides and isolates, line separators, block and box-drawing
-  glyphs, emoji, accented letters) — becomes a `\u{…}` escape. Free text from there is then cut to
-  a total (512 characters per source; 256 per detail), so one relayed error is bounded whatever
-  its size or nesting. Nothing from outside has a line of its own or can draw a shape (there is no
-  character left that would draw a QR code by soft-wrapping). One exception, which is zwallet's own
-  text: a registry token whose `symbol()` is exactly the symbol the registry records shows it as
-  is (USDT0's `USD₮0`); any other symbol, from that address or another, is escaped. A `string`
-  that `call` decodes is kept exact in `--json` and escaped and cut in human output. An error from
-  the process on `d.sock` keeps only the string or number detail fields a key daemon sends (an
-  array or object detail is dropped), and reads as its own: prefixed ``the process answering on
-  the key daemon socket reported:`` unless it is this build's key daemon, or, from a process known
-  to be another one, named, with its details dropped. Only a `WALLET_LOCKED` reply from this
-  build's code whose session just ended gets the neutral prefix instead of being named.
+  What reaches the terminal, exactly. Every byte zwallet writes for a human (results, errors,
+  notes, the whitelist change summary, the password prompt) goes through one write point that
+  lets through only printable ASCII (`0x20`–`0x7E`), the newline and `₮` (U+20AE, in the
+  registry's `USD₮0`); any other character — `\r`, tab, ESC, DEL, C1, bidi controls, line
+  separators, block and box-drawing glyphs, emoji, accented letters — is written as a `\u{…}`
+  escape. The one exception is zwallet's own QR code of a verified address, printed after the
+  text. `--json` is printable ASCII too: every other character inside a string is a JSON
+  `\uXXXX` escape (two for a character above U+FFFF), so a JSON parser reads back the exact
+  string.
+
+  Before that, each source zwallet does not control is escaped where it comes in (the same
+  `\u{…}` form, with `\` itself as `\u{5c}`, so the encoding is one-to-one) and cut to a total,
+  the `...(cut)` marker included:
+  - an error the process on `d.sock` sends: its message and its string or number details (array
+    and object details are dropped) together at most 512 characters; from a process known to be
+    another one, its message at most 512 and its executable path at most 64;
+  - `status`'s relayed `expiresAt`: 64; its whitelist, and a sign reply's `signerDecoded`: 512 in
+    human output (a value that is not an object is one string of at most 512 in `--json` too);
+  - an RPC endpoint's error text: 512; a token's `symbol()`: 32; a `call` result: 512 and its
+    `raw` hex 512 in human output (`--json` keeps both whole);
+  - a cached address or an answer that is not an address: 64; an executable path in a warning:
+    200;
+  - `whitelist.json` in a message: each value 64, a reason 512; in `whitelist list`, see below;
+  - the send journal: each value 64, at most 5 entries per message.
+
+  A QR code holding an Ethereum address needs at least version 2: 25 × 25 = 625 modules without
+  a quiet zone. At one character per module that is more than one source's 512, so no single
+  source can draw one in printable ASCII. What a source can still do inside its budget is pad to
+  the terminal's width so its text starts a visual row at column 0 (soft wrap), and on a terminal
+  exactly 21 columns wide, draw a version-1 code (441 modules, at most 17 bytes: a short link,
+  not an address) with no quiet zone. Both are the capability a same-user process already has by
+  writing to the terminal directly (**Known limits**), so they are documented, not mitigated.
+
+  One exception, which is zwallet's own text: a registry token whose `symbol()` is exactly the
+  symbol the registry records shows it as is (USDT0's `USD₮0`); any other symbol, from that
+  address or another, is escaped. An error from the process on `d.sock` reads as its own:
+  prefixed ``the process answering on the key daemon socket reported:`` unless it is this
+  build's key daemon, or, from a process known to be another one, named, with its details
+  dropped. A `WALLET_LOCKED` reply from any process running this build's code gets the neutral
+  prefix instead of being named (a daemon whose session just ended looks like another process by
+  then), and still no details: a genuine `WALLET_LOCKED` carries none.
   `wallet.json` must hold only key names `create` accepts (`active` too); a file with another is
   `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
   swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
@@ -275,9 +297,13 @@ Commands that act on a key take `--key <name>` (default: the active key).
       `command: zwallet whitelist allow-message-signing on` while the verified list has it off;
       `WHITELIST_INVALID` with that `command` while there is no whitelist; `WHITELIST_INVALID`
       with no `command`, pointing to `list --verify`, while the list cannot be trusted.
-  - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false` (every
-    value from the file is escaped by the rule above — printable ASCII as is, everything else
-    `\u{…}` — and cut to a bounded length; `--json` keeps every entry, only its strings escaped).
+  - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false`. Human
+    output shows a field of an entry as it is only when it passes the check `add` applies to it
+    (the nickname rule, `address` or `contract`, `0x` and 40 hex digits, a known chain key or
+    `*`, `0x` and 8 hex digits), else `<invalid>`; `gen` is a number or `<invalid>`; at most 100
+    entries and 16 chains, selectors and fee caps each. A file that cannot be read as a list
+    shows a count and its entries within one 512-character budget. `--json` keeps every entry,
+    its strings escaped.
     `--verify` (password) checks it against the seal: `verified: true` with
     `source` and `sealedGen`, or `verified: false` with the `reason` (with no whitelist sealed
     but a list file there, why every edit refuses and what to do, not the first `add`; for a
@@ -449,7 +475,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   file owned by this user; otherwise a send without `--nonce` is `VALIDATION_ERROR` "cannot read
   the send journal <path>: …; nothing was signed", since the repeat check below needs it. Errors
   and messages below that send the agent to an earlier transaction name the journal's entries at
-  that nonce, each with its `zwallet tx` command and explorer page.
+  that nonce, each with its `zwallet tx` command and explorer page. The journal is a file any
+  process of this user can write: each of its values in a message is escaped and cut to 64
+  characters, a `txHash` that is not a 32-byte hash shows as `?` with no lookup command, and the
+  entries in `duplicateSends` and `pendingSends` have their strings escaped.
 - **One send at a time.** Sends from one key on one chain never overlap: each holds
   `nonce-<chainId>-<address>.lock` in the wallet home from before reading the nonce until the
   command returns, through `--wait`. A send that finds the lock held does not wait (after waiting,
@@ -743,10 +772,11 @@ things a same-user process can still do, and what to do about them:
 - **Read the human's terminal** while the password is typed: a same-user process can open the
   terminal device the prompt reads. The same access lets it write there too, so it can draw
   whatever it likes on that terminal: the escaping above covers zwallet's own output only.
-- **A `call` result printed with `--json` on a terminal** keeps the contract's string exactly (so
-  a tool reading the JSON gets the true bytes), which means a contract that returns block glyphs
-  can draw on a terminal that `--json` output is piped to. Human output (`call` without `--json`)
-  escapes and cuts it; read contract calls as data, not on a live terminal.
+- **Forge a line within a budget.** Text from outside is bounded and cannot break a line or draw
+  a glyph, but padded to the terminal's width it can start a visual row at column 0 by soft wrap,
+  and on a 21-column terminal a 512-character budget fits a version-1 QR code of a short link
+  (not an address, which needs 625 modules). A same-user process can draw anything on the
+  terminal directly anyway; zwallet's own output never presents such text as verified.
 - **Read a piped password** (`--password-stdin` from a pipe, Linux): the process writing into the
   pipe, and zwallet itself until its first step makes it non-dumpable, are dumpable, so a
   same-user process can open the pipe through `/proc/<pid>/fd` and race zwallet to read the
