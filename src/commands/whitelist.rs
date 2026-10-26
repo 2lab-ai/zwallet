@@ -1097,16 +1097,7 @@ const SHOWN_CHARS: usize = 64;
 /// is at most [`SHOWN_CHARS`] of printable ASCII, else quoted with escapes (`{:?}`, which escapes
 /// control and format characters such as ESC and U+202E) and cut there.
 fn shown(value: &str) -> String {
-    if !value.is_empty()
-        && value.len() <= SHOWN_CHARS
-        && value.bytes().all(|b| b.is_ascii_graphic())
-    {
-        return value.to_string();
-    }
-    match value.char_indices().nth(SHOWN_CHARS) {
-        Some((cut, _)) => format!("{:?}…", &value[..cut]),
-        None => format!("{value:?}"),
-    }
+    crate::core::text::shown(value, SHOWN_CHARS)
 }
 
 /// Free text that may quote a file (a reason) for a terminal: every character that is not

@@ -7,5 +7,6 @@ pub mod password;
 pub mod protocol;
 pub mod seed;
 pub mod store;
+pub mod text;
 pub mod time;
 pub mod whitelist;
