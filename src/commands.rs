@@ -360,6 +360,14 @@ impl<'a> Daemon<'a> {
         self.checked(key, chain, derived.as_ref()).await
     }
 
+    /// The cache's address for `key` on `chain`, used when the daemon did not derive one (the
+    /// wallet is locked, or the chain was added after the key). Marks the result as cached, so
+    /// [`Trust`] does not read it as session-verified.
+    async fn cache_only(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
+        self.cached = true;
+        key_address(self.home, key, chain).await
+    }
+
     /// What the addresses this command took verify: [`Trust::Session`] only when every one was
     /// derived, and every process that answered is this build's key daemon of this home.
     fn trust(&self) -> Trust {
@@ -911,8 +919,10 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     order.sort_by_key(|c| c.is_testnet());
     // The address on each chain first, as `balance --chain` finds it: the daemon's derivation,
     // or while locked the cache (the daemon's for a chain added after the key). A cache the
-    // daemon contradicts fails the whole command (a tamper signal); a daemon that cannot be
-    // reached for a chain family is that family's chains' error rows (fail closed per chain).
+    // daemon contradicts aborts the whole command here with `VALIDATION_ERROR` (a tamper signal,
+    // via `check_cache`'s `?`), before any RPC; a daemon that cannot be reached for a chain
+    // family becomes that family's chains' error rows (fail closed per chain, with `read_network`
+    // below). The two are told apart by their source, not by matching the error's text.
     let mut daemon = Daemon::new(home);
     let mut derived: BTreeMap<&str, Result<Option<String>>> = BTreeMap::new();
     let mut owners = Vec::with_capacity(order.len());
@@ -922,7 +932,14 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
             derived.insert(family, daemon.derive(key.index, chain).await);
         }
         owners.push(match &derived[family] {
-            Ok(d) => daemon.checked(key, chain, d.as_ref()).await,
+            // Derived: the cache must agree, or the command fails now.
+            Ok(Some(d)) => {
+                check_cache(key, chain.key, d, DAEMON)?;
+                Ok(d.clone())
+            }
+            // Locked (or a chain added after the key): the cache, a per-chain failure if absent.
+            Ok(None) => daemon.cache_only(key, chain).await,
+            // The daemon could not be reached for this family: a per-chain error row.
             Err(e) => Err(e.clone()),
         });
     }
