@@ -2753,7 +2753,8 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
         ],
     )
     .ok();
-    // Values from the file are escaped: a hand-edited nickname cannot drive the terminal.
+    // A hand-edited nickname that is not one `add` writes makes the file no list: the summary
+    // says it cannot be read, names the field, and never shows the value.
     let path = home.path().join("whitelist.json");
     let mut file: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     file["entries"].as_array_mut().unwrap().push(json!({
@@ -2768,11 +2769,16 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
         PW,
         &[
             "reset: a new whitelist key and an empty list",
-            "every entry is dropped: alice, router, mallory\\u{1b}[2J",
-            "not verified yet",
+            "every entry is dropped: whitelist.json is there but cannot be read, so its entries \
+             are unknown",
+            "not a whitelist file: the nickname of entry 3 is not in the shape zwallet writes",
         ],
     );
-    assert!(!r.stderr.contains('\u{1b}'), "{:?}", r.stderr);
+    assert!(
+        !r.stderr.contains('\u{1b}') && !r.stderr.contains("mallory"),
+        "{:?}",
+        r.stderr
+    );
     r.ok();
 }
 
