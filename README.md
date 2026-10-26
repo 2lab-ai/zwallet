@@ -149,13 +149,17 @@ Commands that act on a key take `--key <name>` (default: the active key).
 
   Text zwallet does not control is made inert where messages are composed, so the terminal and
   `--json` get the same text: cached values, an answer on `d.sock`, an error the process on
-  `d.sock` sends (and its details), the `expiresAt` and whitelist `status` relays from it, an
-  executable path, an RPC endpoint's error text, and a token's on-chain `symbol()` have control
-  and format characters escaped (ESC, CR, LF, C1, U+202E); a `string` that `call` decodes is kept
-  exact in `--json` and escaped in human output. An
-  error from that process reads as its own: prefixed ``the key daemon reported:`` unless it is
-  this build's key daemon, or, from a process known to be another one, named, with its details
-  dropped. `wallet.json` must hold only key names `create` accepts (`active` too); a file with
+  `d.sock` sends (and its details), the `expiresAt` and whitelist `status`, `unlock` and `create
+  --unlock` show (the whitelist's reason can quote `whitelist.json`), an executable path, an RPC
+  endpoint's error text, and a token's on-chain `symbol()` have control and format characters
+  (ESC, CR, LF, C1, bidi overrides and isolates, line separators) and block-drawing characters
+  escaped, and free text from there is cut (512 characters; 256 per detail): no line of its own,
+  nothing long enough to draw a QR code by wrapping. A `string` that `call` decodes is kept exact
+  in `--json` and escaped and cut in human output. An error from the process on `d.sock` keeps
+  only the detail fields a key daemon sends, and reads as its own: prefixed ``the process
+  answering on the key daemon socket reported:`` unless it is this build's key daemon (or this
+  build's code whose session just ended), or, from a process known to be another one, named, with
+  its details dropped. `wallet.json` must hold only key names `create` accepts (`active` too); a file with
   another is `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
   swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
   genuine daemon of a wallet the human did not make), or injects code into the genuine binary
@@ -729,7 +733,8 @@ things a same-user process can still do, and what to do about them:
   writable by the user, and so by the agent. For real protection install zwallet where the agent
   cannot write (e.g. a root-owned directory), or run the agent as a different OS user.
 - **Read the human's terminal** while the password is typed: a same-user process can open the
-  terminal device the prompt reads.
+  terminal device the prompt reads. The same access lets it write there too, so it can draw
+  whatever it likes on that terminal: the escaping above covers zwallet's own output only.
 - **Read a piped password** (`--password-stdin` from a pipe, Linux): the process writing into the
   pipe, and zwallet itself until its first step makes it non-dumpable, are dumpable, so a
   same-user process can open the pipe through `/proc/<pid>/fd` and race zwallet to read the
