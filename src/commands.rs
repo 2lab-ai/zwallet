@@ -346,11 +346,25 @@ impl<'a> Daemon<'a> {
         derived: Option<&String>,
     ) -> Result<String> {
         if let Some(d) = derived {
-            check_cache(key, chain.key, d, DAEMON)?;
+            self.check_cache(key, chain, d)?;
             return Ok(d.clone());
         }
         self.cached = true;
         key_address(self.home, key, chain).await
+    }
+
+    /// [`check_cache`] of `derived` (this daemon's derivation) for `key` on `chain`. A mismatch
+    /// aborts the command; when what answered on `d.sock` is known not to be this build's key
+    /// daemon of the home, the error also carries that warning (in the message and as the
+    /// `warning` detail), so the abort still names the impostor.
+    fn check_cache(&self, key: &KeyEntry, chain: &Chain, derived: &str) -> Result<()> {
+        check_cache(key, chain.key, derived, DAEMON).map_err(|e| match self.trust().warning() {
+            Some(w) => {
+                let message = format!("{}. Also: {w}", e.message);
+                WalletError { message, ..e }.with_detail("warning", w)
+            }
+            None => e,
+        })
     }
 
     /// `key`'s address on `chain`: derived and checked against the cache, or the cache while
@@ -932,9 +946,10 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
             derived.insert(family, daemon.derive(key.index, chain).await);
         }
         owners.push(match &derived[family] {
-            // Derived: the cache must agree, or the command fails now.
+            // Derived: the cache must agree, or the command fails now (naming an impostor on
+            // `d.sock`, if one answered).
             Ok(Some(d)) => {
-                check_cache(key, chain.key, d, DAEMON)?;
+                daemon.check_cache(key, chain, d)?;
                 Ok(d.clone())
             }
             // Locked (or a chain added after the key): the cache, a per-chain failure if absent.
@@ -1544,7 +1559,7 @@ async fn status(home: &Path, no_qr: bool) -> Result<Out> {
                 let mut daemon = Daemon::new(home);
                 match daemon.derive(key.index, primary).await? {
                     Some(d) => {
-                        check_cache(key, primary.key, &d, DAEMON)?;
+                        daemon.check_cache(key, primary, &d)?;
                         (Some(d), daemon.trust())
                     }
                     None => (primary_address(key).cloned(), Trust::Locked),
