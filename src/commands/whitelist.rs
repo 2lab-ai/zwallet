@@ -30,6 +30,7 @@ use crate::core::error::{Result, WalletError};
 use crate::core::password::read_password;
 use crate::core::protocol::{self, DaemonExe};
 use crate::core::store::{self, WhitelistAnchor};
+use crate::core::text::printable;
 use crate::core::time::{parse_duration, rfc3339_utc, unix_secs};
 use crate::core::whitelist::{
     self, ANY_CHAIN, Base, BaseSource, Edited, Entry, EntryKind, ListFiles, NEXT_FILE, SignedList,
@@ -1098,22 +1099,6 @@ const SHOWN_CHARS: usize = 64;
 /// control and format characters such as ESC and U+202E) and cut there.
 fn shown(value: &str) -> String {
     crate::core::text::shown(value, SHOWN_CHARS)
-}
-
-/// Free text that may quote a file (a reason) for a terminal: every character that is not
-/// printable as it is (control and format characters) escaped as `{:?}` would, quotes and
-/// backslashes left as they are.
-fn printable(text: &str) -> String {
-    text.chars()
-        .flat_map(|c| {
-            let escaped: Vec<char> = if matches!(c, '"' | '\\' | '\'') {
-                vec![c]
-            } else {
-                c.escape_debug().collect()
-            };
-            escaped
-        })
-        .collect()
 }
 
 /// `value` as compact JSON in printable ASCII: every other character as a `\u` escape, which

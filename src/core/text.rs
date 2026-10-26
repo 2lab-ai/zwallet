@@ -16,6 +16,39 @@ pub fn shown(value: &str, max: usize) -> String {
     }
 }
 
+/// Free text that may quote what zwallet does not control (a reason, an error relayed from the
+/// daemon socket), for a terminal and for JSON alike: every character that is not printable as
+/// it is (control and format characters such as ESC, CR, LF, C1 controls, U+202E) escaped as
+/// `{:?}` would, quotes and backslashes left as they are. Prose stays readable and on one line.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            let escaped: Vec<char> = if matches!(c, '"' | '\\' | '\'') {
+                vec![c]
+            } else {
+                c.escape_debug().collect()
+            };
+            escaped
+        })
+        .collect()
+}
+
+/// `value` with every string in it, object keys included, made [`printable`]: a JSON value from
+/// the daemon socket, relayed as it is otherwise.
+pub fn inert_json(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => Value::String(printable(s)),
+        Value::Array(a) => Value::Array(a.iter().map(inert_json).collect()),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, v)| (printable(k), inert_json(v)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -34,5 +67,25 @@ mod tests {
         assert_eq!(shown("", 64), "\"\"");
         // Cut after `max` characters.
         assert_eq!(shown(&"x".repeat(70), 64), format!("{:?}…", "x".repeat(64)));
+    }
+
+    #[test]
+    fn printable_keeps_prose_on_one_inert_line() {
+        let said =
+            printable("refusing \"x\" \\ ok\r\u{1b}[2Kaddress: 0xA\nverified: true\u{9b}\u{202e}");
+        assert!(
+            !said.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{said}"
+        );
+        assert!(
+            said.starts_with("refusing \"x\" \\ ok\\r\\u{1b}[2Kaddress"),
+            "{said}"
+        );
+        assert!(said.contains("\\nverified: true\\u{9b}\\u{202e}"), "{said}");
+        let v = inert_json(&serde_json::json!({ "c\u{1b}": ["a\nb", 1, { "k": "\r" }] }));
+        assert_eq!(
+            v,
+            serde_json::json!({ "c\\u{1b}": ["a\\nb", 1, { "k": "\\r" }] })
+        );
     }
 }
