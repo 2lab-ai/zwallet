@@ -484,6 +484,15 @@ pub fn main_entry() -> i32 {
             };
         }
     };
+    // The key daemon closes every inherited descriptor before the runtime opens any of its own,
+    // so it never holds a listening socket a parent left open (see `close_inherited_fds`). Before
+    // `cli_runtime`: tokio's own descriptors (its kqueue/epoll) are fd 3 or above.
+    if matches!(cli.command, Command::Daemon { .. })
+        && let Err(e) = commands::close_inherited_fds()
+    {
+        print_error(json, &e);
+        return 1;
+    }
     let runtime = match cli_runtime() {
         Ok(rt) => rt,
         Err(e) => {

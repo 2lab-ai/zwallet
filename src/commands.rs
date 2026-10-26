@@ -39,6 +39,12 @@ fn home() -> Result<PathBuf> {
     store::resolve_home(std::env::var_os("ZWALLET_HOME"), std::env::home_dir())
 }
 
+/// Closes every inherited descriptor before `zwallet daemon` opens its own (see
+/// [`protocol::close_inherited_fds`]); `cli::main_entry` calls it for that command alone.
+pub fn close_inherited_fds() -> Result<()> {
+    protocol::close_inherited_fds()
+}
+
 pub async fn run(cli: Cli) -> Result<Out> {
     match cli.command {
         Command::Chains => Ok(chains_list()),
@@ -905,18 +911,19 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     order.sort_by_key(|c| c.is_testnet());
     // The address on each chain first, as `balance --chain` finds it: the daemon's derivation,
     // or while locked the cache (the daemon's for a chain added after the key). A cache the
-    // daemon contradicts fails the command; any other failure is that chain's row.
+    // daemon contradicts fails the whole command (a tamper signal); a daemon that cannot be
+    // reached for a chain family is that family's chains' error rows (fail closed per chain).
     let mut daemon = Daemon::new(home);
-    let mut derived: BTreeMap<&str, Option<String>> = BTreeMap::new();
+    let mut derived: BTreeMap<&str, Result<Option<String>>> = BTreeMap::new();
     let mut owners = Vec::with_capacity(order.len());
     for chain in &order {
         let family = chain.family.name();
         if !derived.contains_key(family) {
-            derived.insert(family, daemon.derive(key.index, chain).await?);
+            derived.insert(family, daemon.derive(key.index, chain).await);
         }
         owners.push(match &derived[family] {
-            Some(d) => Ok(daemon.checked(key, chain, Some(d)).await?),
-            None => daemon.checked(key, chain, None).await,
+            Ok(d) => daemon.checked(key, chain, d.as_ref()).await,
+            Err(e) => Err(e.clone()),
         });
     }
     let trust = daemon.trust();
