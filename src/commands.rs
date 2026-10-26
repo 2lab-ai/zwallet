@@ -1321,7 +1321,7 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
     } else {
         func.signature_with_outputs()
     };
-    Ok(Out::json(json!({
+    let out = json!({
         "chain": chain.key,
         "from": from.map(|f| f.to_checksum(None)),
         "to": to.to_checksum(None),
@@ -1329,7 +1329,12 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
         "args": a.args,
         "result": result,
         "raw": format!("0x{}", hex::encode(&raw)),
-    })))
+    });
+    // A decoded `string` is data the caller asked for: `--json` keeps it exactly as the
+    // contract returned it (JSON encodes its control characters), the human text shows it
+    // escaped, since a contract chose it.
+    let text = render_human(&crate::core::text::inert_json(&out));
+    Ok(Out::with_text(out, text))
 }
 
 async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
