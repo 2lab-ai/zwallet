@@ -282,7 +282,7 @@ pub async fn send_answered(
         let resp: Response = serde_json::from_slice(&buf).map_err(|e| {
             WalletError::validation(format!(
                 "malformed reply from the key daemon: {}",
-                crate::core::text::printable(&e.to_string())
+                crate::core::text::printable_cut(&e.to_string(), crate::core::text::PROSE_MAX)
             ))
         })?;
         if !resp.ok {
@@ -302,30 +302,47 @@ pub async fn send_answered(
     }
 }
 
+/// The detail keys a key daemon's error carries (the signing policy's refusals): the only ones
+/// relayed. Any other key in a reply on `d.sock` is dropped, so nothing that answers there can
+/// put `address`, `verified` or the like into this CLI's error object.
+const RELAYED_DETAILS: &[&str] = &["command", "counterparty", "chain", "feeWei", "capWei"];
+
 /// The error a reply with `ok: false` carries, as this CLI shows it. Whatever answers on
-/// `d.sock` writes that text, so its message and every string in its details are made
-/// [`printable`](crate::core::text::printable) (one line, no terminal control), and who answered
-/// is checked ([`check_peer`]):
-/// - this build's key daemon: its message as is (escaped);
-/// - not known (`Unknown`; every genuine daemon on Linux): prefixed `the key daemon reported: `,
-///   so it never reads as this CLI's own output;
+/// `d.sock` writes that text: its message is made [`printable`](crate::core::text::printable)
+/// and cut after [`PROSE_MAX`](crate::core::text::PROSE_MAX) characters, its details are cut to
+/// [`RELAYED_DETAILS`] with every string escaped and cut after
+/// [`VALUE_MAX`](crate::core::text::VALUE_MAX) (no terminal control, no line of its own, nothing
+/// long enough to draw with), and who answered is checked ([`check_peer`]):
+/// - this build's key daemon: its message as is (escaped and cut);
+/// - not known (`Unknown`; every genuine daemon on Linux; or this build's code whose session just
+///   ended, see [`relayed_check`]): prefixed `the process answering on the key daemon socket
+///   reported: `, so it never reads as this CLI's own output nor claims who sent it;
 /// - another process (`Other`): named, its message quoted after it, and its details dropped (an
 ///   impostor's `command` is no command to run), with the `warning` detail.
 ///
-/// The error code is kept: it is one of a fixed set.
+/// When the check itself fails, the details are dropped too. The error code is kept: it is one
+/// of a fixed set.
 fn relayed_error(home: &Path, who: &Peer, resp: Response) -> WalletError {
-    use crate::core::text::{inert_json, printable};
+    use crate::core::text::{PROSE_MAX, VALUE_MAX, inert_json_capped, printable_cut};
     let code = resp.error_code.unwrap_or(ErrorCode::ValidationError);
-    let said = printable(resp.error.as_deref().unwrap_or("daemon error"));
-    let details: Map<String, Value> = resp
-        .details
-        .iter()
-        .map(|(k, v)| (printable(k), inert_json(v)))
-        .collect();
-    let check = check_peer(home, who).unwrap_or(PeerCheck::Unknown);
+    let said = printable_cut(resp.error.as_deref().unwrap_or("daemon error"), PROSE_MAX);
+    let checked = check_peer(home, who);
+    let details: Map<String, Value> = if checked.is_ok() {
+        resp.details
+            .iter()
+            .filter(|(k, _)| RELAYED_DETAILS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), inert_json_capped(v, VALUE_MAX)))
+            .collect()
+    } else {
+        Map::new()
+    };
+    let check = relayed_check(who, checked.unwrap_or(PeerCheck::Unknown));
     let mut e = match &check {
         PeerCheck::ThisBuild => WalletError::new(code, said),
-        PeerCheck::Unknown => WalletError::new(code, format!("the key daemon reported: {said}")),
+        PeerCheck::Unknown => WalletError::new(
+            code,
+            format!("the process answering on the key daemon socket reported: {said}"),
+        ),
         PeerCheck::Other(reason) => {
             let e = WalletError::new(code, format!("{reason}, and it reported: {said}; {RELOCK}"));
             return match check.warning() {
@@ -336,6 +353,37 @@ fn relayed_error(home: &Path, who: &Peer, resp: Response) -> WalletError {
     };
     e.details = details;
     e
+}
+
+/// What [`relayed_error`] makes of a peer [`check_peer`] judged. A daemon that ends its session
+/// (lock, expiry, a changed wallet.json) answers with its error, then drops the socket and exits,
+/// so by the time its error is checked it no longer holds the socket nor shows in the process
+/// table, and `check_peer` calls it another process. When the code it runs is this build's (the
+/// same cdhash, `CS_VALID`), it is not named as an impostor: `Unknown`. This never makes anything
+/// `ThisBuild`, and it is used for relayed errors only; address verification keeps the strict
+/// check.
+fn relayed_check(who: &Peer, check: PeerCheck) -> PeerCheck {
+    match check {
+        PeerCheck::Other(_) if runs_this_build(who) => PeerCheck::Unknown,
+        other => other,
+    }
+}
+
+/// Whether `peer` runs this build's code, by the kernel: on macOS its cdhash (through its audit
+/// token) is this process's own and it is `CS_VALID`. Elsewhere this cannot be told: `false`.
+fn runs_this_build(peer: &Peer) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let (Some(token), Some(own)) = (peer.token.as_ref(), own_cdhash()) else {
+            return false;
+        };
+        peer_cdhash(token) == Some(own) && peer_cs_valid(token) == Some(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = peer;
+        false
+    }
 }
 
 /// Like [`send`], but a missing daemon is `WALLET_LOCKED`.
@@ -662,9 +710,9 @@ pub enum PeerCheck {
 // A key daemon is non-dumpable, so its `/proc/<pid>/exe` is unreadable even to its own user:
 // `check_peer` can never read it and returns `Unknown` for the genuine daemon. Nothing is
 // verified by session on Linux. The code is here so that `address`, `addresses`, `change`,
-// `status` and `balance` still name an impostor whose executable is readable (another program)
-// in their `warning`. `list` does not ask who answered (it compares the cache with whatever
-// derivation comes back and never claims verification without the password).
+// `status`, `balance` and `list` still name an impostor whose executable is readable (another
+// program): in their `warning`, or in the error of a mismatch (`list`, which never claims
+// verification without the password, asks who answered only for that).
 
 /// The executable of a running process, as the kernel names it.
 #[cfg(target_os = "linux")]
@@ -2154,17 +2202,27 @@ mod tests {
 
     #[test]
     fn a_relayed_error_is_escaped_and_never_reads_as_this_clis_own() {
+        use crate::core::text::{PROSE_MAX, VALUE_MAX, draws_blocks, is_terminal_unsafe};
         let home = tempfile::Builder::new()
             .prefix("zwt-")
             .tempdir_in("/tmp")
             .unwrap();
-        let resp: Response = serde_json::from_value(json!({
-            "v": 2, "ok": false, "errorCode": "WHITELIST_DENIED",
-            "error": "refusing\r\u{1b}[2Kaddress: 0xdEaD\nverified: true\u{9b}",
-            "details": { "command": "zwallet whitelist add x 0xdEaD\n\u{1b}[8m", "n\u{1b}": 1 },
-        }))
-        .unwrap();
-        // Who answered is not known (no pid): prefixed, escaped, details kept but escaped.
+        let reply = |error: &str, command: &str| -> Response {
+            serde_json::from_value(json!({
+                "v": 2, "ok": false, "errorCode": "WHITELIST_DENIED",
+                "error": error,
+                "details": {
+                    "command": command, "n\u{1b}": 1, "address": "0xdEaD", "verified": true,
+                    "verifiedBy": "session", "warning": "fake",
+                },
+            }))
+            .unwrap()
+        };
+        let resp = reply(
+            "refusing\r\u{1b}[2Kaddress: 0xdEaD\nverified: true\u{9b}\u{202e}",
+            "zwallet whitelist add x 0xdEaD\n\u{1b}[8m",
+        );
+        // Who answered is not known (no pid): prefixed with only what is known, and escaped.
         let unknown = Peer {
             pid: None,
             token: None,
@@ -2173,18 +2231,93 @@ mod tests {
         let e = relayed_error(home.path(), &unknown, resp);
         assert_eq!(e.code, ErrorCode::WhitelistDenied);
         assert!(
-            e.message
-                .starts_with("the key daemon reported: refusing\\r\\u{1b}[2Kaddress"),
+            e.message.starts_with(
+                "the process answering on the key daemon socket reported: \
+                 refusing\\r\\u{1b}[2Kaddress"
+            ),
             "{}",
             e.message
         );
-        let all = format!("{} {}", e.message, Value::Object(e.details.clone()));
-        assert!(!all.chars().any(|c| c.is_control()), "{all:?}");
+        assert!(
+            !e.message.chars().any(is_terminal_unsafe),
+            "{:?}",
+            e.message
+        );
+        // `check_peer` answers Unknown for no pid (it did not fail): only the allowlisted
+        // detail keys come through, escaped.
+        assert!(
+            e.details
+                .keys()
+                .all(|k| RELAYED_DETAILS.contains(&k.as_str())),
+            "{:?}",
+            e.details
+        );
         assert_eq!(
             e.details["command"],
             "zwallet whitelist add x 0xdEaD\\n\\u{1b}[8m"
         );
-        assert!(e.details.contains_key("n\\u{1b}"), "{:?}", e.details);
+        // A long text of block characters is cut and drawn with nothing: no QR by soft-wrap.
+        let padded = format!(
+            "{}{}scan to send to 0xdEaD",
+            " ".repeat(4000),
+            "\u{2588}\u{2580}\u{2584} ".repeat(2000)
+        );
+        let e = relayed_error(home.path(), &unknown, reply(&padded, &padded));
+        let prefix = "the process answering on the key daemon socket reported: ";
+        assert!(
+            e.message.chars().count() <= prefix.chars().count() + PROSE_MAX + 1,
+            "{}",
+            e.message.len()
+        );
+        assert!(
+            !e.message.chars().any(draws_blocks),
+            "{:?}",
+            &e.message[..80]
+        );
+        let command = e.details["command"].as_str().unwrap();
+        assert!(
+            command.chars().count() <= VALUE_MAX + 1,
+            "{}",
+            command.len()
+        );
+    }
+
+    /// A session-ending reply from this build's own daemon (it answers, then drops the socket
+    /// and exits) is not named an impostor: same code, but no longer a listed daemon holding the
+    /// socket, is `Unknown` for a relayed error. Modelled with this test process, which runs this
+    /// build's code (its own cdhash) and is no key daemon of the home.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_relayed_error_from_this_builds_code_after_its_session_ended_is_not_named() {
+        let home = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let me = Peer {
+            pid: Some(std::process::id() as i32),
+            token: Some(own_token()),
+            exe_uuid: own_exe().unwrap().uuid,
+        };
+        // The strict check (address verification) still calls it another process.
+        assert!(matches!(
+            check_peer(home.path(), &me).unwrap(),
+            PeerCheck::Other(_)
+        ));
+        let resp: Response = serde_json::from_value(json!({
+            "v": 2, "ok": false, "errorCode": "WALLET_LOCKED",
+            "error": "the unlock expired; locked. A human must run `zwallet unlock 24h` (any duration)",
+        }))
+        .unwrap();
+        let e = relayed_error(home.path(), &me, resp);
+        assert_eq!(e.code, ErrorCode::WalletLocked);
+        assert!(
+            e.message
+                .starts_with("the process answering on the key daemon socket reported: the unlock"),
+            "{}",
+            e.message
+        );
+        assert!(!e.message.contains("not a key daemon"), "{}", e.message);
+        assert!(e.details.get("warning").is_none(), "{:?}", e.details);
     }
 
     #[test]
