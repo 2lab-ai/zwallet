@@ -161,13 +161,13 @@ Commands that act on a key take `--key <name>` (default: the active key).
   text: a registry token whose `symbol()` is exactly the symbol the registry records shows it as
   is (USDT0's `USD₮0`); any other symbol, from that address or another, is escaped. A `string`
   that `call` decodes is kept exact in `--json` and escaped and cut in human output. An error from
-  the process on `d.sock`
-  keeps
-  only the detail fields a key daemon sends, and reads as its own: prefixed ``the process
-  answering on the key daemon socket reported:`` unless it is this build's key daemon (or this
-  build's code whose session just ended), or, from a process known to be another one, named, with
-  its details dropped. `wallet.json` must hold only key names `create` accepts (`active` too); a file with
-  another is `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
+  the process on `d.sock` keeps only the string or number detail fields a key daemon sends (an
+  array or object detail is dropped), and reads as its own: prefixed ``the process answering on
+  the key daemon socket reported:`` unless it is this build's key daemon, or, from a process known
+  to be another one, named, with its details dropped. Only a `WALLET_LOCKED` reply from this
+  build's code whose session just ended gets the neutral prefix instead of being named.
+  `wallet.json` must hold only key names `create` accepts (`active` too); a file with another is
+  `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
   swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
   genuine daemon of a wallet the human did not make), or injects code into the genuine binary
   (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, `LD_PRELOAD`) — the same
