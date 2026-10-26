@@ -96,7 +96,13 @@ Commands that act on a key take `--key <name>` (default: the active key).
     by this process or by the daemon child it just started.
     - `address --verify` and `list --verify` (password at the terminal prompt, or
       `--password-stdin`): decrypt `wallet.json` here, derive, and compare with the cache. A
-      mismatch is `VALIDATION_ERROR`; a wallet the password does not open is `WRONG_PASSWORD`.
+      wallet the password does not open is `WRONG_PASSWORD`. With the password the seed is
+      authoritative and the cache only metadata, so `address --verify` **repairs** every cached
+      address (of every key) that differs from the seed: it rewrites them in `wallet.json` under
+      the writer lock (the encrypted master untouched), and says so in `repaired: [{key, chain,
+      was, now}]` (`was` escaped) and a `warning` that something modified `wallet.json`. `list
+      --verify`, `unlock`, `backup` and the whitelist commands refuse such a cache with
+      `VALIDATION_ERROR` and say to run `zwallet address --verify`.
       Both show each key's derivation `index`, and add a `warning` when an index is one zwallet
       never assigns (at or past `nextIndex`, or with an unused index below it): the key list in
       `wallet.json` was edited. Such an address is still this seed's, but a wallet restored from
@@ -131,14 +137,23 @@ Commands that act on a key take `--key <name>` (default: the active key).
     socket), the command still succeeds, unverified, with a `warning` naming the pid and what it
     is, ending ``run `zwallet lock` and unlock again``. `balance` adds no note line.
 
-  While a daemon answers, a cache that its derivation contradicts fails these commands (and
-  `list`) with `VALIDATION_ERROR`. When the process that answered is not this build's key daemon,
-  that error does not blame the cache: it says the process reported an address that contradicts
-  the cached one, that neither is to be funded, and names the process; the same warning is in the
-  error's `warning` field. An answer that is not an address, or a cached value that is not one, is
-  `VALIDATION_ERROR` too and is never shown as an address; values zwallet does not control (the
-  cache, an answer on `d.sock`, an executable path) appear in messages with control characters
-  escaped. What a session cannot rule out: a process of this user that
+  While a daemon answers, a cache that its answer contradicts fails these commands (and `list`)
+  with `VALIDATION_ERROR`. Only when every process that answered is this build's key daemon (so
+  only on macOS) does that error say the cache was modified. Otherwise the answer is no proven
+  derivation, so the error says the two addresses disagree, that one of them was tampered with,
+  to fund neither and to run `zwallet address --verify`, which decides with the password; a
+  process known to be another one is also named, in the message and the `warning` field. An
+  answer that is not an address, or a cached value that is not one, is `VALIDATION_ERROR` too and
+  is never shown, compared or verified as an address.
+
+  Text zwallet does not control is made inert where messages are composed, so the terminal and
+  `--json` get the same text: cached values, an answer on `d.sock`, an error the process on
+  `d.sock` sends (and its details), the `expiresAt` and whitelist `status` relays from it, and
+  an executable path have control and format characters escaped (ESC, CR, LF, C1, U+202E). An
+  error from that process reads as its own: prefixed ``the key daemon reported:`` unless it is
+  this build's key daemon, or, from a process known to be another one, named, with its details
+  dropped. `wallet.json` must hold only key names `create` accepts (`active` too); a file with
+  another is `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
   swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
   genuine daemon of a wallet the human did not make), or injects code into the genuine binary
   (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, `LD_PRELOAD`) — the same
