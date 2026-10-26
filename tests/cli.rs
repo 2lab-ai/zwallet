@@ -5139,14 +5139,13 @@ fn whitelist_list_shows_a_file_that_is_no_list_within_one_budget_and_draws_nothi
     let r = home.run(&["whitelist", "list"]);
     assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
     assert!(inert_output(&r.stdout), "{}", r.stdout);
-    let grid = |l: &str| !l.trim().is_empty() && l.chars().all(|c| c == '#' || c == ' ');
+    // No row of the drawing reaches the terminal: no line that is only `#` and space, with or
+    // without quotes around it, and the entry lines stay within one prose budget.
+    let grid = |l: &str| {
+        let core = l.trim().trim_matches('"');
+        !core.trim().is_empty() && core.chars().all(|c| c == '#' || c == ' ')
+    };
     assert!(!r.stdout.lines().any(grid), "{}", r.stdout);
-    assert!(
-        r.stdout
-            .contains("29 entries, in a file that is not a whitelist"),
-        "{}",
-        r.stdout
-    );
     let listed: usize = r
         .stdout
         .lines()
@@ -5154,6 +5153,12 @@ fn whitelist_list_shows_a_file_that_is_no_list_within_one_budget_and_draws_nothi
         .map(str::len)
         .sum();
     assert!(listed <= 512, "{listed}: {}", r.stdout);
+    assert!(
+        r.stdout
+            .contains("29 entries, in a file that is not a whitelist"),
+        "{}",
+        r.stdout
+    );
     // `--json` still has every row, escaped.
     let v = home.run(&["whitelist", "list", "--json"]).ok();
     assert_eq!(v["entries"].as_array().unwrap().len(), 29, "{v}");
