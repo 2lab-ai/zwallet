@@ -372,9 +372,13 @@ fn relayed_error(home: &Path, who: &Peer, resp: Response) -> WalletError {
                     budget = budget.saturating_sub(v.chars().count());
                     details.insert((*key).into(), Value::String(v));
                 }
+                // A number cannot be cut: kept only when it fits what is left of the budget.
                 Some(n @ Value::Number(_)) => {
-                    budget = budget.saturating_sub(n.to_string().chars().count());
-                    details.insert((*key).into(), n.clone());
+                    let len = n.to_string().len();
+                    if len <= budget {
+                        budget -= len;
+                        details.insert((*key).into(), n.clone());
+                    }
                 }
                 _ => {}
             }
@@ -2369,6 +2373,41 @@ mod tests {
                 .sum::<usize>();
         let prefix = "the process answering on the key daemon socket reported: ";
         assert!(total <= prefix.chars().count() + PROSE_MAX, "{total}");
+    }
+
+    #[test]
+    fn a_relayed_number_detail_counts_toward_the_budget() {
+        use crate::core::text::PROSE_MAX;
+        let home = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let unknown = Peer {
+            pid: None,
+            token: None,
+            exe_uuid: None,
+        };
+        let reply = |error: String| -> Response {
+            serde_json::from_value(json!({
+                "v": 2, "ok": false, "errorCode": "FEE_CAP_EXCEEDED", "error": error,
+                "details": { "feeWei": u64::MAX, "capWei": 7 },
+            }))
+            .unwrap()
+        };
+        // 500 characters of message leave 12: `capWei` (1) fits, `feeWei` (20 digits) does not.
+        let e = relayed_error(home.path(), &unknown, reply("m".repeat(500)));
+        let prefix = "the process answering on the key daemon socket reported: ";
+        let total = e.message.len() - prefix.len()
+            + e.details
+                .values()
+                .map(|v| v.to_string().len())
+                .sum::<usize>();
+        assert!(total <= PROSE_MAX, "{total}");
+        assert!(e.details.get("feeWei").is_none(), "{:?}", e.details);
+        assert_eq!(e.details["capWei"], 7);
+        // With room, both are kept.
+        let e = relayed_error(home.path(), &unknown, reply("short".into()));
+        assert_eq!(e.details["feeWei"], u64::MAX);
     }
 
     /// A session-ending reply from this build's own daemon (it answers, then drops the socket
