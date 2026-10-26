@@ -3545,14 +3545,16 @@ fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
             "chain": "ethereum", "index": 0, "active": "main", "address": POISON,
         }),
     );
-    // The listener runs in this test process, so its executable is this test binary.
+    // The listener runs in this test harness binary, not zwallet: its code is not this build's.
+    // On macOS the cdhash catches that; on Linux its readable executable is not this build's.
+    // Either way the pid is named and nothing is verified.
     let me = std::process::id();
-    let exe = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
-    let warning = format!(
-        "the process answering on the key daemon socket (pid {me}) is not this zwallet build \
-         ({}); run `zwallet lock` and unlock again",
-        exe.display()
-    );
+    let want = if session_verifies() {
+        "runs other code than this zwallet build"
+    } else {
+        "is not this zwallet build"
+    };
+    let pid = format!("(pid {me})");
     let rpc = common::tiny_rpc(|method| match method {
         "eth_chainId" => json!("0x1"),
         _ => json!("0x0"),
@@ -3567,13 +3569,14 @@ fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
         assert_eq!(shown_address(&v), POISON, "{args:?}: {v}");
         assert_eq!(v["verified"], false, "{args:?}: {v}");
         assert!(v.get("verifiedBy").is_none(), "{args:?}: {v}");
-        assert_eq!(v["warning"], warning.as_str(), "{args:?}: {v}");
+        let w = v["warning"].as_str().unwrap_or("");
+        assert!(w.contains(want) && w.contains(&pid), "{args:?}: {w}");
     }
     // Human: the warning and the note; no code on a terminal either.
     let piped = home.run(&["address"]);
     assert_eq!(piped.code, 0, "{}", piped.stderr);
     assert!(
-        piped.stdout.contains(&format!("warning: {warning}\n")),
+        piped.stdout.contains("warning: the process answering") && piped.stdout.contains(want),
         "{}",
         piped.stdout
     );
@@ -3582,27 +3585,13 @@ fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
     assert_eq!(shown, piped.stdout);
     assert!(common::scan_qr(&shown).is_empty());
     let addresses = home.run(&["addresses"]);
-    assert!(
-        addresses.stdout.contains(&format!("warning: {warning}\n")),
-        "{}",
-        addresses.stdout
-    );
+    assert!(addresses.stdout.contains(want), "{}", addresses.stdout);
     drop(fake);
 }
 
-#[test]
-fn s4_a_daemon_started_from_another_copy_of_zwallet_is_not_verified() {
-    let home = Home::new();
-    home.create("main", &[]);
-    // A byte-identical copy at another path is another file: what `unlock` started is not the
-    // binary this CLI runs.
-    let dir = tempfile::Builder::new()
-        .prefix("zwt-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let copy = dir.path().join("zwallet");
-    fs::copy(env!("CARGO_BIN_EXE_zwallet"), &copy).unwrap();
-    let mut cmd = std::process::Command::new(&copy);
+/// Unlocks `home` with a daemon started from the binary at `exe` (a copy), and returns its pids.
+fn unlock_from(home: &Home, exe: &std::path::Path) {
+    let mut cmd = std::process::Command::new(exe);
     cmd.env_clear().env("ZWALLET_HOME", home.path()).args([
         "unlock",
         "10m",
@@ -3613,26 +3602,187 @@ fn s4_a_daemon_started_from_another_copy_of_zwallet_is_not_verified() {
         cmd.arg("--allow-ptrace-scope-0");
     }
     common::run_command(cmd, Some(&format!("{PW}\n"))).ok();
+}
+
+#[test]
+fn s4_a_byte_copy_runs_the_same_code_so_it_may_verify_by_session() {
+    // The identity is the code, by its kernel-validated cdhash, not the path or the file. A
+    // byte-identical copy at another path has the same cdhash and runs the same code, so a daemon
+    // started from it verifies by session on macOS (on Linux nothing verifies by session).
+    let home = Home::new();
+    let addr = home.create("main", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let copy = dir.path().join("zwallet");
+    fs::copy(env!("CARGO_BIN_EXE_zwallet"), &copy).unwrap();
+    unlock_from(&home, &copy);
+    assert_eq!(home.daemon_pids().len(), 1, "one daemon");
+    for args in SESSION_VIEWS {
+        let v = home.run(args).ok();
+        assert_eq!(shown_address(&v), addr, "{args:?}: {v}");
+        assert!(v.get("warning").is_none(), "{args:?}: {v}");
+        if session_verifies() {
+            assert_eq!(v["verifiedBy"], "session", "{args:?}: {v}");
+        } else {
+            assert_eq!(v["verified"], false, "{args:?}: {v}");
+        }
+    }
+}
+
+#[test]
+fn s5_a_resigned_copy_is_other_code_so_it_is_not_verified() {
+    if !session_verifies() {
+        return; // The cdhash is only read on macOS.
+    }
+    if !have("codesign") {
+        eprintln!("skipping s5: codesign not found");
+        return;
+    }
+    let home = Home::new();
+    home.create("main", &[]);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let copy = dir.path().join("zwallet");
+    fs::copy(env!("CARGO_BIN_EXE_zwallet"), &copy).unwrap();
+    // Re-sign with a different identifier: same bytes of code, a different code directory, so a
+    // different cdhash. The kernel validates the running pages against it.
+    let signed = std::process::Command::new("codesign")
+        .args(["-f", "-s", "-", "-i", "com.example.other"])
+        .arg(&copy)
+        .output()
+        .expect("run codesign");
+    assert!(
+        signed.status.success(),
+        "codesign: {}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    unlock_from(&home, &copy);
     let pids = home.daemon_pids();
     assert_eq!(pids.len(), 1, "{pids:?}");
-    let copy = fs::canonicalize(&copy).unwrap();
     for args in SESSION_VIEWS {
         let v = home.run(args).ok();
         assert_eq!(v["verified"], false, "{args:?}: {v}");
         assert!(v.get("verifiedBy").is_none(), "{args:?}: {v}");
-        if session_verifies() {
-            assert_eq!(
-                v["warning"],
-                format!(
-                    "the process answering on the key daemon socket (pid {}) is not this \
-                     zwallet build ({}); run `zwallet lock` and unlock again",
-                    pids[0],
-                    copy.display()
-                ),
-                "{args:?}: {v}"
-            );
-        } else {
-            assert!(v.get("warning").is_none(), "{args:?}: {v}");
-        }
+        let w = v["warning"].as_str().unwrap_or("");
+        assert!(
+            w.contains("runs other code than this zwallet build")
+                && w.contains(&format!("(pid {})", pids[0])),
+            "{args:?}: {w}"
+        );
     }
+}
+
+/// Whether `tool` is on the PATH, for tests that need `cc` or `codesign`.
+fn have(tool: &str) -> bool {
+    std::process::Command::new(tool)
+        .arg(if tool == "codesign" {
+            "--help"
+        } else {
+            "--version"
+        })
+        .output()
+        .map(|o| o.status.success() || o.status.code().is_some())
+        .unwrap_or(false)
+}
+
+/// A tiny attacker: binds `$1/d.sock` and answers every request with an ok reply carrying the
+/// POISON address, from its own code. Built with `cc` in the test, so its cdhash and executable
+/// are not zwallet's.
+const ATTACKER_C: &str = r#"
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+int main(int argc, char **argv) {
+  if (argc < 3) return 2;              /* argv: daemon --home <HOME> */
+  char path[512];
+  snprintf(path, sizeof path, "%s/d.sock", argv[argc - 1]);
+  unlink(path);
+  int l = socket(AF_UNIX, SOCK_STREAM, 0);
+  struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
+  strncpy(a.sun_path, path, sizeof a.sun_path - 1);
+  if (bind(l, (struct sockaddr *)&a, sizeof a) || listen(l, 8)) return 3;
+  const char *reply =
+    "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":1,"
+    "\"expiresAt\":\"2099-01-01T00:00:00Z\",\"chain\":\"ethereum\",\"index\":0,"
+    "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n";
+  for (;;) {
+    int s = accept(l, 0, 0);
+    if (s < 0) continue;
+    char b[1024]; while (read(s, b, sizeof b) > 0) {}
+    write(s, reply, strlen(reply));
+    shutdown(s, SHUT_WR); close(s);
+  }
+}
+"#;
+
+#[test]
+fn s6_an_attacker_running_its_own_code_on_the_socket_is_not_verified() {
+    if !have("cc") {
+        eprintln!("skipping s6: cc not found");
+        return;
+    }
+    let home = Home::new();
+    home.create("main", &[]);
+    // The cache is edited to the attacker's address: a daemon-vs-cache mismatch would hide the
+    // point, so the attacker answers the same (poisoned) address the cache now holds.
+    poison_cache(&home);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let src = dir.path().join("attacker.c");
+    let bin = dir.path().join("attacker");
+    fs::write(&src, ATTACKER_C).unwrap();
+    let cc = std::process::Command::new("cc")
+        .arg("-o")
+        .arg(&bin)
+        .arg(&src)
+        .output()
+        .expect("run cc");
+    assert!(
+        cc.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+    // It runs with the daemon's argv, so it is in `daemon_pids` (what the old path/UUID check
+    // trusted), yet it runs its own code. On macOS the cdhash catches it; on Linux its executable
+    // is not this build's.
+    let canonical = fs::canonicalize(home.path()).unwrap();
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("daemon").arg("--home").arg(&canonical);
+    let mut child = cmd.spawn().expect("spawn attacker");
+    // Wait for the socket.
+    for _ in 0..200 {
+        if home.sock().exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let want = if session_verifies() {
+        "runs other code than this zwallet build"
+    } else {
+        "is not this zwallet build"
+    };
+    for args in [&["address", "--json"][..], &["addresses", "--json"]] {
+        let v = home.run(args).ok();
+        assert_eq!(shown_address(&v), POISON, "{args:?}: {v}");
+        assert_eq!(v["verified"], false, "{args:?}: {v}");
+        assert!(v.get("verifiedBy").is_none(), "{args:?}: {v}");
+        assert!(
+            v["warning"].as_str().unwrap_or("").contains(want),
+            "{args:?}: {v}"
+        );
+    }
+    child.kill().ok();
+    child.wait().ok();
 }
