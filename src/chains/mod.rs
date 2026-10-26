@@ -690,9 +690,15 @@ const JOURNAL_SHOWN: usize = 5;
 /// nonce, time, kind, amount and recipient together. Entries are shown whole, newest first, while
 /// they fit; the journal is a file any process of this user can write.
 const JOURNAL_TEXT_MAX: usize = crate::core::text::PROSE_MAX;
-/// The most digits an amount in the journal shows on either side of its point (a U256 has 78).
+/// The most digits before the point of a journal amount (a U256 has 78).
 const AMOUNT_DIGITS: usize = 78;
-/// The most characters of the symbol in a journal amount (zwallet keeps 32 of an on-chain one).
+/// The most digits after the point of a journal amount: a token's decimals are a `u8`.
+const FRACTION_DIGITS: usize = 255;
+/// The most characters of a journal amount without its symbol: `format_units` writes at most 78
+/// digits in all, or `0.` and 255 for a token of 255 decimals.
+const AMOUNT_CHARS: usize = 2 + FRACTION_DIGITS;
+/// The most characters of the symbol in a journal amount: `erc20_meta` keeps 32 of an on-chain
+/// one ([`crate::core::text::ascii_inert`]).
 const SYMBOL_CHARS: usize = 32;
 /// The kinds of send zwallet journals: what `transfer` and `invoke` pass as `kind`.
 const SEND_KINDS: [&str; 3] = ["transfer", "token-transfer", "invoke"];
@@ -711,26 +717,26 @@ fn is_address(s: &str) -> bool {
     s.len() == 42 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// `<digits>[.<digits>] <symbol>`, as zwallet writes a journal amount: at most
-/// [`AMOUNT_DIGITS`] digits on either side of the point, then one space and a symbol of letters,
-/// digits and `₮` (one point inside allowed, as in `USDC.e`), at most [`SYMBOL_CHARS`] long.
+/// `<digits>[.<digits>] <symbol>`, as zwallet writes a journal amount (`format_units`, a space,
+/// then what `erc20_meta` or the chain gives as the symbol): at most [`AMOUNT_DIGITS`] digits
+/// before the point and [`FRACTION_DIGITS`] after it, [`AMOUNT_CHARS`] in all, then one space and
+/// a symbol of 1 to [`SYMBOL_CHARS`] printable characters other than the space (`₮` too): the
+/// chain's, a registry token's, `?` when `symbol()` failed, or an escaped, cut on-chain one. A
+/// symbol `erc20_meta` kept with a space in it does not pass.
 fn is_amount_value(s: &str) -> bool {
-    let digits = |d: &str| {
-        !d.is_empty() && d.len() <= AMOUNT_DIGITS && d.bytes().all(|b| b.is_ascii_digit())
+    let digits = |d: &str, max: usize| {
+        !d.is_empty() && d.len() <= max && d.bytes().all(|b| b.is_ascii_digit())
     };
-    let word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '₮');
     let Some((amount, symbol)) = s.split_once(' ') else {
         return false;
     };
-    let amount_ok = match amount.split_once('.') {
-        Some((int, frac)) => digits(int) && digits(frac),
-        None => digits(amount),
-    };
-    let symbol_ok = symbol.chars().count() <= SYMBOL_CHARS
-        && match symbol.split_once('.') {
-            Some((a, b)) => word(a) && word(b),
-            None => word(symbol),
+    let amount_ok = amount.len() <= AMOUNT_CHARS
+        && match amount.split_once('.') {
+            Some((int, frac)) => digits(int, AMOUNT_DIGITS) && digits(frac, FRACTION_DIGITS),
+            None => digits(amount, AMOUNT_DIGITS),
         };
+    let symbol_ok = (1..=SYMBOL_CHARS).contains(&symbol.chars().count())
+        && symbol.chars().all(|c| ('!'..='~').contains(&c) || c == '₮');
     amount_ok && symbol_ok
 }
 
@@ -771,10 +777,10 @@ impl EntryText {
     }
 }
 
-/// The newest of `entries` (at most [`JOURNAL_SHOWN`]) as `text` renders each, oldest first: as
-/// many as fit one [`JOURNAL_TEXT_MAX`] budget of journal text (`text` also says how much of the
-/// rendering is the journal's), each whole, so a hash is never cut. Then `(and N more there)` for
-/// the entries not shown.
+/// The newest of `entries` (at most [`JOURNAL_SHOWN`]) that fit one [`JOURNAL_TEXT_MAX`] budget
+/// of journal text, as `text` renders each (it also says how much of the rendering is the
+/// journal's), shown oldest first, each whole, so a hash is never cut. Then `(and N more there)`
+/// for the entries not shown. The newest always fits: an entry is at most 452 characters.
 fn entries_shown(entries: &[Value], text: impl Fn(&EntryText) -> (String, usize)) -> String {
     let mut shown = Vec::new();
     let mut used = 0;
@@ -1091,6 +1097,17 @@ impl SendJournal {
             .collect())
     }
 
+    /// `entries` from this journal as a human sees them in one line: the newest that fit one
+    /// budget, each field in the shape zwallet writes it ([`describe_entry`]), then how to look a
+    /// hash up. For a field that lists journal entries in a command's human output.
+    pub fn entries_text(&self, entries: &[Value]) -> String {
+        format!(
+            "{}; {}",
+            entries_shown(entries, describe_entry),
+            journal_lookup(self.chain)
+        )
+    }
+
     /// The refusal of a send without `--nonce` that repeats `duplicates` (from
     /// [`Self::recent_duplicates`], not empty): nothing was signed.
     pub fn duplicate_error(&self, duplicates: Vec<Value>) -> WalletError {
@@ -1282,12 +1299,12 @@ pub fn nonce_taken_error(
         None => ("its nonce".to_string(), "<its nonce>".to_string()),
     };
     // The journal also holds this refused transaction's own line: it is not the earlier send.
-    let pointer = match (journal, signed.nonce) {
+    let (pointer, entries) = match (journal, signed.nonce) {
         (Some(j), Some(n)) => {
-            let (text, _) = j.pointer(n..=n, Some(&signed.tx_hash));
-            format!(" {text}.")
+            let (text, entries) = j.pointer(n..=n, Some(&signed.tx_hash));
+            (format!(" {text}."), entries)
         }
-        _ => String::new(),
+        _ => (String::new(), Vec::new()),
     };
     let (code, mut message) = if explicit_nonce {
         (
@@ -1322,7 +1339,9 @@ pub fn nonce_taken_error(
         e = e.with_detail("nonce", n);
     }
     if let Some(j) = journal {
-        e = e.with_detail("journal", j.display());
+        e = e
+            .with_detail("journal", j.display())
+            .with_detail("journalEntries", Value::Array(entries));
     }
     e
 }
@@ -2071,6 +2090,44 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0]["value"], "## ## ## ETH");
         assert_eq!(entries[2]["kind"], "xfer\\u{1b}[2J");
+    }
+
+    #[test]
+    fn journal_lines_zwallet_writes_show_as_they_are() {
+        // Every kind of amount zwallet itself journals: the chain's symbol, a registry token's
+        // (`USD₮0` too), `?` when `symbol()` failed, an on-chain symbol `erc20_meta` escaped or
+        // cut, and a token of 255 decimals. None of them reads as `<invalid>`.
+        use crate::core::text::{INVALID, ascii_inert};
+        let home = temp_home();
+        let chain = find("ethereum").unwrap();
+        let journal = SendJournal::new(home.path(), chain, "0xF00");
+        let values = [
+            "0.01 ETH".to_string(),
+            "2 USDC".to_string(),
+            "1.5 USD\u{20ae}0".to_string(),
+            "0.5 ?".to_string(),
+            format!("1 {}", ascii_inert("\u{2b1b}COIN", 32)),
+            format!("3 {}", ascii_inert(&"LONGSYMBOL".repeat(5), 32)),
+            format!("1 {}", ascii_inert("UNI-V2", 32)),
+            format!("0.{}1 TINY", "0".repeat(254)),
+        ];
+        for (i, value) in values.iter().enumerate() {
+            journal
+                .append(&json!({
+                    "nonce": i, "txHash": format!("0x{:064x}", i + 1),
+                    "ts": "2026-10-20T04:05:06Z", "kind": "token-transfer", "value": value,
+                    "to": "0x000000000000000000000000000000000000dEaD",
+                }))
+                .unwrap();
+        }
+        for (i, value) in values.iter().enumerate() {
+            let (text, _) = journal.pointer(i as u64..=i as u64, None);
+            assert!(!text.contains(INVALID), "{value}: {text}");
+            assert!(
+                text.contains(&format!("token-transfer {value} to 0x")),
+                "{value}: {text}"
+            );
+        }
     }
 
     #[test]

@@ -374,8 +374,11 @@ async fn original_fees(
         let shown = format!("{hash:#x}");
         if nonce < pending {
             // The hash the agent passed is known not to be the one at `nonce`.
-            let pointer = journal
-                .map(|j| format!(" {}.", j.pointer(nonce..=nonce, Some(&shown)).0))
+            let (pointer, entries) = journal
+                .map(|j| {
+                    let (text, entries) = j.pointer(nonce..=nonce, Some(&shown));
+                    (format!(" {text}."), entries)
+                })
                 .unwrap_or_default();
             let mut e = WalletError::rpc(format!(
                 "the node does not know --replace {shown}, but it holds another pending \
@@ -386,7 +389,9 @@ async fn original_fees(
             ))
             .with_detail("nonce", nonce);
             if let Some(j) = journal {
-                e = e.with_detail("journal", j.display());
+                e = e
+                    .with_detail("journal", j.display())
+                    .with_detail("journalEntries", Value::Array(entries));
             }
             return Err(e);
         }
@@ -908,18 +913,19 @@ fn different_payment(n: u64) -> String {
     )
 }
 
-/// `e` from [`check_nonce`] with the journal's entries at nonce `n` (each with how to look it
-/// up), or where else to look.
+/// `e` from [`check_nonce`] with the journal's entries at nonce `n` (then how to look a hash
+/// up), or where else to look; the entries as found in `journalEntries`.
 fn with_nonce_pointer(e: WalletError, n: u64, journal: Option<&SendJournal>) -> WalletError {
     let Some(j) = journal else {
         return e;
     };
-    let (text, _) = j.pointer(n..=n, None);
+    let (text, entries) = j.pointer(n..=n, None);
     WalletError {
         message: format!("{}. {text}", e.message),
         ..e
     }
     .with_detail("journal", j.display())
+    .with_detail("journalEntries", Value::Array(entries))
 }
 
 /// A transaction found mined at a nonce ([`mined_at`]), with what its receipt says about how it

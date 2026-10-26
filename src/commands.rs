@@ -1634,13 +1634,15 @@ async fn sign_and_send<F: ChainFamily>(
     }
     let journal = chains::SendJournal::new(home, net.chain, from);
     let summary = send_summary(&out, net.chain, kind);
+    let mut duplicates_text = None;
     if send.nonce.is_none() {
         let now = crate::core::time::unix_secs(std::time::SystemTime::now());
         let duplicates = journal.recent_duplicates(&summary, now)?;
         if !duplicates.is_empty() && !send.dry_run && !send.allow_duplicate {
             return Err(journal.duplicate_error(duplicates));
         }
-        // The journal's own lines, which anyone of this user can write: escaped.
+        // The journal's own lines, which anyone of this user can write: escaped in `--json`,
+        // and for a human each field only in the shape zwallet writes it, within one budget.
         out.insert(
             "duplicateSends".into(),
             duplicates
@@ -1648,6 +1650,9 @@ async fn sign_and_send<F: ChainFamily>(
                 .map(crate::core::text::inert_json)
                 .collect(),
         );
+        if !duplicates.is_empty() {
+            duplicates_text = Some(journal.entries_text(&duplicates));
+        }
     }
     // A dry-run the whitelist on disk refuses is explained without asking the daemon to sign.
     let checked = if send.dry_run {
@@ -1658,7 +1663,7 @@ async fn sign_and_send<F: ChainFamily>(
     if let whitelist::DryRunCheck::Denied(denied) = checked {
         out.insert("dryRun".into(), json!(true));
         out.insert("whitelist".into(), denied);
-        return Ok(Out::json(Value::Object(out)));
+        return Ok(send_out(out, duplicates_text.as_deref()));
     }
     let signed_value = protocol::send_unlocked(
         home,
@@ -1696,7 +1701,7 @@ async fn sign_and_send<F: ChainFamily>(
         // No rawTx: a dry-run must not hand out a transaction that can be broadcast without
         // zwallet.
         out.insert("recoveredFrom".into(), json!(signed.signer));
-        return Ok(Out::json(Value::Object(out)));
+        return Ok(send_out(out, duplicates_text.as_deref()));
     }
     let record = chains::SendRecord::new(journal, &signed, &summary);
     let outcome = fam
@@ -1727,7 +1732,22 @@ async fn sign_and_send<F: ChainFamily>(
         let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
         chains::record_receipt(&mut out, net.chain, receipt);
     }
-    Ok(Out::json(Value::Object(out)))
+    Ok(send_out(out, duplicates_text.as_deref()))
+}
+
+/// A send's result: `--json` as it is; the human text the same, but with `duplicateSends` as
+/// `duplicates` (the journal's matching lines through [`chains::SendJournal::entries_text`]) when
+/// there are any, so journal text reaches the terminal only in the shape zwallet writes.
+fn send_out(out: Map<String, Value>, duplicates: Option<&str>) -> Out {
+    let value = Value::Object(out);
+    match duplicates {
+        None => Out::json(value),
+        Some(text) => {
+            let mut human = value.clone();
+            human["duplicateSends"] = json!(text);
+            Out::with_text(value, render_human(&human))
+        }
+    }
 }
 
 /// `tx`: a transaction looked up by hash on the chain's node. Needs no wallet and no key, so it
