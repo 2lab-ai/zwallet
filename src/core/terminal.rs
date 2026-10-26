@@ -61,8 +61,9 @@ pub fn eprint_line(text: &str) {
 /// Serialized JSON with every character outside printable ASCII (and the newline of pretty
 /// printing) as a JSON `\uXXXX` escape, two for a character above U+FFFF. serde writes such
 /// characters only inside string literals (it escapes C0 itself, but not DEL, C1 or any other
-/// non-ASCII), so the result is the same JSON value, all of it printable ASCII on the wire.
-pub fn json_ascii(json: &str) -> String {
+/// non-ASCII), so the result is the same JSON value, all of it printable ASCII on the wire. Only
+/// for text serde wrote ([`print_json`] serializes it itself).
+fn json_ascii(json: &str) -> String {
     let mut out = String::with_capacity(json.len());
     for c in json.chars() {
         if c == '\n' || (' '..='~').contains(&c) {
@@ -77,12 +78,19 @@ pub fn json_ascii(json: &str) -> String {
     out
 }
 
-/// `json` (serialized JSON) and a newline on stdout, through [`json_ascii`]; a closed stdout is
+/// `value` as JSON (indented when `pretty`) and a newline on stdout, through [`json_ascii`]: it
+/// is serialized here, so what [`json_ascii`] reads is always serde's output. A closed stdout is
 /// ignored as in [`print_line`].
-pub fn print_json(json: &str) {
+pub fn print_json(value: &serde_json::Value, pretty: bool) {
+    let json = if pretty {
+        serde_json::to_string_pretty(value)
+    } else {
+        serde_json::to_string(value)
+    }
+    .unwrap_or_default();
     let mut out = std::io::stdout().lock();
     let _ = out
-        .write_all(format!("{}\n", json_ascii(json)).as_bytes())
+        .write_all(format!("{}\n", json_ascii(&json)).as_bytes())
         .and_then(|()| out.flush());
 }
 

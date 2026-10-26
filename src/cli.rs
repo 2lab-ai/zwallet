@@ -591,7 +591,7 @@ const HUMAN_DETAILS: &[&str] = &[
 /// Every error zwallet prints, through the write point ([`crate::core::terminal`]).
 fn print_error(json: bool, e: &WalletError) {
     if json {
-        crate::core::terminal::print_json(&e.to_json().to_string());
+        crate::core::terminal::print_json(&e.to_json(), false);
     } else {
         crate::core::terminal::eprint_line(&human_error(e));
     }
@@ -615,7 +615,7 @@ fn print_out(json: bool, out: &Out) {
     use crate::core::terminal::{print_json, print_line};
     if json {
         if !out.value.is_null() {
-            print_json(&serde_json::to_string_pretty(&out.value).unwrap_or_default());
+            print_json(&out.value, true);
         }
         return;
     }
