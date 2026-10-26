@@ -909,11 +909,21 @@ impl Drop for PtyChild {
 /// A minimal JSON-RPC node on 127.0.0.1 answering each method with `result(method)`, for the
 /// commands that need RPC (e.g. `balance`). Returns its URL; it lives until the test exits.
 pub fn tiny_rpc(result: fn(&str) -> Value) -> String {
+    tiny_rpc_reply(move |method, _| Ok(result(method)))
+}
+
+/// [`tiny_rpc`] whose `reply(method, params)` is either a `result` (`Ok`) or a JSON-RPC `error`
+/// object (`Err`), for tests of what zwallet makes of a node's text.
+pub fn tiny_rpc_reply(
+    reply: impl Fn(&str, &Value) -> std::result::Result<Value, Value> + Send + Sync + 'static,
+) -> String {
+    let reply = Arc::new(reply);
     use std::io::BufRead;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            let reply = reply.clone();
             std::thread::spawn(move || {
                 let mut writer = stream.try_clone().unwrap();
                 let mut reader = std::io::BufReader::new(stream);
@@ -940,11 +950,14 @@ pub fn tiny_rpc(result: fn(&str) -> Value) -> String {
                         return;
                     }
                     let req: Value = serde_json::from_slice(&body).unwrap();
-                    let text = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": req["id"],
-                        "result": result(req["method"].as_str().unwrap_or("")),
-                    })
+                    let text = match reply(req["method"].as_str().unwrap_or(""), &req["params"]) {
+                        Ok(result) => {
+                            serde_json::json!({ "jsonrpc": "2.0", "id": req["id"], "result": result })
+                        }
+                        Err(error) => {
+                            serde_json::json!({ "jsonrpc": "2.0", "id": req["id"], "error": error })
+                        }
+                    }
                     .to_string();
                     let head = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",

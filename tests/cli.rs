@@ -4587,3 +4587,150 @@ fn address_verify_repairs_a_tampered_cache_and_unlock_works_again() {
         home.stop_daemons();
     }
 }
+
+/// `s` ABI-encoded as one `string` return value.
+fn abi_string(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut hex = format!("{:064x}{:064x}", 32, b.len());
+    let mut data: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    while !data.len().is_multiple_of(64) {
+        data.push('0');
+    }
+    hex.push_str(&data);
+    format!("0x{hex}")
+}
+
+/// What a node or a contract writes to draw a fake line on a terminal.
+const FORGED: &str = "\r\u{1b}[2Kbalance: 999 ETH\nverified: true\u{9b}\u{202e}\u{1b}[8m";
+
+#[test]
+fn rpc_text_reaches_human_output_escaped_and_on_one_line() {
+    // An RPC endpoint is anyone's: `--rpc` and ZWALLET_RPC_* can name any server. Its error text
+    // and a contract's `symbol()` are escaped where zwallet builds the error or the output, so
+    // `--json` and the terminal get the same inert text.
+    let token = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    // 1. A JSON-RPC error message (and its data) from the node.
+    let failing = common::tiny_rpc_reply(|method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        _ => Err(json!({ "code": -32000, "message": FORGED, "data": FORGED })),
+    });
+    let nowallet = Home::new();
+    let call = [
+        "call",
+        "--chain",
+        "ethereum",
+        "--to",
+        token,
+        "--sig",
+        "name()(string)",
+        "--rpc",
+    ];
+    let mut args = call.to_vec();
+    args.extend([failing.as_str(), "--json"]);
+    let msg = nowallet.run(&args).err("RPC_ERROR");
+    assert!(msg.starts_with("eth_call failed: "), "{msg}");
+    assert!(!has_raw_control(&msg) && !msg.contains('\n'), "{msg:?}");
+    assert!(
+        !msg.contains('\u{9b}') && !msg.contains('\u{202e}'),
+        "{msg:?}"
+    );
+    assert!(
+        msg.contains("\\r\\u{1b}[2Kbalance: 999 ETH\\nverified: true"),
+        "{msg}"
+    );
+    args.pop();
+    let human = nowallet.run(&args);
+    assert_eq!(human.code, 1);
+    assert!(!has_raw_control(&human.stderr), "{:?}", human.stderr);
+    assert_eq!(human.stderr.lines().count(), 1, "{:?}", human.stderr);
+    // 2. A token whose `symbol()` is a terminal escape.
+    let home = Home::new();
+    home.create("main", &[]);
+    let symbol_node = common::tiny_rpc_reply(|method, params| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        "eth_call" => {
+            let tx = &params[0];
+            let data = tx["input"].as_str().or(tx["data"].as_str()).unwrap_or("");
+            Ok(json!(match &data[..10.min(data.len())] {
+                "0x313ce567" => format!("0x{:064x}", 6),
+                "0x95d89b41" => abi_string(FORGED),
+                _ => format!("0x{:064x}", 5),
+            }))
+        }
+        _ => Ok(json!("0x0")),
+    });
+    let b = [
+        "balance",
+        "--chain",
+        "ethereum",
+        "--token",
+        token,
+        "--rpc",
+        &symbol_node,
+    ];
+    let mut json_args = b.to_vec();
+    json_args.push("--json");
+    let v = home.run(&json_args).ok();
+    let sym = v["symbol"].as_str().unwrap_or("");
+    assert!(
+        !has_raw_control(sym) && !sym.contains('\n') && !sym.contains('\u{202e}'),
+        "{v}"
+    );
+    assert!(sym.starts_with("\\r\\u{1b}[2Kbalance"), "{v}");
+    let human = home.run(&b);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(!has_raw_control(&human.stdout), "{:?}", human.stdout);
+    assert!(
+        !human
+            .stdout
+            .lines()
+            .any(|l| l.starts_with("verified: true")),
+        "{:?}",
+        human.stdout
+    );
+}
+
+#[test]
+fn a_call_string_result_is_faithful_in_json_and_escaped_on_the_terminal() {
+    // `call` decodes what the caller asked for: `--json` keeps the contract's string exactly
+    // (JSON encodes its control characters), the human text shows it escaped and on one line.
+    let node = common::tiny_rpc_reply(|method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        "eth_call" => Ok(json!(abi_string(FORGED))),
+        _ => Ok(json!("0x0")),
+    });
+    let home = Home::new();
+    let args = [
+        "call",
+        "--chain",
+        "ethereum",
+        "--to",
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "--sig",
+        "name()(string)",
+        "--rpc",
+        &node,
+    ];
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let v = home.run(&json_args).ok();
+    assert_eq!(v["result"], json!([FORGED]), "{v}");
+    let human = home.run(&args);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(!has_raw_control(&human.stdout), "{:?}", human.stdout);
+    assert!(!human.stdout.contains('\u{9b}') && !human.stdout.contains('\u{202e}'));
+    let result: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("result: "))
+        .collect();
+    assert_eq!(result.len(), 1, "{:?}", human.stdout);
+    assert!(
+        !human
+            .stdout
+            .lines()
+            .any(|l| l.starts_with("verified: true")),
+        "{:?}",
+        human.stdout
+    );
+}
