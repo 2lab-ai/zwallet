@@ -436,17 +436,25 @@ pub enum Toggle {
 pub struct Out {
     pub value: Value,
     pub text: Option<String>,
+    /// zwallet's own QR code of a verified address, printed after `text` as it is (block glyphs
+    /// and colour codes); never part of `text`, which the write point filters.
+    pub qr: Option<String>,
 }
 
 impl Out {
     pub fn json(value: Value) -> Self {
-        Self { value, text: None }
+        Self {
+            value,
+            text: None,
+            qr: None,
+        }
     }
 
     pub fn with_text(value: Value, text: String) -> Self {
         Self {
             value,
             text: Some(text),
+            qr: None,
         }
     }
 
@@ -454,6 +462,7 @@ impl Out {
         Self {
             value: Value::Null,
             text: Some(String::new()),
+            qr: None,
         }
     }
 }
@@ -612,6 +621,9 @@ fn print_out(json: bool, out: &Out) {
         Some(t) if t.is_empty() => {}
         Some(t) => println!("{t}"),
         None => println!("{}", render_human(&out.value)),
+    }
+    if let Some(qr) = &out.qr {
+        println!("{qr}");
     }
 }
 

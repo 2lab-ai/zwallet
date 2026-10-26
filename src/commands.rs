@@ -573,8 +573,8 @@ fn with_note(value: Value, note: Option<&str>) -> Out {
 /// an 80-column terminal.
 const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
 
-/// `out` with `address` as a QR code at the end of its human text, for a phone wallet to scan,
-/// under the lines `scan to send to <address>` and [`EVERY_EVM_NETWORK`]. Only for an address
+/// `out` with `address` as a QR code after its human text ([`Out::qr`]), for a phone wallet to
+/// scan, under the lines `scan to send to <address>` and [`EVERY_EVM_NETWORK`] (which are text). Only for an address
 /// reported `verified: true` (by the password or by the session), only with stdout on a
 /// terminal, and not with `--no-qr`: agents read zwallet through pipes, and `--json` prints no
 /// human text.
@@ -585,10 +585,14 @@ fn with_qr(out: Out, verified: bool, address: Option<&str>, no_qr: bool) -> Out 
     // No colours when NO_COLOR is set and not empty (no-color.org).
     let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
     match qr::render(address, color) {
-        Some(code) => with_line(
-            out,
-            &format!("scan to send to {address}\n{EVERY_EVM_NETWORK}\n{code}"),
-        ),
+        Some(code) => {
+            let mut out = with_line(
+                out,
+                &format!("scan to send to {address}\n{EVERY_EVM_NETWORK}"),
+            );
+            out.qr = Some(code);
+            out
+        }
         None => out,
     }
 }
@@ -598,10 +602,13 @@ fn qr_shown(no_qr: bool) -> bool {
     !no_qr && std::io::stdout().is_terminal()
 }
 
-/// `out` with `line` at the end of its human text.
+/// `out` with `line` at the end of its human text (a QR code stays after it).
 fn with_line(out: Out, line: &str) -> Out {
     let text = out.text.unwrap_or_else(|| render_human(&out.value));
-    Out::with_text(out.value, format!("{text}\n{line}"))
+    Out {
+        text: Some(format!("{text}\n{line}")),
+        ..out
+    }
 }
 
 /// What the `create` that makes the master seed shows where the QR code would be.
