@@ -521,6 +521,13 @@ impl FakeDaemon {
         Self::bind_with_reply(path, reply)
     }
 
+    /// Answers every request with `reply`, a whole reply object (say an `ok: false` error).
+    pub fn replying(path: &Path, reply: Value) -> Self {
+        let mut bytes = serde_json::to_vec(&reply).unwrap();
+        bytes.push(b'\n');
+        Self::bind_with_reply(path, bytes)
+    }
+
     fn bind_with_reply(path: &Path, reply: Vec<u8>) -> Self {
         let listener = UnixListener::bind(path).expect("bind fake daemon");
         listener.set_nonblocking(true).unwrap();
