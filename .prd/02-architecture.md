@@ -124,20 +124,37 @@ seed, so the wallet file and the daemon protocol do not change.
 - **The CLI does everything else** in one process: RPC (nonce, EIP-1559 fees with a legacy
   fallback, `eth_estimateGas`, balance pre-check, broadcast, receipt polling), ABI encoding and
   decoding, and output.
-- **Address trust** (round 2): the address cache in `wallet.json` is not authenticated, and it
-  decides where funds go. A same-user process can also swap in its own wallet and run a genuine
-  daemon with its own password.
-  - So **`verified: true` only follows the human's password, or a seed generated in this process**:
+- **Address trust** (round 2; session level 2026-10-23): the address cache in `wallet.json` is not
+  authenticated, and it decides where funds go. Three levels:
+  - **`verified: true, verifiedBy: "password"`** follows the human's password, or a seed generated
+    in this process:
     - `address --verify` and `list --verify` (decrypt locally, derive, compare);
     - the readiness line of `unlock` and `create --unlock`;
     - the first `create`;
     - a subkey `create` at a terminal or with `--password-stdin`.
-  - Everything else says `verified: false`, with "run `zwallet address --verify` before funding".
-    That covers an agent's `create` through the daemon, and `balance`.
-  - The daemon cross-check remains as a tamper detector only: a mismatch is a VALIDATION_ERROR, and
-    a match is not verification.
+  - **`verified: true, verifiedBy: "session"`** (macOS; cdhash 2026-10-26): `address`, `addresses`,
+    `status`, `change` and `balance` while unlocked, when the daemon's derivation equals the cache
+    and the kernel names the answering process as this build's key daemon of the home
+    (`protocol::check_peer`, decided on the **cdhash of the code actually running**, not a path or
+    a declared value, both forgeable by a same-user process). The legs: from the peer's audit
+    token (`LOCAL_PEERTOKEN`), `csops_audittoken(CS_OPS_CDHASH)` equals this process's own
+    `csops(CS_OPS_CDHASH)`; the peer is `CS_VALID`; `daemon_pids(home)` lists it; it holds the
+    listening `d.sock` of this home (`proc_pidfdinfo`, so an attacker that exec'd this binary while
+    its child squats the socket does not pass — the daemon closes inherited fds at start-up); and
+    `LOCAL_PEERUUID` matches. Linux hides a non-dumpable daemon's `/proc/<pid>/exe`, so there this
+    level never applies.
+  - **`verified: false`** otherwise, with "the wallet is locked; `zwallet unlock <dur>` or `zwallet
+    address --verify` checks it" while locked, else "run `zwallet address --verify` before
+    funding". A peer that fails the check adds a `warning` naming its pid and what it is; the
+    command does not fail.
+  - A cache the daemon contradicts is a VALIDATION_ERROR. Residual risk: a same-user process that
+    swaps in its own wallet and unlocks it with its own password through the genuine binary, or
+    injects code into the genuine binary (`DYLD_INSERT_LIBRARIES` without the hardened runtime,
+    `LD_PRELOAD`) — the same class as replacing the binary. The human keeps the address saved from
+    the first unlock; if it ever changes, stop. Piped/`--json` output changed (the locked note, and
+    `verifiedBy` on a session result); agents read `--json`.
 - **Locked matrix**: `address`, `addresses`, `balance`, `call` and `status` work while locked
-  (they use cached addresses). `sign-message`, `transfer` and `invoke` → `WALLET_LOCKED`, with the
+  (they use cached addresses, `verified: false`). `sign-message`, `transfer` and `invoke` → `WALLET_LOCKED`, with the
   hint `zwallet unlock 24h`.
 - A reboot or a dead daemon means the wallet is locked. This is by design. There is no autostart.
 

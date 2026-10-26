@@ -7,13 +7,14 @@ use crate::chains::{
     TransferRequest, redact_url,
 };
 use crate::cli::{
-    AddressArgs, BalanceArgs, CallArgs, Cli, Command, CreateArgs, InvokeArgs, KeyArg, Out,
-    SendArgs, SignMessageArgs, TransferArgs, TxArgs, UnlockArgs, VerifyArgs, render_human,
+    AddressArgs, AddressesArgs, BalanceArgs, CallArgs, Cli, Command, CreateArgs, InvokeArgs,
+    KeyArg, Out, SendArgs, SignMessageArgs, TransferArgs, TxArgs, UnlockArgs, VerifyArgs,
+    render_human,
 };
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::password::read_password;
-use crate::core::protocol::{self, DaemonExe, Request, SIGN_TIMEOUT};
+use crate::core::protocol::{self, DaemonExe, Peer, PeerCheck, Request, SIGN_TIMEOUT};
 use crate::core::seed::{DEFAULT_WORD_COUNT, Seed, VALID_WORD_COUNTS};
 use crate::core::store::{self, KeyEntry, MasterOptions, WalletFile};
 use crate::core::time::parse_duration;
@@ -38,21 +39,27 @@ fn home() -> Result<PathBuf> {
     store::resolve_home(std::env::var_os("ZWALLET_HOME"), std::env::home_dir())
 }
 
+/// Closes every inherited descriptor before `zwallet daemon` opens its own (see
+/// [`protocol::close_inherited_fds`]); `cli::main_entry` calls it for that command alone.
+pub fn close_inherited_fds() -> Result<()> {
+    protocol::close_inherited_fds()
+}
+
 pub async fn run(cli: Cli) -> Result<Out> {
     match cli.command {
         Command::Chains => Ok(chains_list()),
         Command::Create(a) => create(&home()?, a).await,
         Command::List(v) => list(&home()?, v).await,
-        Command::Change { name } => change(&home()?, &name).await,
+        Command::Change { name, qr } => change(&home()?, &name, qr.no_qr).await,
         Command::Address(a) => address(&home()?, a).await,
-        Command::Addresses(k) => addresses(&home()?, k).await,
+        Command::Addresses(a) => addresses(&home()?, a).await,
         Command::Balance(a) => balance(&home()?, a).await,
         Command::Call(a) => call(&home()?, a).await,
         Command::Invoke(a) => invoke(&home()?, a).await,
         Command::Transfer(a) => transfer(&home()?, a).await,
         Command::SignMessage(a) => sign_message(&home()?, a).await,
         Command::Tx(a) => tx(a).await,
-        Command::Status => status(&home()?).await,
+        Command::Status(qr) => status(&home()?, qr.no_qr).await,
         Command::Backup => backup(&home()?),
         Command::Unlock(a) => unlock(&home()?, a).await,
         Command::Lock => lock(),
@@ -186,7 +193,8 @@ fn primary_address(key: &KeyEntry) -> Option<&String> {
 }
 
 /// The key daemon's own derivation of key `index` on `chain`, or `None` while the wallet is
-/// locked (no daemon, or one that just locked itself).
+/// locked (no daemon, or one that just locked itself). Whoever answers is not checked: for the
+/// cross-check of `list` only (see [`Trust`]).
 async fn daemon_derive(home: &Path, index: u32, chain: &Chain) -> Result<Option<String>> {
     let reply = match protocol::send(
         home,
@@ -227,27 +235,189 @@ fn check_cache(key: &KeyEntry, chain: &str, derived: &str, by: &str) -> Result<(
 
 const DAEMON: &str = "the key daemon";
 
-/// A key's address on `chain` without the password: the cache (the daemon's derivation for a
-/// chain added after the key), cross-checked against whatever key daemon answers. A mismatch is
-/// `VALIDATION_ERROR`, but a match proves nothing: a process of this user can run its own daemon
-/// over its own wallet.json, or squat the socket. So this is never `verified`.
-async fn cross_checked_address(home: &Path, key: &KeyEntry, chain: &Chain) -> Result<String> {
-    if let Some(derived) = daemon_derive(home, key.index, chain).await? {
-        check_cache(key, chain.key, &derived, DAEMON)?;
-        return Ok(derived);
-    }
-    key_address(home, key, chain).await
+/// How far an address shown without the password can be trusted. There are three levels:
+/// - `verified: true, verifiedBy: "password"`: derived from the seed after the human's password,
+///   in this process or by the daemon child `unlock` just started.
+/// - `verified: true, verifiedBy: "session"` ([`Trust::Session`]): while unlocked, derived by this
+///   zwallet build's own key daemon for this home ([`protocol::check_peer`]), and equal to the
+///   cache. That daemon decrypted this home's wallet.json with the password typed at `unlock`.
+/// - `verified: false`: the cache in wallet.json, which any process of this user can edit, or a
+///   derivation by something else on `d.sock` (with a `warning` naming it).
+///
+/// What a session cannot rule out: a process of this user that swapped in its own wallet.json
+/// and unlocked it with its own password through this very binary, or injected code into it. Only
+/// the address the human saved from their first unlock tells that apart: if it ever changes, stop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Trust {
+    Session,
+    /// The wallet is locked: the cache.
+    Locked,
+    /// Unlocked, but not verified by the session: the warning, when what answered is known not
+    /// to be this build's key daemon of this home.
+    Unverified(Option<String>),
 }
 
-/// The one-line note on every address shown without `verified: true`.
+impl Trust {
+    fn verified(&self) -> bool {
+        *self == Self::Session
+    }
+
+    /// Sets `verified`, `verifiedBy` and `warning` on the object `out`.
+    fn mark(&self, out: &mut Value) {
+        out["verified"] = json!(self.verified());
+        if self.verified() {
+            out["verifiedBy"] = json!("session");
+        }
+        if let Self::Unverified(Some(w)) = self {
+            out["warning"] = json!(w);
+        }
+    }
+
+    /// The one line under an address shown unverified.
+    fn note(&self) -> Option<&'static str> {
+        match self {
+            Self::Session => None,
+            Self::Locked => Some(LOCKED_NOTE),
+            Self::Unverified(_) => Some(UNVERIFIED_NOTE),
+        }
+    }
+
+    fn warning(&self) -> Option<&str> {
+        match self {
+            Self::Unverified(Some(w)) => Some(w),
+            _ => None,
+        }
+    }
+}
+
+/// The key daemon as one command asks it for addresses: each derivation is checked against the
+/// cache, and each process that gave one is checked once ([`protocol::check_peer`]); then
+/// [`Daemon::trust`] says what that verifies.
+struct Daemon<'a> {
+    home: &'a Path,
+    peers: Vec<(Peer, PeerCheck)>,
+    /// Some derivation came back.
+    answered: bool,
+    /// Some address came from the cache instead (the wallet was or became locked).
+    cached: bool,
+}
+
+impl<'a> Daemon<'a> {
+    fn new(home: &'a Path) -> Self {
+        Self {
+            home,
+            peers: Vec::new(),
+            answered: false,
+            cached: false,
+        }
+    }
+
+    /// The daemon's derivation of key `index` on `chain`, or `None` while the wallet is locked.
+    async fn derive(&mut self, index: u32, chain: &Chain) -> Result<Option<String>> {
+        let request = Request::Address {
+            chain: chain.key.into(),
+            index,
+        };
+        let answer = match protocol::send_answered(self.home, &request, SIGN_TIMEOUT).await {
+            Ok(Some(a)) => a,
+            Ok(None) => return Ok(None),
+            Err(e) if e.code == ErrorCode::WalletLocked => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let address = answer.value["address"]
+            .as_str()
+            .ok_or_else(|| WalletError::validation("daemon returned no address"))?
+            .to_string();
+        if !self.peers.iter().any(|(p, _)| *p == answer.peer) {
+            let check = protocol::check_peer(self.home, &answer.peer)?;
+            self.peers.push((answer.peer, check));
+        }
+        self.answered = true;
+        Ok(Some(address))
+    }
+
+    /// `key`'s address on `chain` from `derived` (this command's derivation for the chain's
+    /// family) checked against the cache, or without one the cache (the daemon's derivation for
+    /// a chain added after the key).
+    async fn checked(
+        &mut self,
+        key: &KeyEntry,
+        chain: &Chain,
+        derived: Option<&String>,
+    ) -> Result<String> {
+        if let Some(d) = derived {
+            self.check_cache(key, chain, d)?;
+            return Ok(d.clone());
+        }
+        self.cached = true;
+        key_address(self.home, key, chain).await
+    }
+
+    /// [`check_cache`] of `derived` (this daemon's derivation) for `key` on `chain`. A mismatch
+    /// aborts the command; when what answered on `d.sock` is known not to be this build's key
+    /// daemon of the home, the error also carries that warning (in the message and as the
+    /// `warning` detail), so the abort still names the impostor.
+    fn check_cache(&self, key: &KeyEntry, chain: &Chain, derived: &str) -> Result<()> {
+        check_cache(key, chain.key, derived, DAEMON).map_err(|e| match self.trust().warning() {
+            Some(w) => {
+                let message = format!("{}. Also: {w}", e.message);
+                WalletError { message, ..e }.with_detail("warning", w)
+            }
+            None => e,
+        })
+    }
+
+    /// `key`'s address on `chain`: derived and checked against the cache, or the cache while
+    /// locked. A mismatch is `VALIDATION_ERROR`.
+    async fn address(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
+        let derived = self.derive(key.index, chain).await?;
+        self.checked(key, chain, derived.as_ref()).await
+    }
+
+    /// The cache's address for `key` on `chain`, used when the daemon did not derive one (the
+    /// wallet is locked, or the chain was added after the key). Marks the result as cached, so
+    /// [`Trust`] does not read it as session-verified.
+    async fn cache_only(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
+        self.cached = true;
+        key_address(self.home, key, chain).await
+    }
+
+    /// What the addresses this command took verify: [`Trust::Session`] only when every one was
+    /// derived, and every process that answered is this build's key daemon of this home.
+    fn trust(&self) -> Trust {
+        let other = self.peers.iter().find_map(|(_, c)| match c {
+            PeerCheck::Other(w) => Some(w.clone()),
+            _ => None,
+        });
+        if other.is_some() {
+            Trust::Unverified(other)
+        } else if !self.answered {
+            Trust::Locked
+        } else if self.cached || self.peers.iter().any(|(_, c)| *c != PeerCheck::ThisBuild) {
+            Trust::Unverified(None)
+        } else {
+            Trust::Session
+        }
+    }
+}
+
+/// `verifiedBy` of an address derived from the seed after the human's password ([`Trust`]).
+const BY_PASSWORD: &str = "password";
+
+/// The note on an address shown unverified while the wallet is unlocked (or with no session to
+/// verify it, as `list` and an agent's `create`).
 const UNVERIFIED_NOTE: &str = "not verified: run `zwallet address --verify` before funding";
 
-/// Human text for a result object, with the unverified note when it applies.
-fn with_note(value: Value, verified: bool) -> Out {
+/// The note on an address shown while the wallet is locked.
+const LOCKED_NOTE: &str = "not verified: the wallet is locked; `zwallet unlock <dur>` or `zwallet \
+                           address --verify` checks it";
+
+/// Human text for a result object, with `note` under it.
+fn with_note(value: Value, note: Option<&str>) -> Out {
     let mut text = render_human(&value);
-    if !verified {
+    if let Some(note) = note {
         text.push('\n');
-        text.push_str(UNVERIFIED_NOTE);
+        text.push_str(note);
     }
     Out::with_text(value, text)
 }
@@ -258,8 +428,9 @@ const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwal
 
 /// `out` with `address` as a QR code at the end of its human text, for a phone wallet to scan,
 /// under the lines `scan to send to <address>` and [`EVERY_EVM_NETWORK`]. Only for an address
-/// reported `verified: true`, only with stdout on a terminal, and not with `--no-qr`: agents read
-/// zwallet through pipes, and `--json` prints no human text.
+/// reported `verified: true` (by the password or by the session), only with stdout on a
+/// terminal, and not with `--no-qr`: agents read zwallet through pipes, and `--json` prints no
+/// human text.
 fn with_qr(out: Out, verified: bool, address: Option<&str>, no_qr: bool) -> Out {
     let Some(address) = address.filter(|_| verified && qr_shown(no_qr)) else {
         return out;
@@ -376,6 +547,9 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
         "chains": CHAINS.iter().map(|c| c.key).collect::<Vec<_>>(),
         "verified": verified,
     });
+    if verified {
+        out["verifiedBy"] = json!(BY_PASSWORD);
+    }
     if let (Some(ttl), Some(exe), Some(pw)) = (ttl, &exe, password.as_deref()) {
         let session = start_session(home, exe, pw, ttl).await?;
         // The daemon derived the active key's address from the seed on its own; it must be the
@@ -407,7 +581,8 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
             "Write down your recovery phrase now: run `zwallet backup` before funding this wallet."
         );
     }
-    let out = with_note(out, verified);
+    // Unverified only when derived through the daemon, so while unlocked.
+    let out = with_note(out, (!verified).then_some(UNVERIFIED_NOTE));
     if master == "created" {
         // The recovery phrase is not backed up yet, and funds sent before it is are at risk:
         // no code to scan here, only how to get one.
@@ -525,6 +700,9 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
         text.push_str(UNVERIFIED_NOTE);
     }
     let mut out = json!({ "active": file.active, "keys": keys, "verified": verified });
+    if verified {
+        out["verifiedBy"] = json!(BY_PASSWORD);
+    }
     if let Some(w) = warning {
         text.push_str(&format!("\nwarning: {w}"));
         out["warning"] = json!(w);
@@ -573,16 +751,22 @@ fn index_warning(file: &WalletFile, shown: &[&KeyEntry]) -> Option<String> {
     })
 }
 
-async fn change(home: &Path, name: &str) -> Result<Out> {
+async fn change(home: &Path, name: &str, no_qr: bool) -> Result<Out> {
     let primary = chains::find(PRIMARY_CHAIN)?;
     // Check the target before switching to it, so a cache the daemon contradicts never becomes
     // active.
     let file = store::read_wallet_file(home)?;
-    let address = cross_checked_address(home, file.key(Some(name))?, primary).await?;
+    let mut daemon = Daemon::new(home);
+    let address = daemon.address(file.key(Some(name))?, primary).await?;
     let file = store::set_active(home, name)?;
-    Ok(with_note(
-        json!({ "active": file.active, "address": address, "verified": false }),
-        false,
+    let trust = daemon.trust();
+    let mut out = json!({ "active": file.active, "address": address });
+    trust.mark(&mut out);
+    Ok(with_qr(
+        with_note(out, trust.note()),
+        trust.verified(),
+        Some(&address),
+        no_qr,
     ))
 }
 
@@ -598,12 +782,13 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
             "index": key.index,
             "address": address,
             "verified": true,
+            "verifiedBy": BY_PASSWORD,
         });
         if let Some(w) = index_warning(&file, &[key]) {
             out["warning"] = json!(w);
         }
         return Ok(with_qr(
-            with_note(out, true),
+            with_note(out, None),
             true,
             Some(&address),
             a.qr.no_qr,
@@ -611,33 +796,39 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
     }
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
-    let address = cross_checked_address(home, key, chain).await?;
-    Ok(with_note(
-        json!({ "chain": chain.key, "key": key.name, "address": address, "verified": false }),
-        false,
+    let mut daemon = Daemon::new(home);
+    let address = daemon.address(key, chain).await?;
+    let trust = daemon.trust();
+    let mut out = json!({ "chain": chain.key, "key": key.name, "address": address });
+    trust.mark(&mut out);
+    Ok(with_qr(
+        with_note(out, trust.note()),
+        trust.verified(),
+        Some(&address),
+        a.qr.no_qr,
     ))
 }
 
-async fn addresses(home: &Path, k: KeyArg) -> Result<Out> {
+async fn addresses(home: &Path, a: AddressesArgs) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
-    let key = file.key(k.key.as_deref())?;
+    let key = file.key(a.key.key.as_deref())?;
     // One daemon derivation per family (EVM chains share an address), checked per chain.
+    let mut daemon = Daemon::new(home);
     let mut derived: BTreeMap<&str, Option<String>> = BTreeMap::new();
     let mut rows = Vec::new();
+    let mut primary = None;
     for chain in CHAINS {
         let family = chain.family.name();
         if !derived.contains_key(family) {
-            derived.insert(family, daemon_derive(home, key.index, chain).await?);
+            derived.insert(family, daemon.derive(key.index, chain).await?);
         }
-        let address = match &derived[family] {
-            Some(d) => {
-                check_cache(key, chain.key, d, DAEMON)?;
-                d.clone()
-            }
-            None => key_address(home, key, chain).await?,
-        };
+        let address = daemon.checked(key, chain, derived[family].as_ref()).await?;
+        if chain.key == PRIMARY_CHAIN {
+            primary = Some(address.clone());
+        }
         rows.push(json!({ "chainId": chain.key, "address": address }));
     }
+    let trust = daemon.trust();
     let mut text = rows
         .iter()
         .map(|r| {
@@ -649,18 +840,31 @@ async fn addresses(home: &Path, k: KeyArg) -> Result<Out> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    text.push('\n');
-    text.push_str(UNVERIFIED_NOTE);
-    Ok(Out::with_text(
-        json!({ "key": key.name, "addresses": rows, "verified": false }),
-        text,
+    for line in [
+        trust.warning().map(|w| format!("warning: {w}")),
+        trust.note().map(str::to_string),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        text.push('\n');
+        text.push_str(&line);
+    }
+    let mut out = json!({ "key": key.name, "addresses": rows });
+    trust.mark(&mut out);
+    // One code: the address is the same on every EVM chain.
+    Ok(with_qr(
+        Out::with_text(out, text),
+        trust.verified(),
+        primary.as_deref(),
+        a.qr.no_qr,
     ))
 }
 
 async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
     let chain = match (&a.chain, &a.token, &a.rpc) {
         (Some(chain), _, _) => chains::find(chain)?,
-        (None, None, None) => return every_balance(home, &a.key).await,
+        (None, None, None) => return every_balance(home, &a.key, a.qr.no_qr).await,
         // clap refuses these already (`requires`).
         _ => {
             return Err(WalletError::validation(
@@ -671,7 +875,10 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
     };
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
-    let owner = key_address(home, key, chain).await?;
+    // While unlocked, the daemon's derivation, checked against the cache before any RPC.
+    let mut daemon = Daemon::new(home);
+    let owner = daemon.address(key, chain).await?;
+    let trust = daemon.trust();
     let net = net(chain, a.rpc.as_deref());
     let bal = match &chain.family {
         Family::Evm(_) => match &a.token {
@@ -687,13 +894,17 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
         "decimals": bal.decimals,
         "balance": format_units(bal.raw, bal.decimals),
         "raw": bal.raw.to_string(),
-        // From the cache in wallet.json (see `zwallet address --verify`).
-        "verified": false,
     });
+    trust.mark(&mut out);
     if let Some(token) = &a.token {
         out["token"] = json!(Evm.normalize_address(token)?);
     }
-    Ok(Out::json(out))
+    Ok(with_qr(
+        Out::json(out),
+        trust.verified(),
+        Some(&owner),
+        a.qr.no_qr,
+    ))
 }
 
 /// How long `balance` without `--chain` waits for one network: its chain id check and every
@@ -713,18 +924,41 @@ type NetworkBalances = Result<(chains::Balance, Vec<chains::TokenBalance>)>;
 /// `ZWALLET_RPC_<CHAIN>` or the default RPC. A network whose endpoint, chain id or native balance
 /// fails is a row with `error` and `errorCode` instead of `native` and `tokens`; a token whose
 /// read fails is a token row with them instead of `balance` and `raw`. Only when no network
-/// answers is it an error (their shared code, else `RPC_ERROR`).
-async fn every_balance(home: &Path, k: &KeyArg) -> Result<Out> {
+/// answers is it an error (their shared code, else `RPC_ERROR`). While unlocked the address is
+/// the daemon's derivation (once per chain family), checked against the cache before any RPC.
+async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
     let key = file.key(k.key.as_deref())?;
     let mut order: Vec<&'static Chain> = CHAINS.iter().collect();
     order.sort_by_key(|c| c.is_testnet());
-    // The address on each chain first, as `balance --chain` finds it: the cache, or the daemon
-    // for a chain added after the key.
+    // The address on each chain first, as `balance --chain` finds it: the daemon's derivation,
+    // or while locked the cache (the daemon's for a chain added after the key). A cache the
+    // daemon contradicts aborts the whole command here with `VALIDATION_ERROR` (a tamper signal,
+    // via `check_cache`'s `?`), before any RPC; a daemon that cannot be reached for a chain
+    // family becomes that family's chains' error rows (fail closed per chain, with `read_network`
+    // below). The two are told apart by their source, not by matching the error's text.
+    let mut daemon = Daemon::new(home);
+    let mut derived: BTreeMap<&str, Result<Option<String>>> = BTreeMap::new();
     let mut owners = Vec::with_capacity(order.len());
     for chain in &order {
-        owners.push(key_address(home, key, chain).await);
+        let family = chain.family.name();
+        if !derived.contains_key(family) {
+            derived.insert(family, daemon.derive(key.index, chain).await);
+        }
+        owners.push(match &derived[family] {
+            // Derived: the cache must agree, or the command fails now (naming an impostor on
+            // `d.sock`, if one answered).
+            Ok(Some(d)) => {
+                daemon.check_cache(key, chain, d)?;
+                Ok(d.clone())
+            }
+            // Locked (or a chain added after the key): the cache, a per-chain failure if absent.
+            Ok(None) => daemon.cache_only(key, chain).await,
+            // The daemon could not be reached for this family: a per-chain error row.
+            Err(e) => Err(e.clone()),
+        });
     }
+    let trust = daemon.trust();
     // The same on every EVM chain; a row names its own only where it differs. (When no chain
     // has one, every row fails and this is never shown.)
     let address = owners
@@ -836,15 +1070,17 @@ async fn every_balance(home: &Path, k: &KeyArg) -> Result<Out> {
         total.push_str(&format!("; {failed_tokens} token {reads} failed"));
     }
     lines.push(total);
-    Ok(Out::with_text(
-        json!({
-            "key": key.name,
-            "address": address,
-            "chains": rows,
-            // From the cache in wallet.json (see `zwallet address --verify`).
-            "verified": false,
-        }),
-        lines.join("\n"),
+    if let Some(w) = trust.warning() {
+        lines.push(format!("warning: {w}"));
+    }
+    let mut out = json!({ "key": key.name, "address": address, "chains": rows });
+    trust.mark(&mut out);
+    // The code after the networks.
+    Ok(with_qr(
+        Out::with_text(out, lines.join("\n")),
+        trust.verified(),
+        Some(&address),
+        no_qr,
     ))
 }
 
@@ -1288,7 +1524,7 @@ async fn sign_message(home: &Path, a: SignMessageArgs) -> Result<Out> {
     })))
 }
 
-async fn status(home: &Path) -> Result<Out> {
+async fn status(home: &Path, no_qr: bool) -> Result<Out> {
     let file = match store::read_wallet_file(home) {
         Ok(f) => Some(f),
         Err(e) if e.code == ErrorCode::WalletNotFound => None,
@@ -1312,31 +1548,36 @@ async fn status(home: &Path) -> Result<Out> {
         // The whitelist as the serving daemon verifies it right now.
         out["whitelist"] = d["whitelist"].clone();
     }
-    let mut shows_address = false;
+    // The active key's address, and what verifies it.
+    let mut shown = None;
     if let Some(file) = &file {
         out["active"] = json!(file.active);
         if let Ok(key) = file.key(None) {
             let primary = chains::find(PRIMARY_CHAIN)?;
-            // Cross-checked only against a listed daemon that says it serves this session.
-            let derived = if serving.is_some() {
-                daemon_derive(home, key.index, primary).await?
-            } else {
-                None
-            };
-            out["address"] = match derived {
-                Some(d) => {
-                    check_cache(key, primary.key, &d, DAEMON)?;
-                    json!(d)
+            // Derived only by a listed daemon that says it serves this session.
+            let (address, trust) = if serving.is_some() {
+                let mut daemon = Daemon::new(home);
+                match daemon.derive(key.index, primary).await? {
+                    Some(d) => {
+                        daemon.check_cache(key, primary, &d)?;
+                        (Some(d), daemon.trust())
+                    }
+                    None => (primary_address(key).cloned(), Trust::Locked),
                 }
-                None => json!(primary_address(key)),
+            } else if locked {
+                (primary_address(key).cloned(), Trust::Locked)
+            } else {
+                (primary_address(key).cloned(), Trust::Unverified(None))
             };
-            out["verified"] = json!(false);
-            shows_address = true;
+            out["address"] = json!(address);
+            trust.mark(&mut out);
+            shown = Some((address, trust));
         }
     }
-    let mut shown = with_note(out, !shows_address);
+    let note = shown.as_ref().and_then(|(_, trust)| trust.note());
+    let mut text = with_note(out, note);
     if !others.is_empty()
-        && let Some(text) = shown.text.as_mut()
+        && let Some(text) = text.text.as_mut()
     {
         text.push_str(&format!(
             "\nnote: {} zwallet daemon(s) of this user serve other homes (otherDaemonPids); \
@@ -1344,7 +1585,10 @@ async fn status(home: &Path) -> Result<Out> {
             others.len()
         ));
     }
-    Ok(shown)
+    Ok(match shown {
+        Some((address, trust)) => with_qr(text, trust.verified(), address.as_deref(), no_qr),
+        None => text,
+    })
 }
 
 /// How long `status` waits for a daemon that does not confirm its session (it may be exiting) to
@@ -1409,6 +1653,7 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
         "daemonPid": session["pid"],
         // Derived by this process's own daemon child from the seed this password opened.
         "verified": true,
+        "verifiedBy": BY_PASSWORD,
         // The whitelist this session signs under, as its daemon verified it: the generation and
         // the entries, so a rolled-back list is visible.
         "whitelist": session["whitelist"],

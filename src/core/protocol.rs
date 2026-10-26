@@ -185,6 +185,37 @@ fn is_disconnect(e: &std::io::Error) -> bool {
 
 /// Sends one request. `Ok(None)` means no daemon is listening, i.e. the wallet is locked.
 pub async fn send(home: &Path, req: &Request, timeout: Duration) -> Result<Option<Value>> {
+    Ok(send_answered(home, req, timeout).await?.map(|a| a.value))
+}
+
+/// The process at the other end of a connection to `d.sock`, as the kernel reports it when the
+/// connection is made. On macOS: the audit token of the process that last used the listening
+/// socket (`LOCAL_PEERTOKEN`, its pid and pid version), and the UUID of the executable that
+/// process ran when it did (`LOCAL_PEERUUID`). On Linux: the process that called listen(2)
+/// (`SO_PEERCRED`). Asked at connect time: once the daemon has answered and closed its end, macOS
+/// no longer says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Peer {
+    pub pid: Option<i32>,
+    token: Option<AuditToken>,
+    exe_uuid: Option<[u8; 16]>,
+}
+
+/// A macOS `audit_token_t`: eight words, the pid in word 5 and the pid version in word 7.
+type AuditToken = [u32; 8];
+
+/// A daemon's answer to one request, and the [`Peer`] that gave it.
+pub struct Answer {
+    pub value: Value,
+    pub peer: Peer,
+}
+
+/// [`send`], with the [`Peer`] that answered.
+pub async fn send_answered(
+    home: &Path,
+    req: &Request,
+    timeout: Duration,
+) -> Result<Option<Answer>> {
     let path = socket_path(home)?;
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.uid() != current_uid() => {
@@ -221,6 +252,12 @@ pub async fn send(home: &Path, req: &Request, timeout: Duration) -> Result<Optio
                 "refusing to talk to a key daemon run by another user",
             ));
         }
+        let token = peer_token(std::os::fd::AsRawFd::as_raw_fd(&stream));
+        let who = Peer {
+            pid: token.and_then(|t| i32::try_from(t[5]).ok()).or(peer.pid()),
+            token,
+            exe_uuid: peer_exe_uuid(&stream),
+        };
         let mut line = Zeroizing::new(
             serde_json::to_vec(req)
                 .map_err(|e| WalletError::validation(format!("cannot encode request: {e}")))?,
@@ -245,7 +282,8 @@ pub async fn send(home: &Path, req: &Request, timeout: Duration) -> Result<Optio
         let resp: Response = serde_json::from_slice(&buf).map_err(|e| {
             WalletError::validation(format!("malformed reply from the key daemon: {e}"))
         })?;
-        resp.into_result().map(Some)
+        resp.into_result()
+            .map(|value| Some(Answer { value, peer: who }))
     };
     match tokio::time::timeout(timeout, exchange).await {
         Ok(r) => r,
@@ -544,6 +582,450 @@ impl DaemonExe {
     }
 }
 
+// ---- Who answered on `d.sock` ----
+//
+// The peer uid check lets any process of this user answer, so an address a daemon derives proves
+// nothing by itself: a 20-line script on `d.sock` answers what it likes. [`check_peer`] asks the
+// kernel instead which program answered: only this build's own key daemon for the home counts.
+
+/// The identity of a file, as `stat` follows links to it: `(dev, ino)`.
+pub fn file_id(path: &Path) -> Option<(u64, u64)> {
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// What [`check_peer`] establishes about a connection's [`Peer`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PeerCheck {
+    /// This build's key daemon for the home. On macOS: the kernel-validated code-signing hash
+    /// (cdhash) of the code the peer is running equals this process's own, the peer is
+    /// `CS_VALID`, it holds the listening `d.sock` of this home, its argv is in `daemon_pids`,
+    /// and its socket-use executable UUID matches. Never on Linux.
+    ThisBuild,
+    /// Another program, another zwallet build (say the one before a `brew upgrade`), or not the
+    /// key daemon of this home: the warning naming which.
+    Other(String),
+    /// Nothing can be established, so nothing is verified: a kernel query failed or the process
+    /// is gone, or (on Linux) the peer cannot be the genuine key daemon's but may be this build.
+    /// On Linux every zwallet process is non-dumpable (see `password::disable_core_dumps`), which
+    /// hides `/proc/<pid>/exe` from its own user, so a key daemon's executable is always
+    /// unreadable there; a readable one that runs this very build is no genuine daemon either.
+    Unknown,
+}
+
+// ---- Linux: the peer's executable file ----
+//
+// A key daemon is non-dumpable, so its `/proc/<pid>/exe` is unreadable even to its own user:
+// `check_peer` can never read it and returns `Unknown` for the genuine daemon. Nothing is
+// verified by session on Linux. The code is here so the cross-check (`list`) still names a
+// readable impostor.
+
+/// The executable of a running process, as the kernel names it.
+#[cfg(target_os = "linux")]
+enum ProcessExe {
+    /// Its path, and the identity of the file there (`None` when it no longer exists).
+    File(PathBuf, Option<(u64, u64)>),
+    /// Hidden from this process, or the process is gone.
+    Unreadable,
+}
+
+/// The executable `pid` runs: Linux `/proc/<pid>/exe`, stat'ed through the link (the very file,
+/// whatever its path holds now). A target the kernel marks ` (deleted)` is no file at all.
+#[cfg(target_os = "linux")]
+fn process_exe(pid: i32) -> ProcessExe {
+    let link = PathBuf::from(format!("/proc/{pid}/exe"));
+    let Ok(meta) = std::fs::metadata(&link) else {
+        // EACCES for a non-dumpable process (every zwallet daemon), ENOENT once it exited.
+        return ProcessExe::Unreadable;
+    };
+    let Ok(path) = std::fs::read_link(&link) else {
+        return ProcessExe::Unreadable;
+    };
+    let deleted = path.as_os_str().as_bytes().ends_with(b" (deleted)");
+    let id = (!deleted).then(|| (meta.dev(), meta.ino()));
+    ProcessExe::File(path, id)
+}
+
+// ---- macOS: the peer's code, by its code-signing hash ----
+//
+// `proc_pidpath` and `LOCAL_PEERUUID` both name a path or a value the Mach-O declares about
+// itself: a same-user attacker can exec its own code from a path it then symlinks to the genuine
+// binary (so dev/ino match) and embed the genuine `LC_UUID`, and it passes. So the decision rests
+// on the cdhash the kernel validates against the code pages actually mapped (arm64 macOS runs only
+// signed code; a Rust binary is linker ad-hoc signed). `csops`/`csops_audittoken` live in
+// libsystem.
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn csops(
+        pid: libc::pid_t,
+        ops: u32,
+        useraddr: *mut libc::c_void,
+        usersize: libc::size_t,
+    ) -> libc::c_int;
+    fn csops_audittoken(
+        pid: libc::pid_t,
+        ops: u32,
+        useraddr: *mut libc::c_void,
+        usersize: libc::size_t,
+        token: *const AuditToken,
+    ) -> libc::c_int;
+}
+
+/// `CS_OPS_STATUS`: read the code-signing status word.
+#[cfg(target_os = "macos")]
+const CS_OPS_STATUS: u32 = 0;
+/// `CS_OPS_CDHASH`: read the 20-byte code directory hash.
+#[cfg(target_os = "macos")]
+const CS_OPS_CDHASH: u32 = 5;
+/// `CS_VALID`: the kernel has found nothing invalid about the process's signature.
+#[cfg(target_os = "macos")]
+const CS_VALID: u32 = 0x0000_0001;
+#[cfg(target_os = "macos")]
+const CDHASH_LEN: usize = 20;
+
+/// This process's own cdhash (`csops` on `getpid`).
+#[cfg(target_os = "macos")]
+fn own_cdhash() -> Option<[u8; CDHASH_LEN]> {
+    let mut hash = [0u8; CDHASH_LEN];
+    // SAFETY: csops writes at most CDHASH_LEN bytes into `hash` for this pid.
+    let rc = unsafe {
+        csops(
+            libc::getpid(),
+            CS_OPS_CDHASH,
+            hash.as_mut_ptr().cast(),
+            CDHASH_LEN,
+        )
+    };
+    (rc == 0).then_some(hash)
+}
+
+/// The cdhash of the process `token` names (`csops_audittoken`, so pid reuse cannot swap the
+/// target between the check and now).
+#[cfg(target_os = "macos")]
+fn peer_cdhash(token: &AuditToken) -> Option<[u8; CDHASH_LEN]> {
+    let mut hash = [0u8; CDHASH_LEN];
+    // SAFETY: csops_audittoken writes at most CDHASH_LEN bytes into `hash` for `token`'s pid.
+    let rc = unsafe {
+        csops_audittoken(
+            token[5] as libc::pid_t,
+            CS_OPS_CDHASH,
+            hash.as_mut_ptr().cast(),
+            CDHASH_LEN,
+            token,
+        )
+    };
+    (rc == 0).then_some(hash)
+}
+
+/// Whether the process `token` names is `CS_VALID` (`csops_audittoken`).
+#[cfg(target_os = "macos")]
+fn peer_cs_valid(token: &AuditToken) -> Option<bool> {
+    let mut status: u32 = 0;
+    // SAFETY: csops_audittoken writes one u32 of status for `token`'s pid.
+    let rc = unsafe {
+        csops_audittoken(
+            token[5] as libc::pid_t,
+            CS_OPS_STATUS,
+            (&mut status as *mut u32).cast(),
+            std::mem::size_of::<u32>(),
+            token,
+        )
+    };
+    (rc == 0).then_some(status & CS_VALID != 0)
+}
+
+/// Offsets into `socket_fdinfo` (`<sys/proc_info.h>`), confirmed with `offsetof` on arm64 and
+/// x86_64 macOS (the fields are fixed-width, so the offsets match on both). `soi_options` is a
+/// `short`, `soi_kind` an `int`; `unsi_addr` is a `sockaddr_un` whose `sun_path` begins two bytes
+/// in (`sun_len`, `sun_family`).
+#[cfg(target_os = "macos")]
+mod sock_fdinfo {
+    pub const SIZE: usize = 792;
+    pub const SOI_OPTIONS: usize = 188;
+    pub const SOI_KIND: usize = 256;
+    pub const SUN_PATH: usize = 282;
+    /// `SOCKINFO_UN`.
+    pub const KIND_UN: i32 = 3;
+    /// `PROC_PIDFDSOCKETINFO` (`<sys/proc_info.h>`); libc does not re-export it.
+    pub const FDSOCKETINFO: libc::c_int = 3;
+}
+
+/// Whether `pid` holds a listening (`SO_ACCEPTCONN`) `AF_UNIX` socket bound at `path`
+/// (`proc_pidinfo`/`proc_pidfdinfo`). `None` if its descriptors cannot be listed: the genuine
+/// daemon binds and holds `d.sock`, and closes every inherited descriptor at start-up, so an
+/// attacker that exec'd this binary while squatting the socket on an inherited fd holds no such
+/// socket. The bound path is compared in full, so a listener on another home does not count.
+#[cfg(target_os = "macos")]
+fn holds_listening_socket(pid: i32, path: &Path) -> Option<bool> {
+    let want = path.as_os_str().as_bytes();
+    // The descriptor table: an array of proc_fdinfo (fd: i32, type: u32).
+    let entry = std::mem::size_of::<libc::proc_fdinfo>();
+    // SAFETY: a null buffer asks only for the size the list needs now.
+    let need =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if need <= 0 {
+        return None;
+    }
+    let n = need as usize / entry + 32;
+    let mut fds = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        };
+        n
+    ];
+    let size = libc::c_int::try_from(fds.len() * entry).ok()?;
+    // SAFETY: the kernel writes at most `size` bytes of proc_fdinfo into `fds`.
+    let got =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), size) };
+    if got <= 0 {
+        return None;
+    }
+    let count = got as usize / entry;
+    for info in &fds[..count.min(fds.len())] {
+        if info.proc_fdtype != libc::PROX_FDTYPE_SOCKET as u32 {
+            continue;
+        }
+        let mut buf = [0u8; sock_fdinfo::SIZE];
+        // SAFETY: the kernel writes at most SIZE bytes of socket_fdinfo into `buf`.
+        let r = unsafe {
+            libc::proc_pidfdinfo(
+                pid,
+                info.proc_fd,
+                sock_fdinfo::FDSOCKETINFO,
+                buf.as_mut_ptr().cast(),
+                sock_fdinfo::SIZE as libc::c_int,
+            )
+        };
+        if r < sock_fdinfo::SIZE as libc::c_int {
+            continue;
+        }
+        let kind = i32::from_ne_bytes(buf[sock_fdinfo::SOI_KIND..][..4].try_into().ok()?);
+        let options = i16::from_ne_bytes(buf[sock_fdinfo::SOI_OPTIONS..][..2].try_into().ok()?);
+        if kind != sock_fdinfo::KIND_UN || options as i32 & libc::SO_ACCEPTCONN == 0 {
+            continue;
+        }
+        let tail = &buf[sock_fdinfo::SUN_PATH..];
+        let end = tail.iter().position(|b| *b == 0).unwrap_or(tail.len());
+        if &tail[..end] == want {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// The executable this process runs, in the same terms as a [`Peer`]: on Linux its `(dev, ino)`;
+/// on macOS its cdhash and its socket-use UUID.
+struct OwnExe {
+    #[cfg(target_os = "linux")]
+    id: (u64, u64),
+    #[cfg(target_os = "macos")]
+    cdhash: [u8; CDHASH_LEN],
+    #[cfg(target_os = "macos")]
+    uuid: Option<[u8; 16]>,
+}
+
+fn own_exe() -> Option<OwnExe> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(OwnExe {
+            id: file_id(Path::new("/proc/self/exe"))?,
+        })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (a, b) = ChildChannel::pair().ok()?;
+        (&a).write_all(&[0]).ok()?;
+        Some(OwnExe {
+            cdhash: own_cdhash()?,
+            uuid: Some(local_peer_uuid(std::os::fd::AsRawFd::as_raw_fd(&b))?),
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// `LOCAL_PEERUUID` of the connected unix socket `fd`: the UUID of the executable the peer
+/// process ran when it last used its end. It does not follow a later `exec`, so it, with the
+/// cdhash, pins the code that opened the socket.
+#[cfg(target_os = "macos")]
+fn local_peer_uuid(fd: RawFd) -> Option<[u8; 16]> {
+    let mut uuid = [0u8; 16];
+    let mut len = uuid.len() as libc::socklen_t;
+    // SAFETY: the kernel writes at most `len` bytes into `uuid`.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERUUID,
+            uuid.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    (rc == 0 && len as usize == uuid.len()).then_some(uuid)
+}
+
+/// `LOCAL_PEERTOKEN` of the connected unix socket `fd`: the audit token of the process that last
+/// used the listening socket (its pid in word 5, pid version in word 7). None off macOS.
+fn peer_token(fd: RawFd) -> Option<AuditToken> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut token: AuditToken = [0; 8];
+        let mut len = std::mem::size_of::<AuditToken>() as libc::socklen_t;
+        // SAFETY: the kernel writes at most `len` bytes of audit token into `token`.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERTOKEN,
+                token.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
+        (rc == 0 && len as usize == std::mem::size_of::<AuditToken>()).then_some(token)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = fd;
+        None
+    }
+}
+
+fn peer_exe_uuid(stream: &UnixStream) -> Option<[u8; 16]> {
+    #[cfg(target_os = "macos")]
+    return local_peer_uuid(std::os::fd::AsRawFd::as_raw_fd(stream));
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = stream;
+        None
+    }
+}
+
+/// The warning that names why a [`Peer`] (pid `pid`) is not this build's key daemon.
+fn peer_not_ours(pid: i32, what: &str) -> PeerCheck {
+    PeerCheck::Other(format!(
+        "the process answering on the key daemon socket (pid {pid}) {what}; run `zwallet lock` \
+         and unlock again"
+    ))
+}
+
+/// Whether `peer` is this build's key daemon for `home` ([`PeerCheck`]). Any kernel query that
+/// fails gives `Unknown` (fail closed): nothing is verified by session.
+///
+/// On macOS the decision rests on the cdhash the kernel validates against the code actually
+/// running, not on a path or a value the Mach-O declares; see [`check_peer_macos`]. On Linux the
+/// key daemon is non-dumpable, so its executable is unreadable and this returns `Unknown`; see
+/// [`check_peer_linux`].
+///
+/// This cannot stop a process of this user that runs this very binary over its own `wallet.json`
+/// with its own password, or injects code into it (`DYLD_INSERT_LIBRARIES` on a binary without the
+/// hardened runtime, `LD_PRELOAD`): that is the same as replacing the binary, which nothing here
+/// can prevent.
+pub fn check_peer(home: &Path, peer: &Peer) -> Result<PeerCheck> {
+    let (Some(pid), Some(own)) = (peer.pid, own_exe()) else {
+        return Ok(PeerCheck::Unknown);
+    };
+    #[cfg(target_os = "macos")]
+    return check_peer_macos(home, peer, pid, &own);
+    #[cfg(target_os = "linux")]
+    return check_peer_linux(home, pid, &own);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (home, peer, pid, &own);
+        Ok(PeerCheck::Unknown)
+    }
+}
+
+/// [`check_peer`] on macOS. The legs, in order: the peer's cdhash equals this process's own; the
+/// peer is `CS_VALID`; its pid is in `daemon_pids`; it holds the listening `d.sock` of this home;
+/// the executable UUID it used the socket with matches; and the token still resolves (pid reuse).
+/// Everything after the cdhash guards the gap that `csops_audittoken` reports the cdhash of the
+/// listen-socket owner, which an attacker can turn into this binary's by exec'ing it while its
+/// own child keeps answering.
+#[cfg(target_os = "macos")]
+fn check_peer_macos(home: &Path, peer: &Peer, pid: i32, own: &OwnExe) -> Result<PeerCheck> {
+    let (Some(token), Some(uuid)) = (peer.token.as_ref(), own.uuid) else {
+        return Ok(PeerCheck::Unknown);
+    };
+    let (Some(cdhash), Some(valid)) = (peer_cdhash(token), peer_cs_valid(token)) else {
+        return Ok(PeerCheck::Unknown);
+    };
+    if cdhash != own.cdhash {
+        // Its path, for the message only (never for the decision).
+        let path = macos_exe_path(pid);
+        return Ok(peer_not_ours(
+            pid,
+            &format!("runs other code than this zwallet build ({path})"),
+        ));
+    }
+    if !valid {
+        return Ok(peer_not_ours(
+            pid,
+            "runs this zwallet build but its signature is invalid",
+        ));
+    }
+    if !daemon_pids(home, None)?.contains(&pid) {
+        return Ok(peer_not_ours(
+            pid,
+            "is not a key daemon of this wallet home",
+        ));
+    }
+    let sock = daemon_home(home)?.join(SOCKET_NAME);
+    match holds_listening_socket(pid, &sock) {
+        None => return Ok(PeerCheck::Unknown),
+        Some(false) => {
+            return Ok(peer_not_ours(
+                pid,
+                "does not hold the key daemon socket of this home",
+            ));
+        }
+        Some(true) => {}
+    }
+    if peer.exe_uuid != Some(uuid) {
+        return Ok(peer_not_ours(
+            pid,
+            "opened the key daemon socket as another program",
+        ));
+    }
+    // Once more, so the token the whole check rested on still names a live process.
+    if peer_cdhash(token) != Some(own.cdhash) {
+        return Ok(PeerCheck::Unknown);
+    }
+    Ok(PeerCheck::ThisBuild)
+}
+
+/// [`check_peer`] on Linux. Nothing is ever verified by session here: the genuine key daemon is
+/// non-dumpable, so its `/proc/<pid>/exe` is unreadable to its own user (`process_exe` returns
+/// `Unreadable`) — this never returns `ThisBuild`. A *readable* executable therefore belongs to
+/// some other process; if it runs other code it is named for the cross-check, and if it happens
+/// to run this very build it is still not a genuine daemon (which would be unreadable), so
+/// `Unknown`. `home` is unused; the socket/daemon-table legs that would need it only matter where
+/// a session can verify.
+#[cfg(target_os = "linux")]
+fn check_peer_linux(_home: &Path, pid: i32, own: &OwnExe) -> Result<PeerCheck> {
+    match process_exe(pid) {
+        ProcessExe::File(path, id) if id != Some(own.id) => Ok(peer_not_ours(
+            pid,
+            &format!("is not this zwallet build ({})", path.display()),
+        )),
+        _ => Ok(PeerCheck::Unknown),
+    }
+}
+
+/// The path of `pid`'s executable (`proc_pidpath`), for a warning message only. `?` if the kernel
+/// will not say.
+#[cfg(target_os = "macos")]
+fn macos_exe_path(pid: i32) -> String {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: the kernel writes at most `buf.len()` bytes into `buf`.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    match usize::try_from(n) {
+        Ok(n) if n > 0 && n <= buf.len() => String::from_utf8_lossy(&buf[..n]).into_owned(),
+        _ => "?".to_string(),
+    }
+}
+
 /// Starts a new key daemon for `home` holding the seed for `ttl`, and returns its readiness
 /// report `{ locked, expiresAt, active, index, address, pid }` (the address derived by the
 /// daemon from the seed it decrypted with `password`, never read from the cache in wallet.json).
@@ -666,6 +1148,26 @@ fn set_cloexec(fd: libc::c_int) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Closes every descriptor this process holds from fd 3 up, so the key daemon never inherits a
+/// listening socket a parent left open (an attacker that `exec`s this binary while its own child
+/// squats `d.sock`): without this the daemon's pid would pass [`check_peer`]'s socket-holder leg.
+/// Called at the very start of `zwallet daemon`, before the runtime opens any descriptor of its
+/// own. The genuine spawn path already marks fds ≥ 3 close-on-exec, so for it this closes nothing.
+/// A listing that cannot be read refuses to start (fail closed).
+pub fn close_inherited_fds() -> Result<()> {
+    let mut fds = OpenFds::prepare()?;
+    fds.for_each(|fd| {
+        if fd >= 3 {
+            // SAFETY: close(2) of a descriptor number; a bad one is harmless here.
+            unsafe {
+                libc::close(fd);
+            }
+        }
+        Ok(())
+    })
+    .map_err(io_err("cannot close inherited descriptors"))
 }
 
 /// Lists this process's open descriptors where nothing may allocate (in the child, between fork
@@ -1578,6 +2080,144 @@ mod tests {
             assert_eq!(err.code, ErrorCode::ValidationError, "{bad:?}");
         }
         assert!(encode_unlock_input(Duration::from_secs(1), "").is_err());
+    }
+
+    #[test]
+    fn file_id_is_the_file_not_its_name_or_its_bytes() {
+        let dir = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::write(&a, b"zwallet").unwrap();
+        std::fs::write(&b, b"zwallet").unwrap();
+        // The same bytes in another file: another file.
+        assert!(file_id(&a).is_some());
+        assert_ne!(file_id(&a), file_id(&b));
+        // Another name for the same file: the same file.
+        let hard = dir.path().join("hard");
+        std::fs::hard_link(&a, &hard).unwrap();
+        assert_eq!(file_id(&hard), file_id(&a));
+        let soft = dir.path().join("soft");
+        std::os::unix::fs::symlink(&a, &soft).unwrap();
+        assert_eq!(file_id(&soft), file_id(&a));
+        assert_eq!(file_id(&dir.path().join("missing")), None);
+    }
+
+    /// This process's own audit token (macOS), read over a socketpair to itself: the peer of
+    /// either end is this process, so `LOCAL_PEERTOKEN` names us.
+    #[cfg(target_os = "macos")]
+    fn own_token() -> AuditToken {
+        let (a, b) = ChildChannel::pair().unwrap();
+        (&a).write_all(&[0]).unwrap();
+        peer_token(std::os::fd::AsRawFd::as_raw_fd(&b)).expect("own audit token")
+    }
+
+    #[test]
+    fn check_peer_names_what_answered() {
+        let home = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let me = std::process::id() as i32;
+        // This test process runs this build's code. On macOS that gets past the cdhash leg but is
+        // no key daemon of the home, so it is named. On Linux its executable is readable, so it is
+        // not the non-dumpable genuine daemon: Unknown (nothing is verified by session there).
+        #[cfg(target_os = "macos")]
+        {
+            let tail = "; run `zwallet lock` and unlock again";
+            let this = Peer {
+                pid: Some(me),
+                token: Some(own_token()),
+                exe_uuid: own_exe().unwrap().uuid,
+            };
+            assert_eq!(
+                check_peer(home.path(), &this).unwrap(),
+                PeerCheck::Other(format!(
+                    "the process answering on the key daemon socket (pid {me}) is not a key \
+                     daemon of this wallet home{tail}"
+                ))
+            );
+            // No token means the kernel will not say, so Unknown (fail closed).
+            let no_token = Peer {
+                token: None,
+                ..this
+            };
+            assert_eq!(
+                check_peer(home.path(), &no_token).unwrap(),
+                PeerCheck::Unknown
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let this = Peer {
+                pid: Some(me),
+                token: None,
+                exe_uuid: None,
+            };
+            assert_eq!(check_peer(home.path(), &this).unwrap(), PeerCheck::Unknown);
+        }
+        // No pid at all: nothing is known, nothing is claimed.
+        let none = Peer {
+            pid: None,
+            token: None,
+            exe_uuid: None,
+        };
+        assert_eq!(check_peer(home.path(), &none).unwrap(), PeerCheck::Unknown);
+        // Linux: another program's readable executable is not this build's. `spawn()` returns
+        // before the child has exec'd `sleep`, so poll until `/proc/<pid>/exe` is no longer this
+        // test binary; until then it still reads as own's id.
+        #[cfg(target_os = "linux")]
+        {
+            let own_id = file_id(Path::new("/proc/self/exe")).unwrap();
+            let mut sleep = Command::new("sleep").arg("30").spawn().unwrap();
+            let spid = sleep.id() as i32;
+            let exe = PathBuf::from(format!("/proc/{spid}/exe"));
+            let start = Instant::now();
+            while file_id(&exe) == Some(own_id) && start.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_ne!(file_id(&exe), Some(own_id), "sleep did not exec within 5s");
+            let other = Peer {
+                pid: Some(spid),
+                token: None,
+                exe_uuid: None,
+            };
+            let w = match check_peer(home.path(), &other).unwrap() {
+                PeerCheck::Other(w) => w,
+                PeerCheck::ThisBuild => panic!("sleep passed for this build's key daemon"),
+                PeerCheck::Unknown => panic!("sleep's readable executable gave Unknown, not Other"),
+            };
+            assert!(
+                w.contains("is not this zwallet build (") && w.contains("sleep)"),
+                "{w}"
+            );
+            sleep.kill().unwrap();
+            sleep.wait().unwrap();
+            // Gone: unreadable, so Unknown.
+            assert_eq!(check_peer(home.path(), &other).unwrap(), PeerCheck::Unknown);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn holds_listening_socket_sees_a_bound_listener() {
+        let dir = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        let me = std::process::id() as i32;
+        assert_eq!(holds_listening_socket(me, &path), Some(false));
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert_eq!(holds_listening_socket(me, &path), Some(true));
+        // Another path is not this one.
+        assert_eq!(
+            holds_listening_socket(me, &dir.path().join("other.sock")),
+            Some(false)
+        );
+        drop(listener);
+        assert_eq!(holds_listening_socket(me, &path), Some(false));
     }
 
     #[test]

@@ -42,11 +42,15 @@ pub enum Command {
     /// List keys (* = active). Works while locked.
     List(VerifyArgs),
     /// Make NAME the active key. Works while locked.
-    Change { name: String },
+    Change {
+        name: String,
+        #[command(flatten)]
+        qr: QrArg,
+    },
     /// Address of a key on a chain (default: ethereum). Works while locked.
     Address(AddressArgs),
     /// Addresses of a key on every chain. Works while locked.
-    Addresses(KeyArg),
+    Addresses(AddressesArgs),
     /// Native or ERC-20 balance on one chain; without --chain, the native coin and every registry
     /// token on every network. Works while locked.
     Balance(BalanceArgs),
@@ -62,7 +66,7 @@ pub enum Command {
     /// while locked, and without a wallet.
     Tx(TxArgs),
     /// Wallet, lock state, and active key.
-    Status,
+    Status(QrArg),
     /// Print the recovery phrase. Interactive terminals only, after the password.
     Backup,
     /// Unlock signing for a duration: 30m, 24h, 365d, 1y (units s m h d w y).
@@ -99,8 +103,9 @@ pub struct PasswordStdin {
 
 #[derive(Debug, Args)]
 pub struct QrArg {
-    /// Do not print the address as a QR code. It is printed only for an address verified with
-    /// the password, only in human output to a terminal (never with --json or into a pipe).
+    /// Do not print the address as a QR code. It is printed only for a verified address (by the
+    /// password, or by this zwallet build's key daemon while unlocked), only in human output to a
+    /// terminal (never with --json or into a pipe).
     #[arg(long)]
     pub no_qr: bool,
 }
@@ -137,9 +142,18 @@ pub struct AddressArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct AddressesArgs {
+    #[command(flatten)]
+    pub key: KeyArg,
+    #[command(flatten)]
+    pub qr: QrArg,
+}
+
+#[derive(Debug, Args)]
 pub struct VerifyArgs {
-    /// Decrypt the wallet here with the password and check the address against the seed; only
-    /// this reports `verified: true`. Run it before funding an address.
+    /// Decrypt the wallet here with the password and check the address against the seed:
+    /// `verified: true`, `verifiedBy: password`. Run it before funding an address that is not
+    /// verified otherwise.
     #[arg(long)]
     pub verify: bool,
     /// With --verify: read the password from one line of stdin instead of prompting.
@@ -162,6 +176,8 @@ pub struct BalanceArgs {
     pub rpc: Option<String>,
     #[command(flatten)]
     pub key: KeyArg,
+    #[command(flatten)]
+    pub qr: QrArg,
 }
 
 #[derive(Debug, Args)]
@@ -468,6 +484,15 @@ pub fn main_entry() -> i32 {
             };
         }
     };
+    // The key daemon closes every inherited descriptor before the runtime opens any of its own,
+    // so it never holds a listening socket a parent left open (see `close_inherited_fds`). Before
+    // `cli_runtime`: tokio's own descriptors (its kqueue/epoll) are fd 3 or above.
+    if matches!(cli.command, Command::Daemon { .. })
+        && let Err(e) = commands::close_inherited_fds()
+    {
+        print_error(json, &e);
+        return 1;
+    }
     let runtime = match cli_runtime() {
         Ok(rt) => rt,
         Err(e) => {
