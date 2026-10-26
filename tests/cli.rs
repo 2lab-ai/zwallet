@@ -3772,7 +3772,9 @@ fn wait_until_answering(home: &Home, limit: Duration) {
 
 /// A tiny attacker: binds `$1/d.sock` and answers every request with an ok reply carrying the
 /// POISON address, from its own code. Built with `cc` in the test, so its cdhash and executable
-/// are not zwallet's.
+/// are not zwallet's. `ATTACKER_REPLY` replaces the whole reply (one JSON line), and
+/// `ATTACKER_NONDUMPABLE` makes it non-dumpable on Linux, as a genuine key daemon is, so its
+/// executable cannot be read and who answered is not known (`Unknown`).
 const ATTACKER_C: &str = r#"
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -3783,6 +3785,9 @@ const ATTACKER_C: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 /* When $ATTACKER_LOG is set, append a timestamped event (sub-second) so a flake can be read from
    the log rather than guessed. Inert (one getenv) when the variable is unset. */
 static void logev(const char *ev, long n) {
@@ -3802,7 +3807,8 @@ static void handle(int s, const char *reply) {
   char b[1024]; ssize_t n; long got = 0;
   while ((n = read(s, b, sizeof b)) > 0) got += n;
   logev(n == 0 ? "eof" : "read-stop", got);
-  write(s, reply, strlen(reply));
+  size_t len = strlen(reply), off = 0;
+  while (off < len) { ssize_t w = write(s, reply + off, len - off); if (w <= 0) break; off += w; }
   logev("replied", got);
   shutdown(s, SHUT_WR); close(s);
 }
@@ -3810,6 +3816,9 @@ int main(int argc, char **argv) {
   if (argc < 3) return 2;              /* argv: daemon --home <HOME> */
   signal(SIGPIPE, SIG_IGN);            /* a client that hangs up must not kill us mid-reply */
   signal(SIGCHLD, SIG_IGN);            /* reap per-connection handlers, no zombies */
+#ifdef __linux__
+  if (getenv("ATTACKER_NONDUMPABLE")) prctl(PR_SET_DUMPABLE, 0);
+#endif
   /* Release any descriptor inherited from the test (its captured stdout/stderr pipe, say) so
      nothing waits on this process for EOF and no handler shares one. */
   int dn = open("/dev/null", O_RDWR);
@@ -3827,8 +3836,12 @@ int main(int argc, char **argv) {
   if (!exp) exp = "2099-01-01T00:00:00Z";
   const char *wl = getenv("ATTACKER_WHITELIST");
   if (!wl) wl = "null";
-  char reply[2048];
-  snprintf(reply, sizeof reply,
+  const char *raw = getenv("ATTACKER_REPLY");
+  size_t cap = (raw ? strlen(raw) : strlen(exp) + strlen(wl)) + 512;
+  char *reply = malloc(cap);
+  if (!reply) return 4;
+  if (raw) snprintf(reply, cap, "%s\n", raw);
+  else snprintf(reply, cap,
     "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
     "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"ethereum\",\"index\":0,"
     "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n",
@@ -4853,6 +4866,179 @@ fn a_relayed_error_of_solid_glyphs_draws_nothing() {
         line.chars().take(120).collect::<String>()
     );
     drop(fake);
+}
+
+#[test]
+fn a_squatters_array_and_object_details_are_dropped_and_its_error_is_bounded() {
+    // A squatter on d.sock that a check cannot tell from a key daemon (on Linux a non-dumpable
+    // process, `Unknown`) keeps its scalar details; an array of 64 strings of 256 characters and
+    // an object of them are dropped, so neither `--json` nor the terminal gets ~16K characters.
+    // On macOS the attacker runs other code (`Other`): every detail is dropped there anyway.
+    let home = Home::new();
+    home.create("main", &[]);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let reply = json!({
+        "v": 2, "ok": false, "errorCode": "WHITELIST_DENIED", "error": "refused",
+        "details": {
+            "command": "zwallet whitelist add x 0xdEaD",
+            "counterparty": vec!["A".repeat(256); 64],
+            "chain": { "k": vec!["B".repeat(256); 64] },
+        },
+    })
+    .to_string();
+    let _attacker = daemon_argv_impostor(
+        &home,
+        dir.path(),
+        &[("ATTACKER_REPLY", &reply), ("ATTACKER_NONDUMPABLE", "1")],
+    );
+    let out = home.run(&["address", "--json"]);
+    let head = |s: &str| s.chars().take(300).collect::<String>();
+    assert_eq!(out.code, 1, "{}", head(&out.stdout));
+    let v = out.json();
+    assert!(
+        v.get("counterparty").is_none() && v.get("chain").is_none(),
+        "{}",
+        head(&out.stdout)
+    );
+    assert!(out.stdout.len() < 1500, "{}", out.stdout.len());
+    assert!(inert_output(&out.stdout), "{}", head(&out.stdout));
+    #[cfg(target_os = "linux")]
+    {
+        // Not known who answered: the neutral prefix, and the scalar detail kept.
+        let msg = v["error"].as_str().unwrap_or("");
+        assert!(
+            msg.starts_with("the process answering on the key daemon socket reported: refused"),
+            "{msg}"
+        );
+        assert_eq!(v["command"], "zwallet whitelist add x 0xdEaD", "{v}");
+    }
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 1);
+    assert!(human.stdout.is_empty(), "{:?}", head(&human.stdout));
+    assert!(human.stderr.len() < 1500, "{}", human.stderr.len());
+    assert!(human.stderr.lines().count() <= 2, "{}", head(&human.stderr));
+    assert!(inert_output(&human.stderr), "{}", head(&human.stderr));
+}
+
+#[test]
+fn status_bounds_a_nested_whitelist_on_the_terminal_and_keeps_every_entry_in_json() {
+    // `status` relays the serving daemon's whitelist. A daemon-argv impostor answers 200 entries
+    // of solid glyphs and a long reason: `--json` keeps all 200, each escaped, with the reason cut;
+    // the terminal gets one inert `whitelist:` line of at most the prose budget.
+    let home = Home::new();
+    home.create("main", &[]);
+    poison_cache(&home);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let entries: Vec<String> = (0..200)
+        .map(|i| format!("n{i:03}{}", "\u{2b1b}\u{2b1c}".repeat(30)))
+        .collect();
+    let whitelist = json!({
+        "gen": 1, "verified": false, "entries": entries, "reason": "\u{1cd00}".repeat(5000),
+    })
+    .to_string();
+    let _attacker = daemon_argv_impostor(&home, dir.path(), &[("ATTACKER_WHITELIST", &whitelist)]);
+    let head = |s: &str| s.chars().take(300).collect::<String>();
+    let out = home.run(&["status", "--json"]);
+    assert_eq!(out.code, 0, "{}", head(&out.stdout));
+    assert!(inert_output(&out.stdout), "{}", head(&out.stdout));
+    let v = out.json();
+    let shown = v["whitelist"]["entries"].as_array().unwrap();
+    assert_eq!(shown.len(), 200, "every entry is kept in --json");
+    assert_eq!(
+        shown[7],
+        json!(format!("n007{}", "\\u{2b1b}\\u{2b1c}".repeat(30)))
+    );
+    let reason = v["whitelist"]["reason"].as_str().unwrap_or("");
+    assert!(reason.chars().count() <= 512 + 8, "{}", reason.len());
+    let human = home.run(&["status"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(inert_output(&human.stdout), "{}", head(&human.stdout));
+    let lines: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("whitelist"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{}", head(&human.stdout));
+    assert!(
+        lines[0].chars().count() <= "whitelist: ".len() + 512 + 8,
+        "{}",
+        lines[0].chars().count()
+    );
+}
+
+/// ABI-encodes `items` as the return data of a function returning `string[]`.
+fn abi_string_array(items: &[String]) -> String {
+    let word = |n: usize| format!("{n:064x}");
+    let tails: Vec<String> = items
+        .iter()
+        .map(|s| {
+            let mut data: String = s.bytes().map(|x| format!("{x:02x}")).collect();
+            while !data.len().is_multiple_of(64) {
+                data.push('0');
+            }
+            format!("{}{data}", word(s.len()))
+        })
+        .collect();
+    let mut hex = word(32) + &word(items.len());
+    let mut offset = 32 * items.len();
+    for t in &tails {
+        hex.push_str(&word(offset));
+        offset += t.len() / 2;
+    }
+    for t in &tails {
+        hex.push_str(t);
+    }
+    format!("0x{hex}")
+}
+
+#[test]
+fn a_call_string_array_result_is_exact_in_json_and_bounded_on_the_terminal() {
+    // 64 strings of 128 solid glyphs each: `--json` keeps them exactly; the human `result:` line
+    // is one inert line within the prose budget, not 64 pieces each cut on their own.
+    let items: Vec<String> = (0..64).map(|_| "\u{2b1b}".repeat(128)).collect();
+    let encoded = abi_string_array(&items);
+    let node = common::tiny_rpc_reply(move |method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        "eth_call" => Ok(json!(encoded.clone())),
+        _ => Ok(json!("0x0")),
+    });
+    let home = Home::new();
+    let args = [
+        "call",
+        "--chain",
+        "ethereum",
+        "--to",
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "--sig",
+        "names()(string[])",
+        "--rpc",
+        &node,
+    ];
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let v = home.run(&json_args).ok();
+    assert_eq!(v["result"], json!([items]), "--json is exact");
+    let human = home.run(&args);
+    let head = |s: &str| s.chars().take(300).collect::<String>();
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(inert_output(&human.stdout), "{}", head(&human.stdout));
+    let result: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("result: "))
+        .collect();
+    assert_eq!(result.len(), 1, "{}", head(&human.stdout));
+    assert!(
+        result[0].chars().count() <= "result: ".len() + 512 + 8,
+        "{}",
+        result[0].chars().count()
+    );
 }
 
 #[test]
