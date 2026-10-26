@@ -5426,6 +5426,90 @@ fn whitelist_list_verify_that_fails_points_to_json_not_to_verify_again() {
 }
 
 #[test]
+fn an_unverified_lists_fee_caps_spend_the_same_budget_as_its_entries() {
+    // N5. A list that does not verify, with fee caps of 77 digits on every chain zwallet knows:
+    // its entry lines and the caps it shows together stay within one 512-character budget, and
+    // the caps left out are counted.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let huge = format!("1{}", "0".repeat(76));
+    for chain in [
+        "arbitrum",
+        "avalanche",
+        "base",
+        "bsc",
+        "ethereum",
+        "optimism",
+        "polygon",
+        "sepolia",
+    ] {
+        v["policy"]["maxFeeWei"][chain] = json!(huge);
+    }
+    v["entries"][0]["nickname"] = json!("renamed");
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let r = home.run(&["whitelist", "list"]);
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    let entries: usize = r
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("  ") && !l.starts_with("  ... "))
+        .map(str::len)
+        .sum();
+    let caps = r
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("fee caps: "))
+        .unwrap_or_else(|| panic!("{}", r.stdout));
+    let (shown, more) = caps
+        .rsplit_once(", and ")
+        .unwrap_or_else(|| panic!("{caps}"));
+    assert!(more.ends_with(" more"), "{caps}");
+    let shown: usize = shown.split(", ").map(str::len).sum();
+    assert!(entries + shown <= 512, "{entries} + {shown}: {}", r.stdout);
+}
+
+#[test]
+fn a_reset_shows_each_discarded_files_entries_as_one_line_of_at_most_512() {
+    // N1. A reset drops a whitelist.json and a whitelist.next.json that are no lists, here each
+    // with 2000 characters of `#` and space for its entries: each file's unverified entries are
+    // one escaped line of at most 512 characters.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    // Two different files (a whitelist.next.json with whitelist.json's very bytes is a leftover
+    // copy, not a discarded edit).
+    for (file, grid) in [
+        ("whitelist.json", "## ".repeat(667)),
+        ("whitelist.next.json", " ##".repeat(667)),
+    ] {
+        fs::write(
+            home.path().join(file),
+            serde_json::to_vec(&json!({ "entries": grid })).unwrap(),
+        )
+        .unwrap();
+    }
+    let r = home.run_stdin(
+        &["whitelist", "reset", "--password-stdin"],
+        &format!("{PW}\n"),
+    );
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    let found: Vec<&str> = r
+        .stdout
+        .lines()
+        .filter_map(|l| l.split_once("its unverified entries: ").map(|(_, e)| e))
+        .collect();
+    assert_eq!(found.len(), 2, "{}", r.stdout);
+    for e in found {
+        assert!(e.len() <= 512, "{}", e.len());
+    }
+}
+
+#[test]
 fn whitelist_list_shows_a_value_add_would_refuse_as_invalid() {
     // A parseable list with a forged signature: its nickname is a 32-character `#`/space row,
     // which `add` would refuse. `whitelist list` shows `<invalid>` there, not the row.
