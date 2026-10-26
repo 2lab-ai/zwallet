@@ -3776,14 +3776,44 @@ fn wait_until_answering(home: &Home, limit: Duration) {
 const ATTACKER_C: &str = r#"
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/time.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+/* When $ATTACKER_LOG is set, append a timestamped event (sub-second) so a flake can be read from
+   the log rather than guessed. Inert (one getenv) when the variable is unset. */
+static void logev(const char *ev, long n) {
+  const char *p = getenv("ATTACKER_LOG");
+  if (!p) return;
+  FILE *f = fopen(p, "a");
+  if (!f) return;
+  struct timeval tv; gettimeofday(&tv, 0);
+  fprintf(f, "%ld.%06d pid=%d %s %ld\n", (long)tv.tv_sec, (int)tv.tv_usec, (int)getpid(), ev, n);
+  fclose(f);
+}
+/* One connection, in its own process: read what the client sends (bounded by SO_RCVTIMEO so a
+   client that is slow to send its request or its EOF never blocks us), then answer. */
+static void handle(int s, const char *reply) {
+  struct timeval to; to.tv_sec = 2; to.tv_usec = 0;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+  char b[1024]; ssize_t n; long got = 0;
+  while ((n = read(s, b, sizeof b)) > 0) got += n;
+  logev(n == 0 ? "eof" : "read-stop", got);
+  write(s, reply, strlen(reply));
+  logev("replied", got);
+  shutdown(s, SHUT_WR); close(s);
+}
 int main(int argc, char **argv) {
   if (argc < 3) return 2;              /* argv: daemon --home <HOME> */
   signal(SIGPIPE, SIG_IGN);            /* a client that hangs up must not kill us mid-reply */
+  signal(SIGCHLD, SIG_IGN);            /* reap per-connection handlers, no zombies */
+  /* Release any descriptor inherited from the test (its captured stdout/stderr pipe, say) so
+     nothing waits on this process for EOF and no handler shares one. */
+  int dn = open("/dev/null", O_RDWR);
+  if (dn >= 0) { dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); }
   char path[512];
   snprintf(path, sizeof path, "%s/d.sock", argv[argc - 1]);
   unlink(path);
@@ -3803,12 +3833,16 @@ int main(int argc, char **argv) {
     "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"ethereum\",\"index\":0,"
     "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n",
     (int)getpid(), exp, wl);
+  logev("listening", 0);
   for (;;) {
     int s = accept(l, 0, 0);
-    if (s < 0) continue;
-    char b[1024]; while (read(s, b, sizeof b) > 0) {}
-    write(s, reply, strlen(reply));
-    shutdown(s, SHUT_WR); close(s);
+    if (s < 0) { logev("accept-err", 0); continue; }
+    logev("accepted", 0);
+    /* Each connection is served in its own child, so a client that is slow on one connection
+       never keeps us from accepting and answering another. */
+    pid_t pid = fork();
+    if (pid == 0) { close(l); handle(s, reply); _exit(0); }
+    close(s);
   }
 }
 "#;
