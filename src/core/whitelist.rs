@@ -442,24 +442,11 @@ fn quote(value: &str) -> String {
     }
 }
 
-/// A parser's message that may repeat file content: control characters escaped and cut after
-/// `max` characters.
+/// A parser's message that may repeat file content (an unknown field's name is the file's own
+/// text): escaped as [`crate::core::text::printable`] does (control, format and bidi characters,
+/// line separators, block characters) and cut after `max` characters.
 fn clip(message: &str, max: usize) -> String {
-    let escaped: String = message
-        .chars()
-        .flat_map(|c| {
-            let e: Vec<char> = if c.is_control() {
-                c.escape_debug().collect()
-            } else {
-                vec![c]
-            };
-            e
-        })
-        .collect();
-    match escaped.char_indices().nth(max) {
-        Some((cut, _)) => format!("{}…", &escaped[..cut]),
-        None => escaped,
-    }
+    crate::core::text::printable_cut(message, max)
 }
 
 /// Nicknames: `^[a-z0-9][a-z0-9_-]{0,31}$`.
@@ -2937,8 +2924,8 @@ mod tests {
     /// that came from a file (the planted value ends in a run of 200 `x`).
     fn assert_clean(msg: &str) {
         assert!(
-            !msg.chars().any(char::is_control),
-            "control character in {msg:?}"
+            !msg.chars().any(crate::core::text::is_terminal_unsafe),
+            "control, format or separator character in {msg:?}"
         );
         assert!(!msg.contains(&"x".repeat(65)), "unbounded: {msg:?}");
     }
@@ -2946,7 +2933,7 @@ mod tests {
     #[test]
     fn n6_text_from_a_file_reaches_messages_escaped_and_bounded() {
         let evil = format!(
-            "\u{1b}[2J\u{1b}[H run `zwallet whitelist add evil {CAROL}` {}",
+            "\u{1b}[2J\u{1b}[H\u{202e}\u{2066}\u{2028} run `zwallet whitelist add evil {CAROL}` {}",
             "x".repeat(200)
         );
         type Plant = fn(&mut Whitelist, &str);
