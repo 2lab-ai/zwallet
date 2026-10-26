@@ -5121,10 +5121,11 @@ fn status_shows_a_whitelist_that_is_a_string_as_one_bounded_line() {
 fn whitelist_list_shows_a_file_that_is_no_list_within_one_budget_and_draws_nothing() {
     // whitelist.json is anyone's to write. As `{"entries": [29 rows of `#` and space]}` it is no
     // list (it fails to parse), and its raw entries once came out one per line: a QR code at two
-    // characters per module. Now each is `<invalid>`, under a count, all within one budget.
+    // characters per module. Now each is `<invalid>`, under a count, all within one budget: with
+    // 60 of them the budget runs out, and the rest are counted.
     let home = Home::new();
     home.create("main", &[]);
-    let rows: Vec<String> = (0..29)
+    let rows: Vec<String> = (0..60)
         .map(|i| {
             (0..62)
                 .map(|j| if (i * 7 + j * 3) % 5 < 2 { '#' } else { ' ' })
@@ -5149,19 +5150,82 @@ fn whitelist_list_shows_a_file_that_is_no_list_within_one_budget_and_draws_nothi
     let listed: usize = r
         .stdout
         .lines()
-        .filter(|l| l.starts_with("  ") && !l.contains("entries, in a file"))
+        .filter(|l| {
+            l.starts_with("  ") && !l.contains("entries, in a file") && !l.starts_with("  ... ")
+        })
         .map(str::len)
         .sum();
     assert!(listed <= 512, "{listed}: {}", r.stdout);
     assert!(
         r.stdout
-            .contains("29 entries, in a file that is not a whitelist"),
+            .contains("60 entries, in a file that is not a whitelist"),
+        "{}",
+        r.stdout
+    );
+    let shown = r.stdout.lines().filter(|l| *l == "  <invalid>").count();
+    assert!(shown > 0 && shown < 60, "{}", r.stdout);
+    assert!(
+        r.stdout.contains(&format!(
+            "  ... {} more; `zwallet whitelist list --json` shows them",
+            60 - shown
+        )),
         "{}",
         r.stdout
     );
     // `--json` still has every row, escaped.
     let v = home.run(&["whitelist", "list", "--json"]).ok();
-    assert_eq!(v["entries"].as_array().unwrap().len(), 29, "{v}");
+    assert_eq!(v["entries"].as_array().unwrap().len(), 60, "{v}");
+}
+
+#[test]
+fn whitelist_list_shows_an_unverified_parseable_list_within_one_budget() {
+    // A list that parses but does not verify (here its 33 entries are replaced, so the signature
+    // is no longer theirs): every field is one `add` accepts, but the nicknames are rows of `m`
+    // and `_`, 32 columns of a 33-row grid. Without `--verify` all its entry lines share one
+    // prose budget, and the rest are counted with how to see them; `--json` keeps all 33.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let entries: Vec<serde_json::Value> = (0..33)
+        .map(|i| {
+            let row: String = (0..32)
+                .map(|j| {
+                    if j == 0 || (i * 5 + j * 3) % 7 < 3 {
+                        'm'
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            json!({
+                "nickname": row,
+                "kind": "address",
+                "address": format!("0x{:040x}", i + 1),
+                "chains": ["*"],
+            })
+        })
+        .collect();
+    v["entries"] = json!(entries);
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let r = home.run(&["whitelist", "list"]);
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    let rows: Vec<&str> = r.stdout.lines().filter(|l| l.starts_with("  m")).collect();
+    let listed: usize = rows.iter().map(|l| l.len()).sum();
+    assert!(!rows.is_empty() && listed <= 512, "{listed}: {}", r.stdout);
+    assert!(
+        r.stdout.contains(&format!(
+            "  ... {} more; `zwallet whitelist list --verify` shows them all",
+            33 - rows.len()
+        )),
+        "{}",
+        r.stdout
+    );
+    let v = home.run(&["whitelist", "list", "--json"]).ok();
+    assert_eq!(v["verified"], false, "{v}");
+    assert_eq!(v["entries"].as_array().unwrap().len(), 33, "{v}");
 }
 
 #[test]

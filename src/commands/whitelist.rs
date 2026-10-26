@@ -1342,10 +1342,13 @@ fn list_text(out: &Value, verify: bool) -> String {
         }
     )];
     // The entries come from whitelist.json, which anyone of this user can write: each field is
-    // shown only when it is what `add` would have written ([`entry_line`]), at most
-    // [`ENTRIES_SHOWN`] lines. A file that cannot be read as a list (only then is `policy` null
-    // with entries there) gets a count and one prose budget for all its entry lines.
+    // shown only when it is what `add` would have written ([`entry_line`]). A list the seal
+    // verified (`--verify`) is the human's own: up to [`ENTRIES_SHOWN`] lines. Any other list,
+    // parseable or not, gets one prose budget for all its entry lines, so a file cannot lay out
+    // rows of its own (a grid of nicknames is a picture too); `--json` keeps every entry. A file
+    // that cannot be read as a list (only then is `policy` null with entries there) is counted.
     let entries: Vec<&Value> = out["entries"].as_array().into_iter().flatten().collect();
+    let bounded = out["verified"] != json!(true);
     let raw = out["policy"].is_null() && !entries.is_empty();
     if raw {
         lines.push(format!(
@@ -1356,7 +1359,7 @@ fn list_text(out: &Value, verify: bool) -> String {
     let (mut used, mut listed) = (0, 0);
     for e in entries.iter().take(ENTRIES_SHOWN) {
         let line = entry_line(e);
-        if raw && used + line.len() > crate::core::text::PROSE_MAX {
+        if bounded && used + line.len() > crate::core::text::PROSE_MAX {
             break;
         }
         used += line.len();
@@ -1364,7 +1367,16 @@ fn list_text(out: &Value, verify: bool) -> String {
         lines.push(line);
     }
     if entries.len() > listed {
-        lines.push(format!("  ... {} more", entries.len() - listed));
+        let more = entries.len() - listed;
+        lines.push(match (bounded, raw) {
+            (true, true) => {
+                format!("  ... {more} more; `zwallet whitelist list --json` shows them")
+            }
+            (true, false) => {
+                format!("  ... {more} more; `zwallet whitelist list --verify` shows them all")
+            }
+            (false, _) => format!("  ... {more} more; `--json` shows them all"),
+        });
     }
     if let Some(caps) = out["policy"]["maxFeeWei"].as_object() {
         // Keys and amounts from the file: a known chain and a decimal amount, or [`INVALID`].
