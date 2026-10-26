@@ -55,19 +55,19 @@ Commands that act on a key take `--key <name>` (default: the active key).
 |---|---|---|
 | `chains` | `[{ key, name, family, symbol, chainId, rpc }]` | works |
 | `create <name> [--password-stdin] [--unlock <dur> [--allow-ptrace-scope-0]] [--words 12\|15\|18\|21\|24] [--no-qr]` | `{ name, index, address, active, master, home, chains, verified }` (+ `locked, expiresAt, daemonPid, whitelist` with `--unlock`) | see below |
-| `list [--verify [--password-stdin]]` | `{ active, keys: [{ name, index, address, active }], verified, warning? }` | works |
-| `change <name>` | `{ active, address, verified }` | works |
-| `address [--chain <key>] [--verify [--password-stdin]] [--no-qr]` | `{ chain, key, address, verified }` (EIP-55; `--verify` adds `index` and `warning?`) | works |
-| `addresses` | `{ key, addresses: [{ chainId: <key>, address }], verified }` | works |
-| `status` | `{ wallet, locked, home, daemonPids?, otherDaemonPids, daemonPid?, expiresAt?, whitelist?, active?, address?, verified? }` | works |
-| `balance` | `{ key, address, verified: false, chains: [{ chain, chainId, native: { symbol, decimals, balance, raw }, tokens: [{ symbol, address, decimals, balance, raw }] }] }`; a network that failed has `{ chain, chainId, error, errorCode }` instead, a token whose read failed `{ symbol, address, decimals, error, errorCode }` (see below) | works |
-| `balance --chain <key> [--token <erc20>] [--rpc <url>]` | `{ chain, key, address, symbol, decimals, balance, raw, verified: false, token? }` | works |
+| `list [--verify [--password-stdin]]` | `{ active, keys: [{ name, index, address, active }], verified, verifiedBy?, warning? }` | works |
+| `change <name> [--no-qr]` | `{ active, address, verified, verifiedBy?, warning? }` | works |
+| `address [--chain <key>] [--verify [--password-stdin]] [--no-qr]` | `{ chain, key, address, verified, verifiedBy?, warning? }` (EIP-55; `--verify` adds `index`) | works |
+| `addresses [--no-qr]` | `{ key, addresses: [{ chainId: <key>, address }], verified, verifiedBy?, warning? }` | works |
+| `status [--no-qr]` | `{ wallet, locked, home, daemonPids?, otherDaemonPids, daemonPid?, expiresAt?, whitelist?, active?, address?, verified?, verifiedBy?, warning? }` | works |
+| `balance [--no-qr]` | `{ key, address, verified, verifiedBy?, warning?, chains: [{ chain, chainId, native: { symbol, decimals, balance, raw }, tokens: [{ symbol, address, decimals, balance, raw }] }] }`; a network that failed has `{ chain, chainId, error, errorCode }` instead, a token whose read failed `{ symbol, address, decimals, error, errorCode }` (see below) | works |
+| `balance --chain <key> [--token <erc20>] [--rpc <url>] [--no-qr]` | `{ chain, key, address, symbol, decimals, balance, raw, verified, verifiedBy?, warning?, token? }` | works |
 | `call --chain <key> --to <contract> --sig "<fn>" [ARGS...] [--rpc <url>]` | `{ chain, from, to, sig, args, result, raw }` | works |
 | `invoke --chain <key> --to <contract\|@nick> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw, toNickname? }` | `WALLET_LOCKED` |
 | `transfer --chain <key> --to <0x\|@nick> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
 | `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191; refused unless the whitelist allows it) | `WALLET_LOCKED` |
 | `tx --chain <key> <txHash> [--rpc <url>]` | `{ chain, txHash, found, status, from, to, nonce, value, valueRaw, symbol, explorerUrl, blockNumber?, gasUsed?, success?, hint? }` | works (no wallet needed) |
-| `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0] [--no-qr]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, whitelist, warning? }` | - |
+| `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0] [--no-qr]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, verifiedBy: "password", whitelist, warning? }` | - |
 | `lock` | `{ locked: true, wasUnlocked, stopped: [<pid>] }` | - |
 | `backup` | prints the recovery phrase; interactive terminal only | asks for the password |
 | `whitelist list [--verify [--password-stdin]]` | `{ gen, entries: [{ nickname, kind, address, chains, selectors? }], policy: { maxFeeWei, allowMessageSigning }, verified, source?, sealedGen?, reason? }` | works |
@@ -89,43 +89,64 @@ Commands that act on a key take `--key <name>` (default: the active key).
   operation and derives the key itself (`verified: true`). Without either (an agent) it derives
   through the unlocked daemon without a password (`verified: false`), and while locked it refuses.
   It starts no daemon unless `--unlock` is given. Concurrent creates get distinct indices.
-- **Address trust** (`verified`): the addresses in `wallet.json` are a plain cache that anything
-  running as the same user can edit, and that user can also swap `wallet.json` for its own wallet
-  and run a genuine `zwallet daemon` over it, or put a listener on `d.sock`. So `verified: true`
-  only for an address derived from the seed after the human's password, by this process or by
-  the daemon child it just started:
-  - `address --verify` and `list --verify` (password at the terminal prompt, or
-    `--password-stdin`): decrypt `wallet.json` here, derive, and compare with the cache. A
-    mismatch is `VALIDATION_ERROR`; a wallet the password does not open is `WRONG_PASSWORD`.
-    Both show each key's derivation `index`, and add a `warning` when an index is one zwallet
-    never assigns (at or past `nextIndex`, or with an unused index below it): the key list in
-    `wallet.json` was edited. Such an address is still this seed's, but a wallet restored from
-    the phrase lists accounts in index order and may not show it.
-  - `unlock` and `create --unlock`: the address the CLI's own daemon child derived from the seed
-    the password opened, reported on that child's channel (both also add `daemonPid`). `unlock`
-    also shows that key's derivation `index`, and the same `warning` as `--verify` when the index
-    is one zwallet never assigns (checked against the key list it read before the prompt).
-  - `create`: the first key, derived from the seed generated in the same process, and a later
-    key when the password was asked for (see above).
+- **Address trust** (`verified`, `verifiedBy`): the addresses in `wallet.json` are a plain cache
+  that anything running as the same user can edit, and a listener of that user can answer on
+  `d.sock`. An address is shown at one of three levels:
+  - `verified: true, verifiedBy: "password"`: derived from the seed after the human's password,
+    by this process or by the daemon child it just started.
+    - `address --verify` and `list --verify` (password at the terminal prompt, or
+      `--password-stdin`): decrypt `wallet.json` here, derive, and compare with the cache. A
+      mismatch is `VALIDATION_ERROR`; a wallet the password does not open is `WRONG_PASSWORD`.
+      Both show each key's derivation `index`, and add a `warning` when an index is one zwallet
+      never assigns (at or past `nextIndex`, or with an unused index below it): the key list in
+      `wallet.json` was edited. Such an address is still this seed's, but a wallet restored from
+      the phrase lists accounts in index order and may not show it.
+    - `unlock` and `create --unlock`: the address the CLI's own daemon child derived from the
+      seed the password opened, reported on that child's channel (both also add `daemonPid`).
+      `unlock` also shows that key's derivation `index`, and the same `warning` as `--verify`
+      when the index is one zwallet never assigns (checked against the key list it read before
+      the prompt).
+    - `create`: the first key, derived from the seed generated in the same process, and a later
+      key when the password was asked for (see above).
+  - `verified: true, verifiedBy: "session"`: while unlocked, `address`, `addresses`, `status`,
+    `change` and `balance` (with or without `--chain`) ask the key daemon to derive the address
+    (once per chain family), compare it with the cache, and check with the kernel which process
+    answered: its executable must be the very file this CLI runs (same device and inode, read by
+    `proc_pidpath` on macOS), on macOS the kernel must also record that file's executable UUID
+    for the process's use of the socket (`LOCAL_PEERUUID`, so a program that opened the socket and
+    then started zwallet does not pass), and the process table must list it as a key daemon of
+    this home. That daemon decrypted this home's `wallet.json` with the password typed at
+    `unlock`. On Linux every zwallet process is non-dumpable, which hides `/proc/<pid>/exe` from
+    its own user, so the daemon's executable cannot be checked there and nothing is verified by
+    session: the address is shown as below.
+  - `verified: false`: the cache while locked, with the line ``not verified: the wallet is locked;
+    `zwallet unlock <dur>` or `zwallet address --verify` checks it`` in human output; or, while
+    unlocked, an address no session verified (an agent's `create`, `list` without `--verify`, or
+    Linux), with ``not verified: run `zwallet address --verify` before funding``. When the
+    process answering on `d.sock` is not this build's key daemon of this home (another program,
+    or another zwallet build, such as the one running before a `brew upgrade`), the command still
+    succeeds, unverified, with a `warning`: ``the process answering on the key daemon socket (pid
+    N) is not this zwallet build (<its executable>); run `zwallet lock` and unlock again``.
+    `balance` adds no note line.
 
-  Everything else is `verified: false`: `address` and `list` without `--verify`, `addresses`,
-  `status`, `change`, an agent's `create` (derived by whatever daemon answers), and `balance` (the
-  cache). All but `balance` add the line ``not verified: run `zwallet address --verify` before
-  funding`` in human output. While a daemon answers, `address`, `addresses`, `list`, `status` and
-  `change` still compare the cache with its derivation and fail with `VALIDATION_ERROR` on a
-  mismatch, but a match only means nothing visibly tampered: it is never `verified`. Take a
-  funding address from `address --verify` (or `unlock`) on your own terminal.
-- **QR code**: where the address is `verified: true` (`unlock`, `create` and `create --unlock`
-  with a verified key, `address --verify`), human output on a terminal ends with the lines
+  While a daemon answers, a cache that its derivation contradicts fails these commands (and
+  `list`) with `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
+  swaps in its own `wallet.json` and unlocks it with its own password through this very binary,
+  or injects code into it (`DYLD_INSERT_LIBRARIES`, `LD_PRELOAD`), the same as replacing the
+  binary itself. So keep the address you saved from your first unlock; if it ever changes, stop.
+- **QR code**: where the address is `verified: true`, by the password (`unlock`, `create` and
+  `create --unlock` with a verified key, `address --verify`) or by the session (`address`,
+  `addresses`, `status`, `change` and `balance` while unlocked), human output on a terminal ends
+  with the lines
   `scan to send to <address>` and ``(the same address on every EVM network in `zwallet chains`)``,
   then the address as a QR code for a phone wallet: the plain EIP-55 address (no URI scheme, no
   chain), error correction level M, a quiet zone of 4 modules, black on white in ANSI colours, or
   with `NO_COLOR` plain blocks for a dark terminal. Scan that one and save it in the phone
   wallet's address book. The `create` that makes the master seed shows no code, only a line to run
   `zwallet backup` first: funds sent before the recovery phrase is written down are at risk.
-  `--no-qr` leaves either out. Nothing that reads the cache prints one (`address` without
-  `--verify`, `addresses`, `balance`), and neither `--json` nor output into a pipe ever has one, so
-  agents see the same text as before.
+  `--no-qr` leaves either out. `addresses` shows one code (the address is the same on every EVM
+  chain), and `balance` shows it after the networks. Nothing unverified prints one, and neither
+  `--json` nor output into a pipe ever has one, so agents see the same text as before.
 - **The whitelist** ([`.prd/04-whitelist.md`](.prd/04-whitelist.md)): the key daemon signs a
   transaction that moves value only when a list signed with this wallet's whitelist key allows
   it. That ed25519 key is not derived from the seed, and it is never stored: every whitelist
