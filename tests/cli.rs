@@ -2630,7 +2630,13 @@ fn hand_edited_values_reach_the_terminal_escaped() {
                 r.stdout
             );
         }
-        assert!(r.stdout.contains("mallory"), "{}", r.stdout);
+        // The hand-edited entry is no nickname, address or chain `add` would write: each field
+        // shows as `<invalid>`, never its own text; the genuine entry shows as it is.
+        assert!(
+            r.stdout.contains("<invalid>") && r.stdout.contains("alice"),
+            "{}",
+            r.stdout
+        );
     }
     // `--json` keeps every entry (no trimming) but escapes each string: the bidi override and the
     // bell in the hand-edited entry come out as `\u{...}`, so every printed line is ASCII.
@@ -5078,6 +5084,71 @@ fn status_shows_a_whitelist_that_is_a_string_as_one_bounded_line() {
     let v = home.run(&["status", "--json"]).ok();
     let w = v["whitelist"].as_str().unwrap_or_default();
     assert!(!w.is_empty() && w.len() <= 512, "{}", v["whitelist"]);
+}
+
+#[test]
+fn whitelist_list_shows_a_file_that_is_no_list_within_one_budget_and_draws_nothing() {
+    // whitelist.json is anyone's to write. As `{"entries": [29 rows of `#` and space]}` it is no
+    // list (it fails to parse), and its raw entries once came out one per line: a QR code at two
+    // characters per module. Now each is `<invalid>`, under a count, all within one budget.
+    let home = Home::new();
+    home.create("main", &[]);
+    let rows: Vec<String> = (0..29)
+        .map(|i| {
+            (0..62)
+                .map(|j| if (i * 7 + j * 3) % 5 < 2 { '#' } else { ' ' })
+                .collect()
+        })
+        .collect();
+    fs::write(
+        home.path().join("whitelist.json"),
+        serde_json::to_vec(&json!({ "entries": rows })).unwrap(),
+    )
+    .unwrap();
+    let r = home.run(&["whitelist", "list"]);
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    let grid = |l: &str| !l.trim().is_empty() && l.chars().all(|c| c == '#' || c == ' ');
+    assert!(!r.stdout.lines().any(grid), "{}", r.stdout);
+    assert!(
+        r.stdout
+            .contains("29 entries, in a file that is not a whitelist"),
+        "{}",
+        r.stdout
+    );
+    let listed: usize = r
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("  ") && !l.contains("entries, in a file"))
+        .map(str::len)
+        .sum();
+    assert!(listed <= 512, "{listed}: {}", r.stdout);
+    // `--json` still has every row, escaped.
+    let v = home.run(&["whitelist", "list", "--json"]).ok();
+    assert_eq!(v["entries"].as_array().unwrap().len(), 29, "{v}");
+}
+
+#[test]
+fn whitelist_list_shows_a_value_add_would_refuse_as_invalid() {
+    // A parseable list with a forged signature: its nickname is a 32-character `#`/space row,
+    // which `add` would refuse. `whitelist list` shows `<invalid>` there, not the row.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let row = "## ## ## ## ## ## ## ## ## ## ##";
+    assert_eq!(row.len(), 32);
+    v["entries"][0]["nickname"] = json!(row);
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let r = home.run(&["whitelist", "list"]);
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("<invalid>") && !r.stdout.contains(row),
+        "{}",
+        r.stdout
+    );
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
 }
 
 /// ABI-encodes `items` as the return data of a function returning `string[]`.

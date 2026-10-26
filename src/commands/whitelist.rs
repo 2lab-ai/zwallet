@@ -1036,7 +1036,10 @@ fn edit_text(out: &Value) -> String {
             if entries.is_null() {
                 String::new()
             } else {
-                format!("; its unverified entries: {}", ascii_json(entries))
+                format!(
+                    "; its unverified entries: {}",
+                    crate::core::text::human_capped(entries, crate::core::text::PROSE_MAX)
+                )
             }
         ));
     }
@@ -1047,7 +1050,10 @@ fn edit_text(out: &Value) -> String {
             if entries.is_null() {
                 "its entries unknown (it cannot be read or has no entries)".to_string()
             } else {
-                format!("its unverified entries: {}", ascii_json(entries))
+                format!(
+                    "its unverified entries: {}",
+                    crate::core::text::human_capped(entries, crate::core::text::PROSE_MAX)
+                )
             }
         ));
     }
@@ -1096,6 +1102,74 @@ const SHOWN_CHARS: usize = 64;
 /// The most whitelist entries `whitelist list` prints before saying how many are left (the file
 /// is anyone's to write); `--json` keeps them all.
 const ENTRIES_SHOWN: usize = 100;
+
+/// The most chains or selectors of one listed entry, and the most fee caps, `whitelist list`
+/// prints before saying how many are left.
+const ITEMS_SHOWN: usize = 16;
+
+/// What `whitelist list` shows for a value from whitelist.json that is not what `add` would have
+/// written there: this fixed text, never the value (the file is anyone's to edit, and a value
+/// that is not a nickname, an address, a chain or a selector can be anything, a picture too).
+const INVALID: &str = "<invalid>";
+
+/// `v` when it is a string that passes `check`, else [`INVALID`].
+fn valid_or_invalid(v: &Value, check: fn(&str) -> bool) -> String {
+    match v.as_str() {
+        Some(s) if check(s) => s.to_string(),
+        _ => INVALID.to_string(),
+    }
+}
+
+/// `0x` and `n` hex digits.
+fn is_hex(s: &str, n: usize) -> bool {
+    s.len() == n + 2 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A chain of an entry: [`ANY_CHAIN`], or a known chain's key (as zwallet spells it), else
+/// [`INVALID`].
+fn chain_shown(v: &Value) -> String {
+    match v.as_str() {
+        Some(ANY_CHAIN) => ANY_CHAIN.to_string(),
+        Some(key) => chains::find(key).map_or_else(|_| INVALID.to_string(), |c| c.key.to_string()),
+        None => INVALID.to_string(),
+    }
+}
+
+/// An array of an entry (its chains or selectors), each item through `one`, at most
+/// [`ITEMS_SHOWN`] of them; [`INVALID`] when it is no array.
+fn items_shown(v: &Value, one: impl Fn(&Value) -> String) -> String {
+    let Some(items) = v.as_array() else {
+        return INVALID.to_string();
+    };
+    let mut shown: Vec<String> = items.iter().take(ITEMS_SHOWN).map(one).collect();
+    if items.len() > ITEMS_SHOWN {
+        shown.push(format!("and {} more", items.len() - ITEMS_SHOWN));
+    }
+    shown.join(", ")
+}
+
+/// One entry of a listed whitelist as a line: each field as is when it passes the check `add`
+/// applies to it (the nickname rule, `address` or `contract`, an address, a known chain or `*`,
+/// a 4-byte selector), else [`INVALID`]. A verified list's fields always pass.
+fn entry_line(e: &Value) -> String {
+    if !e.is_object() {
+        return format!("  {INVALID}");
+    }
+    let mut line = format!(
+        "  {:<16} {:<8} {} {}",
+        valid_or_invalid(&e["nickname"], |s| whitelist::validate_nickname(s).is_ok()),
+        valid_or_invalid(&e["kind"], |s| matches!(s, "address" | "contract")),
+        valid_or_invalid(&e["address"], |s| is_hex(s, 40)),
+        items_shown(&e["chains"], chain_shown)
+    );
+    if !e["selectors"].is_null() {
+        line.push_str(&format!(
+            "  selectors {}",
+            items_shown(&e["selectors"], |s| valid_or_invalid(s, |s| is_hex(s, 8)))
+        ));
+    }
+    line
+}
 
 /// A value from a file (a hand-edited whitelist.json is anything) for a terminal: as is when it
 /// is at most [`SHOWN_CHARS`] of printable ASCII, else quoted with escapes (`{:?}`, which escapes
@@ -1251,7 +1325,9 @@ fn list_text(out: &Value, verify: bool) -> String {
         "whitelist gen {}, {}{}",
         match &out["gen"] {
             Value::Null => "-".to_string(),
-            g => ascii_json(g),
+            g => g
+                .as_u64()
+                .map_or_else(|| INVALID.to_string(), |g| g.to_string()),
         },
         if out["verified"] == json!(true) {
             "verified"
@@ -1265,50 +1341,51 @@ fn list_text(out: &Value, verify: bool) -> String {
             (None, None) => String::new(),
         }
     )];
-    // The entries come from whitelist.json, which anyone of this user can write: show at most
-    // [`ENTRIES_SHOWN`], each a bounded, printable-ASCII line, then how many were left out.
+    // The entries come from whitelist.json, which anyone of this user can write: each field is
+    // shown only when it is what `add` would have written ([`entry_line`]), at most
+    // [`ENTRIES_SHOWN`] lines. A file that cannot be read as a list (only then is `policy` null
+    // with entries there) gets a count and one prose budget for all its entry lines.
     let entries: Vec<&Value> = out["entries"].as_array().into_iter().flatten().collect();
+    let raw = out["policy"].is_null() && !entries.is_empty();
+    if raw {
+        lines.push(format!(
+            "  {} entries, in a file that is not a whitelist:",
+            entries.len()
+        ));
+    }
+    let (mut used, mut listed) = (0, 0);
     for e in entries.iter().take(ENTRIES_SHOWN) {
-        if !e.is_object() {
-            lines.push(format!(
-                "  {}",
-                crate::core::text::ascii_inert(&ascii_json(e), SHOWN_CHARS)
-            ));
-            continue;
+        let line = entry_line(e);
+        if raw && used + line.len() > crate::core::text::PROSE_MAX {
+            break;
         }
-        let field = |k: &str| match &e[k] {
-            Value::String(s) => shown(s),
-            other => crate::core::text::ascii_inert(&ascii_json(other), SHOWN_CHARS),
-        };
-        let mut line = format!(
-            "  {:<16} {:<8} {} {}",
-            field("nickname"),
-            field("kind"),
-            field("address"),
-            join(&e["chains"])
-        );
-        if e["selectors"].is_array() {
-            line.push_str(&format!("  selectors {}", join(&e["selectors"])));
-        }
+        used += line.len();
+        listed += 1;
         lines.push(line);
     }
-    if entries.len() > ENTRIES_SHOWN {
-        lines.push(format!("  ... {} more", entries.len() - ENTRIES_SHOWN));
+    if entries.len() > listed {
+        lines.push(format!("  ... {} more", entries.len() - listed));
     }
     if let Some(caps) = out["policy"]["maxFeeWei"].as_object() {
-        let caps: Vec<String> = caps
+        // Keys and amounts from the file: a known chain and a decimal amount, or [`INVALID`].
+        let mut shown_caps: Vec<String> = caps
             .iter()
+            .take(ITEMS_SHOWN)
             .map(|(key, wei)| {
-                let wei = wei.as_str().unwrap_or("?");
-                match (chains::find(key), U256::from_str_radix(wei, 10)) {
-                    (Ok(c), Ok(w)) => {
+                let wei = wei.as_str().map(|w| U256::from_str_radix(w, 10));
+                match (chains::find(key), wei) {
+                    (Ok(c), Some(Ok(w))) => {
                         format!("{} {} {}", c.key, format_units(w, c.decimals), c.symbol)
                     }
-                    _ => format!("{} {} wei", shown(key), shown(wei)),
+                    (Ok(c), _) => format!("{} {INVALID}", c.key),
+                    _ => INVALID.to_string(),
                 }
             })
             .collect();
-        lines.push(format!("fee caps: {}", caps.join(", ")));
+        if caps.len() > ITEMS_SHOWN {
+            shown_caps.push(format!("and {} more", caps.len() - ITEMS_SHOWN));
+        }
+        lines.push(format!("fee caps: {}", shown_caps.join(", ")));
         lines.push(format!(
             "message signing: {}",
             if out["policy"]["allowMessageSigning"] == json!(true) {
