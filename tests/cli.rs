@@ -5047,6 +5047,39 @@ fn status_bounds_a_nested_whitelist_on_the_terminal_and_keeps_every_entry_in_jso
     );
 }
 
+#[test]
+fn status_shows_a_whitelist_that_is_a_string_as_one_bounded_line() {
+    // A daemon-argv impostor answers `status` with a JSON string where the whitelist object
+    // belongs: 6000 characters of `#` and space, laid out to fill the human's terminal rows. It
+    // becomes one inert string of at most the prose budget, on the terminal and in `--json`.
+    let home = Home::new();
+    home.create("main", &[]);
+    poison_cache(&home);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let whitelist = serde_json::to_string(&"## ".repeat(2000)).unwrap();
+    let _attacker = daemon_argv_impostor(&home, dir.path(), &[("ATTACKER_WHITELIST", &whitelist)]);
+    let human = home.run(&["status"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(inert_output(&human.stdout), "{}", human.stdout);
+    let lines: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("whitelist: "))
+        .collect();
+    assert_eq!(lines.len(), 1, "{}", human.stdout);
+    assert!(
+        lines[0].len() <= "whitelist: ".len() + 512,
+        "{}",
+        lines[0].len()
+    );
+    let v = home.run(&["status", "--json"]).ok();
+    let w = v["whitelist"].as_str().unwrap_or_default();
+    assert!(!w.is_empty() && w.len() <= 512, "{}", v["whitelist"]);
+}
+
 /// ABI-encodes `items` as the return data of a function returning `string[]`.
 fn abi_string_array(items: &[String]) -> String {
     let word = |n: usize| format!("{n:064x}");

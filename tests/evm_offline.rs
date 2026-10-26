@@ -305,6 +305,102 @@ fn dry_run_prints_no_broadcastable_raw_tx() {
     assert!(rpc.sent().is_empty(), "a dry-run broadcast");
 }
 
+/// A listener on `at` that relays each request to the key daemon on `to` and its reply back, with
+/// `decoded` put in place of a signing reply's own `decoded` view: what a process squatting on
+/// `d.sock` in front of a genuine daemon can do. Stops when dropped.
+struct SignerProxy {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SignerProxy {
+    fn start(at: &std::path::Path, to: std::path::PathBuf, decoded: Value) -> Self {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let listener = UnixListener::bind(at).expect("bind proxy");
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let st = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !st.load(Ordering::SeqCst) {
+                let Ok((mut client, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                client.set_nonblocking(false).unwrap();
+                client
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let _ = client.read_to_end(&mut request);
+                let Ok(mut daemon) = UnixStream::connect(&to) else {
+                    continue;
+                };
+                let mut reply = Vec::new();
+                let _ = daemon
+                    .write_all(&request)
+                    .and_then(|()| daemon.shutdown(std::net::Shutdown::Write))
+                    .and_then(|()| daemon.read_to_end(&mut reply));
+                let mut v: Value = serde_json::from_slice(&reply).unwrap_or(Value::Null);
+                if v["result"].get("decoded").is_some() {
+                    v["result"]["decoded"] = decoded.clone();
+                }
+                let mut out = serde_json::to_vec(&v).unwrap();
+                out.push(b'\n');
+                let _ = client.write_all(&out);
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for SignerProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+#[test]
+fn a_signer_view_that_is_a_string_is_one_bounded_line() {
+    // A squatter in front of the genuine daemon passes its signature through (the signer check
+    // holds) but puts a 60K string where the decoded view belongs: `--json` and the terminal get
+    // one inert string of at most the prose budget, not the whole of it.
+    let (home, _) = unlocked();
+    let front = Home::new();
+    for file in ["wallet.json", "whitelist.json"] {
+        std::fs::copy(home.path().join(file), front.path().join(file)).unwrap();
+    }
+    let _proxy = SignerProxy::start(&front.sock(), home.sock(), json!("## ".repeat(20_000)));
+    let rpc = MockRpc::start(healthy);
+    let v = front.run(&transfer(&rpc.url, &["--dry-run"])).ok();
+    let view = v["signerDecoded"].as_str().unwrap_or_default();
+    assert!(
+        !view.is_empty() && view.len() <= 512,
+        "{}",
+        v["signerDecoded"]
+    );
+    let mut args = transfer(&rpc.url, &["--dry-run"]);
+    args.retain(|a| *a != "--json");
+    let human = front.run(&args);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    let lines: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("signerDecoded: "))
+        .collect();
+    assert_eq!(lines.len(), 1, "{}", human.stdout);
+    assert!(
+        lines[0].len() <= "signerDecoded: ".len() + 512,
+        "{}",
+        lines[0].len()
+    );
+}
+
 #[test]
 fn transfer_refuses_zero_or_token_recipient_unless_forced() {
     let (home, _) = unlocked();

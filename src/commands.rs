@@ -199,19 +199,37 @@ fn shown(value: &str) -> String {
     crate::core::text::shown(value, VALUE_SHOWN)
 }
 
-/// The session whitelist a daemon reports, inert for `--json`: every string and key is
-/// ASCII-escaped and its structure and counts are kept, but its `reason` (the only unbounded
-/// prose field, which can quote whitelist.json) is cut to a prose budget. The human side is
-/// bounded by `render_human`.
+/// The session whitelist a daemon reports, inert for `--json` and the terminal. A genuine daemon
+/// sends an object (or null): every string and key is ASCII-escaped and its structure and counts
+/// are kept, but its `reason` (the only unbounded prose field, which can quote whitelist.json) is
+/// cut to a prose budget, and `render_human` bounds the rest. Anything else (a string, an array,
+/// a number from whatever answers on `d.sock`) is no whitelist: it becomes one string, its JSON
+/// text made inert and cut to [`PROSE_MAX`](crate::core::text::PROSE_MAX), in both outputs.
 fn inert_whitelist(value: &Value) -> Value {
-    let mut w = crate::core::text::inert_json(value);
-    if let Some(reason) = w.get("reason").and_then(Value::as_str) {
-        w["reason"] = json!(crate::core::text::ascii_inert(
-            reason,
-            crate::core::text::PROSE_MAX
-        ));
+    use crate::core::text::{PROSE_MAX, ascii_inert, inert_json};
+    match value {
+        Value::Null => Value::Null,
+        Value::Object(_) => {
+            let mut w = inert_json(value);
+            if let Some(reason) = w.get("reason").and_then(Value::as_str) {
+                w["reason"] = json!(ascii_inert(reason, PROSE_MAX));
+            }
+            w
+        }
+        other => json!(ascii_inert(&other.to_string(), PROSE_MAX)),
     }
-    w
+}
+
+/// What the key holder decoded from the bytes it signed, for `signerDecoded`: an object from a
+/// genuine daemon, made inert with its structure kept; anything else (whatever answers on `d.sock`
+/// may send a 1 MiB string) one string, made inert and cut as [`inert_whitelist`] does.
+fn signer_decoded(view: &Value) -> Value {
+    use crate::core::text::{PROSE_MAX, ascii_inert, inert_json};
+    if view.is_object() {
+        inert_json(view)
+    } else {
+        json!(ascii_inert(&view.to_string(), PROSE_MAX))
+    }
 }
 
 /// Whether `value` has the shape of an address on `chain`: for EVM, `0x` and 40 hex digits (any
@@ -1377,9 +1395,15 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
         "raw": format!("0x{}", hex::encode(&raw)),
     });
     // A decoded `string` is data the caller asked for: `--json` keeps it exactly as the contract
-    // returned it; `render_human` (the human path of `Out::json`) makes the `result` and every
-    // other nested value inert and bounded, since a contract chose that text.
-    Ok(Out::json(out))
+    // returned it; `render_human` makes the `result` and every other nested value inert and
+    // bounded, since a contract chose that text. The human text also cuts `raw` (the returned
+    // bytes as hex, whatever their length) to a prose budget; `--json` keeps it whole.
+    let mut shown = out.clone();
+    shown["raw"] = json!(crate::core::text::ascii_inert(
+        out["raw"].as_str().unwrap_or_default(),
+        crate::core::text::PROSE_MAX
+    ));
+    Ok(Out::with_text(out, render_human(&shown)))
 }
 
 async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
@@ -1653,7 +1677,7 @@ async fn sign_and_send<F: ChainFamily>(
     out.insert("dryRun".into(), json!(send.dry_run));
     // What the key holder decoded from the bytes it signed (not what this process intended).
     if let Some(view) = signed_value.get("decoded") {
-        out.insert("signerDecoded".into(), crate::core::text::inert_json(view));
+        out.insert("signerDecoded".into(), signer_decoded(view));
     }
     // The hash is computed from the signed bytes, never taken from the node.
     out.insert("txHash".into(), json!(signed.tx_hash));
