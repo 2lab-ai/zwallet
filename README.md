@@ -149,8 +149,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
 
   Text zwallet does not control is made inert where messages are composed, so the terminal and
   `--json` get the same text: cached values, an answer on `d.sock`, an error the process on
-  `d.sock` sends (and its details), the `expiresAt` and whitelist `status` relays from it, and
-  an executable path have control and format characters escaped (ESC, CR, LF, C1, U+202E). An
+  `d.sock` sends (and its details), the `expiresAt` and whitelist `status` relays from it, an
+  executable path, an RPC endpoint's error text, and a token's on-chain `symbol()` have control
+  and format characters escaped (ESC, CR, LF, C1, U+202E); a `string` that `call` decodes is kept
+  exact in `--json` and escaped in human output. An
   error from that process reads as its own: prefixed ``the key daemon reported:`` unless it is
   this build's key daemon, or, from a process known to be another one, named, with its details
   dropped. `wallet.json` must hold only key names `create` accepts (`active` too); a file with
