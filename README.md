@@ -172,8 +172,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - a cached address or an answer that is not an address: 64; an executable path in a warning:
     200;
   - `whitelist.json` in a message: each value 64, a reason 512; in `whitelist list`, see below;
-  - the send journal: each value 64, at most 5 entries per message; its values are escaped like
-    every value from a file, `₮` included (a journal line is anyone of this user's to write).
+  - the send journal: at most 512 characters in all per message. Each shown entry's hash, nonce,
+    time, kind, amount and recipient count, every field shown only in the shape zwallet writes
+    it (see **The send journal**) or as `<invalid>`; entries are shown whole, newest first, and the
+    ones that do not fit are counted.
 
   A QR code holding an Ethereum address needs at least version 2: a block of 25 × 25 = 625
   modules without a quiet zone, which at one character per module is 25 rows of 25 cells from
@@ -185,10 +187,6 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - its fee caps line: at most 16 caps on one line, the file giving only each amount's digits and
     one point; the chain keys, symbols, commas and spaces are zwallet's. The line has fewer than
     93 blank or point-like cells, so it cannot hold a code's light modules.
-  - the send journal in a message: at most 5 entries on one line, each with 4 values of at most
-    64 characters (the time, the kind, the amount, the recipient) and a hash that is 66 hex
-    characters (shown 3 times: with its lookup command and link) or `?`, with zwallet's own words
-    between one entry's values and the next's.
   - `status` from a process on `d.sock`: its `expiresAt` (64), its whitelist (512) and, from
     another process, its executable path in the warning (200), each on its own labelled line.
   - a relayed error from another process: its message (512) and its executable path (64).
@@ -198,10 +196,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   What a source can still do inside these bounds is pad to the terminal's width so that its text
   starts a visual row at column 0 (soft wrap). On a terminal exactly 21 columns wide, a
   512-character budget fits a version-1 code (441 modules, at most 17 bytes: a short link, not an
-  address) with no quiet zone. The journal's runs of text, with zwallet's words between them,
-  have not been shown unable to tile a code around those words on a wide terminal. All of this is
-  what a same-user process can already do by writing to the terminal directly (**Known limits**),
-  so it is documented, not mitigated.
+  address) with no quiet zone. All of this is what a same-user process can already do by writing
+  to the terminal directly (**Known limits**), so it is documented, not mitigated.
 
   One exception, which is zwallet's own text: a registry token whose `symbol()` is exactly the
   symbol the registry records shows it as is (USDT0's `USD₮0`); any other symbol, from that
@@ -499,10 +495,16 @@ Commands that act on a key take `--key <name>` (default: the active key).
   file owned by this user; otherwise a send without `--nonce` is `VALIDATION_ERROR` "cannot read
   the send journal <path>: …; nothing was signed", since the repeat check below needs it. Errors
   and messages below that send the agent to an earlier transaction name the journal's entries at
-  that nonce, each with its `zwallet tx` command and explorer page. The journal is a file any
-  process of this user can write: each of its values in a message is escaped and cut to 64
-  characters, a `txHash` that is not a 32-byte hash shows as `?` with no lookup command, and the
-  entries in `duplicateSends` and `pendingSends` have their strings escaped.
+  that nonce, then how to look each hash up (`zwallet tx --chain <chain> <txHash>` or the
+  explorer's `/tx/<txHash>` page). The journal is a file any process of this user can write, so
+  a message shows each field of an entry only in the shape zwallet writes it, else `<invalid>`:
+  the time as RFC 3339 UTC (re-rendered from the instant, not the file's text), the kind
+  `transfer`, `token-transfer` or `invoke`, the recipient `0x` and 40 hex digits, the amount as
+  digits (at most 78 on either side of a point), one space and a symbol of letters, digits and
+  `₮` (one point inside, as in `USDC.e`; at most 32), and the hash only when it is a 32-byte hash
+  (`?` else). The journal's text in one message is at most 512 characters: whole entries, newest
+  first, at most 5, then "(and N more there)". The entries in `duplicateSends` and
+  `pendingSends` keep all their fields, every string escaped.
 - **One send at a time.** Sends from one key on one chain never overlap: each holds
   `nonce-<chainId>-<address>.lock` in the wallet home from before reading the nonce until the
   command returns, through `--wait`. A send that finds the lock held does not wait (after waiting,
