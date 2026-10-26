@@ -4785,6 +4785,37 @@ fn a_registry_tokens_recorded_symbol_shows_as_itself_and_any_other_is_escaped() 
 }
 
 #[test]
+fn the_write_point_escapes_text_no_source_escaped() {
+    // `status` prints the wallet home's path as it is: no source escapes it. A home named with
+    // ESC, CR and a solid glyph still reaches the terminal as printable ASCII, on one line,
+    // because every human write goes through the write point.
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = dir.path().join("h\u{1b}[2J\r\u{2b1b}");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    let out = common::run_in(&home, &["status"], None, &[]);
+    assert_eq!(out.code, 0, "{:?}", out.stderr);
+    assert!(inert_output(&out.stdout), "{:?}", out.stdout);
+    let line: Vec<&str> = out
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("home: "))
+        .collect();
+    assert_eq!(line.len(), 1, "{:?}", out.stdout);
+    assert!(
+        line[0].ends_with("/h\\u{1b}[2J\\u{d}\\u{2b1b}"),
+        "{:?}",
+        line[0]
+    );
+}
+
+#[test]
 fn call_json_is_ascii_on_the_wire_and_parses_back_to_the_contracts_exact_string() {
     // `--json` keeps a contract's string exactly, but the bytes printed are printable ASCII (and
     // the newlines of pretty printing): solid glyphs, an octant, C1 CSI and DEL go out as JSON
