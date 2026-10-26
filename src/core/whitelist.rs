@@ -434,13 +434,14 @@ const SHOWN_CHARS: usize = 64;
 
 /// A value that may come from a file, for a message a human reads (possibly while typing the
 /// password): in double quotes, so it never blends into the sentence around it, its own `"` as
-/// `\"`, and inside them printable ASCII only ([`crate::core::text::ascii_inert`], which escapes
-/// `\` as `\u{5c}`), cut after [`SHOWN_CHARS`] characters. So a planted terminal escape or a fake
-/// instruction is shown inert and plainly quoted.
+/// `\"`, and inside them printable ASCII only ([`crate::core::text::escape`], which escapes `\`
+/// as `\u{5c}`). Escaped first and cut after, so the whole is at most [`SHOWN_CHARS`] + 2. A
+/// planted terminal escape or a fake instruction is shown inert and plainly quoted.
 fn quote(value: &str) -> String {
+    use crate::core::text::{cut_to, escape};
     format!(
         "\"{}\"",
-        crate::core::text::ascii_inert(value, SHOWN_CHARS).replace('"', "\\\"")
+        cut_to(escape(value).replace('"', "\\\""), SHOWN_CHARS)
     )
 }
 
@@ -2964,6 +2965,12 @@ mod tests {
             assert_clean(&msg);
         }
         assert_clean(&validate_nickname(&evil).unwrap_err().message);
+        // Escaped first, cut after: a value of quotes stays within its 64, plus the two quotes.
+        for v in ["\"".repeat(100), "\\".repeat(100), evil.clone()] {
+            let q = quote(&v);
+            assert!(q.len() <= SHOWN_CHARS + 2, "{} {q}", q.len());
+            assert!(q.starts_with('"') && q.ends_with('"'), "{q}");
+        }
 
         // Through the edit path: a hand-edited list's reason is shown while the human types.
         let tmp = wallet();

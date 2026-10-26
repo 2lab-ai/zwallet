@@ -43,9 +43,10 @@ pub fn escape(text: &str) -> String {
     out
 }
 
-/// `ascii` (printable ASCII only) cut so that the whole result, [`CUT`] marker included, is at
-/// most `max` characters. Below the marker's own length the cut has no marker.
-fn cut_to(ascii: String, max: usize) -> String {
+/// `ascii` (printable ASCII only, as [`escape`] makes it) cut so that the whole result, [`CUT`]
+/// marker included, is at most `max` characters. Below the marker's own length the cut has no
+/// marker.
+pub fn cut_to(ascii: String, max: usize) -> String {
     if ascii.len() <= max {
         return ascii;
     }
@@ -69,11 +70,12 @@ pub fn shown(value: &str, max: usize) -> String {
 
 /// `text` for one line of human output: printable ASCII passes, the backslash included (so a
 /// string a source already [`escape`]d keeps its one escape), and everything else becomes a
-/// `\u{hex}` escape.
+/// `\u{hex}` escape, the double quote too (`\u{22}`), so a value cannot close the quotes
+/// [`compact`] puts around it and read as JSON structure of its own.
 fn one_line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if ok(c as u32) {
+        if ok(c as u32) && c != '"' {
             out.push(c);
         } else {
             out.push_str(&u_escape(c));
@@ -277,5 +279,11 @@ mod tests {
         let once = "{\"k\":[\"\\u{2b1b}\\u{1b}\"]}";
         assert_eq!(human_capped(&raw, PROSE_MAX), once);
         assert_eq!(human_capped(&inert_json(&raw), PROSE_MAX), once);
+        // A quote inside a string or a key never closes the quotes around it.
+        let forged = serde_json::json!({ "a\"b": "x\",\"verified\":true,\"y\":\"" });
+        assert_eq!(
+            human_capped(&forged, PROSE_MAX),
+            "{\"a\\u{22}b\":\"x\\u{22},\\u{22}verified\\u{22}:true,\\u{22}y\\u{22}:\\u{22}\"}"
+        );
     }
 }
