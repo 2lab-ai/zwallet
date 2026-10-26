@@ -315,20 +315,30 @@ const RELAYED_DETAILS: &[&str] = &["command", "counterparty", "chain", "feeWei",
 /// budget leaves, and the rest dropped. So the human output of one relayed error is at most that
 /// many characters whatever the reply's size or nesting. Who answered is checked ([`check_peer`]):
 /// - this build's key daemon: its message as is (inert);
-/// - not known (`Unknown`; every genuine daemon on Linux; or this build's own code whose session
-///   just ended, see [`relayed_check`]): prefixed `the process answering on the key daemon socket
-///   reported: `, so it never reads as this CLI's own output nor claims who sent it;
-/// - another process (`Other`): named, its message quoted after it, its details dropped (an
-///   impostor's `command` is no command to run), with the `warning` detail.
+/// - not known (`Unknown`; every genuine daemon on Linux): prefixed `the process answering on the
+///   key daemon socket reported: `, so it never reads as this CLI's own output nor claims who sent
+///   it;
+/// - another process (`Other`): named (its executable path cut to [`RELAYED_EXE_SHOWN`]), its
+///   message quoted after it, its details dropped (an impostor's `command` is no command to run),
+///   with the `warning` detail. A `WALLET_LOCKED` reply from a process running this build's code
+///   gets the neutral prefix instead ([`relayed_check`]), and still no details: a genuine
+///   `WALLET_LOCKED` carries none.
 ///
 /// When the check itself fails, the details are dropped too. The error code is kept: it is one of
 /// a fixed set.
 fn relayed_error(home: &Path, who: &Peer, resp: Response) -> WalletError {
     use crate::core::text::{PROSE_MAX, ascii_inert};
     let code = resp.error_code.unwrap_or(ErrorCode::ValidationError);
-    let checked = check_peer(home, who);
-    let details_ok = checked.is_ok();
+    let checked = check_peer_shown(home, who, RELAYED_EXE_SHOWN);
+    let judged = checked.as_ref().ok().cloned();
     let check = relayed_check(who, resp.error_code, checked.unwrap_or(PeerCheck::Unknown));
+    // Details only from a peer judged Unknown or this build's daemon as it is, never from one
+    // judged another process and let through as Unknown by the `WALLET_LOCKED` exception.
+    let details_ok = match judged {
+        None => false,
+        Some(PeerCheck::Other(_)) => false,
+        Some(_) => true,
+    };
 
     // The message, then (for a known key daemon or an Unknown peer) the scalar kept details in a
     // fixed order, sharing one budget.
@@ -378,11 +388,11 @@ fn relayed_error(home: &Path, who: &Peer, resp: Response) -> WalletError {
 /// What [`relayed_error`] makes of a peer [`check_peer`] judged, given the reply's error `code`.
 /// A daemon that ends its session (lock or expiry) answers `WALLET_LOCKED`, then drops the socket
 /// and exits, so by the time its error is checked it no longer holds the socket nor shows in the
-/// process table, and `check_peer` calls it another process. Only for that code, and only when
-/// the code it runs is this build's (same cdhash, `CS_VALID`), is it not named an impostor:
-/// `Unknown`. Any other code keeps `Other` (named, details dropped). This never makes anything
-/// `ThisBuild`, and it is used for relayed errors only; address verification keeps the strict
-/// check.
+/// process table, and `check_peer` calls it another process. So a `WALLET_LOCKED` reply from any
+/// process running this build's code (same cdhash, `CS_VALID`; not only a daemon whose session
+/// just ended) is not named an impostor: `Unknown`, with no details ([`relayed_error`]). Any
+/// other code keeps `Other` (named, details dropped). This never makes anything `ThisBuild`, and
+/// it is used for relayed errors only; address verification keeps the strict check.
 fn relayed_check(who: &Peer, code: Option<ErrorCode>, check: PeerCheck) -> PeerCheck {
     match check {
         PeerCheck::Other(_) if code == Some(ErrorCode::WalletLocked) && runs_this_build(who) => {
@@ -1037,6 +1047,10 @@ impl PeerCheck {
 /// [`crate::core::text::shown`]): the path is chosen by whoever started that process.
 const EXE_SHOWN: usize = 200;
 
+/// The most characters of an executable path a relayed error names, where it shares the line
+/// with what that process said.
+const RELAYED_EXE_SHOWN: usize = 64;
+
 /// Why a [`Peer`] (pid `pid`) is not this build's key daemon: `what` it is. Any value from that
 /// process in `what` must already be escaped.
 fn peer_not_ours(pid: i32, what: &str) -> PeerCheck {
@@ -1058,16 +1072,21 @@ fn peer_not_ours(pid: i32, what: &str) -> PeerCheck {
 /// hardened runtime, `LD_PRELOAD`): that is the same as replacing the binary, which nothing here
 /// can prevent.
 pub fn check_peer(home: &Path, peer: &Peer) -> Result<PeerCheck> {
+    check_peer_shown(home, peer, EXE_SHOWN)
+}
+
+/// [`check_peer`], with at most `exe_max` characters of the peer's executable path in the reason.
+fn check_peer_shown(home: &Path, peer: &Peer, exe_max: usize) -> Result<PeerCheck> {
     let (Some(pid), Some(own)) = (peer.pid, own_exe()) else {
         return Ok(PeerCheck::Unknown);
     };
     #[cfg(target_os = "macos")]
-    return check_peer_macos(home, peer, pid, &own);
+    return check_peer_macos(home, peer, pid, &own, exe_max);
     #[cfg(target_os = "linux")]
-    return check_peer_linux(home, pid, &own);
+    return check_peer_linux(home, pid, &own, exe_max);
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (home, peer, pid, &own);
+        let _ = (home, peer, pid, &own, exe_max);
         Ok(PeerCheck::Unknown)
     }
 }
@@ -1079,7 +1098,13 @@ pub fn check_peer(home: &Path, peer: &Peer) -> Result<PeerCheck> {
 /// listen-socket owner, which an attacker can turn into this binary's by exec'ing it while its
 /// own child keeps answering.
 #[cfg(target_os = "macos")]
-fn check_peer_macos(home: &Path, peer: &Peer, pid: i32, own: &OwnExe) -> Result<PeerCheck> {
+fn check_peer_macos(
+    home: &Path,
+    peer: &Peer,
+    pid: i32,
+    own: &OwnExe,
+    exe_max: usize,
+) -> Result<PeerCheck> {
     let (Some(token), Some(uuid)) = (peer.token.as_ref(), own.uuid) else {
         return Ok(PeerCheck::Unknown);
     };
@@ -1088,7 +1113,7 @@ fn check_peer_macos(home: &Path, peer: &Peer, pid: i32, own: &OwnExe) -> Result<
     };
     if cdhash != own.cdhash {
         // Its path, for the message only (never for the decision).
-        let path = macos_exe_path(pid);
+        let path = macos_exe_path(pid, exe_max);
         return Ok(peer_not_ours(
             pid,
             &format!("runs other code than this zwallet build ({path})"),
@@ -1138,13 +1163,13 @@ fn check_peer_macos(home: &Path, peer: &Peer, pid: i32, own: &OwnExe) -> Result<
 /// so `Unknown`. `home` is unused; the socket/daemon-table legs that would need it only matter where
 /// a session can verify.
 #[cfg(target_os = "linux")]
-fn check_peer_linux(_home: &Path, pid: i32, own: &OwnExe) -> Result<PeerCheck> {
+fn check_peer_linux(_home: &Path, pid: i32, own: &OwnExe, exe_max: usize) -> Result<PeerCheck> {
     match process_exe(pid) {
         ProcessExe::File(path, id) if id != Some(own.id) => Ok(peer_not_ours(
             pid,
             &format!(
                 "is not this zwallet build ({})",
-                crate::core::text::shown(&path.to_string_lossy(), EXE_SHOWN)
+                crate::core::text::shown(&path.to_string_lossy(), exe_max)
             ),
         )),
         _ => Ok(PeerCheck::Unknown),
@@ -1155,13 +1180,13 @@ fn check_peer_linux(_home: &Path, pid: i32, own: &OwnExe) -> Result<PeerCheck> {
 /// path is chosen by whoever started that process, and may carry a terminal escape or a line
 /// break). `?` if the kernel will not say.
 #[cfg(target_os = "macos")]
-fn macos_exe_path(pid: i32) -> String {
+fn macos_exe_path(pid: i32, max: usize) -> String {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: the kernel writes at most `buf.len()` bytes into `buf`.
     let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
     match usize::try_from(n) {
         Ok(n) if n > 0 && n <= buf.len() => {
-            crate::core::text::shown(&String::from_utf8_lossy(&buf[..n]), EXE_SHOWN)
+            crate::core::text::shown(&String::from_utf8_lossy(&buf[..n]), max)
         }
         _ => "?".to_string(),
     }
@@ -2367,9 +2392,16 @@ mod tests {
             check_peer(home.path(), &me).unwrap(),
             PeerCheck::Other(_)
         ));
+        // The reply carries details a genuine `WALLET_LOCKED` never has: none of them comes
+        // through, though the message keeps the neutral prefix.
         let resp: Response = serde_json::from_value(json!({
             "v": 2, "ok": false, "errorCode": "WALLET_LOCKED",
             "error": "the unlock expired; locked. A human must run `zwallet unlock 24h` (any duration)",
+            "details": {
+                "command": "zwallet whitelist add savings 0x000000000000000000000000000000000000dEaD",
+                "counterparty": "0x000000000000000000000000000000000000dEaD",
+                "chain": "ethereum",
+            },
         }))
         .unwrap();
         let e = relayed_error(home.path(), &me, resp);
@@ -2381,7 +2413,16 @@ mod tests {
             e.message
         );
         assert!(!e.message.contains("not a key daemon"), "{}", e.message);
-        assert!(e.details.get("warning").is_none(), "{:?}", e.details);
+        assert!(e.details.is_empty(), "{:?}", e.details);
+        // Any other code from the same process keeps it named, details dropped.
+        let resp: Response = serde_json::from_value(json!({
+            "v": 2, "ok": false, "errorCode": "WHITELIST_DENIED", "error": "refused",
+            "details": { "command": "zwallet whitelist add x 0xdEaD" },
+        }))
+        .unwrap();
+        let e = relayed_error(home.path(), &me, resp);
+        assert!(e.message.contains("is not a key daemon"), "{}", e.message);
+        assert!(e.details.get("command").is_none(), "{:?}", e.details);
     }
 
     #[test]
