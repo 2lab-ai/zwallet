@@ -165,7 +165,10 @@ impl WalletFile {
 fn key_not_found(name: &str) -> WalletError {
     WalletError::new(
         ErrorCode::KeyNotFound,
-        format!("no key named '{name}' (see `zwallet list`)"),
+        format!(
+            "no key named {} (see `zwallet list`)",
+            crate::core::text::shown(name, 64)
+        ),
     )
 }
 
@@ -182,7 +185,8 @@ pub fn validate_key_name(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(WalletError::validation(format!(
-            "invalid key name '{name}': use 1-32 of a-z 0-9 _ - starting with a letter or digit"
+            "invalid key name {}: use 1-32 of a-z 0-9 _ - starting with a letter or digit",
+            crate::core::text::shown(name, 64)
         )))
     }
 }
@@ -546,13 +550,30 @@ pub fn read_wallet_file(home: &Path) -> Result<WalletFile> {
 
 fn parse_wallet_file(path: &Path) -> Result<WalletFile> {
     let bytes = read_wallet_bytes(path)?;
-    let file: WalletFile = serde_json::from_slice(&bytes)
-        .map_err(|e| WalletError::validation(format!("{} is not valid: {e}", path.display())))?;
+    // A parser's message can quote the file's text: escaped.
+    let file: WalletFile = serde_json::from_slice(&bytes).map_err(|e| {
+        WalletError::validation(format!(
+            "{} is not valid: {}",
+            path.display(),
+            crate::core::text::printable(&e.to_string())
+        ))
+    })?;
     if file.version != STORE_VERSION {
         return Err(WalletError::validation(format!(
             "unsupported wallet.json version {} (this zwallet reads version {STORE_VERSION})",
             file.version
         )));
+    }
+    // Key names reach messages and human output: every one, and the active one, must be a name
+    // `create` would accept. zwallet never writes another, so a file that has one was edited.
+    for name in file.keys.iter().map(|k| &k.name).chain([&file.active]) {
+        validate_key_name(name).map_err(|e| {
+            WalletError::validation(format!(
+                "{} is not valid: {}; zwallet never writes such a name, so the file was edited",
+                path.display(),
+                e.message
+            ))
+        })?;
     }
     Ok(file)
 }
@@ -633,8 +654,23 @@ pub fn unlock(
 /// Every key has a distinct name and index, and every cached address is the one the seed
 /// derives at that index.
 fn verify_key_cache(file: &WalletFile, seed: &Seed, derive: AddressDeriver<'_>) -> Result<()> {
-    let inconsistent =
-        |what: String| WalletError::validation(format!("wallet.json is inconsistent: {what}"));
+    verify_key_list(file)?;
+    if let Some(r) = cache_repairs(file, seed, derive)?.first() {
+        return Err(inconsistent(format!(
+            "cached {} address of key '{}' does not match the master seed; run `zwallet address \
+             --verify` to check the cache against the seed and repair it",
+            r.chain, r.key
+        )));
+    }
+    Ok(())
+}
+
+fn inconsistent(what: String) -> WalletError {
+    WalletError::validation(format!("wallet.json is inconsistent: {what}"))
+}
+
+/// Every key has a distinct name and index.
+fn verify_key_list(file: &WalletFile) -> Result<()> {
     let (mut names, mut indices) = (BTreeSet::new(), BTreeSet::new());
     for key in &file.keys {
         if !names.insert(key.name.as_str()) {
@@ -647,20 +683,85 @@ fn verify_key_cache(file: &WalletFile, seed: &Seed, derive: AddressDeriver<'_>) 
             )));
         }
     }
+    Ok(())
+}
+
+/// One cached address that differs from the seed's: what [`unlock_repairing`] replaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheRepair {
+    pub key: String,
+    /// A chain key the seed derives an address for.
+    pub chain: String,
+    /// The cached value, as wallet.json has it (any text: escape it before showing it).
+    pub was: String,
+    /// The seed's address.
+    pub now: String,
+}
+
+/// Every cached address in `file` that is not the one `seed` derives for its key and chain.
+/// Chain keys this build derives nothing for are left alone.
+fn cache_repairs(
+    file: &WalletFile,
+    seed: &Seed,
+    derive: AddressDeriver<'_>,
+) -> Result<Vec<CacheRepair>> {
+    let mut repairs = Vec::new();
     for key in &file.keys {
         let derived = derive(seed, key.index)?;
         for (chain, cached) in &key.addresses {
             if let Some(actual) = derived.get(chain)
                 && !actual.eq_ignore_ascii_case(cached)
             {
-                return Err(inconsistent(format!(
-                    "cached {chain} address of key '{}' does not match the master seed",
-                    key.name
-                )));
+                repairs.push(CacheRepair {
+                    key: key.name.clone(),
+                    chain: chain.clone(),
+                    was: cached.clone(),
+                    now: actual.clone(),
+                });
             }
         }
     }
-    Ok(())
+    Ok(repairs)
+}
+
+/// [`unlock`], but cached addresses that differ from the seed are repaired instead of refused:
+/// with the password the seed is authoritative and the cache is only metadata. Every other check
+/// (distinct names and indices) still refuses. The repair is written under the writer lock, only
+/// while wallet.json's crypto envelope is still the one the password opened, through the same
+/// atomic replace as every metadata write; the encrypted master is never touched. Returns the
+/// repairs made (none when the cache was right, and then nothing is written).
+pub fn unlock_repairing(
+    home: &Path,
+    password: &str,
+    derive: AddressDeriver<'_>,
+) -> Result<(Unsealed, WalletFile, Vec<CacheRepair>)> {
+    let file = read_wallet_file(home)?;
+    let unsealed = decrypt(&file.crypto, password)?;
+    verify_key_list(&file)?;
+    if cache_repairs(&file, &unsealed.seed, derive)?.is_empty() {
+        verify_key_cache(&file, &unsealed.seed, derive)?;
+        return Ok((unsealed, file, Vec::new()));
+    }
+    let opened = serde_json::to_value(&file.crypto).ok();
+    let lock = MetaLock::acquire(home)?;
+    let mut repairs = Vec::new();
+    let repaired = lock.update(|current| {
+        if serde_json::to_value(&current.crypto).ok() != opened {
+            return Err(WalletError::validation(
+                "wallet.json's master changed while the password was checked; retry",
+            ));
+        }
+        verify_key_list(current)?;
+        repairs = cache_repairs(current, &unsealed.seed, derive)?;
+        for r in &repairs {
+            if let Some(key) = current.keys.iter_mut().find(|k| k.name == r.key) {
+                key.addresses.insert(r.chain.clone(), r.now.clone());
+            }
+        }
+        Ok(())
+    })?;
+    verify_key_cache(&repaired, &unsealed.seed, derive)?;
+    Ok((unsealed, repaired, repairs))
 }
 
 /// Options for creating the master seed.
