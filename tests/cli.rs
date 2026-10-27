@@ -652,7 +652,7 @@ fn c7_poisoned_cache_while_unlocked_is_a_validation_error() {
         &["balance", "--chain", "base", "--json"],
     ] {
         let msg = home.run_env(args, &closed).err("VALIDATION_ERROR");
-        assert!(msg.contains("does not match"), "{args:?}: {msg}");
+        assert!(msg.contains(genuine_daemon_mismatch()), "{args:?}: {msg}");
     }
 }
 
@@ -1075,12 +1075,24 @@ const NOT_VERIFIED: &str = "not verified: run `zwallet address --verify` before 
 const LOCKED_NOTE: &str = "not verified: the wallet is locked; `zwallet unlock <dur>` or `zwallet address --verify` \
      checks it";
 
-/// Whether a live session verifies an address on this OS. On macOS the CLI reads the
-/// executable of the process answering on `d.sock` from the kernel. On Linux every zwallet
+/// Whether a live session verifies an address on this OS. On macOS the CLI asks the kernel for
+/// the code-signing hash (cdhash) of the code the process answering on `d.sock` runs, through
+/// that connection's audit token, and compares it with its own. On Linux every zwallet
 /// process is non-dumpable, which hides its `/proc/<pid>/exe` from its own user, so the key
 /// daemon's executable cannot be checked and nothing is verified by session.
 fn session_verifies() -> bool {
     cfg!(target_os = "macos")
+}
+
+/// What a cache-vs-daemon mismatch says while this build's key daemon answers: on macOS the CLI
+/// knows it is this build's, so its derivation is the seed's and the cache is to blame; on Linux
+/// it cannot tell, so either side may be the tampered one.
+fn genuine_daemon_mismatch() -> &'static str {
+    if session_verifies() {
+        "the cache was modified"
+    } else {
+        "one of them was tampered with"
+    }
 }
 
 /// The commands that show an address without the human's password.
@@ -1240,14 +1252,18 @@ fn k1_verify_derives_from_the_password_and_checks_the_cache() {
     );
     home.stop_daemons();
 
-    // A poisoned cache fails --verify; so do a wrong password and a missing terminal.
+    // A poisoned cache: `list --verify` refuses and says how to repair it (`address --verify`
+    // repairs it, see `address_verify_repairs_a_tampered_cache_and_unlock_works_again`); a wrong
+    // password and a missing terminal still fail.
     poison_cache(&home);
     let msg = home
-        .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
+        .run_stdin(&["list", "--verify", "--password-stdin", "--json"], &pw)
         .err("VALIDATION_ERROR");
-    assert!(msg.contains("does not match"), "{msg}");
-    home.run_stdin(&["list", "--verify", "--password-stdin", "--json"], &pw)
-        .err("VALIDATION_ERROR");
+    assert!(
+        msg.contains("does not match the master seed")
+            && msg.contains("run `zwallet address --verify`"),
+        "{msg}"
+    );
     home.run_stdin(
         &["address", "--verify", "--password-stdin", "--json"],
         "not the password\n",
@@ -2614,8 +2630,25 @@ fn hand_edited_values_reach_the_terminal_escaped() {
                 r.stdout
             );
         }
-        assert!(r.stdout.contains("mallory"), "{}", r.stdout);
+        // The hand-edited entry is no nickname, address or chain `add` would write: each field
+        // shows as `<invalid>`, never its own text; the genuine entry shows as it is.
+        assert!(
+            r.stdout.contains("<invalid>") && r.stdout.contains("alice"),
+            "{}",
+            r.stdout
+        );
     }
+    // `--json` keeps every entry (no trimming) but escapes each string: the bidi override and the
+    // bell in the hand-edited entry come out as `\u{...}`, so every printed line is ASCII.
+    let r = home.run(&["whitelist", "list", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    let v = r.json();
+    assert_eq!(v["entries"].as_array().unwrap().len(), 2, "{v}");
+    let e = &v["entries"][1];
+    assert_eq!(e["nickname"], json!("mallory\\u{1b}[2J"), "{v}");
+    assert_eq!(e["address"], json!("0x6666\\u{202e}6666"), "{v}");
+    assert_eq!(e["chains"][0], json!("base\\u{7}"), "{v}");
 }
 
 #[test]
@@ -2720,7 +2753,8 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
         ],
     )
     .ok();
-    // Values from the file are escaped: a hand-edited nickname cannot drive the terminal.
+    // A hand-edited nickname that is not one `add` writes makes the file no list: the summary
+    // says it cannot be read, names the field, and never shows the value.
     let path = home.path().join("whitelist.json");
     let mut file: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     file["entries"].as_array_mut().unwrap().push(json!({
@@ -2735,11 +2769,16 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
         PW,
         &[
             "reset: a new whitelist key and an empty list",
-            "every entry is dropped: alice, router, \"mallory\\u{1b}[2J\"",
-            "not verified yet",
+            "every entry is dropped: whitelist.json is there but cannot be read, so its entries \
+             are unknown",
+            "not a whitelist file: the nickname of entry 3 is not in the shape zwallet writes",
         ],
     );
-    assert!(!r.stderr.contains('\u{1b}'), "{:?}", r.stderr);
+    assert!(
+        !r.stderr.contains('\u{1b}') && !r.stderr.contains("mallory"),
+        "{:?}",
+        r.stderr
+    );
     r.ok();
 }
 
@@ -3639,10 +3678,11 @@ fn s5_a_resigned_copy_is_other_code_so_it_is_not_verified() {
     if !session_verifies() {
         return; // The cdhash is only read on macOS.
     }
-    if !have("codesign") {
-        eprintln!("skipping s5: codesign not found");
-        return;
-    }
+    // macOS ships codesign: a missing one is a broken host, not a reason to pass silently.
+    assert!(
+        have("codesign"),
+        "s5 needs codesign, which ships with macOS"
+    );
     let home = Home::new();
     home.create("main", &[]);
     let dir = tempfile::Builder::new()
@@ -3744,18 +3784,57 @@ fn wait_until_answering(home: &Home, limit: Duration) {
 
 /// A tiny attacker: binds `$1/d.sock` and answers every request with an ok reply carrying the
 /// POISON address, from its own code. Built with `cc` in the test, so its cdhash and executable
-/// are not zwallet's.
+/// are not zwallet's. `ATTACKER_REPLY` replaces the whole reply (one JSON line), and
+/// `ATTACKER_NONDUMPABLE` makes it non-dumpable on Linux, as a genuine key daemon is, so its
+/// executable cannot be read and who answered is not known (`Unknown`).
 const ATTACKER_C: &str = r#"
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/time.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+/* When $ATTACKER_LOG is set, append a timestamped event (sub-second) so a flake can be read from
+   the log rather than guessed. Inert (one getenv) when the variable is unset. */
+static void logev(const char *ev, long n) {
+  const char *p = getenv("ATTACKER_LOG");
+  if (!p) return;
+  FILE *f = fopen(p, "a");
+  if (!f) return;
+  struct timeval tv; gettimeofday(&tv, 0);
+  fprintf(f, "%ld.%06d pid=%d %s %ld\n", (long)tv.tv_sec, (int)tv.tv_usec, (int)getpid(), ev, n);
+  fclose(f);
+}
+/* One connection, in its own process: read what the client sends (bounded by SO_RCVTIMEO so a
+   client that is slow to send its request or its EOF never blocks us), then answer. */
+static void handle(int s, const char *reply) {
+  struct timeval to; to.tv_sec = 2; to.tv_usec = 0;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+  char b[1024]; ssize_t n; long got = 0;
+  while ((n = read(s, b, sizeof b)) > 0) got += n;
+  logev(n == 0 ? "eof" : "read-stop", got);
+  size_t len = strlen(reply), off = 0;
+  while (off < len) { ssize_t w = write(s, reply + off, len - off); if (w <= 0) break; off += w; }
+  logev("replied", got);
+  shutdown(s, SHUT_WR); close(s);
+}
 int main(int argc, char **argv) {
   if (argc < 3) return 2;              /* argv: daemon --home <HOME> */
   signal(SIGPIPE, SIG_IGN);            /* a client that hangs up must not kill us mid-reply */
+  signal(SIGCHLD, SIG_IGN);            /* reap per-connection handlers, no zombies */
+#ifdef __linux__
+  if (getenv("ATTACKER_NONDUMPABLE")) prctl(PR_SET_DUMPABLE, 0);
+#endif
+  /* Release any descriptor inherited from the test (its captured stdout/stderr pipe, say) so
+     nothing waits on this process for EOF and no handler shares one. */
+  int dn = open("/dev/null", O_RDWR);
+  if (dn >= 0) { dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); }
   char path[512];
   snprintf(path, sizeof path, "%s/d.sock", argv[argc - 1]);
   unlink(path);
@@ -3763,26 +3842,43 @@ int main(int argc, char **argv) {
   struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
   strncpy(a.sun_path, path, sizeof a.sun_path - 1);
   if (bind(l, (struct sockaddr *)&a, sizeof a) || listen(l, 8)) return 3;
-  const char *reply =
-    "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":1,"
-    "\"expiresAt\":\"2099-01-01T00:00:00Z\",\"chain\":\"ethereum\",\"index\":0,"
-    "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n";
+  /* Its own pid, so `status` takes the reply as coming from a listed daemon process. The
+     expiry (JSON string text) and the whitelist (a JSON value) can be set from the environment. */
+  const char *exp = getenv("ATTACKER_EXPIRES");
+  if (!exp) exp = "2099-01-01T00:00:00Z";
+  const char *wl = getenv("ATTACKER_WHITELIST");
+  if (!wl) wl = "null";
+  const char *raw = getenv("ATTACKER_REPLY");
+  size_t cap = (raw ? strlen(raw) : strlen(exp) + strlen(wl)) + 512;
+  char *reply = malloc(cap);
+  if (!reply) return 4;
+  if (raw) snprintf(reply, cap, "%s\n", raw);
+  else snprintf(reply, cap,
+    "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
+    "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"ethereum\",\"index\":0,"
+    "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n",
+    (int)getpid(), exp, wl);
+  logev("listening", 0);
   for (;;) {
     int s = accept(l, 0, 0);
-    if (s < 0) continue;
-    char b[1024]; while (read(s, b, sizeof b) > 0) {}
-    write(s, reply, strlen(reply));
-    shutdown(s, SHUT_WR); close(s);
+    if (s < 0) { logev("accept-err", 0); continue; }
+    logev("accepted", 0);
+    /* Each connection is served in its own child, so a client that is slow on one connection
+       never keeps us from accepting and answering another. */
+    pid_t pid = fork();
+    if (pid == 0) { close(l); handle(s, reply); _exit(0); }
+    close(s);
   }
 }
 "#;
 
 #[test]
 fn s6_an_attacker_running_its_own_code_on_the_socket_is_not_verified() {
-    if !have("cc") {
-        eprintln!("skipping s6: cc not found");
-        return;
-    }
+    // rustc links with cc, so a host that built this test has it.
+    assert!(
+        have("cc"),
+        "s6 needs cc (rustc's linker) to build its attacker"
+    );
     let home = Home::new();
     home.create("main", &[]);
     // The cache is edited to the attacker's address: a daemon-vs-cache mismatch would hide the
@@ -3872,7 +3968,10 @@ fn every_balance_aborts_on_a_cache_mismatch_even_with_good_rows() {
     let v = out.json();
     assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
     assert!(
-        v["error"].as_str().unwrap_or("").contains("does not match"),
+        v["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains(genuine_daemon_mismatch()),
         "{v}"
     );
     // The good row really is good: the same node serves `balance --chain ethereum`.
@@ -3915,14 +4014,262 @@ fn a_mismatch_answered_by_an_impostor_aborts_and_names_it() {
         let v = out.json();
         assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{args:?}: {v}");
         let msg = v["error"].as_str().unwrap_or("");
+        // It does not present the impostor's answer as the seed's derivation, nor blame the cache.
         assert!(
-            msg.contains("does not match") && msg.contains(want) && msg.contains(&pid),
-            "{args:?}: {v}"
+            !msg.contains("the cache was modified") && !msg.contains("derives from the seed"),
+            "{args:?}: {msg}"
+        );
+        for part in [
+            format!(
+                "the process answering on the key daemon socket reported {POISON} as the \
+                 ethereum address of key 'main', but wallet.json caches 0x"
+            ),
+            ": one of them was tampered with. Do not send funds to either address; run \
+             `zwallet address --verify`"
+                .to_string(),
+            ". That process is not this build's key daemon: ".to_string(),
+            want.to_string(),
+            pid.clone(),
+        ] {
+            assert!(msg.contains(&part), "{args:?}: missing {part:?} in {msg}");
+        }
+        // The relock advice once, worded as in the warning.
+        assert_eq!(
+            msg.matches("and unlock again").count(),
+            1,
+            "{args:?}: {msg}"
+        );
+        assert!(
+            msg.ends_with("run `zwallet lock` and unlock again"),
+            "{msg}"
         );
         let w = v["warning"].as_str().unwrap_or("");
         assert!(w.contains(want) && w.contains(&pid), "{args:?}: {v}");
     }
     drop(fake);
+}
+
+/// Whether `value` (one value from outside, on one line) is printable ASCII only: [`common::
+/// ascii_printable`], which does NOT exempt `\n`, so an injected line break fails it.
+fn inert(value: &str) -> bool {
+    common::ascii_printable(value)
+}
+
+/// Whether every byte of a whole output is printable ASCII or the `\n` separator. Split on `\n`
+/// only (not `str::lines`, which would also eat a `\r` before it). Pair it with a line-count
+/// assertion so an injected line break cannot pass as another output line.
+fn inert_output(text: &str) -> bool {
+    text.split('\n').all(common::ascii_printable)
+}
+
+#[test]
+fn an_answer_that_is_no_address_is_rejected_and_shown_escaped() {
+    // An impostor answers a terminal escape and a fake second line where an address belongs: it
+    // is never shown, compared or verified as an address, and the error shows it escaped, in
+    // `--json` and in the human error alike.
+    let home = Home::new();
+    home.create("main", &[]);
+    let evil = "\u{1b}[2J\nwarning: all good, send funds";
+    let fake = FakeDaemon::answering(
+        &home.sock(),
+        serde_json::json!({
+            "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z",
+            "chain": "ethereum", "index": 0, "active": "main", "address": evil,
+        }),
+    );
+    let closed: Vec<(String, String)> = chains::CHAINS
+        .iter()
+        .map(|c| (c.rpc_env_var(), "http://127.0.0.1:1".to_string()))
+        .collect();
+    let closed: Vec<(&str, &str)> = closed
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    // `balance` too: an answer that is no address is tampering, not a network row.
+    for args in [
+        &["address", "--json"][..],
+        &["addresses", "--json"],
+        &["change", "main", "--json"],
+        &["balance", "--json"],
+    ] {
+        let out = home.run_env(args, &closed);
+        assert_eq!(out.code, 1, "{args:?}: {}", out.stdout);
+        let v = out.json();
+        assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{args:?}: {v}");
+        assert!(
+            v.get("address").is_none() && v.get("verified").is_none(),
+            "{v}"
+        );
+        let msg = v["error"].as_str().unwrap_or("");
+        assert!(msg.contains("which is not an address"), "{args:?}: {msg}");
+        assert!(
+            v["warning"].is_string(),
+            "{args:?}: the impostor is named: {v}"
+        );
+        assert!(inert(msg), "{args:?}: {msg:?}");
+        assert!(
+            msg.contains("\\u{1b}") && msg.contains("\\u{a}"),
+            "{args:?}: {msg:?}"
+        );
+    }
+    // Human: one error line on stderr, nothing on stdout, no raw control character.
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 1);
+    assert!(human.stdout.is_empty(), "{:?}", human.stdout);
+    assert!(inert_output(&human.stderr), "{:?}", human.stderr);
+    assert_eq!(
+        human.stderr.trim_end().lines().count(),
+        1,
+        "{:?}",
+        human.stderr
+    );
+    drop(fake);
+}
+
+#[test]
+fn a_cached_value_that_is_no_address_is_rejected_and_shown_escaped() {
+    // wallet.json is anyone's to edit: a cached "address" carrying a terminal escape is never
+    // printed as one, locked or unlocked. (Editing the cache does not end a session: the daemon
+    // watches only the sealed master.)
+    let home = Home::new();
+    home.create("main", &[]);
+    let genuine = fs::read(home.wallet_json()).unwrap();
+    let garbage = "\u{1b}]0;pwned\u{7}\n0xabc";
+    for unlocked in [false, true] {
+        if unlocked {
+            fs::write(home.wallet_json(), &genuine).unwrap();
+            home.unlock("10m");
+        }
+        home.edit_wallet(|v| v["keys"][0]["addresses"]["ethereum"] = serde_json::json!(garbage));
+        for args in [
+            &["address", "--json"][..],
+            &["status", "--json"],
+            &["list", "--json"],
+        ] {
+            let msg = home.run(args).err("VALIDATION_ERROR");
+            assert!(
+                msg.contains("which is not an address"),
+                "unlocked {unlocked} {args:?}: {msg}"
+            );
+            assert!(inert(&msg), "{args:?}: {msg:?}");
+        }
+        let human = home.run(&["address"]);
+        assert_eq!(human.code, 1);
+        assert!(inert_output(&human.stderr), "{:?}", human.stderr);
+    }
+}
+
+/// Builds [`ATTACKER_C`] at `bin` with `cc`.
+fn build_attacker(src_dir: &std::path::Path, bin: &std::path::Path) {
+    let src = src_dir.join("attacker.c");
+    fs::write(&src, ATTACKER_C).unwrap();
+    let cc = std::process::Command::new("cc")
+        .arg("-o")
+        .arg(bin)
+        .arg(&src)
+        .output()
+        .expect("run cc");
+    assert!(
+        cc.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+}
+
+#[test]
+fn an_impostor_executable_path_is_shown_escaped() {
+    // The warning names the impostor's executable path, which its starter chose: a terminal
+    // escape and a line break in it come out escaped, in `--json` and on the terminal alike.
+    assert!(
+        have("cc"),
+        "needs cc (rustc's linker) to build the attacker"
+    );
+    let home = Home::new();
+    home.create("main", &[]);
+    // The cache is set to the attacker's answer, so the command shows its warning, not a mismatch.
+    poison_cache(&home);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let bin = dir.path().join("zw\u{1b}[31mallet\nfake line");
+    build_attacker(dir.path(), &bin);
+    let canonical = fs::canonicalize(home.path()).unwrap();
+    let _attacker = KillOnDrop(
+        std::process::Command::new(&bin)
+            .arg("daemon")
+            .arg("--home")
+            .arg(&canonical)
+            .spawn()
+            .expect("spawn attacker"),
+    );
+    wait_until_answering(&home, Duration::from_secs(15));
+    let v = home.run(&["address", "--json"]).ok();
+    assert_eq!(v["verified"], false, "{v}");
+    let w = v["warning"].as_str().unwrap_or("");
+    assert!(w.contains("zw\\u{1b}[31mallet\\u{a}fake line"), "{w:?}");
+    assert!(inert(w), "{w:?}");
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(inert_output(&human.stdout), "{:?}", human.stdout);
+    let warning_lines: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("warning: "))
+        .collect();
+    assert_eq!(warning_lines.len(), 1, "{:?}", human.stdout);
+    assert!(!human.stdout.contains("\nfake line"), "{:?}", human.stdout);
+}
+
+#[test]
+fn status_names_a_daemon_argv_impostor_that_contradicts_the_cache() {
+    // `status` derives only through a daemon the process table lists that says it serves this
+    // session. An impostor started with the daemon's argv is listed and says so (its own pid);
+    // answering an address the genuine cache contradicts, it makes `status` abort, named.
+    assert!(
+        have("cc"),
+        "needs cc (rustc's linker) to build the attacker"
+    );
+    let home = Home::new();
+    home.create("main", &[]);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let bin = dir.path().join("attacker");
+    build_attacker(dir.path(), &bin);
+    let canonical = fs::canonicalize(home.path()).unwrap();
+    let attacker = KillOnDrop(
+        std::process::Command::new(&bin)
+            .arg("daemon")
+            .arg("--home")
+            .arg(&canonical)
+            .spawn()
+            .expect("spawn attacker"),
+    );
+    let pid = format!("(pid {})", attacker.0.id());
+    wait_until_answering(&home, Duration::from_secs(15));
+    assert!(home.daemon_pids().contains(&(attacker.0.id() as i32)));
+    let want = if session_verifies() {
+        "runs other code than this zwallet build"
+    } else {
+        "is not this zwallet build"
+    };
+    let out = home.run(&["status", "--json"]);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    let v = out.json();
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
+    let msg = v["error"].as_str().unwrap_or("");
+    assert!(
+        msg.contains(&format!(
+            "reported {POISON} as the ethereum address of key 'main'"
+        )),
+        "{msg}"
+    );
+    assert!(msg.contains(want) && msg.contains(&pid), "{msg}");
+    assert!(!msg.contains("the cache was modified"), "{msg}");
+    let w = v["warning"].as_str().unwrap_or("");
+    assert!(w.contains(want) && w.contains(&pid), "{v}");
 }
 
 /// The LC_UUID of a thin little-endian 64-bit Mach-O (what `cargo` and `cc` emit for the host on
@@ -4063,4 +4410,1355 @@ fn s7_own_code_behind_a_symlink_to_zwallet_with_its_uuid_is_not_verified() {
             .contains("runs other code than this zwallet build"),
         "{v}"
     );
+}
+
+/// Starts [`ATTACKER_C`] (built into `dir`) as a daemon-argv impostor for `home`, with `env`
+/// set, and waits until it answers.
+fn daemon_argv_impostor(home: &Home, dir: &std::path::Path, env: &[(&str, &str)]) -> KillOnDrop {
+    assert!(
+        have("cc"),
+        "needs cc (rustc's linker) to build the attacker"
+    );
+    let bin = dir.join("attacker");
+    build_attacker(dir, &bin);
+    let canonical = fs::canonicalize(home.path()).unwrap();
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("daemon").arg("--home").arg(&canonical);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let attacker = KillOnDrop(cmd.spawn().expect("spawn attacker"));
+    wait_until_answering(home, Duration::from_secs(15));
+    attacker
+}
+
+#[test]
+fn list_never_blames_the_cache_for_an_impostor_answer() {
+    // `list` compares the cache with what answers on d.sock too. An impostor answering another
+    // address than the genuine cache is no derivation from the seed: the error must not say the
+    // cache was modified, and it names the impostor.
+    let home = Home::new();
+    home.create("main", &[]);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let attacker = daemon_argv_impostor(&home, dir.path(), &[]);
+    let v = home.run(&["list", "--json"]).json();
+    assert_eq!(v["errorCode"], "VALIDATION_ERROR", "{v}");
+    let msg = v["error"].as_str().unwrap_or("");
+    assert!(
+        !msg.contains("derives from the seed") && !msg.contains("cache was modified"),
+        "{msg}"
+    );
+    assert!(msg.contains("one of them was tampered with"), "{msg}");
+    assert!(
+        msg.contains(&format!("(pid {})", attacker.0.id())),
+        "the impostor is named: {msg}"
+    );
+}
+
+#[test]
+fn an_impostor_error_reply_is_named_escaped_and_on_one_line() {
+    // An impostor answers with ok:false, its error text drawing a fake verified address on the
+    // terminal (CR, erase line, new lines, then hiding the rest), and a fake `command` detail.
+    // Its text comes out escaped and on one line, after the line naming it; its details are
+    // dropped.
+    let home = Home::new();
+    home.create("main", &[]);
+    let forged = "\r\u{1b}[2Kaddress: 0x000000000000000000000000000000000000dEaD\nverified: \
+                  true\nverifiedBy: session\nscan to send to 0xdEaD\n\u{2588}\u{2588}\u{1b}[8m";
+    let fake = FakeDaemon::replying(
+        &home.sock(),
+        serde_json::json!({
+            "v": 2, "ok": false, "errorCode": "RPC_ERROR", "error": forged,
+            "details": { "command": "zwallet whitelist add x 0xdEaD\n\u{1b}[8m" },
+        }),
+    );
+    let out = home.run(&["address", "--json"]);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    let v = out.json();
+    let msg = v["error"].as_str().unwrap_or("");
+    assert!(inert(msg), "{msg:?}");
+    assert!(
+        msg.starts_with(&format!(
+            "the process answering on the key daemon socket (pid {})",
+            std::process::id()
+        )) && msg.contains(", and it reported: \\u{d}\\u{1b}[2Kaddress: 0x"),
+        "{msg}"
+    );
+    assert!(
+        v.get("command").is_none(),
+        "an impostor's details are dropped: {v}"
+    );
+    assert!(v["warning"].is_string(), "{v}");
+    // Human: exactly one line on stderr, nothing on stdout, no terminal control.
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 1);
+    assert!(human.stdout.is_empty(), "{:?}", human.stdout);
+    assert!(inert_output(&human.stderr), "{:?}", human.stderr);
+    assert_eq!(human.stderr.lines().count(), 1, "{:?}", human.stderr);
+    assert!(!human.stderr.contains("command:"), "{:?}", human.stderr);
+    drop(fake);
+}
+
+#[test]
+fn a_key_name_with_a_control_character_is_refused() {
+    // Key names reach messages and output: wallet.json may only hold names `create` accepts.
+    let home = Home::new();
+    home.create("main", &[]);
+    let genuine = fs::read(home.wallet_json()).unwrap();
+    for edit in ["name", "active"] {
+        fs::write(home.wallet_json(), &genuine).unwrap();
+        home.edit_wallet(|v| {
+            let evil = serde_json::json!("ma\u{1b}[2J\nin");
+            if edit == "name" {
+                v["keys"][0]["name"] = evil.clone();
+            }
+            v["active"] = evil;
+        });
+        for args in [&["address", "--json"][..], &["list", "--json"]] {
+            let msg = home.run(args).err("VALIDATION_ERROR");
+            assert!(msg.contains("invalid key name"), "{edit} {args:?}: {msg}");
+            assert!(inert(&msg), "{msg:?}");
+        }
+        let human = home.run(&["list"]);
+        assert!(inert_output(&human.stderr), "{:?}", human.stderr);
+    }
+}
+
+#[test]
+fn status_shows_an_impostor_expiry_and_whitelist_escaped() {
+    // `status` relays the serving daemon's expiry and whitelist. A daemon-argv impostor (so
+    // `status` takes it as serving) sets both to terminal escapes: they come out escaped, in
+    // `--json` and on the terminal.
+    let home = Home::new();
+    home.create("main", &[]);
+    // The cache agrees with the impostor's answer, so `status` shows rather than aborts.
+    poison_cache(&home);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let _attacker = daemon_argv_impostor(
+        &home,
+        dir.path(),
+        &[
+            ("ATTACKER_EXPIRES", "2099\\u001b[2J\\u001b]0;x\\u0007"),
+            (
+                "ATTACKER_WHITELIST",
+                "{\"gen\":1,\"verified\":true,\"entries\":[\"ev\\u001b[31mil\",\"\\u202e\\u009b\"]}",
+            ),
+        ],
+    );
+    let v = home.run(&["status", "--json"]).ok();
+    let expires = v["expiresAt"].as_str().unwrap_or("");
+    assert!(inert(expires) && expires.contains("\\u{1b}[2J"), "{v}");
+    let entries = v["whitelist"]["entries"].to_string();
+    assert!(
+        !entries.contains('\u{1b}') && !entries.contains('\u{202e}') && !entries.contains('\u{9b}'),
+        "{v}"
+    );
+    let human = home.run(&["status"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    for c in ['\u{1b}', '\u{7}', '\u{202e}', '\u{9b}'] {
+        assert!(!human.stdout.contains(c), "{c:?} in {:?}", human.stdout);
+    }
+}
+
+#[test]
+fn address_verify_repairs_a_tampered_cache_and_unlock_works_again() {
+    // With the password the seed is authoritative: a garbage cache value and a wrong address
+    // both stop unlock (which says how to repair), and `address --verify` repairs them from the
+    // seed, saying so in `repaired` and a warning. Then unlock works.
+    let pw = format!("{PW}\n");
+    for garbage in [true, false] {
+        let home = Home::new();
+        let addr = home.create("main", &[])["address"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let was = if garbage {
+            home.edit_wallet(|v| {
+                v["keys"][0]["addresses"]["ethereum"] =
+                    serde_json::json!("\u{1b}]0;pwned\u{7}\n0xabc")
+            });
+            "\u{1b}]0;pwned\u{7}\n0xabc".to_string()
+        } else {
+            poison_cache(&home);
+            POISON.to_string()
+        };
+        for args in [
+            &["unlock", "10m", "--password-stdin", "--json"][..],
+            &["list", "--verify", "--password-stdin", "--json"],
+            &[
+                "whitelist",
+                "list",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
+        ] {
+            let msg = home.run_stdin(args, &pw).err("VALIDATION_ERROR");
+            assert!(
+                msg.contains("run `zwallet address --verify` to check the cache against the seed"),
+                "{args:?}: {msg}"
+            );
+        }
+        let v = home
+            .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
+            .ok();
+        assert_eq!(
+            (&v["address"], &v["verified"]),
+            (&json!(addr), &json!(true)),
+            "{v}"
+        );
+        let repaired = v["repaired"].as_array().unwrap_or_else(|| panic!("{v}"));
+        let eth = repaired
+            .iter()
+            .find(|r| r["chain"] == "ethereum")
+            .unwrap_or_else(|| panic!("{v}"));
+        assert_eq!((&eth["key"], &eth["now"]), (&json!("main"), &json!(addr)));
+        let shown_was = eth["was"].as_str().unwrap();
+        assert!(inert(shown_was), "{v}");
+        if !garbage {
+            assert_eq!(shown_was, was);
+            assert_eq!(repaired.len(), chains::CHAINS.len(), "{v}");
+        }
+        assert!(
+            v["warning"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Something modified wallet.json"),
+            "{v}"
+        );
+        // The human form says so too, with nothing raw (tampered again for it).
+        home.edit_wallet(|v| v["keys"][0]["addresses"]["ethereum"] = serde_json::json!(was));
+        let human = home.run_stdin(&["address", "--verify", "--password-stdin"], &pw);
+        assert_eq!(human.code, 0, "{}", human.stderr);
+        assert!(
+            human.stdout.contains("repaired: ")
+                && human.stdout.contains("Something modified wallet.json"),
+            "{}",
+            human.stdout
+        );
+        assert!(inert_output(&human.stdout), "{:?}", human.stdout);
+        // Repaired once: the next check finds nothing, and unlock works.
+        let again = home
+            .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
+            .ok();
+        assert!(again.get("repaired").is_none(), "{again}");
+        assert_eq!(home.unlock("10m")["address"], addr.as_str());
+        home.stop_daemons();
+    }
+}
+
+/// `s` ABI-encoded as one `string` return value.
+fn abi_string(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut hex = format!("{:064x}{:064x}", 32, b.len());
+    let mut data: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    while !data.len().is_multiple_of(64) {
+        data.push('0');
+    }
+    hex.push_str(&data);
+    format!("0x{hex}")
+}
+
+/// What a node or a contract writes to draw a fake line on a terminal.
+const FORGED: &str = "\r\u{1b}[2Kbalance: 999 ETH\nverified: true\u{9b}\u{202e}\u{1b}[8m";
+
+#[test]
+fn rpc_text_reaches_human_output_escaped_and_on_one_line() {
+    // An RPC endpoint is anyone's: `--rpc` and ZWALLET_RPC_* can name any server. Its error text
+    // and a contract's `symbol()` are escaped where zwallet builds the error or the output, so
+    // `--json` and the terminal get the same inert text.
+    let token = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    // 1. A JSON-RPC error message (and its data) from the node.
+    let failing = common::tiny_rpc_reply(|method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        _ => Err(json!({ "code": -32000, "message": FORGED, "data": FORGED })),
+    });
+    let nowallet = Home::new();
+    let call = [
+        "call",
+        "--chain",
+        "ethereum",
+        "--to",
+        token,
+        "--sig",
+        "name()(string)",
+        "--rpc",
+    ];
+    let mut args = call.to_vec();
+    args.extend([failing.as_str(), "--json"]);
+    let msg = nowallet.run(&args).err("RPC_ERROR");
+    assert!(msg.starts_with("eth_call failed: "), "{msg}");
+    assert!(inert(&msg), "{msg:?}");
+    assert!(
+        !msg.contains('\u{9b}') && !msg.contains('\u{202e}'),
+        "{msg:?}"
+    );
+    assert!(
+        msg.contains("\\u{d}\\u{1b}[2Kbalance: 999 ETH\\u{a}verified: true"),
+        "{msg}"
+    );
+    args.pop();
+    let human = nowallet.run(&args);
+    assert_eq!(human.code, 1);
+    assert!(inert_output(&human.stderr), "{:?}", human.stderr);
+    assert_eq!(human.stderr.lines().count(), 1, "{:?}", human.stderr);
+    // 2. A token whose `symbol()` is a terminal escape.
+    let home = Home::new();
+    home.create("main", &[]);
+    let symbol_node = common::tiny_rpc_reply(|method, params| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        "eth_call" => {
+            let tx = &params[0];
+            let data = tx["input"].as_str().or(tx["data"].as_str()).unwrap_or("");
+            Ok(json!(match &data[..10.min(data.len())] {
+                "0x313ce567" => format!("0x{:064x}", 6),
+                "0x95d89b41" => abi_string(FORGED),
+                _ => format!("0x{:064x}", 5),
+            }))
+        }
+        _ => Ok(json!("0x0")),
+    });
+    let b = [
+        "balance",
+        "--chain",
+        "ethereum",
+        "--token",
+        token,
+        "--rpc",
+        &symbol_node,
+    ];
+    let mut json_args = b.to_vec();
+    json_args.push("--json");
+    let v = home.run(&json_args).ok();
+    let sym = v["symbol"].as_str().unwrap_or("");
+    assert!(inert(sym) && !sym.contains('\u{202e}'), "{v}");
+    assert!(sym.starts_with("\\u{d}\\u{1b}[2Kbalance"), "{v}");
+    let human = home.run(&b);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(inert_output(&human.stdout), "{:?}", human.stdout);
+    assert!(
+        !human
+            .stdout
+            .lines()
+            .any(|l| l.starts_with("verified: true")),
+        "{:?}",
+        human.stdout
+    );
+}
+
+#[test]
+fn a_registry_tokens_recorded_symbol_shows_as_itself_and_any_other_is_escaped() {
+    // USDT0 on Arbitrum answers `symbol()` with `USD₮0`, which the registry records: shown as is.
+    // The same text from a contract not in the registry, or anything else from the registry's
+    // address, is text from outside: escaped to printable ASCII.
+    let usdt0 = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9";
+    let other = "0x1111111111111111111111111111111111111111";
+    let home = Home::new();
+    home.create("main", &[]);
+    let symbol_of = |token: &str, symbol: &'static str| {
+        let node = common::tiny_rpc_reply(move |method, params| match method {
+            "eth_chainId" => Ok(json!("0xa4b1")),
+            "eth_call" => {
+                let tx = &params[0];
+                let data = tx["input"].as_str().or(tx["data"].as_str()).unwrap_or("");
+                Ok(json!(match &data[..10.min(data.len())] {
+                    "0x313ce567" => format!("0x{:064x}", 6),
+                    "0x95d89b41" => abi_string(symbol),
+                    _ => format!("0x{:064x}", 5),
+                }))
+            }
+            _ => Ok(json!("0x0")),
+        });
+        let v = home
+            .run(&[
+                "balance", "--chain", "arbitrum", "--token", token, "--rpc", &node, "--json",
+            ])
+            .ok();
+        v["symbol"].as_str().unwrap_or("").to_string()
+    };
+    assert_eq!(symbol_of(usdt0, "USD\u{20ae}0"), "USD\u{20ae}0");
+    assert_eq!(symbol_of(other, "USD\u{20ae}0"), "USD\\u{20ae}0");
+    assert_eq!(
+        symbol_of(usdt0, "USD\u{20ae}0\u{1b}[2J"),
+        "USD\\u{20ae}0\\u{1b}[2J"
+    );
+}
+
+#[test]
+fn the_write_point_escapes_text_no_source_escaped() {
+    // `status` prints the wallet home's path as it is: no source escapes it. A home named with
+    // ESC, CR and a solid glyph still reaches the terminal as printable ASCII, on one line,
+    // because every human write goes through the write point.
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = dir.path().join("h\u{1b}[2J\r\u{2b1b}");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    let out = common::run_in(&home, &["status"], None, &[]);
+    assert_eq!(out.code, 0, "{:?}", out.stderr);
+    assert!(inert_output(&out.stdout), "{:?}", out.stdout);
+    let line: Vec<&str> = out
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("home: "))
+        .collect();
+    assert_eq!(line.len(), 1, "{:?}", out.stdout);
+    assert!(
+        line[0].ends_with("/h\\u{1b}[2J\\u{d}\\u{2b1b}"),
+        "{:?}",
+        line[0]
+    );
+}
+
+#[test]
+fn call_json_is_ascii_on_the_wire_and_parses_back_to_the_contracts_exact_string() {
+    // `--json` keeps a contract's string exactly, but the bytes printed are printable ASCII (and
+    // the newlines of pretty printing): solid glyphs, an octant, C1 CSI and DEL go out as JSON
+    // `\uXXXX` escapes, which a parser turns back into the same string.
+    let s = "\u{2b1b}\u{2b1c}\u{1cd00}\u{9b}2J\u{7f}\u{1b}[2J USD\u{20ae}0";
+    let encoded = abi_string(s);
+    let node = common::tiny_rpc_reply(move |method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        "eth_call" => Ok(json!(encoded.clone())),
+        _ => Ok(json!("0x0")),
+    });
+    let home = Home::new();
+    let out = home.run(&[
+        "call",
+        "--chain",
+        "ethereum",
+        "--to",
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "--sig",
+        "name()(string)",
+        "--rpc",
+        &node,
+        "--json",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout
+            .bytes()
+            .all(|b| b == b'\n' || (0x20..=0x7e).contains(&b)),
+        "{:?}",
+        out.stdout
+    );
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["result"], json!([s]), "the exact string, after parsing");
+}
+
+#[test]
+fn a_call_string_result_is_faithful_in_json_and_escaped_on_the_terminal() {
+    // `call` decodes what the caller asked for: `--json` keeps the contract's string exactly
+    // (JSON encodes its control characters), the human text shows it escaped and on one line.
+    let node = common::tiny_rpc_reply(|method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        "eth_call" => Ok(json!(abi_string(FORGED))),
+        _ => Ok(json!("0x0")),
+    });
+    let home = Home::new();
+    let args = [
+        "call",
+        "--chain",
+        "ethereum",
+        "--to",
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "--sig",
+        "name()(string)",
+        "--rpc",
+        &node,
+    ];
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let v = home.run(&json_args).ok();
+    assert_eq!(v["result"], json!([FORGED]), "{v}");
+    let human = home.run(&args);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(inert_output(&human.stdout), "{:?}", human.stdout);
+    assert!(!human.stdout.contains('\u{9b}') && !human.stdout.contains('\u{202e}'));
+    let result: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("result: "))
+        .collect();
+    assert_eq!(result.len(), 1, "{:?}", human.stdout);
+    assert!(
+        !human
+            .stdout
+            .lines()
+            .any(|l| l.starts_with("verified: true")),
+        "{:?}",
+        human.stdout
+    );
+}
+
+/// Kilobytes of padding, then rows of half blocks, then a fake label: what a sender writes to
+/// draw a QR code of its own address by letting the terminal soft-wrap one long line.
+fn qr_by_wrapping() -> String {
+    let row = "\u{2588}\u{2580}\u{2584} ".repeat(20);
+    format!(
+        "{}{}scan to send to 0x000000000000000000000000000000000000dEaD",
+        " ".repeat(4000),
+        format!("{row}\n").repeat(30)
+    )
+}
+
+#[test]
+fn a_long_relayed_error_is_cut_and_draws_nothing_and_its_code_shows() {
+    // An impostor's ok:false reply padded to draw a QR code by soft-wrap: the message and its
+    // detail come out cut and with no block character, on one line ending in the code.
+    let home = Home::new();
+    home.create("main", &[]);
+    let payload = qr_by_wrapping();
+    let fake = FakeDaemon::replying(
+        &home.sock(),
+        serde_json::json!({
+            "v": 2, "ok": false, "errorCode": "RPC_ERROR", "error": payload,
+            "details": { "command": payload },
+        }),
+    );
+    let v = home.run(&["address", "--json"]).json();
+    let msg = v["error"].as_str().unwrap_or("");
+    assert!(inert(msg), "{:?}", &msg[..200]);
+    assert!(msg.chars().count() < 1200, "{}", msg.chars().count());
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 1);
+    let line = human.stderr.trim_end();
+    assert_eq!(line.lines().count(), 1, "{:?}", &line[..200]);
+    assert!(
+        line.starts_with("error: ") && line.ends_with(" [RPC_ERROR]"),
+        "{:?}",
+        &line[line.len() - 80..]
+    );
+    assert!(line.chars().count() < 1250, "{}", line.chars().count());
+    assert!(inert(line), "{:?}", &line[..200]);
+    drop(fake);
+}
+
+#[test]
+fn a_relayed_error_of_solid_glyphs_draws_nothing() {
+    // Glyphs an earlier blacklist missed — ⬛⬜ (U+2B1B/2B1C), a sextant (U+1FB00) and an octant
+    // (U+1CD00) — would tile a QR on a terminal as well as the old block elements. The allowlist
+    // escapes every one, so `--json` and the human line are printable ASCII, on one line.
+    let home = Home::new();
+    home.create("main", &[]);
+    let payload = format!(
+        "{}{}{}",
+        "\u{2b1b}\u{2b1c} ".repeat(400),
+        "\u{1fb00}".repeat(200),
+        "\u{1cd00}".repeat(200)
+    );
+    let fake = FakeDaemon::replying(
+        &home.sock(),
+        serde_json::json!({
+            "v": 2, "ok": false, "errorCode": "RPC_ERROR", "error": payload,
+            "details": { "command": payload },
+        }),
+    );
+    let v = home.run(&["address", "--json"]).json();
+    let msg = v["error"].as_str().unwrap_or("");
+    assert!(inert(msg), "{:?}", msg.chars().take(80).collect::<String>());
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 1);
+    let line = human.stderr.trim_end();
+    assert_eq!(
+        line.lines().count(),
+        1,
+        "{:?}",
+        line.chars().take(120).collect::<String>()
+    );
+    assert!(
+        inert_output(line),
+        "{:?}",
+        line.chars().take(120).collect::<String>()
+    );
+    drop(fake);
+}
+
+#[test]
+fn a_squatters_array_and_object_details_are_dropped_and_its_error_is_bounded() {
+    // A squatter on d.sock that a check cannot tell from a key daemon (on Linux a non-dumpable
+    // process, `Unknown`) keeps its scalar details; an array of 64 strings of 256 characters and
+    // an object of them are dropped, so neither `--json` nor the terminal gets ~16K characters.
+    // On macOS the attacker runs other code (`Other`): every detail is dropped there anyway.
+    let home = Home::new();
+    home.create("main", &[]);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let reply = json!({
+        "v": 2, "ok": false, "errorCode": "WHITELIST_DENIED", "error": "refused",
+        "details": {
+            "command": "zwallet whitelist add x 0xdEaD",
+            "counterparty": vec!["A".repeat(256); 64],
+            "chain": { "k": vec!["B".repeat(256); 64] },
+        },
+    })
+    .to_string();
+    let _attacker = daemon_argv_impostor(
+        &home,
+        dir.path(),
+        &[("ATTACKER_REPLY", &reply), ("ATTACKER_NONDUMPABLE", "1")],
+    );
+    let out = home.run(&["address", "--json"]);
+    let head = |s: &str| s.chars().take(300).collect::<String>();
+    assert_eq!(out.code, 1, "{}", head(&out.stdout));
+    let v = out.json();
+    assert!(
+        v.get("counterparty").is_none() && v.get("chain").is_none(),
+        "{}",
+        head(&out.stdout)
+    );
+    assert!(out.stdout.len() < 1500, "{}", out.stdout.len());
+    assert!(inert_output(&out.stdout), "{}", head(&out.stdout));
+    #[cfg(target_os = "linux")]
+    {
+        // Not known who answered: the neutral prefix, and the scalar detail kept.
+        let msg = v["error"].as_str().unwrap_or("");
+        assert!(
+            msg.starts_with("the process answering on the key daemon socket reported: refused"),
+            "{msg}"
+        );
+        assert_eq!(v["command"], "zwallet whitelist add x 0xdEaD", "{v}");
+    }
+    let human = home.run(&["address"]);
+    assert_eq!(human.code, 1);
+    assert!(human.stdout.is_empty(), "{:?}", head(&human.stdout));
+    assert!(human.stderr.len() < 1500, "{}", human.stderr.len());
+    assert!(human.stderr.lines().count() <= 2, "{}", head(&human.stderr));
+    assert!(inert_output(&human.stderr), "{}", head(&human.stderr));
+}
+
+#[test]
+fn status_bounds_a_nested_whitelist_on_the_terminal_and_keeps_every_entry_in_json() {
+    // `status` relays the serving daemon's whitelist. A daemon-argv impostor answers 200 entries
+    // of solid glyphs and a long reason: `--json` keeps all 200, each escaped, with the reason cut;
+    // the terminal gets one inert `whitelist:` line of at most the prose budget.
+    let home = Home::new();
+    home.create("main", &[]);
+    poison_cache(&home);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let entries: Vec<String> = (0..200)
+        .map(|i| format!("n{i:03}{}", "\u{2b1b}\u{2b1c}".repeat(30)))
+        .collect();
+    let whitelist = json!({
+        "gen": 1, "verified": false, "entries": entries, "reason": "\u{1cd00}".repeat(5000),
+    })
+    .to_string();
+    let _attacker = daemon_argv_impostor(&home, dir.path(), &[("ATTACKER_WHITELIST", &whitelist)]);
+    let head = |s: &str| s.chars().take(300).collect::<String>();
+    let out = home.run(&["status", "--json"]);
+    assert_eq!(out.code, 0, "{}", head(&out.stdout));
+    assert!(inert_output(&out.stdout), "{}", head(&out.stdout));
+    let v = out.json();
+    let shown = v["whitelist"]["entries"].as_array().unwrap();
+    assert_eq!(shown.len(), 200, "every entry is kept in --json");
+    assert_eq!(
+        shown[7],
+        json!(format!("n007{}", "\\u{2b1b}\\u{2b1c}".repeat(30)))
+    );
+    let reason = v["whitelist"]["reason"].as_str().unwrap_or("");
+    assert!(reason.chars().count() <= 512 + 8, "{}", reason.len());
+    let human = home.run(&["status"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(inert_output(&human.stdout), "{}", head(&human.stdout));
+    let lines: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("whitelist"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{}", head(&human.stdout));
+    assert!(
+        lines[0].chars().count() <= "whitelist: ".len() + 512 + 8,
+        "{}",
+        lines[0].chars().count()
+    );
+}
+
+#[test]
+fn status_shows_a_whitelist_that_is_a_string_as_one_bounded_line() {
+    // A daemon-argv impostor answers `status` with a JSON string where the whitelist object
+    // belongs: 6000 characters of `#` and space, laid out to fill the human's terminal rows. It
+    // becomes one inert string of at most the prose budget, on the terminal and in `--json`.
+    let home = Home::new();
+    home.create("main", &[]);
+    poison_cache(&home);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let whitelist = serde_json::to_string(&"## ".repeat(2000)).unwrap();
+    let _attacker = daemon_argv_impostor(&home, dir.path(), &[("ATTACKER_WHITELIST", &whitelist)]);
+    let human = home.run(&["status"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(inert_output(&human.stdout), "{}", human.stdout);
+    let lines: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("whitelist: "))
+        .collect();
+    assert_eq!(lines.len(), 1, "{}", human.stdout);
+    assert!(
+        lines[0].len() <= "whitelist: ".len() + 512,
+        "{}",
+        lines[0].len()
+    );
+    let v = home.run(&["status", "--json"]).ok();
+    let w = v["whitelist"].as_str().unwrap_or_default();
+    assert!(!w.is_empty() && w.len() <= 512, "{}", v["whitelist"]);
+}
+
+#[test]
+fn whitelist_list_shows_a_file_that_is_no_list_within_one_budget_and_draws_nothing() {
+    // whitelist.json is anyone's to write. As `{"entries": [29 rows of `#` and space]}` it is no
+    // list (it fails to parse), and its raw entries once came out one per line: a QR code at two
+    // characters per module. Now each is `<invalid>`, under a count, all within one budget: with
+    // 60 of them the budget runs out, and the rest are counted.
+    let home = Home::new();
+    home.create("main", &[]);
+    let rows: Vec<String> = (0..60)
+        .map(|i| {
+            (0..62)
+                .map(|j| if (i * 7 + j * 3) % 5 < 2 { '#' } else { ' ' })
+                .collect()
+        })
+        .collect();
+    fs::write(
+        home.path().join("whitelist.json"),
+        serde_json::to_vec(&json!({ "entries": rows })).unwrap(),
+    )
+    .unwrap();
+    let r = home.run(&["whitelist", "list"]);
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    // No row of the drawing reaches the terminal: no line that is only `#` and space, with or
+    // without quotes around it, and the entry lines stay within one prose budget.
+    let grid = |l: &str| {
+        let core = l.trim().trim_matches('"');
+        !core.trim().is_empty() && core.chars().all(|c| c == '#' || c == ' ')
+    };
+    assert!(!r.stdout.lines().any(grid), "{}", r.stdout);
+    let listed: usize = r
+        .stdout
+        .lines()
+        .filter(|l| {
+            l.starts_with("  ") && !l.contains("entries, in a file") && !l.starts_with("  ... ")
+        })
+        .map(str::len)
+        .sum();
+    assert!(listed <= 512, "{listed}: {}", r.stdout);
+    assert!(
+        r.stdout
+            .contains("60 entries, in a file that is not a whitelist"),
+        "{}",
+        r.stdout
+    );
+    let shown = r.stdout.lines().filter(|l| *l == "  <invalid>").count();
+    assert!(shown > 0 && shown < 60, "{}", r.stdout);
+    assert!(
+        r.stdout.contains(&format!(
+            "  ... {} more; `zwallet whitelist list --json` shows them",
+            60 - shown
+        )),
+        "{}",
+        r.stdout
+    );
+    // `--json` still has every row, escaped.
+    let v = home.run(&["whitelist", "list", "--json"]).ok();
+    assert_eq!(v["entries"].as_array().unwrap().len(), 60, "{v}");
+}
+
+#[test]
+fn whitelist_list_shows_an_unverified_parseable_list_within_one_budget() {
+    // A list that parses but does not verify (here its 33 entries are replaced, so the signature
+    // is no longer theirs): every field is one `add` accepts, but the nicknames are rows of `m`
+    // and `_`, 32 columns of a 33-row grid. Without `--verify` all its entry lines share one
+    // prose budget, and the rest are counted with how to see them; `--json` keeps all 33.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let entries: Vec<serde_json::Value> = (0..33)
+        .map(|i| {
+            let row: String = (0..32)
+                .map(|j| {
+                    if j == 0 || (i * 5 + j * 3) % 7 < 3 {
+                        'm'
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            json!({
+                "nickname": row,
+                "kind": "address",
+                "address": format!("0x{:040x}", i + 1),
+                "chains": ["*"],
+            })
+        })
+        .collect();
+    v["entries"] = json!(entries);
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let r = home.run(&["whitelist", "list"]);
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    let rows: Vec<&str> = r.stdout.lines().filter(|l| l.starts_with("  m")).collect();
+    let listed: usize = rows.iter().map(|l| l.len()).sum();
+    assert!(!rows.is_empty() && listed <= 512, "{listed}: {}", r.stdout);
+    assert!(
+        r.stdout.contains(&format!(
+            "  ... {} more; `zwallet whitelist list --verify` shows them all",
+            33 - rows.len()
+        )),
+        "{}",
+        r.stdout
+    );
+    let v = home.run(&["whitelist", "list", "--json"]).ok();
+    assert_eq!(v["verified"], false, "{v}");
+    assert_eq!(v["entries"].as_array().unwrap().len(), 33, "{v}");
+}
+
+/// Rows of a picture made only of `#` and space (quotes around a row aside).
+fn grid_row(l: &str) -> bool {
+    let core = l.trim().trim_matches('"');
+    !core.trim().is_empty() && core.chars().all(|c| c == '#' || c == ' ')
+}
+
+/// whitelist.json with its first entry's `field` set to `value` (the signature is then not
+/// theirs: the list does not verify, but it is still read and shown).
+fn plant_entry(home: &Home, field: &str, value: serde_json::Value) {
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    v["entries"][0][field] = value;
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+}
+
+#[test]
+fn r6_the_change_summary_shows_no_file_value_outside_adds_shape() {
+    // R6-B1. The summary printed before the password once showed an entry's chains as found,
+    // each up to 64 characters with spaces, only `, ` between them: one line of 50 rows of `#`
+    // and space is a QR code. Such a file is no whitelist now (its chain is not a chain key's
+    // shape), so the summary says it cannot be read, naming the field, never the value.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let rows: Vec<String> = (0..50)
+        .map(|i| {
+            (0..64)
+                .map(|j| if (i * 7 + j * 3) % 5 < 2 { '#' } else { ' ' })
+                .collect()
+        })
+        .collect();
+    plant_entry(&home, "chains", json!(rows));
+    let r = whitelist_with(&home, &["remove", "alice"], "not the password");
+    assert!(inert_output(&r.stderr), "{}", r.stderr);
+    assert!(!r.stderr.lines().any(grid_row), "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("whitelist.json is there but cannot be read (")
+            && r.stderr.contains(
+                "not a whitelist file: a chain of entry 1 is not in the shape zwallet writes"
+            ),
+        "{}",
+        r.stderr
+    );
+    // Chains in a chain key's shape that zwallet does not know: `<invalid>`, at most 16.
+    let keys: Vec<String> = (0..50).map(|i| format!("m-m{i:02}-mm-m--m")).collect();
+    plant_entry(&home, "chains", json!(keys));
+    let r = whitelist_with(&home, &["remove", "alice"], "not the password");
+    assert!(inert_output(&r.stderr), "{}", r.stderr);
+    assert!(!r.stderr.contains("m-m0"), "{}", r.stderr);
+    assert!(
+        r.stderr
+            .contains(&format!("{}and 34 more", "<invalid>, ".repeat(16))),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn r6_the_names_a_summary_shows_from_the_files_share_one_budget() {
+    // Both list files with 20 nicknames of 32 characters each, rows of `m` and `_`: what the
+    // reset summary names from them, on its "dropped" line and on each file's line, is at most
+    // one 512-character budget in all; the rest are counted.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let grid = |file: usize| -> Vec<serde_json::Value> {
+        (0..20)
+            .map(|i| {
+                let row: String = (0..32)
+                    .map(|j| {
+                        if j == 0 || (i * 5 + j * 3 + file) % 7 < 3 {
+                            'm'
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                json!({
+                    "nickname": row,
+                    "kind": "address",
+                    "address": format!("0x{:040x}", file * 100 + i + 1),
+                    "chains": ["*"],
+                })
+            })
+            .collect()
+    };
+    v["entries"] = json!(grid(0));
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    v["entries"] = json!(grid(1));
+    v["gen"] = json!(2);
+    fs::write(
+        home.path().join("whitelist.next.json"),
+        serde_json::to_vec(&v).unwrap(),
+    )
+    .unwrap();
+    let r = whitelist_with(&home, &["reset"], "not the password");
+    assert!(inert_output(&r.stderr), "{}", r.stderr);
+    let named: usize = r
+        .stderr
+        .split([' ', ',', '(', ')', '\n'])
+        .filter(|w| w.len() == 32 && w.starts_with('m') && w.chars().all(|c| c == 'm' || c == '_'))
+        .map(str::len)
+        .sum();
+    assert!(named > 0 && named <= 512, "{named}: {}", r.stderr);
+    assert!(r.stderr.contains(" more"), "{}", r.stderr);
+}
+
+#[test]
+fn whitelist_list_shows_a_file_with_a_value_outside_adds_shape_as_no_list() {
+    // A parseable file whose nickname is not one `add` writes is no whitelist: `whitelist list`
+    // shows the count and `<invalid>` under one budget, and the reason names the field only.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    plant_entry(&home, "nickname", json!("## ## ## ##"));
+    let r = home.run(&["whitelist", "list"]);
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    assert!(
+        r.stdout
+            .contains("1 entries, in a file that is not a whitelist")
+            && r.stdout.contains(
+                "not a whitelist file: the nickname of entry 1 is not in the shape zwallet writes"
+            )
+            && !r.stdout.contains("##"),
+        "{}",
+        r.stdout
+    );
+    // `--json` still has the entry as found, escaped.
+    let v = home.run(&["whitelist", "list", "--json"]).ok();
+    assert_eq!(v["entries"][0]["nickname"], "## ## ## ##", "{v}");
+}
+
+#[test]
+fn whitelist_list_verify_shows_every_entry_of_a_verified_list() {
+    // N3. A list the seal verifies is the human's own: all its entries, no "more" line.
+    let home = Home::new();
+    home.create("main", &[]);
+    for i in 0..8 {
+        home.allow(
+            &format!("payee{i}"),
+            &format!("0x{:040x}", i + 1),
+            &["base"],
+        );
+    }
+    let r = home.run_stdin(
+        &["whitelist", "list", "--verify", "--password-stdin"],
+        &format!("{PW}\n"),
+    );
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    for i in 0..8 {
+        assert!(
+            r.stdout.contains(&format!("  payee{i} ")),
+            "{i}: {}",
+            r.stdout
+        );
+    }
+    assert!(!r.stdout.contains(" more"), "{}", r.stdout);
+}
+
+#[test]
+fn whitelist_list_verify_that_fails_points_to_json_not_to_verify_again() {
+    // N2. After a `--verify` that did not verify, the hint for the entries left out is `--json`:
+    // running `--verify` again would show the same few.
+    let home = Home::new();
+    home.create("main", &[]);
+    for i in 0..12 {
+        home.allow(
+            &format!("payee{i:02}"),
+            &format!("0x{:040x}", i + 1),
+            &["base"],
+        );
+    }
+    plant_entry(&home, "nickname", json!("renamed"));
+    let r = home.run_stdin(
+        &["whitelist", "list", "--verify", "--password-stdin"],
+        &format!("{PW}\n"),
+    );
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout
+            .contains("more; `zwallet whitelist list --json` shows them")
+            && !r.stdout.contains("--verify` shows them all"),
+        "{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn an_unverified_lists_fee_caps_spend_the_same_budget_as_its_entries() {
+    // N5. A list that does not verify, with fee caps of 77 digits on every chain zwallet knows:
+    // its entry lines and the caps it shows together stay within one 512-character budget, and
+    // the caps left out are counted.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let huge = format!("1{}", "0".repeat(76));
+    for chain in [
+        "arbitrum",
+        "avalanche",
+        "base",
+        "bsc",
+        "ethereum",
+        "optimism",
+        "polygon",
+        "sepolia",
+    ] {
+        v["policy"]["maxFeeWei"][chain] = json!(huge);
+    }
+    v["entries"][0]["nickname"] = json!("renamed");
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let r = home.run(&["whitelist", "list"]);
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    let entries: usize = r
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("  ") && !l.starts_with("  ... "))
+        .map(str::len)
+        .sum();
+    let caps = r
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("fee caps: "))
+        .unwrap_or_else(|| panic!("{}", r.stdout));
+    let (shown, more) = caps
+        .rsplit_once(", and ")
+        .unwrap_or_else(|| panic!("{caps}"));
+    assert!(more.ends_with(" more"), "{caps}");
+    let shown: usize = shown.split(", ").map(str::len).sum();
+    assert!(entries + shown <= 512, "{entries} + {shown}: {}", r.stdout);
+}
+
+#[test]
+fn a_reset_shows_each_discarded_files_entries_as_one_line_of_at_most_512() {
+    // N1. A reset drops a whitelist.json and a whitelist.next.json that are no lists, here each
+    // with 2000 characters of `#` and space for its entries: each file's unverified entries are
+    // one escaped line of at most 512 characters. A reset stops every daemon of this user, so no
+    // other test may run meanwhile.
+    let _alone = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    // Two different files (a whitelist.next.json with whitelist.json's very bytes is a leftover
+    // copy, not a discarded edit).
+    for (file, grid) in [
+        ("whitelist.json", "## ".repeat(667)),
+        ("whitelist.next.json", " ##".repeat(667)),
+    ] {
+        fs::write(
+            home.path().join(file),
+            serde_json::to_vec(&json!({ "entries": grid })).unwrap(),
+        )
+        .unwrap();
+    }
+    let r = home.run_stdin(
+        &["whitelist", "reset", "--password-stdin"],
+        &format!("{PW}\n"),
+    );
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+    let found: Vec<&str> = r
+        .stdout
+        .lines()
+        .filter_map(|l| l.split_once("its unverified entries: ").map(|(_, e)| e))
+        .collect();
+    assert_eq!(found.len(), 2, "{}", r.stdout);
+    for e in found {
+        assert!(e.len() <= 512, "{}", e.len());
+    }
+}
+
+#[test]
+fn whitelist_list_shows_a_value_add_would_refuse_as_invalid() {
+    // A parseable list with a forged signature: its nickname is a 32-character `#`/space row,
+    // which `add` would refuse. `whitelist list` shows `<invalid>` there, not the row.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", PAYEE, &["base"]);
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let row = "## ## ## ## ## ## ## ## ## ## ##";
+    assert_eq!(row.len(), 32);
+    v["entries"][0]["nickname"] = json!(row);
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let r = home.run(&["whitelist", "list"]);
+    assert_eq!(r.code, 0, "{} / {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("<invalid>") && !r.stdout.contains(row),
+        "{}",
+        r.stdout
+    );
+    assert!(inert_output(&r.stdout), "{}", r.stdout);
+}
+
+/// ABI-encodes `items` as the return data of a function returning `string[]`.
+fn abi_string_array(items: &[String]) -> String {
+    let word = |n: usize| format!("{n:064x}");
+    let tails: Vec<String> = items
+        .iter()
+        .map(|s| {
+            let mut data: String = s.bytes().map(|x| format!("{x:02x}")).collect();
+            while !data.len().is_multiple_of(64) {
+                data.push('0');
+            }
+            format!("{}{data}", word(s.len()))
+        })
+        .collect();
+    let mut hex = word(32) + &word(items.len());
+    let mut offset = 32 * items.len();
+    for t in &tails {
+        hex.push_str(&word(offset));
+        offset += t.len() / 2;
+    }
+    for t in &tails {
+        hex.push_str(t);
+    }
+    format!("0x{hex}")
+}
+
+#[test]
+fn a_call_string_array_result_is_exact_in_json_and_bounded_on_the_terminal() {
+    // 64 strings of 128 solid glyphs each: `--json` keeps them exactly; the human `result:` line
+    // is one inert line within the prose budget, not 64 pieces each cut on their own.
+    let items: Vec<String> = (0..64).map(|_| "\u{2b1b}".repeat(128)).collect();
+    let encoded = abi_string_array(&items);
+    let node = common::tiny_rpc_reply(move |method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        "eth_call" => Ok(json!(encoded.clone())),
+        _ => Ok(json!("0x0")),
+    });
+    let home = Home::new();
+    let args = [
+        "call",
+        "--chain",
+        "ethereum",
+        "--to",
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "--sig",
+        "names()(string[])",
+        "--rpc",
+        &node,
+    ];
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let v = home.run(&json_args).ok();
+    assert_eq!(v["result"], json!([items]), "--json is exact");
+    let human = home.run(&args);
+    let head = |s: &str| s.chars().take(300).collect::<String>();
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(inert_output(&human.stdout), "{}", head(&human.stdout));
+    let result: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("result: "))
+        .collect();
+    assert_eq!(result.len(), 1, "{}", head(&human.stdout));
+    assert!(
+        result[0].chars().count() <= "result: ".len() + 512 + 8,
+        "{}",
+        result[0].chars().count()
+    );
+}
+
+#[test]
+fn a_long_rpc_error_and_call_string_are_cut_on_the_terminal() {
+    // The same from an RPC endpoint: its error text is cut where the error is built; a `call`
+    // string is cut on the terminal and kept whole in `--json`.
+    let payload = qr_by_wrapping();
+    let failing = common::tiny_rpc_reply(move |method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        _ => Err(json!({ "code": -32000, "message": qr_by_wrapping() })),
+    });
+    let home = Home::new();
+    let token = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    let call = |rpc: &str, json_out: bool| {
+        let mut args = vec![
+            "call",
+            "--chain",
+            "ethereum",
+            "--to",
+            token,
+            "--sig",
+            "name()(string)",
+            "--rpc",
+            rpc,
+        ];
+        if json_out {
+            args.push("--json");
+        }
+        home.run(&args)
+    };
+    let msg = call(&failing, true).err("RPC_ERROR");
+    assert!(msg.chars().count() < 700, "{}", msg.chars().count());
+    assert!(inert(&msg), "{:?}", &msg[..200]);
+    let human = call(&failing, false);
+    assert_eq!(human.stderr.trim_end().lines().count(), 1);
+    assert!(human.stderr.trim_end().ends_with(" [RPC_ERROR]"));
+    let encoded = abi_string(&payload);
+    let node = common::tiny_rpc_reply(move |method, _| match method {
+        "eth_chainId" => Ok(json!("0x1")),
+        "eth_call" => Ok(json!(encoded.clone())),
+        _ => Ok(json!("0x0")),
+    });
+    let v = call(&node, true).ok();
+    assert_eq!(v["result"], json!([payload]), "--json is exact");
+    let human = call(&node, false);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    let result: Vec<&str> = human
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("result: "))
+        .collect();
+    assert_eq!(result.len(), 1, "{:?}", &human.stdout[..200]);
+    assert!(
+        result[0].chars().count() < 700,
+        "{}",
+        result[0].chars().count()
+    );
+    assert!(inert_output(&human.stdout), "{:?}", &human.stdout[..200]);
+}
+
+#[test]
+fn unlock_and_create_show_a_whitelist_reason_from_the_file_escaped() {
+    // whitelist.json is anyone's to edit: a key the parser does not know is quoted by its message,
+    // which the daemon reports as the list's reason, and `unlock` and `create --unlock` show it.
+    // A bidi override, an isolate and a line separator there come out escaped.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow(
+        "alice",
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        &["base"],
+    );
+    let path = home.path().join("whitelist.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    v.as_object_mut()
+        .unwrap()
+        .insert("ok\u{202e}evil\u{2066}\u{2028}\u{1b}[2J".into(), json!(1));
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let pw = format!("{PW}\n");
+    for args in [
+        &["unlock", "10m", "--password-stdin", "--json"][..],
+        &[
+            "create",
+            "b",
+            "--unlock",
+            "10m",
+            "--password-stdin",
+            "--json",
+        ],
+    ] {
+        let out = home.run_stdin(args, &pw);
+        assert_eq!(out.code, 0, "{args:?}: {}", out.stdout);
+        let w = out.json()["whitelist"].clone();
+        assert_eq!(w["verified"], false, "{args:?}: {w}");
+        let reason = w["reason"].as_str().unwrap_or("");
+        assert!(
+            reason.contains("evil"),
+            "{args:?}: the key is still named: {reason}"
+        );
+        assert!(inert(reason), "{args:?}: {reason:?}");
+        home.stop_daemons();
+    }
+    let human = home.run_stdin(&["unlock", "10m", "--password-stdin"], &pw);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(inert_output(&human.stdout), "{:?}", human.stdout);
+    home.stop_daemons();
+}
+
+#[test]
+fn a_repair_keeps_the_sealed_whitelist_and_the_running_session() {
+    // The repair rewrites metadata only: the sealed master (with its whitelist anchor) is
+    // untouched, so a session running meanwhile goes on and the whitelist still verifies.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow(
+        "alice",
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        &["base"],
+    );
+    let pid = home.unlock("10m")["daemonPid"].clone();
+    poison_cache(&home);
+    let pw = format!("{PW}\n");
+    let v = home
+        .run_stdin(&["address", "--verify", "--password-stdin", "--json"], &pw)
+        .ok();
+    assert!(v["repaired"].is_array(), "{v}");
+    // The human form marks the old value.
+    poison_cache(&home);
+    let human = home.run_stdin(&["address", "--verify", "--password-stdin"], &pw);
+    assert!(
+        human
+            .stdout
+            .contains(&format!("was {POISON} (do not fund), now 0x")),
+        "{}",
+        human.stdout
+    );
+    let s = home.run(&["status", "--json"]).ok();
+    assert_eq!(
+        (&s["locked"], &s["daemonPid"]),
+        (&json!(false), &pid),
+        "{s}"
+    );
+    assert_eq!(
+        (&s["whitelist"]["verified"], &s["whitelist"]["gen"]),
+        (&json!(true), &json!(1)),
+        "{s}"
+    );
+    let w = home
+        .run_stdin(
+            &[
+                "whitelist",
+                "list",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
+            &pw,
+        )
+        .ok();
+    assert_eq!(w["verified"], true, "{w}");
 }

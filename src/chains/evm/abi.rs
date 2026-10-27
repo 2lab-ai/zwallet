@@ -225,13 +225,23 @@ fn split_list(s: &str, open: char, close: char) -> Result<Vec<&str>> {
     Ok(items)
 }
 
+/// How much of the return data, as hex, a decode error quotes.
+const DECODE_HEX_SHOWN: usize = 128;
+
 /// Decodes return data into JSON (scalars as strings, arrays/tuples as arrays).
 pub fn decode_output(func: &Function, data: &[u8]) -> Result<Vec<Value>> {
     let values = func.abi_decode_output(data).map_err(|e| {
+        // The decoder's message can quote the returned data, which the contract chose; the data
+        // itself, as hex, is cut too (it is as long as the node made it). Together they are one
+        // prose budget: 128 characters of hex and 384 of the message.
         WalletError::validation(format!(
-            "return data (0x{}) does not match {}: {e}",
-            hex::encode(data),
-            func.signature_with_outputs()
+            "return data (0x{}) does not match {}: {}",
+            crate::core::text::ascii_inert(&hex::encode(data), DECODE_HEX_SHOWN),
+            func.signature_with_outputs(),
+            crate::core::text::ascii_inert(
+                &e.to_string(),
+                crate::core::text::PROSE_MAX - DECODE_HEX_SHOWN
+            )
         ))
     })?;
     Ok(values.iter().map(to_json).collect())

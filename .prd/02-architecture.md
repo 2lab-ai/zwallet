@@ -147,7 +147,7 @@ seed, so the wallet file and the daemon protocol do not change.
     address --verify` checks it" while locked, else "run `zwallet address --verify` before
     funding". A peer that fails the check adds a `warning` naming its pid and what it is; the
     command does not fail.
-  - A cache the daemon contradicts is a VALIDATION_ERROR. Residual risk: a same-user process that
+  - A cache the daemon contradicts is a VALIDATION_ERROR; it blames the cache only when every answering process is this build's key daemon, else it says the two disagree and names a known impostor (2026-10-26). With the password, `address --verify` repairs cached addresses that differ from the seed; other password paths refuse and point to it. Residual risk: a same-user process that
     swaps in its own wallet and unlocks it with its own password through the genuine binary, or
     injects code into the genuine binary (`DYLD_INSERT_LIBRARIES` without the hardened runtime,
     `LD_PRELOAD`) — the same class as replacing the binary. The human keeps the address saved from

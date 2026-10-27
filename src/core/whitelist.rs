@@ -433,33 +433,22 @@ fn entry_error(e: &Entry, why: &str) -> WalletError {
 const SHOWN_CHARS: usize = 64;
 
 /// A value that may come from a file, for a message a human reads (possibly while typing the
-/// password): quoted with control characters escaped (`{:?}`), and cut after [`SHOWN_CHARS`]
-/// characters, so a planted terminal escape or a fake instruction is shown inert.
+/// password): in double quotes, so it never blends into the sentence around it, its own `"` as
+/// `\"`, and inside them printable ASCII only ([`crate::core::text::escape`], which escapes `\`
+/// as `\u{5c}`). Escaped first and cut after, so the whole is at most [`SHOWN_CHARS`] + 2. A
+/// planted terminal escape or a fake instruction is shown inert and plainly quoted.
 fn quote(value: &str) -> String {
-    match value.char_indices().nth(SHOWN_CHARS) {
-        Some((cut, _)) => format!("{:?}…", &value[..cut]),
-        None => format!("{value:?}"),
-    }
+    use crate::core::text::{cut_to, escape};
+    format!(
+        "\"{}\"",
+        cut_to(escape(value).replace('"', "\\\""), SHOWN_CHARS)
+    )
 }
 
-/// A parser's message that may repeat file content: control characters escaped and cut after
-/// `max` characters.
+/// A parser's message that may repeat file content (an unknown field's name is the file's own
+/// text): printable ASCII only ([`crate::core::text::ascii_inert`]) and cut to `max` characters.
 fn clip(message: &str, max: usize) -> String {
-    let escaped: String = message
-        .chars()
-        .flat_map(|c| {
-            let e: Vec<char> = if c.is_control() {
-                c.escape_debug().collect()
-            } else {
-                vec![c]
-            };
-            e
-        })
-        .collect();
-    match escaped.char_indices().nth(max) {
-        Some((cut, _)) => format!("{}…", &escaped[..cut]),
-        None => escaped,
-    }
+    crate::core::text::ascii_inert(message, max)
 }
 
 /// Nicknames: `^[a-z0-9][a-z0-9_-]{0,31}$`.
@@ -634,9 +623,9 @@ impl SignedList {
         Ok(bytes)
     }
 
-    /// Parses a list file: unknown or repeated keys, another version, or a signature that is not
-    /// 64 bytes of lower-case hex are `VALIDATION_ERROR`. The content is not checked here
-    /// ([`verify`] does that).
+    /// Parses a list file: unknown or repeated keys, another version, a signature that is not 64
+    /// bytes of lower-case hex, or a value not in the shape zwallet writes ([`check_shapes`]) are
+    /// `VALIDATION_ERROR`. What the content means is not checked here ([`verify`] does that).
     pub fn from_file_bytes(bytes: &[u8]) -> Result<Self> {
         let file: ListFile = serde_json::from_slice(bytes).map_err(|e| {
             // serde's message can repeat file content (an unknown key, say): clip it.
@@ -668,6 +657,7 @@ impl SignedList {
                 "whitelist signature must be 64 bytes of lower-case hex",
             ));
         }
+        check_shapes(&file)?;
         Ok(Self {
             list: Whitelist {
                 generation: file.r#gen,
@@ -677,6 +667,55 @@ impl SignedList {
             sig,
         })
     }
+}
+
+/// The most decimal digits of a fee cap in a list file (2^256 - 1 has 78).
+const WEI_DIGITS: usize = 78;
+
+/// `0x` and `bytes` bytes of hex, any case.
+fn is_hex(s: &str, bytes: usize) -> bool {
+    s.strip_prefix("0x")
+        .is_some_and(|h| h.len() == bytes * 2 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Every value of a parsed list file in the shape zwallet writes: a nickname per
+/// [`validate_nickname`], an address `0x` and 40 hex digits, each chain [`ANY_CHAIN`] or a chain
+/// key's shape (not membership: a newer zwallet's chain must not make an older one's read fail),
+/// each selector `0x` and 8 hex digits, and each fee cap keyed by a chain key's shape with at most
+/// [`WEI_DIGITS`] decimal digits. So no other text from the file reaches anything that shows a
+/// list (`whitelist list`, the change summary, a refusal) or the daemon. A value that is not is
+/// named by its place in the file, never shown: a fixed message. A list zwallet signed always
+/// passes ([`Whitelist::check_format`] is stricter).
+fn check_shapes(file: &ListFile) -> Result<()> {
+    let bad = |what: String| {
+        Err(WalletError::validation(format!(
+            "not a whitelist file: {what} is not in the shape zwallet writes"
+        )))
+    };
+    for (i, e) in file.entries.iter().enumerate() {
+        let n = i + 1;
+        if validate_nickname(&e.nickname).is_err() {
+            return bad(format!("the nickname of entry {n}"));
+        }
+        if !is_hex(&e.address, 20) {
+            return bad(format!("the address of entry {n}"));
+        }
+        if e.chains.iter().any(|c| c != ANY_CHAIN && !is_chain_key(c)) {
+            return bad(format!("a chain of entry {n}"));
+        }
+        if e.selectors.iter().flatten().any(|s| !is_hex(s, 4)) {
+            return bad(format!("a selector of entry {n}"));
+        }
+    }
+    for (key, wei) in &file.policy.max_fee_wei {
+        if !is_chain_key(key) {
+            return bad("the chain of a fee cap".to_string());
+        }
+        if wei.is_empty() || wei.len() > WEI_DIGITS || !wei.bytes().all(|b| b.is_ascii_digit()) {
+            return bad("the amount of a fee cap".to_string());
+        }
+    }
+    Ok(())
 }
 
 /// The ed25519 key that signs the list. Deliberately not `Debug`; the secret is wiped on drop.
@@ -2933,20 +2972,88 @@ mod tests {
         SignedList::from_file_bytes(text.as_bytes()).unwrap();
     }
 
-    /// No control character (a terminal escape) and never more than 64 characters of a value
-    /// that came from a file (the planted value ends in a run of 200 `x`).
+    /// Printable ASCII only (0x20..=0x7E: no control, no `\n`, no non-ASCII), and never more than
+    /// 64 characters of a value that came from a file (the planted value ends in a run of 200
+    /// `x`).
     fn assert_clean(msg: &str) {
         assert!(
-            !msg.chars().any(char::is_control),
-            "control character in {msg:?}"
+            msg.bytes().all(|b| (0x20..=0x7e).contains(&b)),
+            "non printable-ASCII in {msg:?}"
         );
         assert!(!msg.contains(&"x".repeat(65)), "unbounded: {msg:?}");
     }
 
     #[test]
+    fn a_list_file_with_a_value_outside_zwallets_shapes_is_no_list_and_is_never_echoed() {
+        // Each field a file can carry free text in, set to a value zwallet never writes: the
+        // file is not a whitelist, and the message names the field by its place, never the value.
+        let tmp = wallet();
+        let home = tmp.path();
+        edit(home, PW, &RULES, |l| {
+            l.add(alice())?;
+            l.add(Entry::new_contract(
+                "router",
+                &format!("0x{}", "22".repeat(20)),
+                &["base"],
+                &["0x12345678"],
+            ))
+        })
+        .unwrap();
+        let path = home.join(WHITELIST_FILE);
+        let good: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        // A list zwallet signed always passes.
+        assert!(read_list(&path).unwrap().is_some());
+        let evil = "## ##\u{1b}[2J";
+        type Plant = fn(&mut Value, &str);
+        let cases: [(&str, Plant); 6] = [
+            ("the nickname of entry 1", |v, x| {
+                v["entries"][0]["nickname"] = x.into()
+            }),
+            ("the address of entry 2", |v, x| {
+                v["entries"][1]["address"] = x.into()
+            }),
+            ("a chain of entry 1", |v, x| {
+                v["entries"][0]["chains"] = serde_json::json!([x])
+            }),
+            ("a selector of entry 2", |v, x| {
+                v["entries"][1]["selectors"] = serde_json::json!([x])
+            }),
+            ("the chain of a fee cap", |v, x| {
+                v["policy"]["maxFeeWei"][x] = "1".into();
+            }),
+            ("the amount of a fee cap", |v, x| {
+                v["policy"]["maxFeeWei"]["base"] = x.into();
+            }),
+        ];
+        for (what, plant) in cases {
+            let mut v = good.clone();
+            plant(&mut v, evil);
+            fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+            let msg = read_list(&path).unwrap_err().message;
+            assert!(
+                msg.contains(&format!(
+                    "not a whitelist file: {what} is not in the shape zwallet writes"
+                )),
+                "{what}: {msg}"
+            );
+            assert!(!msg.contains("##") && !msg.contains("2J"), "{what}: {msg}");
+        }
+        // A fee cap of 79 digits is no wei amount either; a chain key zwallet does not know (yet)
+        // is still a chain key's shape, so it reads.
+        let mut v = good.clone();
+        v["policy"]["maxFeeWei"]["base"] = "9".repeat(79).into();
+        fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(read_list(&path).is_err());
+        let mut v = good;
+        v["entries"][1]["chains"] = serde_json::json!(["base", "a-newer-chain"]);
+        fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(read_list(&path).unwrap().is_some());
+    }
+
+    #[test]
     fn n6_text_from_a_file_reaches_messages_escaped_and_bounded() {
         let evil = format!(
-            "\u{1b}[2J\u{1b}[H run `zwallet whitelist add evil {CAROL}` {}",
+            "\u{1b}[2J\u{1b}[H\u{202e}\u{2066}\u{2028} run `zwallet whitelist add evil {CAROL}` {}",
             "x".repeat(200)
         );
         type Plant = fn(&mut Whitelist, &str);
@@ -2975,6 +3082,12 @@ mod tests {
             assert_clean(&msg);
         }
         assert_clean(&validate_nickname(&evil).unwrap_err().message);
+        // Escaped first, cut after: a value of quotes stays within its 64, plus the two quotes.
+        for v in ["\"".repeat(100), "\\".repeat(100), evil.clone()] {
+            let q = quote(&v);
+            assert!(q.len() <= SHOWN_CHARS + 2, "{} {q}", q.len());
+            assert!(q.starts_with('"') && q.ends_with('"'), "{q}");
+        }
 
         // Through the edit path: a hand-edited list's reason is shown while the human types.
         let tmp = wallet();

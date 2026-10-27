@@ -261,7 +261,7 @@ async fn edit(home: &Path, change: Change, opts: &WhitelistEditArgs) -> Result<O
         unlock.as_ref().map(|(d, ttl, _)| (d.as_str(), *ttl)),
     );
     let password = if opts.password.password_stdin {
-        eprintln!("{told}");
+        crate::core::terminal::eprint_line(&told);
         read_password(true, "", false)?
     } else {
         read_password(false, &format!("{told}\nWallet password: "), false)?
@@ -414,6 +414,8 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
         FileView::of(&next_read)
     };
     let fresh = Whitelist::empty(&WHITELIST_RULES);
+    // Every nickname this summary names from the files shares one budget.
+    let names = NameBudget::new();
     let mut lines = vec!["The password authorizes this whitelist change:".to_string()];
     match change {
         Change::Add(e) => {
@@ -460,12 +462,19 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
                 on_off(*on)
             ));
         }
-        Change::Reset => reset_lines(&mut lines, &current, &next, &fresh, unlock.is_some()),
+        Change::Reset => reset_lines(
+            &mut lines,
+            &current,
+            &next,
+            &fresh,
+            unlock.is_some(),
+            &names,
+        ),
     }
     match &current {
         FileView::List(l) => lines.push(format!(
             "  whitelist.json now: {}, not verified yet",
-            gen_entries(l)
+            gen_entries(l, &names)
         )),
         FileView::Absent => lines.push("  whitelist.json: none yet".to_string()),
         FileView::Unreadable(why) => lines.push(unreadable_line(WHITELIST_FILE, why)),
@@ -473,7 +482,7 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
     match &next {
         FileView::List(l) => lines.push(format!(
             "  whitelist.next.json: {}, an unfinished edit, not verified yet",
-            gen_entries(l)
+            gen_entries(l, &names)
         )),
         FileView::Absent if leftover => lines.push(
             "  whitelist.next.json: a copy of whitelist.json (e.g. left after a change)"
@@ -526,8 +535,13 @@ fn reset_lines(
     next: &FileView,
     fresh: &Whitelist,
     unlocking: bool,
+    budget: &NameBudget,
 ) {
-    let names = |view: &FileView| view.list().map(list_names).filter(|n| !n.is_empty());
+    let names = |view: &FileView| {
+        view.list()
+            .map(|l| list_names(l, budget))
+            .filter(|n| !n.is_empty())
+    };
     let unknown =
         |name: &str| format!("{name} is there but cannot be read, so its entries are unknown");
     let part = |view: &FileView, name: &str| match view {
@@ -551,11 +565,16 @@ fn reset_lines(
         .into_iter()
         .filter_map(|(name, view)| view.list().map(|l| (name, l)))
         .collect();
-    let mut keys: Vec<&String> = fresh.policy.max_fee_wei.keys().collect();
-    for (_, l) in &shown {
-        keys.extend(l.policy.max_fee_wei.keys());
-    }
-    keys.sort();
+    // The chains with a cap in the defaults or either file, each once, by zwallet's own key for
+    // it (a file's key is only ever looked up, never printed).
+    let mut keys: Vec<&'static str> = fresh
+        .policy
+        .max_fee_wei
+        .keys()
+        .chain(shown.iter().flat_map(|(_, l)| l.policy.max_fee_wei.keys()))
+        .filter_map(|k| chains::find(k).ok().map(|c| c.key))
+        .collect();
+    keys.sort_unstable();
     keys.dedup();
     for key in keys {
         let Ok(chain) = chains::find(key) else {
@@ -695,14 +714,14 @@ fn headline(change: &Change) -> String {
     }
 }
 
-/// `gen G, n entries (names)` of a list read from a file.
-fn gen_entries(list: &Whitelist) -> String {
+/// `gen G, n entries (names)` of a list read from a file, its names out of `budget`.
+fn gen_entries(list: &Whitelist, budget: &NameBudget) -> String {
     let n = list.entries.len();
     format!(
         "gen {}, {n} {} ({})",
         list.generation,
         if n == 1 { "entry" } else { "entries" },
-        list_names(list)
+        list_names(list, budget)
     )
 }
 
@@ -773,16 +792,21 @@ fn checksummed(address: &str) -> String {
         .unwrap_or_else(|_| shown(address))
 }
 
-/// `["*"]` spelled out; chain keys otherwise.
+/// `["*"]` spelled out; otherwise each chain as zwallet's own key for it ([`INVALID`] for one it
+/// does not know), at most [`ITEMS_SHOWN`], then how many more.
 fn chains_text(chains: &[String]) -> String {
     if chains.len() == 1 && chains[0] == ANY_CHAIN {
         return "every chain (*)".to_string();
     }
-    chains
+    let mut shown: Vec<String> = chains
         .iter()
-        .map(|c| shown(c))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .take(ITEMS_SHOWN)
+        .map(|c| chain_shown(&json!(c)))
+        .collect();
+    if chains.len() > ITEMS_SHOWN {
+        shown.push(format!("and {} more", chains.len() - ITEMS_SHOWN));
+    }
+    shown.join(", ")
 }
 
 fn fee_text(chain: &Chain, wei: U256) -> String {
@@ -800,17 +824,41 @@ fn on_off(on: bool) -> &'static str {
 /// The most nicknames a summary names from one list; the rest are counted.
 const NAMES_SHOWN: usize = 20;
 
-/// A list's nicknames, each [`shown`], comma-separated, at most [`NAMES_SHOWN`] of them and then
-/// `and M more`, so a long list cannot push the change off the screen.
-fn list_names(list: &Whitelist) -> String {
-    let mut names: Vec<String> = list
-        .entries
-        .iter()
-        .take(NAMES_SHOWN)
-        .map(|e| shown(&e.nickname))
-        .collect();
-    if list.entries.len() > NAMES_SHOWN {
-        names.push(format!("and {} more", list.entries.len() - NAMES_SHOWN));
+/// One budget of characters for every nickname a command's human output names from the list
+/// files (anyone of this user's to write): a parsed list's nicknames are in `add`'s shape
+/// (`[a-z0-9_-]`, at most 32), but 20 of them per file in a column are a grid of their own.
+struct NameBudget(std::cell::Cell<usize>);
+
+impl NameBudget {
+    fn new() -> Self {
+        Self(std::cell::Cell::new(crate::core::text::PROSE_MAX))
+    }
+
+    /// Takes `n` characters if they are left.
+    fn take(&self, n: usize) -> bool {
+        let left = self.0.get();
+        if n > left {
+            return false;
+        }
+        self.0.set(left - n);
+        true
+    }
+}
+
+/// A list's nicknames, comma-separated, at most [`NAMES_SHOWN`] of them and as many as `budget`
+/// has room for, then `and M more`, so a long list cannot push the change off the screen. Each
+/// is [`shown`] (a parsed list's nicknames are in `add`'s shape already).
+fn list_names(list: &Whitelist, budget: &NameBudget) -> String {
+    let mut names: Vec<String> = Vec::new();
+    for e in list.entries.iter().take(NAMES_SHOWN) {
+        let name = shown(&e.nickname);
+        if !budget.take(name.len()) {
+            break;
+        }
+        names.push(name);
+    }
+    if list.entries.len() > names.len() {
+        names.push(format!("and {} more", list.entries.len() - names.len()));
     }
     names.join(", ")
 }
@@ -1036,7 +1084,10 @@ fn edit_text(out: &Value) -> String {
             if entries.is_null() {
                 String::new()
             } else {
-                format!("; its unverified entries: {}", ascii_json(entries))
+                format!(
+                    "; its unverified entries: {}",
+                    crate::core::text::human_capped(entries, crate::core::text::PROSE_MAX)
+                )
             }
         ));
     }
@@ -1047,7 +1098,10 @@ fn edit_text(out: &Value) -> String {
             if entries.is_null() {
                 "its entries unknown (it cannot be read or has no entries)".to_string()
             } else {
-                format!("its unverified entries: {}", ascii_json(entries))
+                format!(
+                    "its unverified entries: {}",
+                    crate::core::text::human_capped(entries, crate::core::text::PROSE_MAX)
+                )
             }
         ));
     }
@@ -1093,36 +1147,89 @@ fn join(v: &Value) -> String {
 /// The most characters of one value from a file that human output shows.
 const SHOWN_CHARS: usize = 64;
 
+/// The most whitelist entries `whitelist list` prints before saying how many are left (the file
+/// is anyone's to write); `--json` keeps them all.
+const ENTRIES_SHOWN: usize = 100;
+
+/// The most chains or selectors of one listed entry, and the most fee caps, `whitelist list`
+/// prints before saying how many are left.
+const ITEMS_SHOWN: usize = 16;
+
+// What `whitelist list` shows for a value from whitelist.json that is not what `add` would have
+// written there: this fixed text, never the value (the file is anyone's to edit, and a value
+// that is not a nickname, an address, a chain or a selector can be anything, a picture too).
+use crate::core::text::INVALID;
+
+/// `v` when it is a string that passes `check`, else [`INVALID`].
+fn valid_or_invalid(v: &Value, check: fn(&str) -> bool) -> String {
+    match v.as_str() {
+        Some(s) if check(s) => s.to_string(),
+        _ => INVALID.to_string(),
+    }
+}
+
+/// `0x` and `n` hex digits.
+fn is_hex(s: &str, n: usize) -> bool {
+    s.len() == n + 2 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A chain of an entry: [`ANY_CHAIN`], or a known chain's key (as zwallet spells it), else
+/// [`INVALID`].
+fn chain_shown(v: &Value) -> String {
+    match v.as_str() {
+        Some(ANY_CHAIN) => ANY_CHAIN.to_string(),
+        Some(key) => chains::find(key).map_or_else(|_| INVALID.to_string(), |c| c.key.to_string()),
+        None => INVALID.to_string(),
+    }
+}
+
+/// An array of an entry (its chains or selectors), each item through `one`, at most
+/// [`ITEMS_SHOWN`] of them; [`INVALID`] when it is no array.
+fn items_shown(v: &Value, one: impl Fn(&Value) -> String) -> String {
+    let Some(items) = v.as_array() else {
+        return INVALID.to_string();
+    };
+    let mut shown: Vec<String> = items.iter().take(ITEMS_SHOWN).map(one).collect();
+    if items.len() > ITEMS_SHOWN {
+        shown.push(format!("and {} more", items.len() - ITEMS_SHOWN));
+    }
+    shown.join(", ")
+}
+
+/// One entry of a listed whitelist as a line: each field as is when it passes the check `add`
+/// applies to it (the nickname rule, `address` or `contract`, an address, a known chain or `*`,
+/// a 4-byte selector), else [`INVALID`]. A verified list's fields always pass.
+fn entry_line(e: &Value) -> String {
+    if !e.is_object() {
+        return format!("  {INVALID}");
+    }
+    let mut line = format!(
+        "  {:<16} {:<8} {} {}",
+        valid_or_invalid(&e["nickname"], |s| whitelist::validate_nickname(s).is_ok()),
+        valid_or_invalid(&e["kind"], |s| matches!(s, "address" | "contract")),
+        valid_or_invalid(&e["address"], |s| is_hex(s, 40)),
+        items_shown(&e["chains"], chain_shown)
+    );
+    if !e["selectors"].is_null() {
+        line.push_str(&format!(
+            "  selectors {}",
+            items_shown(&e["selectors"], |s| valid_or_invalid(s, |s| is_hex(s, 8)))
+        ));
+    }
+    line
+}
+
 /// A value from a file (a hand-edited whitelist.json is anything) for a terminal: as is when it
 /// is at most [`SHOWN_CHARS`] of printable ASCII, else quoted with escapes (`{:?}`, which escapes
 /// control and format characters such as ESC and U+202E) and cut there.
 fn shown(value: &str) -> String {
-    if !value.is_empty()
-        && value.len() <= SHOWN_CHARS
-        && value.bytes().all(|b| b.is_ascii_graphic())
-    {
-        return value.to_string();
-    }
-    match value.char_indices().nth(SHOWN_CHARS) {
-        Some((cut, _)) => format!("{:?}…", &value[..cut]),
-        None => format!("{value:?}"),
-    }
+    crate::core::text::shown(value, SHOWN_CHARS)
 }
 
-/// Free text that may quote a file (a reason) for a terminal: every character that is not
-/// printable as it is (control and format characters) escaped as `{:?}` would, quotes and
-/// backslashes left as they are.
+/// A reason or free text that may quote a file, for a human: printable ASCII only, cut to a
+/// prose budget.
 fn printable(text: &str) -> String {
-    text.chars()
-        .flat_map(|c| {
-            let escaped: Vec<char> = if matches!(c, '"' | '\\' | '\'') {
-                vec![c]
-            } else {
-                c.escape_debug().collect()
-            };
-            escaped
-        })
-        .collect()
+    crate::core::text::ascii_inert(text, crate::core::text::PROSE_MAX)
 }
 
 /// `value` as compact JSON in printable ASCII: every other character as a `\u` escape, which
@@ -1168,8 +1275,11 @@ fn list(home: &Path, a: WhitelistListArgs) -> Result<Out> {
     } else {
         unverified_view(home, None)
     };
+    // whitelist.json is anyone of this user's to edit, so its entries, nicknames and the reason
+    // that quotes it reach `--json` escaped (every string ASCII-inert, structure and counts kept,
+    // `reason` cut to a prose budget); the human text is already bounded in `list_text`.
     let text = list_text(&out, a.verify);
-    Ok(Out::with_text(out, text))
+    Ok(Out::with_text(super::inert_whitelist(&out), text))
 }
 
 fn verified_view(home: &Path, anchor: Result<Option<WhitelistAnchor>>) -> Value {
@@ -1263,7 +1373,9 @@ fn list_text(out: &Value, verify: bool) -> String {
         "whitelist gen {}, {}{}",
         match &out["gen"] {
             Value::Null => "-".to_string(),
-            g => ascii_json(g),
+            g => g
+                .as_u64()
+                .map_or_else(|| INVALID.to_string(), |g| g.to_string()),
         },
         if out["verified"] == json!(true) {
             "verified"
@@ -1277,41 +1389,70 @@ fn list_text(out: &Value, verify: bool) -> String {
             (None, None) => String::new(),
         }
     )];
-    for e in out["entries"].as_array().into_iter().flatten() {
-        if !e.is_object() {
-            lines.push(format!("  {}", ascii_json(e)));
-            continue;
+    // The entries come from whitelist.json, which anyone of this user can write: each field is
+    // shown only when it is what `add` would have written ([`entry_line`]). A list the seal
+    // verified (`--verify`) is the human's own: up to [`ENTRIES_SHOWN`] lines. Any other list,
+    // parseable or not, gets one prose budget for all its entry lines, so a file cannot lay out
+    // rows of its own (a grid of nicknames is a picture too); `--json` keeps every entry. A file
+    // that cannot be read as a list (only then is `policy` null with entries there) is counted.
+    let entries: Vec<&Value> = out["entries"].as_array().into_iter().flatten().collect();
+    let bounded = out["verified"] != json!(true);
+    let raw = out["policy"].is_null() && !entries.is_empty();
+    if raw {
+        lines.push(format!(
+            "  {} entries, in a file that is not a whitelist:",
+            entries.len()
+        ));
+    }
+    let (mut used, mut listed) = (0, 0);
+    for e in entries.iter().take(ENTRIES_SHOWN) {
+        let line = entry_line(e);
+        if bounded && used + line.len() > crate::core::text::PROSE_MAX {
+            break;
         }
-        let field = |k: &str| match &e[k] {
-            Value::String(s) => shown(s),
-            other => ascii_json(other),
-        };
-        let mut line = format!(
-            "  {:<16} {:<8} {} {}",
-            field("nickname"),
-            field("kind"),
-            field("address"),
-            join(&e["chains"])
-        );
-        if e["selectors"].is_array() {
-            line.push_str(&format!("  selectors {}", join(&e["selectors"])));
-        }
+        used += line.len();
+        listed += 1;
         lines.push(line);
     }
+    if entries.len() > listed {
+        let more = entries.len() - listed;
+        lines.push(match (bounded, raw) {
+            (true, true) => {
+                format!("  ... {more} more; `zwallet whitelist list --json` shows them")
+            }
+            // `--verify` just ran and did not verify: running it again shows the same.
+            (true, false) if verify => {
+                format!("  ... {more} more; `zwallet whitelist list --json` shows them")
+            }
+            (true, false) => {
+                format!("  ... {more} more; `zwallet whitelist list --verify` shows them all")
+            }
+            (false, _) => format!("  ... {more} more; `--json` shows them all"),
+        });
+    }
     if let Some(caps) = out["policy"]["maxFeeWei"].as_object() {
-        let caps: Vec<String> = caps
-            .iter()
-            .map(|(key, wei)| {
-                let wei = wei.as_str().unwrap_or("?");
-                match (chains::find(key), U256::from_str_radix(wei, 10)) {
-                    (Ok(c), Ok(w)) => {
-                        format!("{} {} {}", c.key, format_units(w, c.decimals), c.symbol)
-                    }
-                    _ => format!("{} {} wei", shown(key), shown(wei)),
+        // Keys and amounts from the file: a known chain and a decimal amount, or [`INVALID`]. At
+        // most [`ITEMS_SHOWN`]; a list that is not verified also spends the entry lines' budget.
+        let mut shown_caps: Vec<String> = Vec::new();
+        for (key, wei) in caps.iter().take(ITEMS_SHOWN) {
+            let wei = wei.as_str().map(|w| U256::from_str_radix(w, 10));
+            let cap = match (chains::find(key), wei) {
+                (Ok(c), Some(Ok(w))) => {
+                    format!("{} {} {}", c.key, format_units(w, c.decimals), c.symbol)
                 }
-            })
-            .collect();
-        lines.push(format!("fee caps: {}", caps.join(", ")));
+                (Ok(c), _) => format!("{} {INVALID}", c.key),
+                _ => INVALID.to_string(),
+            };
+            if bounded && used + cap.len() > crate::core::text::PROSE_MAX {
+                break;
+            }
+            used += cap.len();
+            shown_caps.push(cap);
+        }
+        if caps.len() > shown_caps.len() {
+            shown_caps.push(format!("and {} more", caps.len() - shown_caps.len()));
+        }
+        lines.push(format!("fee caps: {}", shown_caps.join(", ")));
         lines.push(format!(
             "message signing: {}",
             if out["policy"]["allowMessageSigning"] == json!(true) {
@@ -1429,11 +1570,14 @@ mod tests {
     #[test]
     fn file_values_reach_human_output_escaped() {
         assert_eq!(shown("alice"), "alice");
-        assert_eq!(shown("mallory\u{1b}[2J"), "\"mallory\\u{1b}[2J\"");
-        assert_eq!(shown("a\u{202e}b"), "\"a\\u{202e}b\"");
-        assert_eq!(shown(""), "\"\"");
+        assert_eq!(shown("mallory\u{1b}[2J"), "mallory\\u{1b}[2J");
+        assert_eq!(shown("a\u{202e}b"), "a\\u{202e}b");
+        assert_eq!(shown(""), "");
         let long = "x".repeat(SHOWN_CHARS + 1);
-        assert_eq!(shown(&long), format!("{:?}…", &long[..SHOWN_CHARS]));
+        assert_eq!(
+            shown(&long),
+            format!("{}...(cut)", &long[..SHOWN_CHARS - "...(cut)".len()])
+        );
         assert_eq!(
             printable("entry \"m\u{1b}\": bad \u{202e}"),
             "entry \"m\\u{1b}\": bad \\u{202e}"
@@ -2042,6 +2186,7 @@ mod tests {
             &FileView::Absent,
             &fresh,
             false,
+            &NameBudget::new(),
         );
         let text = lines.join("\n");
         assert!(

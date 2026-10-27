@@ -6,7 +6,7 @@
 
 use crate::core::error::{Result, WalletError};
 use std::fs::OpenOptions;
-use std::io::{ErrorKind, IsTerminal, Write};
+use std::io::{ErrorKind, IsTerminal};
 use std::os::fd::{AsRawFd, RawFd};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -164,7 +164,8 @@ fn prompt_tty(prompt: &str) -> Result<Zeroizing<String>> {
     let original = term;
     term.c_lflag &= !libc::ECHO;
     term.c_lflag |= libc::ECHONL;
-    (&tty).write_all(prompt.as_bytes()).map_err(|_| no_tty())?;
+    // The prompt can carry a whitelist change summary, which quotes files: through the write point.
+    crate::core::terminal::write_human(&mut &tty, prompt).map_err(|_| no_tty())?;
     // SAFETY: fd is open for the lifetime of `tty`; `term` came from tcgetattr.
     if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &term) } != 0 {
         return Err(no_tty());
@@ -178,6 +179,7 @@ fn prompt_tty(prompt: &str) -> Result<Zeroizing<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::os::fd::{FromRawFd, OwnedFd};
 
     fn pipe_with(bytes: &[u8]) -> OwnedFd {

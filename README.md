@@ -96,7 +96,14 @@ Commands that act on a key take `--key <name>` (default: the active key).
     by this process or by the daemon child it just started.
     - `address --verify` and `list --verify` (password at the terminal prompt, or
       `--password-stdin`): decrypt `wallet.json` here, derive, and compare with the cache. A
-      mismatch is `VALIDATION_ERROR`; a wallet the password does not open is `WRONG_PASSWORD`.
+      wallet the password does not open is `WRONG_PASSWORD`. With the password the seed is
+      authoritative and the cache only metadata, so `address --verify` **repairs** every cached
+      address (of every key) that differs from the seed: it rewrites them in `wallet.json` under
+      the writer lock (the encrypted master untouched), and says so in `repaired: [{key, chain,
+      was, now}]` (`was` escaped) and a `warning` that something modified `wallet.json`. `list
+      --verify`, `unlock`, `create` of a further key with the password, `backup`, the whitelist
+      changes and `whitelist list --verify` refuse such a cache with `VALIDATION_ERROR` and say to
+      run `zwallet address --verify`.
       Both show each key's derivation `index`, and add a `warning` when an index is one zwallet
       never assigns (at or past `nextIndex`, or with an unused index below it): the key list in
       `wallet.json` was edited. Such an address is still this seed's, but a wallet restored from
@@ -131,8 +138,80 @@ Commands that act on a key take `--key <name>` (default: the active key).
     socket), the command still succeeds, unverified, with a `warning` naming the pid and what it
     is, ending ``run `zwallet lock` and unlock again``. `balance` adds no note line.
 
-  While a daemon answers, a cache that its derivation contradicts fails these commands (and
-  `list`) with `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
+  While a daemon answers, a cache that its answer contradicts fails these commands (and `list`)
+  with `VALIDATION_ERROR`. Only when every process that answered is this build's key daemon (so
+  only on macOS) does that error say the cache was modified. Otherwise the answer is no proven
+  derivation, so the error says the two addresses disagree, that one of them was tampered with,
+  to fund neither and to run `zwallet address --verify`, which decides with the password; a
+  process known to be another one is also named, in the message and the `warning` field. An
+  answer that is not an address, or a cached value that is not one, is `VALIDATION_ERROR` too and
+  is never shown, compared or verified as an address.
+
+  What reaches the terminal, exactly. Every byte zwallet writes for a human (results, errors,
+  notes, the whitelist change summary, the password prompt) goes through one write point that
+  lets through only printable ASCII (`0x20`–`0x7E`), the newline and `₮` (U+20AE, in the
+  registry's `USD₮0`); any other character — `\r`, tab, ESC, DEL, C1, bidi controls, line
+  separators, block and box-drawing glyphs, emoji, accented letters — is written as a `\u{…}`
+  escape. Two writes do not go through it: zwallet's own QR code of a verified address, printed
+  after the text, and clap's help, version, usage and argument errors (`--help`, `--version`, a
+  mistyped command line without `--json`), which repeat only the command line the invoker typed
+  (no argument is read from the environment). `--json` is printable ASCII too: every other
+  character inside a string is a JSON `\uXXXX` escape (two for a character above U+FFFF), so a
+  JSON parser reads back the exact string.
+
+  Before that, each source zwallet does not control is escaped where it comes in (the same
+  `\u{…}` form, with `\` itself as `\u{5c}`, so the encoding is one-to-one) and bounded. What
+  holds, as one invariant (every cut counts its `...(cut)` marker):
+  - **whitelist.json and whitelist.next.json** (anyone of this user's to write): a file is a list
+    only if every value in it is in the shape zwallet writes — a nickname of `a-z 0-9 _ -`, an
+    address or selector of `0x` and hex digits, a chain `*` or a chain key's shape (`a-z 0-9 -`),
+    a fee cap of decimal digits — else it is not a list, and the message names the field, never
+    its value; the daemon then trusts nothing. So every value from these files a human sees is
+    in that alphabet, or `<invalid>` (a chain zwallet does not know, a field of a file that is not
+    a list). Two exceptions, each bounded: the parser's message for a file JSON cannot read as a
+    list quotes at most 80 characters of it; and `whitelist reset` shows the entries of the files
+    it discards as found, one line of at most 512 per file (`whitelist.json`, and
+    `whitelist.next.json` when it is not the sealed list).
+  - **Names from those files** in one command: at most 512 characters in all, whole names, then
+    how many more (the change summary before the password, `whitelist list` and its fee caps for
+    a list that did not verify). A list the seal verified (`whitelist list --verify`) is the
+    human's own, signed by the key only the password derives: up to 100 entries.
+  - **The send journal:** at most 512 characters per message, each field in the shape zwallet
+    writes it or `<invalid>` (see **The send journal**).
+  - **Everything else from outside**, at most 512 characters per source: an error the process on
+    `d.sock` sends (its message and its string or number details together; array and object
+    details are dropped); `status`'s whitelist and a sign reply's `signerDecoded` (a value that
+    is not an object is one string of at most 512 in `--json` too); an RPC endpoint's error text;
+    a decode error's return data and message (128 + 384); a `call` result in human output; and,
+    at 64 or less, a relayed `expiresAt`, a token's `symbol()` (32), a cached address or an answer
+    that is not an address. Exceptions, each named and bounded: a relayed error from a process
+    known to be another one names its executable path (64) beside its message (512); `status`
+    shows the serving process's `expiresAt` (64), whitelist (512) and, from another process, its
+    path in the warning (200), on three labelled lines; `call`'s human output adds the returned
+    bytes as hex (512) on its own line (`--json` keeps the result and the hex whole).
+
+  A QR code holding an Ethereum address needs at least version 2: a block of 25 × 25 = 625
+  modules without a quiet zone, 25 rows of 25 cells from one source at one character per module.
+  A source bounded to 512 characters cannot fill one. The exceptions above are not shown unable
+  to: their parts sit on separate labelled lines, or are hex only. What a bounded source can
+  still do is pad to the terminal's width so that its text starts a visual row at column 0 (soft
+  wrap), and on a terminal exactly 21 columns wide, a 512-character budget fits a version-1 code
+  (441 modules, at most 17 bytes: a short link, not an address) with no quiet zone. All of this
+  is what a same-user process can already do by writing to the terminal directly (**Known
+  limits**), so it is documented, not mitigated.
+
+  Two places keep `₮`, the one non-ASCII character the write point lets through: a registry
+  token whose `symbol()` is exactly the symbol the registry records shows it as is (USDT0's
+  `USD₮0`; any other symbol, from that address or another, is escaped), and a send journal
+  amount whose symbol has it (zwallet journaled that symbol; in `--json` it is `\u{20ae}`, as
+  every non-ASCII character of a file value is). An error from the process on `d.sock` reads as its own:
+  prefixed ``the process answering on the key daemon socket reported:`` unless it is this
+  build's key daemon, or, from a process known to be another one, named, with its details
+  dropped. A `WALLET_LOCKED` reply from any process running this build's code gets the neutral
+  prefix instead of being named (a daemon whose session just ended looks like another process by
+  then), and still no details: a genuine `WALLET_LOCKED` carries none.
+  `wallet.json` must hold only key names `create` accepts (`active` too); a file with another is
+  `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
   swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
   genuine daemon of a wallet the human did not make), or injects code into the genuine binary
   (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, `LD_PRELOAD`) — the same
@@ -240,9 +319,16 @@ Commands that act on a key take `--key <name>` (default: the active key).
       `command: zwallet whitelist allow-message-signing on` while the verified list has it off;
       `WHITELIST_INVALID` with that `command` while there is no whitelist; `WHITELIST_INVALID`
       with no `command`, pointing to `list --verify`, while the list cannot be trusted.
-  - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false` (human
-    output shows a value from the file as is only when it is short printable ASCII, else quoted
-    with escapes). `--verify` (password) checks it against the seal: `verified: true` with
+  - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false`. Human
+    output shows a field of an entry as it is only when it passes the check `add` applies to it
+    (the nickname rule, `address` or `contract`, `0x` and 40 hex digits, a known chain key or
+    `*`, `0x` and 8 hex digits), else `<invalid>`; `gen` is a number or `<invalid>`; at most 16
+    chains, selectors and fee caps each. A list that is not `verified: true` shows its entry lines
+    and fee caps within one 512-character budget (about 5 entries), then "... N more; `zwallet
+    whitelist list --verify` shows them all" (after a `--verify` that did not verify, `--json`
+    does); a file that cannot be read as a list is also counted. A verified list (`--verify`)
+    shows up to 100 entries. `--json` keeps every entry, its strings escaped.
+    `--verify` (password) checks it against the seal: `verified: true` with
     `source` and `sealedGen`, or `verified: false` with the `reason` (with no whitelist sealed
     but a list file there, why every edit refuses and what to do, not the first `add`; for a
     `whitelist.json` that does not verify and is not above the seal (deleted, unreadable, not a
@@ -255,11 +341,13 @@ Commands that act on a key take `--key <name>` (default: the active key).
     password (terminal prompt, or `--password-stdin`). Before the password is read,
     `whitelist.json` and `whitelist.next.json` are read once and the change is printed where the
     password is read from (the terminal, or stderr with `--password-stdin`): the nickname, the
-    full address, payee or contract, the chains (`*` as "every chain"), the selectors, a policy
-    change's old and new value (from both files when an unfinished edit is in
-    `whitelist.next.json`), what a `reset` drops and every fee cap it sets back, both files as
-    they are (name lists cut at 20; a file that exists but cannot be read is "there but cannot
-    be read: its entries are unknown, and a reset drops them", never "none"), every outcome
+    full address, payee or contract, the chains (`*` as "every chain", otherwise zwallet's key for
+    each or `<invalid>`, at most 16), the selectors, a policy change's old and new value (from
+    both files when an unfinished edit is in `whitelist.next.json`), what a `reset` drops and
+    every fee cap it sets back (by zwallet's key for each chain, once), both files as they are
+    (at most 20 names per file and 512 characters of names in all, then how many more; a file
+    that exists but cannot be read, or is not a list, is "there but cannot be read: its entries
+    are unknown, and a reset drops them", never "none"), every outcome
     that can still happen (for an edit: the change lands on `whitelist.json` if it is the sealed
     list, on the unfinished edit if that is, on a first list from the defaults if there is no
     list file and no whitelist yet, otherwise nothing changes; for a `reset`: the generation it
@@ -396,7 +484,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   reach the network, be held by other nodes, or have been dropped) and that a retry of the
   payment passes `--nonce <the nonce it was signed with>`, never a plain resend. A node that
   answers about another transaction is `RPC_ERROR`, never "not found". Every message below that
-  says to look a transaction up names this command with the hash and the explorer page.
+  says to look a transaction up names this command and the explorer page: with the hash for a
+  transaction zwallet itself sent or found mined, and for the send journal's entries their
+  hashes, then one `zwallet tx --chain <chain> <txHash>` or `/tx/<txHash>` template.
 - **The send journal.** Right before `eth_sendRawTransaction`, zwallet appends one JSON line
   `{ ts, chain, from, nonce, txHash, to, value, amountRaw, kind, token? }` (`value` like
   `"0.01 ETH"` for people, `amountRaw` the same amount in base units: wei, or the token's smallest
@@ -413,7 +503,21 @@ Commands that act on a key take `--key <name>` (default: the active key).
   file owned by this user; otherwise a send without `--nonce` is `VALIDATION_ERROR` "cannot read
   the send journal <path>: …; nothing was signed", since the repeat check below needs it. Errors
   and messages below that send the agent to an earlier transaction name the journal's entries at
-  that nonce, each with its `zwallet tx` command and explorer page.
+  that nonce, then how to look each hash up (`zwallet tx --chain <chain> <txHash>` or the
+  explorer's `/tx/<txHash>` page). The journal is a file any process of this user can write, so
+  a message shows each field of an entry only in the shape zwallet writes it, else `<invalid>`:
+  the time as RFC 3339 UTC (re-rendered from the instant, not the file's text), the kind
+  `transfer`, `token-transfer` or `invoke`, the recipient `0x` and 40 hex digits, the amount as
+  `format_units` writes it (at most 78 digits before a point and 255 after, 257 characters in
+  all), one space and the symbol zwallet journaled (1 to 32 printable characters other than a
+  space, `₮` included: the chain's, a registry token's, `?` when `symbol()` failed, or an
+  on-chain one as `erc20_meta` escaped and cut it; one with a space in it shows as `<invalid>`),
+  and the hash only when it is a 32-byte hash (`?` else). The journal's text in one message is at
+  most 512 characters: the newest entries that fit, at most 5, shown whole and oldest first, then
+  "(and N more there)". The human `duplicateSends` line of a dry-run or an `--allow-duplicate`
+  send shows its entries the same way. The entries in `duplicateSends`, `pendingSends` and
+  `journalEntries` (on the other messages that name the journal's entries) keep all their fields,
+  every string escaped.
 - **One send at a time.** Sends from one key on one chain never overlap: each holds
   `nonce-<chainId>-<address>.lock` in the wallet home from before reading the nonce until the
   command returns, through `--wait`. A send that finds the lock held does not wait (after waiting,
@@ -435,8 +539,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   (`amountRaw`: wei for a native transfer or an invoke's value; for a token transfer the token's
   base units and the same token contract), a send without `--nonce` is `VALIDATION_ERROR` "this
   looks like a repeat of a recent send; look those hashes up first. If this really is a second
-  payment, pass --allow-duplicate", naming each match's txHash, nonce and time with its `zwallet
-  tx` command (`duplicateSends`, `journal`); nothing is signed. The display text (`value`) is
+  payment, pass --allow-duplicate", naming each match's txHash, nonce and time, then one `zwallet
+  tx` template to look each hash up (`duplicateSends`, `journal`); nothing is signed. The display text (`value`) is
   never compared: a token's symbol comes from the node, and a `symbol()` call that fails once
   (shown as `?`) must not make a repeat look new. A journal line written before `amountRaw`
   existed is compared by its `value`. This catches the re-run of a send that was cut off after it
@@ -460,7 +564,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   the nonce was used: the transaction there may have reverted and paid nothing, so no message
   says a payment went through from that alone. Where the transaction mined at `n` is known (the
   `--replace` hash or a journal entry at `n` that the node reports as this key's at `n`, with a
-  receipt), the error names it (`minedTxHash`, and the hash in the message) and adds the
+  receipt), the error names it (`minedTxHash`, and the hash in the message: 66 hex characters,
+  the node's own transaction, shown up to three times beside the journal's 512) and adds the
   receipt's `success` (`true`, `false`, or `null` when its status says nothing); otherwise the
   message has `<its txHash>`. `n` equal to the next free nonce takes that free slot. Below it,
   `--nonce` replaces the transaction pending at `n`, and `--replace <txHash>` must name it (it must
@@ -705,7 +810,13 @@ things a same-user process can still do, and what to do about them:
   writable by the user, and so by the agent. For real protection install zwallet where the agent
   cannot write (e.g. a root-owned directory), or run the agent as a different OS user.
 - **Read the human's terminal** while the password is typed: a same-user process can open the
-  terminal device the prompt reads.
+  terminal device the prompt reads. The same access lets it write there too, so it can draw
+  whatever it likes on that terminal: the escaping above covers zwallet's own output only.
+- **Forge a line within a budget.** Text from outside is bounded and cannot break a line or draw
+  a glyph, but padded to the terminal's width it can start a visual row at column 0 by soft wrap,
+  and on a 21-column terminal a 512-character budget fits a version-1 QR code of a short link
+  (not an address, which needs 625 modules). A same-user process can draw anything on the
+  terminal directly anyway; zwallet's own output never presents such text as verified.
 - **Read a piped password** (`--password-stdin` from a pipe, Linux): the process writing into the
   pipe, and zwallet itself until its first step makes it non-dumpable, are dumpable, so a
   same-user process can open the pipe through `/proc/<pid>/fd` and race zwallet to read the

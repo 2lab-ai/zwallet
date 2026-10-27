@@ -165,7 +165,10 @@ impl WalletFile {
 fn key_not_found(name: &str) -> WalletError {
     WalletError::new(
         ErrorCode::KeyNotFound,
-        format!("no key named '{name}' (see `zwallet list`)"),
+        format!(
+            "no key named {} (see `zwallet list`)",
+            crate::core::text::shown(name, 64)
+        ),
     )
 }
 
@@ -182,7 +185,8 @@ pub fn validate_key_name(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(WalletError::validation(format!(
-            "invalid key name '{name}': use 1-32 of a-z 0-9 _ - starting with a letter or digit"
+            "invalid key name {}: use 1-32 of a-z 0-9 _ - starting with a letter or digit",
+            crate::core::text::shown(name, 64)
         )))
     }
 }
@@ -546,13 +550,30 @@ pub fn read_wallet_file(home: &Path) -> Result<WalletFile> {
 
 fn parse_wallet_file(path: &Path) -> Result<WalletFile> {
     let bytes = read_wallet_bytes(path)?;
-    let file: WalletFile = serde_json::from_slice(&bytes)
-        .map_err(|e| WalletError::validation(format!("{} is not valid: {e}", path.display())))?;
+    // A parser's message can quote the file's text: escaped.
+    let file: WalletFile = serde_json::from_slice(&bytes).map_err(|e| {
+        WalletError::validation(format!(
+            "{} is not valid: {}",
+            path.display(),
+            crate::core::text::ascii_inert(&e.to_string(), crate::core::text::PROSE_MAX)
+        ))
+    })?;
     if file.version != STORE_VERSION {
         return Err(WalletError::validation(format!(
             "unsupported wallet.json version {} (this zwallet reads version {STORE_VERSION})",
             file.version
         )));
+    }
+    // Key names reach messages and human output: every one, and the active one, must be a name
+    // `create` would accept. zwallet never writes another, so a file that has one was edited.
+    for name in file.keys.iter().map(|k| &k.name).chain([&file.active]) {
+        validate_key_name(name).map_err(|e| {
+            WalletError::validation(format!(
+                "{} is not valid: {}; zwallet never writes such a name, so the file was edited",
+                path.display(),
+                e.message
+            ))
+        })?;
     }
     Ok(file)
 }
@@ -633,8 +654,25 @@ pub fn unlock(
 /// Every key has a distinct name and index, and every cached address is the one the seed
 /// derives at that index.
 fn verify_key_cache(file: &WalletFile, seed: &Seed, derive: AddressDeriver<'_>) -> Result<()> {
-    let inconsistent =
-        |what: String| WalletError::validation(format!("wallet.json is inconsistent: {what}"));
+    verify_key_list(file)?;
+    let repairs = cache_repairs(file, seed, derive)?;
+    moved_index(file, seed, derive, &repairs)?;
+    if let Some(r) = repairs.first() {
+        return Err(inconsistent(format!(
+            "cached {} address of key '{}' does not match the master seed; run `zwallet address \
+             --verify` to check the cache against the seed and repair it",
+            r.chain, r.key
+        )));
+    }
+    Ok(())
+}
+
+fn inconsistent(what: String) -> WalletError {
+    WalletError::validation(format!("wallet.json is inconsistent: {what}"))
+}
+
+/// Every key has a distinct name and index.
+fn verify_key_list(file: &WalletFile) -> Result<()> {
     let (mut names, mut indices) = (BTreeSet::new(), BTreeSet::new());
     for key in &file.keys {
         if !names.insert(key.name.as_str()) {
@@ -647,20 +685,197 @@ fn verify_key_cache(file: &WalletFile, seed: &Seed, derive: AddressDeriver<'_>) 
             )));
         }
     }
+    Ok(())
+}
+
+/// One cached address that differs from the seed's: what [`unlock_repairing`] replaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheRepair {
+    pub key: String,
+    /// A chain key the seed derives an address for.
+    pub chain: String,
+    /// The cached value, as wallet.json has it (any text: escape it before showing it).
+    pub was: String,
+    /// The seed's address.
+    pub now: String,
+}
+
+/// Every cached address in `file` that is not the one `seed` derives for its key and chain.
+/// Chain keys this build derives nothing for are left alone.
+fn cache_repairs(
+    file: &WalletFile,
+    seed: &Seed,
+    derive: AddressDeriver<'_>,
+) -> Result<Vec<CacheRepair>> {
+    let mut repairs = Vec::new();
     for key in &file.keys {
         let derived = derive(seed, key.index)?;
         for (chain, cached) in &key.addresses {
             if let Some(actual) = derived.get(chain)
                 && !actual.eq_ignore_ascii_case(cached)
             {
-                return Err(inconsistent(format!(
-                    "cached {chain} address of key '{}' does not match the master seed",
-                    key.name
-                )));
+                repairs.push(CacheRepair {
+                    key: key.name.clone(),
+                    chain: chain.clone(),
+                    was: cached.clone(),
+                    now: actual.clone(),
+                });
             }
         }
     }
+    Ok(repairs)
+}
+
+/// The highest derivation index [`moved_index`] looks at (besides every key's own).
+const INDEX_SCAN: u32 = 256;
+
+/// Refuses when a cached address that differs from its key's is the seed's address at another
+/// index: the key list's indices were changed (or two swapped), not the cache. Repairing that
+/// would make the key show another account than the one its cache showed, which may be the one
+/// the human funded, so it is never repaired: the human restores the indices. Looks at every
+/// key's index and at 0 to `nextIndex` (at most [`INDEX_SCAN`]); only when there is a mismatch.
+fn moved_index(
+    file: &WalletFile,
+    seed: &Seed,
+    derive: AddressDeriver<'_>,
+    repairs: &[CacheRepair],
+) -> Result<()> {
+    if repairs.is_empty() {
+        return Ok(());
+    }
+    let top = file
+        .keys
+        .iter()
+        .map(|k| k.index.saturating_add(1))
+        .chain([file.next_index])
+        .max()
+        .unwrap_or(0)
+        .min(INDEX_SCAN);
+    let mut candidates: BTreeSet<u32> = (0..top).collect();
+    candidates.extend(file.keys.iter().map(|k| k.index));
+    let mut derived: BTreeMap<u32, BTreeMap<String, String>> = BTreeMap::new();
+    for r in repairs {
+        let Some(key) = file.keys.iter().find(|k| k.name == r.key) else {
+            continue;
+        };
+        for &j in candidates.iter().filter(|&&j| j != key.index) {
+            let at_j = match derived.entry(j) {
+                std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::btree_map::Entry::Vacant(e) => e.insert(derive(seed, j)?),
+            };
+            if !at_j
+                .get(&r.chain)
+                .is_some_and(|a| a.eq_ignore_ascii_case(&r.was))
+            {
+                continue;
+            }
+            // `r.key`'s cache holds index `j`'s address. If a key legitimately sits at `j` with a
+            // correct cache there, `r.key` just holds a stray copy of that address: repair it,
+            // this is not a moved index. Only when no key owns `j`, or the key at `j` also
+            // caches the wrong address (two indices swapped), is this a move, and refused.
+            let owner = file.keys.iter().find(|k| k.index == j);
+            let owner_correct = owner.is_some_and(|k| {
+                k.addresses.get(&r.chain).is_some_and(|c| {
+                    at_j.get(&r.chain)
+                        .is_some_and(|a| a.eq_ignore_ascii_case(c))
+                })
+            });
+            if owner_correct {
+                continue;
+            }
+            let owner = owner
+                .map(|k| format!(", key '{}''s", k.name))
+                .unwrap_or_default();
+            return Err(inconsistent(format!(
+                "key '{}' has index {} but caches the {} address of index {j}{owner}: the key \
+                 list's indices were changed. Not repaired: that would make '{}' show another \
+                 account than the one its cache showed, which may be the one you funded. Restore \
+                 the indices in wallet.json, or delete key '{}''s cached address, from a copy you \
+                 trust",
+                key.name, key.index, r.chain, key.name, key.name
+            )));
+        }
+    }
     Ok(())
+}
+
+/// [`unlock`], but cached addresses that differ from the seed are repaired instead of refused:
+/// with the password the seed is authoritative and the cache is only metadata. Every other check
+/// (distinct names and indices) still refuses. The repair is written under the writer lock, only
+/// while wallet.json's crypto envelope is still the one the password opened, through the same
+/// atomic replace as every metadata write; the encrypted master is never touched. Returns the
+/// repairs made (none when the cache was right, and then nothing is written).
+pub fn unlock_repairing(
+    home: &Path,
+    password: &str,
+    derive: AddressDeriver<'_>,
+) -> Result<(Unsealed, WalletFile, Vec<CacheRepair>)> {
+    let file = read_wallet_file(home)?;
+    let unsealed = decrypt(&file.crypto, password)?;
+    verify_key_list(&file)?;
+    let repairs = cache_repairs(&file, &unsealed.seed, derive)?;
+    if repairs.is_empty() {
+        verify_key_cache(&file, &unsealed.seed, derive)?;
+        return Ok((unsealed, file, Vec::new()));
+    }
+    moved_index(&file, &unsealed.seed, derive, &repairs)?;
+    let lock = MetaLock::acquire(home)?;
+    let (repaired, repairs) = repair_under_lock(&lock, &file.crypto, &unsealed.seed, derive)?;
+    Ok((unsealed, repaired, repairs))
+}
+
+/// [`repair_under_lock`] with no test hook.
+fn repair_under_lock(
+    lock: &MetaLock,
+    opened: &CryptoBox,
+    seed: &Seed,
+    derive: AddressDeriver<'_>,
+) -> Result<(WalletFile, Vec<CacheRepair>)> {
+    repair_under_lock_hooked(lock, opened, seed, derive, || {})
+}
+
+/// The write of [`unlock_repairing`], under `lock`: only while wallet.json's crypto envelope is
+/// still `opened` (the one the password decrypted); the key list checked again and the repairs
+/// computed again as the file is now, and nothing written when there are none (another process
+/// repaired first). The envelope is then **read back from disk** and must still be `opened`, so a
+/// same-user process that swapped the file around the write (`after_write`, a test seam) is
+/// caught: the repair writes only cached addresses and must never be the path that lets a
+/// different master through.
+fn repair_under_lock_hooked(
+    lock: &MetaLock,
+    opened: &CryptoBox,
+    seed: &Seed,
+    derive: AddressDeriver<'_>,
+    after_write: impl FnOnce(),
+) -> Result<(WalletFile, Vec<CacheRepair>)> {
+    let opened = serde_json::to_value(opened).ok();
+    let mut repairs = Vec::new();
+    lock.update_if(|current| {
+        if serde_json::to_value(&current.crypto).ok() != opened {
+            return Err(WalletError::validation(
+                "wallet.json's master changed while the password was checked; retry",
+            ));
+        }
+        verify_key_list(current)?;
+        repairs = cache_repairs(current, seed, derive)?;
+        moved_index(current, seed, derive, &repairs)?;
+        for r in &repairs {
+            if let Some(key) = current.keys.iter_mut().find(|k| k.name == r.key) {
+                key.addresses.insert(r.chain.clone(), r.now.clone());
+            }
+        }
+        Ok(!repairs.is_empty())
+    })?;
+    after_write();
+    let on_disk = read_wallet_file(lock.home())?;
+    if serde_json::to_value(&on_disk.crypto).ok() != opened {
+        return Err(WalletError::validation(
+            "wallet.json's master changed during the cache repair; run `zwallet address --verify` \
+             again",
+        ));
+    }
+    verify_key_cache(&on_disk, seed, derive)?;
+    Ok((on_disk, repairs))
 }
 
 /// Options for creating the master seed.
@@ -1115,10 +1330,21 @@ impl MetaLock {
     /// and the new file replaces the old one atomically (temp file + rename), so the encrypted
     /// master is never at risk even if this process dies midway.
     fn update(&self, mutate: impl FnOnce(&mut WalletFile) -> Result<()>) -> Result<WalletFile> {
+        self.update_if(|file| mutate(file).map(|()| true))
+    }
+
+    /// [`MetaLock::update`], written only when `mutate` returns `true`; otherwise the file as
+    /// read is returned and nothing is written.
+    fn update_if(
+        &self,
+        mutate: impl FnOnce(&mut WalletFile) -> Result<bool>,
+    ) -> Result<WalletFile> {
         let home = &self.home;
         let mut file = read_wallet_file(home)?;
         let crypto_before = serde_json::to_value(&file.crypto).ok();
-        mutate(&mut file)?;
+        if !mutate(&mut file)? {
+            return Ok(file);
+        }
         if serde_json::to_value(&file.crypto).ok() != crypto_before {
             return Err(WalletError::validation(
                 "refusing to rewrite the encrypted master",
@@ -1650,6 +1876,223 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
         let err = unlock(tmp.path(), PW, &fake_derive).err().unwrap();
         assert_eq!(err.code, ErrorCode::ValidationError);
+    }
+
+    /// A fresh wallet in a temp home with keys `a` (0) and `b` (1), rewritten by `edit`.
+    fn two_keys(edit: impl FnOnce(&mut WalletFile)) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        create_master(tmp.path(), PW, "a", fast(), &fake_derive).unwrap();
+        let seed = unlock(tmp.path(), PW, &fake_derive).unwrap().0.seed;
+        add_key(tmp.path(), "b", 1, fake_derive(&seed, 1).unwrap()).unwrap();
+        let path = tmp.path().join(WALLET_FILE);
+        let mut file: WalletFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        edit(&mut file);
+        fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn a_forged_cache_is_repaired_from_the_seed_once() {
+        let tmp = two_keys(|f| {
+            f.keys[1].addresses.insert("alpha".into(), "forged".into());
+        });
+        let err = unlock(tmp.path(), PW, &fake_derive).err().unwrap();
+        assert!(
+            err.message.contains("run `zwallet address --verify`"),
+            "{}",
+            err.message
+        );
+        let (_, file, repairs) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
+        assert_eq!(repairs.len(), 1, "{repairs:?}");
+        assert_eq!(
+            (repairs[0].key.as_str(), repairs[0].was.as_str()),
+            ("b", "forged")
+        );
+        assert_eq!(file.keys[1].addresses["alpha"], repairs[0].now);
+        unlock(tmp.path(), PW, &fake_derive).unwrap();
+        // Nothing left to repair: nothing is written.
+        let before = fs::read(tmp.path().join(WALLET_FILE)).unwrap();
+        let (_, _, again) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
+        assert!(again.is_empty());
+        assert_eq!(fs::read(tmp.path().join(WALLET_FILE)).unwrap(), before);
+    }
+
+    #[test]
+    fn a_changed_index_is_refused_not_repaired() {
+        // `b`'s index changed from 1 to 5: its cache still holds index 1's address. Repairing
+        // would make `b` show index 5's account; refused, naming the index, for unlock and repair.
+        let tmp = two_keys(|f| {
+            f.keys[1].index = 5;
+            f.next_index = 6;
+        });
+        for err in [
+            unlock(tmp.path(), PW, &fake_derive).err().unwrap(),
+            unlock_repairing(tmp.path(), PW, &fake_derive)
+                .err()
+                .unwrap(),
+        ] {
+            assert!(
+                err.message
+                    .contains("key 'b' has index 5 but caches the alpha address of index 1")
+                    && err.message.contains("Not repaired"),
+                "{}",
+                err.message
+            );
+            // Two remedies, each named; no vague "(or the file)".
+            assert!(
+                err.message.contains(
+                    "Restore the indices in wallet.json, or delete key 'b''s cached address"
+                ) && !err.message.contains("(or the file)"),
+                "{}",
+                err.message
+            );
+            assert!(
+                !err.message.contains("run `zwallet address --verify`"),
+                "{}",
+                err.message
+            );
+        }
+        // Two keys' indices swapped: the other key is named.
+        let tmp = two_keys(|f| {
+            f.keys[0].index = 1;
+            f.keys[1].index = 0;
+        });
+        let err = unlock_repairing(tmp.path(), PW, &fake_derive)
+            .err()
+            .unwrap();
+        assert!(
+            err.message
+                .contains("key 'a' has index 1 but caches the alpha address of index 0, key 'b''s"),
+            "{}",
+            err.message
+        );
+        let bytes = fs::read(tmp.path().join(WALLET_FILE)).unwrap();
+        let file: WalletFile = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            (file.keys[0].index, file.keys[1].index),
+            (1, 0),
+            "nothing written"
+        );
+    }
+
+    #[test]
+    fn a_repair_refuses_duplicate_names_and_indices() {
+        for (edit, why) in [
+            (
+                (|f: &mut WalletFile| {
+                    f.keys[1].name = "a".into();
+                    f.keys[1].addresses.insert("alpha".into(), "forged".into());
+                }) as fn(&mut WalletFile),
+                "two keys are named 'a'",
+            ),
+            (
+                |f: &mut WalletFile| {
+                    f.keys[1].index = 0;
+                    f.keys[1].addresses.insert("alpha".into(), "forged".into());
+                },
+                "key 'b' reuses derivation index 0",
+            ),
+        ] {
+            let tmp = two_keys(edit);
+            let err = unlock_repairing(tmp.path(), PW, &fake_derive)
+                .err()
+                .unwrap();
+            assert!(err.message.contains(why), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn a_repair_refuses_a_master_that_changed_after_the_password() {
+        let tmp = two_keys(|f| {
+            f.keys[1].addresses.insert("alpha".into(), "forged".into());
+        });
+        let file = read_wallet_file(tmp.path()).unwrap();
+        let seed = decrypt(&file.crypto, PW).unwrap().seed;
+        // The envelope the password opened is not the one on disk any more.
+        let mut opened = file.crypto.clone();
+        opened.nonce = "AAAAAAAAAAAAAAAA".into();
+        let lock = MetaLock::acquire(tmp.path()).unwrap();
+        let err = repair_under_lock(&lock, &opened, &seed, &fake_derive)
+            .err()
+            .unwrap();
+        assert!(
+            err.message
+                .contains("master changed while the password was checked"),
+            "{}",
+            err.message
+        );
+        let now = read_wallet_file(tmp.path()).unwrap();
+        assert_eq!(now.keys[1].addresses["alpha"], "forged", "nothing written");
+    }
+
+    #[test]
+    fn a_stray_copy_of_another_keys_address_is_repaired_not_called_a_move() {
+        // `a` (index 0) caches the address `b` (index 1) correctly owns: `a` holds a stray copy,
+        // not a moved index. Because a key sits at index 1 with a correct cache there, this is a
+        // repair of `a`, not a refusal.
+        let tmp = two_keys(|f| {
+            let b_addr = f.keys[1].addresses["alpha"].clone();
+            f.keys[0].addresses.insert("alpha".into(), b_addr);
+        });
+        let (unsealed, file, repairs) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
+        let want0 = fake_derive(&unsealed.seed, 0).unwrap()["alpha"].clone();
+        let want1 = fake_derive(&unsealed.seed, 1).unwrap()["alpha"].clone();
+        assert_eq!(repairs.len(), 1, "{repairs:?}");
+        assert_eq!(
+            (repairs[0].key.as_str(), repairs[0].now.as_str()),
+            ("a", want0.as_str())
+        );
+        assert_eq!(file.keys[0].addresses["alpha"], want0);
+        // `b`, which legitimately sits at index 1, is left as it is.
+        assert_eq!(file.keys[1].addresses["alpha"], want1);
+    }
+
+    #[test]
+    fn a_repair_under_lock_writes_nothing_when_the_cache_is_already_right() {
+        // Another process repaired first: under the lock the on-disk cache already matches the
+        // seed, so the write is skipped and wallet.json is untouched (S5).
+        let tmp = two_keys(|_| {});
+        let file = read_wallet_file(tmp.path()).unwrap();
+        let seed = decrypt(&file.crypto, PW).unwrap().seed;
+        let before = fs::read(tmp.path().join(WALLET_FILE)).unwrap();
+        let lock = MetaLock::acquire(tmp.path()).unwrap();
+        let (_, repairs) = repair_under_lock(&lock, &file.crypto, &seed, &fake_derive).unwrap();
+        assert!(repairs.is_empty(), "{repairs:?}");
+        drop(lock);
+        assert_eq!(
+            fs::read(tmp.path().join(WALLET_FILE)).unwrap(),
+            before,
+            "nothing written"
+        );
+    }
+
+    #[test]
+    fn the_repair_catches_a_master_swapped_in_after_the_write() {
+        // A same-user process swaps wallet.json for one with a different master right after the
+        // repair writes: the read-back from disk no longer matches the envelope the password
+        // opened, so the repair errors instead of leaving a cache written under a master this
+        // password never opened (S3).
+        let tmp = two_keys(|f| {
+            f.keys[1].addresses.insert("alpha".into(), "forged".into());
+        });
+        let file = read_wallet_file(tmp.path()).unwrap();
+        let seed = decrypt(&file.crypto, PW).unwrap().seed;
+        let path = tmp.path().join(WALLET_FILE);
+        let lock = MetaLock::acquire(tmp.path()).unwrap();
+        let swap = || {
+            let mut swapped = read_wallet_file(tmp.path()).unwrap();
+            swapped.crypto.nonce = "AAAAAAAAAAAAAAAA".into();
+            fs::write(&path, serde_json::to_vec(&swapped).unwrap()).unwrap();
+        };
+        let err = repair_under_lock_hooked(&lock, &file.crypto, &seed, &fake_derive, swap)
+            .err()
+            .unwrap();
+        assert!(
+            err.message
+                .contains("master changed during the cache repair"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

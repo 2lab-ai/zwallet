@@ -91,6 +91,36 @@ fn without_a_list_unlock_says_so_and_message_signing_is_refused() {
     );
 }
 
+#[test]
+fn a_list_with_a_value_outside_adds_shape_is_no_list_to_the_daemon_and_is_never_echoed() {
+    // A whitelist.json that parses as JSON but holds a nickname `add` never writes is no list:
+    // the daemon trusts nothing (it signs nothing a list would allow), and its reason names the
+    // field, never the planted text.
+    let home = Home::new();
+    home.create("main", &[]);
+    home.allow("alice", ALICE, &["*"]);
+    home.edit_whitelist(|l| l.policy.allow_message_signing = true);
+    home.unlock("30s");
+    assert!(sign(&home).ok()["signature"].is_string());
+    let path = home.path().join("whitelist.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("\"alice\"", "\"## ## ## alice\"")).unwrap();
+    let status = home.run(&["status", "--json"]).ok();
+    let w = &status["whitelist"];
+    assert_eq!(w["verified"], false, "{status:#}");
+    let reason = w["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains(
+            "not a whitelist file: the nickname of entry 1 is not in the shape zwallet writes"
+        ),
+        "{reason}"
+    );
+    assert!(!reason.contains("##"), "{reason}");
+    let r = sign(&home);
+    let msg = r.err("WHITELIST_INVALID");
+    assert!(!msg.contains("##"), "{msg}");
+}
+
 /// Runs `args` like [`Home::run`], but fails the test instead of hanging if the command has not
 /// finished within 30 seconds.
 fn run_bounded(home: &Home, args: &[&str]) -> common::Run {

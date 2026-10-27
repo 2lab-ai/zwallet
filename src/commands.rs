@@ -133,7 +133,7 @@ async fn require_unlocked(home: &Path) -> Result<()> {
 /// the key was created.
 async fn key_address(home: &Path, key: &KeyEntry, chain: &Chain) -> Result<String> {
     if let Some(a) = key.addresses.get(chain.key) {
-        return Ok(a.clone());
+        return cached_address(key, chain.key, a);
     }
     let v = protocol::send(
         home,
@@ -154,10 +154,7 @@ async fn key_address(home: &Path, key: &KeyEntry, chain: &Chain) -> Result<Strin
             ),
         )
     })?;
-    v["address"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| WalletError::validation("daemon returned no address"))
+    reply_address(&v, chain)
 }
 
 /// Derives every chain's address for key `index` through the unlocked daemon.
@@ -176,64 +173,187 @@ async fn derive_via_daemon(home: &Path, index: u32) -> Result<BTreeMap<String, S
                 SIGN_TIMEOUT,
             )
             .await?;
-            let a = v["address"]
-                .as_str()
-                .ok_or_else(|| WalletError::validation("daemon returned no address"))?;
-            per_family.insert(family, a.to_string());
+            per_family.insert(family, reply_address(&v, chain)?);
         }
         out.insert(chain.key.to_string(), per_family[family].clone());
     }
     Ok(out)
 }
 
-fn primary_address(key: &KeyEntry) -> Option<&String> {
+/// The address `key` shows by default: the cached one on [`PRIMARY_CHAIN`], else on any chain;
+/// `None` when the cache has none. A cached value that is not an address is an error.
+fn primary_address(key: &KeyEntry) -> Result<Option<String>> {
     key.addresses
-        .get(PRIMARY_CHAIN)
-        .or_else(|| key.addresses.values().next())
+        .get_key_value(PRIMARY_CHAIN)
+        .or_else(|| key.addresses.iter().next())
+        .map(|(chain, a)| cached_address(key, chain, a))
+        .transpose()
 }
 
-/// The key daemon's own derivation of key `index` on `chain`, or `None` while the wallet is
-/// locked (no daemon, or one that just locked itself). Whoever answers is not checked: for the
-/// cross-check of `list` only (see [`Trust`]).
-async fn daemon_derive(home: &Path, index: u32, chain: &Chain) -> Result<Option<String>> {
-    let reply = match protocol::send(
-        home,
-        &Request::Address {
-            chain: chain.key.into(),
-            index,
-        },
-        SIGN_TIMEOUT,
-    )
-    .await
-    {
-        Ok(Some(v)) => v,
-        Ok(None) => return Ok(None),
-        Err(e) if e.code == ErrorCode::WalletLocked => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    reply["address"]
-        .as_str()
-        .map(|a| Some(a.to_string()))
-        .ok_or_else(|| WalletError::validation("daemon returned no address"))
+/// The most characters of a value zwallet does not control (wallet.json's cache, a reply on the
+/// daemon socket) that a message shows, escaped (see [`crate::core::text::shown`]).
+const VALUE_SHOWN: usize = 64;
+
+/// `value` escaped for a message (see [`VALUE_SHOWN`]).
+fn shown(value: &str) -> String {
+    crate::core::text::shown(value, VALUE_SHOWN)
 }
 
-/// wallet.json's cached address for `key` on `chain` must be the one `by` derived from the seed;
-/// the cache is plain metadata that anyone running as this user can edit.
-fn check_cache(key: &KeyEntry, chain: &str, derived: &str, by: &str) -> Result<()> {
-    match key.addresses.get(chain) {
-        Some(cached) if !cached.eq_ignore_ascii_case(derived) => {
-            Err(WalletError::validation(format!(
-                "wallet.json's cached {chain} address for key '{}' ({cached}) does not match \
-                 the address {by} derives from the seed ({derived}); the cache was modified, do \
-                 not send funds to it",
-                key.name
-            )))
+/// The session whitelist a daemon reports, inert for `--json` and the terminal. A genuine daemon
+/// sends an object (or null): every string and key is ASCII-escaped and its structure and counts
+/// are kept, but its `reason` (the only unbounded prose field, which can quote whitelist.json) is
+/// cut to a prose budget, and `render_human` bounds the rest. Anything else (a string, an array,
+/// a number from whatever answers on `d.sock`) is no whitelist: it becomes one string, its JSON
+/// text made inert and cut to [`PROSE_MAX`](crate::core::text::PROSE_MAX), in both outputs.
+fn inert_whitelist(value: &Value) -> Value {
+    use crate::core::text::{PROSE_MAX, ascii_inert, inert_json};
+    match value {
+        Value::Null => Value::Null,
+        Value::Object(_) => {
+            let mut w = inert_json(value);
+            if let Some(reason) = w.get("reason").and_then(Value::as_str) {
+                w["reason"] = json!(ascii_inert(reason, PROSE_MAX));
+            }
+            w
         }
-        _ => Ok(()),
+        other => json!(ascii_inert(&other.to_string(), PROSE_MAX)),
     }
 }
 
-const DAEMON: &str = "the key daemon";
+/// What the key holder decoded from the bytes it signed, for `signerDecoded`: an object from a
+/// genuine daemon, made inert with its structure kept; anything else (whatever answers on `d.sock`
+/// may send a 1 MiB string) one string, made inert and cut as [`inert_whitelist`] does.
+fn signer_decoded(view: &Value) -> Value {
+    use crate::core::text::{PROSE_MAX, ascii_inert, inert_json};
+    if view.is_object() {
+        inert_json(view)
+    } else {
+        json!(ascii_inert(&view.to_string(), PROSE_MAX))
+    }
+}
+
+/// Whether `value` has the shape of an address on `chain`: for EVM, `0x` and 40 hex digits (any
+/// case). Says nothing about whose address it is.
+fn address_shaped(chain: &Chain, value: &str) -> bool {
+    match &chain.family {
+        Family::Evm(_) => {
+            value.len() == 42
+                && value.starts_with("0x")
+                && value[2..].bytes().all(|b| b.is_ascii_hexdigit())
+        }
+    }
+}
+
+/// `cached`, wallet.json's cached address of `key` on chain key `chain`, if it has an address's
+/// shape; otherwise `VALIDATION_ERROR` showing the value escaped. The cache is plain metadata
+/// anyone of this user can edit: a value that is no address (a terminal escape, a fake line)
+/// must never be shown or compared as one.
+fn cached_address(key: &KeyEntry, chain: &str, cached: &str) -> Result<String> {
+    if chains::find(chain).is_ok_and(|c| address_shaped(c, cached)) {
+        return Ok(cached.to_string());
+    }
+    Err(WalletError::validation(format!(
+        "wallet.json's cached {} address for key '{}' is {}, which is not an address; the cache \
+         was modified, do not send funds to it",
+        shown(chain),
+        key.name,
+        shown(cached)
+    )))
+}
+
+/// The `address` of a daemon's reply for `chain`, if it has an address's shape; otherwise
+/// `VALIDATION_ERROR` showing the value escaped. Whatever answers on the socket chooses this
+/// text, so a value that is no address is never shown, compared, cached or verified as one.
+fn reply_address(reply: &Value, chain: &Chain) -> Result<String> {
+    match reply["address"].as_str() {
+        Some(a) if address_shaped(chain, a) => Ok(a.to_string()),
+        Some(a) => Err(WalletError::validation(format!(
+            "the process answering on the key daemon socket returned {} as a {} address, which \
+             is not an address; not using it",
+            shown(a),
+            chain.key
+        ))),
+        None => Err(WalletError::validation(
+            "the process answering on the key daemon socket returned no address",
+        )),
+    }
+}
+
+/// wallet.json's cached address for `key` on `chain` must be the one this process derived from
+/// the seed after the password (`derived`); the cache is plain metadata that anyone running as
+/// this user can edit.
+fn check_cache(key: &KeyEntry, chain: &str, derived: &str) -> Result<()> {
+    match cache_mismatch(key, chain, derived)? {
+        Some(cached) => Err(mismatch_error(
+            &key.name,
+            chain,
+            &cached,
+            derived,
+            &Deriver::Seed("this process"),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Who produced the address a cached one is compared with, which decides what a mismatch may say.
+#[derive(Debug)]
+enum Deriver<'a> {
+    /// Derived from the seed: by this process after the password, or by this build's own key
+    /// daemon of the home. A mismatch means the cache was modified.
+    Seed(&'a str),
+    /// Reported by whatever answers on `d.sock`, not known to be this build's key daemon: either
+    /// side may be the tampered one. With the reason when it is known to be another process.
+    Socket(Option<&'a str>),
+}
+
+/// The `VALIDATION_ERROR` for a cached address (`cached`) of key `name` on `chain` that differs
+/// from `other`, worded by who produced `other` ([`Deriver`]). Only a derivation from the seed
+/// blames the cache; an address reported on the socket by a process not known to be this
+/// build's key daemon is no derivation, so neither address is to be funded and the password
+/// check decides. `other` is escaped; `cached` is address-shaped already ([`cache_mismatch`]).
+fn mismatch_error(
+    name: &str,
+    chain: &str,
+    cached: &str,
+    other: &str,
+    by: &Deriver<'_>,
+) -> WalletError {
+    let other = shown(other);
+    match by {
+        Deriver::Seed(who) => WalletError::validation(format!(
+            "wallet.json's cached {chain} address for key '{name}' ({cached}) does not match the \
+             address {who} derives from the seed ({other}); the cache was modified, do not send \
+             funds to it. `zwallet address --verify` repairs the cache from the seed"
+        )),
+        Deriver::Socket(impostor) => {
+            let mut message = format!(
+                "the process answering on the key daemon socket reported {other} as the {chain} \
+                 address of key '{name}', but wallet.json caches {cached}: one of them was \
+                 tampered with. Do not send funds to either address; run `zwallet address \
+                 --verify` (with the password it says which is right)"
+            );
+            if let Some(reason) = impostor {
+                message.push_str(&format!(
+                    ". That process is not this build's key daemon: {reason}; {}",
+                    protocol::RELOCK
+                ));
+            }
+            WalletError::validation(message)
+        }
+    }
+}
+
+/// The cached address of `key` on `chain` when it differs from `derived`, `None` when it agrees
+/// or there is none. A cached value that is not an address is an error ([`cached_address`]).
+fn cache_mismatch(key: &KeyEntry, chain: &str, derived: &str) -> Result<Option<String>> {
+    match key.addresses.get(chain) {
+        Some(cached) => {
+            let cached = cached_address(key, chain, cached)?;
+            Ok((!cached.eq_ignore_ascii_case(derived)).then_some(cached))
+        }
+        None => Ok(None),
+    }
+}
 
 /// How far an address shown without the password can be trusted. There are three levels:
 /// - `verified: true, verifiedBy: "password"`: derived from the seed after the human's password,
@@ -314,26 +434,65 @@ impl<'a> Daemon<'a> {
 
     /// The daemon's derivation of key `index` on `chain`, or `None` while the wallet is locked.
     async fn derive(&mut self, index: u32, chain: &Chain) -> Result<Option<String>> {
+        self.fetch(index, chain).await?
+    }
+
+    /// [`Daemon::derive`] in two levels, for a caller that keeps going when one chain family
+    /// cannot be read: the outer error must abort the command (an answer that is no address, a
+    /// failed peer check: tampering, never a row), the inner one is that the socket could not be
+    /// asked or relayed an error.
+    async fn fetch(&mut self, index: u32, chain: &Chain) -> Result<Result<Option<String>>> {
         let request = Request::Address {
             chain: chain.key.into(),
             index,
         };
         let answer = match protocol::send_answered(self.home, &request, SIGN_TIMEOUT).await {
             Ok(Some(a)) => a,
-            Ok(None) => return Ok(None),
-            Err(e) if e.code == ErrorCode::WalletLocked => return Ok(None),
-            Err(e) => return Err(e),
+            Ok(None) => return Ok(Ok(None)),
+            Err(e) if e.code == ErrorCode::WalletLocked => return Ok(Ok(None)),
+            Err(e) => return Ok(Err(e)),
         };
-        let address = answer.value["address"]
-            .as_str()
-            .ok_or_else(|| WalletError::validation("daemon returned no address"))?
-            .to_string();
         if !self.peers.iter().any(|(p, _)| *p == answer.peer) {
             let check = protocol::check_peer(self.home, &answer.peer)?;
             self.peers.push((answer.peer, check));
         }
+        // An answer that is no address is never used, whoever gave it; the error names an
+        // impostor when one answered.
+        let address = reply_address(&answer.value, chain).map_err(|e| self.naming_impostor(e))?;
         self.answered = true;
-        Ok(Some(address))
+        Ok(Ok(Some(address)))
+    }
+
+    /// Why a process that answered this command is not this build's key daemon, if one is known
+    /// not to be (a [`PeerCheck::Other`] peer).
+    fn impostor(&self) -> Option<&str> {
+        self.peers.iter().find_map(|(_, c)| match c {
+            PeerCheck::Other(reason) => Some(reason.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Whether every process that answered this command is this build's key daemon of the home
+    /// (and one did).
+    fn all_this_build(&self) -> bool {
+        !self.peers.is_empty() && self.peers.iter().all(|(_, c)| *c == PeerCheck::ThisBuild)
+    }
+
+    /// `e` naming an impostor on `d.sock` (in the message, and as the `warning` detail), when one
+    /// answered this command.
+    fn naming_impostor(&self, e: WalletError) -> WalletError {
+        match (self.impostor(), self.trust().warning()) {
+            (Some(reason), Some(w)) => {
+                let message = format!(
+                    "{}. That process is not this build's key daemon: {reason}; {}",
+                    e.message,
+                    protocol::RELOCK
+                );
+                let w = w.to_string();
+                WalletError { message, ..e }.with_detail("warning", w)
+            }
+            _ => e,
+        }
     }
 
     /// `key`'s address on `chain` from `derived` (this command's derivation for the chain's
@@ -353,16 +512,25 @@ impl<'a> Daemon<'a> {
         key_address(self.home, key, chain).await
     }
 
-    /// [`check_cache`] of `derived` (this daemon's derivation) for `key` on `chain`. A mismatch
-    /// aborts the command; when what answered on `d.sock` is known not to be this build's key
-    /// daemon of the home, the error also carries that warning (in the message and as the
-    /// `warning` detail), so the abort still names the impostor.
+    /// `derived` (what answered on `d.sock` gave) checked against `key`'s cached address on
+    /// `chain`. A mismatch aborts the command with `VALIDATION_ERROR` ([`mismatch_error`]): it
+    /// blames the cache only when every process that answered is this build's key daemon of the
+    /// home (its answer is the seed's derivation); otherwise either side may be the tampered one,
+    /// and a process known to be another one is named (also as the `warning` detail).
     fn check_cache(&self, key: &KeyEntry, chain: &Chain, derived: &str) -> Result<()> {
-        check_cache(key, chain.key, derived, DAEMON).map_err(|e| match self.trust().warning() {
-            Some(w) => {
-                let message = format!("{}. Also: {w}", e.message);
-                WalletError { message, ..e }.with_detail("warning", w)
-            }
+        let Some(cached) =
+            cache_mismatch(key, chain.key, derived).map_err(|e| self.naming_impostor(e))?
+        else {
+            return Ok(());
+        };
+        let by = if self.all_this_build() {
+            Deriver::Seed("the key daemon")
+        } else {
+            Deriver::Socket(self.impostor())
+        };
+        let e = mismatch_error(&key.name, chain.key, &cached, derived, &by);
+        Err(match self.trust().warning() {
+            Some(w) => e.with_detail("warning", w),
             None => e,
         })
     }
@@ -385,10 +553,7 @@ impl<'a> Daemon<'a> {
     /// What the addresses this command took verify: [`Trust::Session`] only when every one was
     /// derived, and every process that answered is this build's key daemon of this home.
     fn trust(&self) -> Trust {
-        let other = self.peers.iter().find_map(|(_, c)| match c {
-            PeerCheck::Other(w) => Some(w.clone()),
-            _ => None,
-        });
+        let other = self.peers.iter().find_map(|(_, c)| c.warning());
         if other.is_some() {
             Trust::Unverified(other)
         } else if !self.answered {
@@ -426,8 +591,8 @@ fn with_note(value: Value, note: Option<&str>) -> Out {
 /// an 80-column terminal.
 const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
 
-/// `out` with `address` as a QR code at the end of its human text, for a phone wallet to scan,
-/// under the lines `scan to send to <address>` and [`EVERY_EVM_NETWORK`]. Only for an address
+/// `out` with `address` as a QR code after its human text ([`Out::qr`]), for a phone wallet to
+/// scan, under the lines `scan to send to <address>` and [`EVERY_EVM_NETWORK`] (which are text). Only for an address
 /// reported `verified: true` (by the password or by the session), only with stdout on a
 /// terminal, and not with `--no-qr`: agents read zwallet through pipes, and `--json` prints no
 /// human text.
@@ -438,10 +603,14 @@ fn with_qr(out: Out, verified: bool, address: Option<&str>, no_qr: bool) -> Out 
     // No colours when NO_COLOR is set and not empty (no-color.org).
     let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
     match qr::render(address, color) {
-        Some(code) => with_line(
-            out,
-            &format!("scan to send to {address}\n{EVERY_EVM_NETWORK}\n{code}"),
-        ),
+        Some(code) => {
+            let mut out = with_line(
+                out,
+                &format!("scan to send to {address}\n{EVERY_EVM_NETWORK}"),
+            );
+            out.qr = Some(code);
+            out
+        }
         None => out,
     }
 }
@@ -451,10 +620,13 @@ fn qr_shown(no_qr: bool) -> bool {
     !no_qr && std::io::stdout().is_terminal()
 }
 
-/// `out` with `line` at the end of its human text.
+/// `out` with `line` at the end of its human text (a QR code stays after it).
 fn with_line(out: Out, line: &str) -> Out {
     let text = out.text.unwrap_or_else(|| render_human(&out.value));
-    Out::with_text(out.value, format!("{text}\n{line}"))
+    Out {
+        text: Some(format!("{text}\n{line}")),
+        ..out
+    }
 }
 
 /// What the `create` that makes the master seed shows where the QR code would be.
@@ -474,7 +646,7 @@ fn open_with_password(home: &Path, password_stdin: bool) -> Result<(Seed, Wallet
 /// `key`'s address on `chain` derived from `seed` here, checked against the cache.
 fn derive_checked(seed: &Seed, key: &KeyEntry, chain: &Chain) -> Result<String> {
     let derived = chain.family.keys().derive_address(seed, key.index)?;
-    check_cache(key, chain.key, &derived, "this process")?;
+    check_cache(key, chain.key, &derived)?;
     Ok(derived)
 }
 
@@ -574,11 +746,12 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
         out["expiresAt"] = session["expiresAt"].clone();
         out["daemonPid"] = session["pid"].clone();
         // The whitelist this session signs under, as `unlock` shows it.
-        out["whitelist"] = session["whitelist"].clone();
+        // Its reason can quote whitelist.json, a file anyone of this user can write.
+        out["whitelist"] = inert_whitelist(&session["whitelist"]);
     }
     if master == "created" && std::io::stderr().is_terminal() {
-        eprintln!(
-            "Write down your recovery phrase now: run `zwallet backup` before funding this wallet."
+        crate::core::terminal::eprint_line(
+            "Write down your recovery phrase now: run `zwallet backup` before funding this wallet.",
         );
     }
     // Unverified only when derived through the daemon, so while unlocked.
@@ -658,15 +831,18 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
         (store::read_wallet_file(home)?, None)
     };
     let mut keys = Vec::new();
+    // Without the password `list` is never verified; asking through `Daemon` only decides how a
+    // mismatch is worded (and names an impostor).
+    let mut daemon = Daemon::new(home);
     for k in &file.keys {
         let address = match &opened {
             Some(seed) => Some(derive_checked(seed, k, primary)?),
-            None => match daemon_derive(home, k.index, primary).await? {
+            None => match daemon.derive(k.index, primary).await? {
                 Some(d) => {
-                    check_cache(k, primary.key, &d, DAEMON)?;
+                    daemon.check_cache(k, primary, &d)?;
                     Some(d)
                 }
-                None => primary_address(k).cloned(),
+                None => primary_address(k)?,
             },
         };
         keys.push(json!({
@@ -773,7 +949,14 @@ async fn change(home: &Path, name: &str, no_qr: bool) -> Result<Out> {
 async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
     if a.verify.verify {
-        let (seed, file) = open_with_password(home, a.verify.password_stdin)?;
+        // With the password the seed is authoritative: cached addresses that differ from it are
+        // repaired, loudly, instead of refused.
+        store::read_wallet_file(home)?;
+        let pw = read_password(a.verify.password_stdin, "Wallet password: ", false)?;
+        let (unsealed, file, repairs) =
+            store::unlock_repairing(home, &pw, &chains::derive_addresses)?;
+        drop(pw);
+        let seed = unsealed.seed;
         let key = file.key(a.key.key.as_deref())?;
         let address = derive_checked(&seed, key, chain)?;
         let mut out = json!({
@@ -784,11 +967,54 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
             "verified": true,
             "verifiedBy": BY_PASSWORD,
         });
-        if let Some(w) = index_warning(&file, &[key]) {
-            out["warning"] = json!(w);
+        let mut warnings: Vec<String> = Vec::new();
+        if !repairs.is_empty() {
+            out["repaired"] = json!(
+                repairs
+                    .iter()
+                    .map(|r| json!({ "key": r.key, "chain": r.chain, "was": shown(&r.was), "now": r.now }))
+                    .collect::<Vec<_>>()
+            );
+            warnings.push(format!(
+                "wallet.json's address cache did not match the seed: {} repaired from it (see \
+                 `repaired`). Something modified wallet.json; check what can write to it before \
+                 funding",
+                if repairs.len() == 1 {
+                    "1 entry was".to_string()
+                } else {
+                    format!("{} entries were", repairs.len())
+                }
+            ));
+        }
+        // A repaired file was edited: its whole key list is checked for indices zwallet never
+        // assigns, not only the key shown.
+        let checked: Vec<&KeyEntry> = if repairs.is_empty() {
+            vec![key]
+        } else {
+            file.keys.iter().collect()
+        };
+        warnings.extend(index_warning(&file, &checked));
+        if !warnings.is_empty() {
+            out["warning"] = json!(warnings.join(". "));
+        }
+        // Human text: the fields, then one line per repaired entry; the old value is marked so
+        // nobody funds it.
+        let mut shown_out = out.clone();
+        if let Some(o) = shown_out.as_object_mut() {
+            o.remove("repaired");
+        }
+        let mut text = render_human(&shown_out);
+        for r in &repairs {
+            text.push_str(&format!(
+                "\nrepaired: key '{}' {}: was {} (do not fund), now {}",
+                r.key,
+                r.chain,
+                shown(&r.was),
+                r.now
+            ));
         }
         return Ok(with_qr(
-            with_note(out, None),
+            Out::with_text(out, text),
             true,
             Some(&address),
             a.qr.no_qr,
@@ -943,7 +1169,9 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     for chain in &order {
         let family = chain.family.name();
         if !derived.contains_key(family) {
-            derived.insert(family, daemon.derive(key.index, chain).await);
+            // An answer that is no address aborts (tampering); a socket that could not be asked
+            // is this family's rows.
+            derived.insert(family, daemon.fetch(key.index, chain).await?);
         }
         owners.push(match &derived[family] {
             // Derived: the cache must agree, or the command fails now (naming an impostor on
@@ -1117,8 +1345,8 @@ fn brief(message: &str) -> String {
     if line.chars().count() <= BRIEF_ERROR_CHARS {
         return line.to_string();
     }
-    let cut: String = line.chars().take(BRIEF_ERROR_CHARS - 1).collect();
-    format!("{cut}…")
+    let cut: String = line.chars().take(BRIEF_ERROR_CHARS - 3).collect();
+    format!("{cut}...")
 }
 
 /// Returns (from, index) of the selected key on `chain`.
@@ -1157,7 +1385,7 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
     } else {
         func.signature_with_outputs()
     };
-    Ok(Out::json(json!({
+    let out = json!({
         "chain": chain.key,
         "from": from.map(|f| f.to_checksum(None)),
         "to": to.to_checksum(None),
@@ -1165,7 +1393,17 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
         "args": a.args,
         "result": result,
         "raw": format!("0x{}", hex::encode(&raw)),
-    })))
+    });
+    // A decoded `string` is data the caller asked for: `--json` keeps it exactly as the contract
+    // returned it; `render_human` makes the `result` and every other nested value inert and
+    // bounded, since a contract chose that text. The human text also cuts `raw` (the returned
+    // bytes as hex, whatever their length) to a prose budget; `--json` keeps it whole.
+    let mut shown = out.clone();
+    shown["raw"] = json!(crate::core::text::ascii_inert(
+        out["raw"].as_str().unwrap_or_default(),
+        crate::core::text::PROSE_MAX
+    ));
+    Ok(Out::with_text(out, render_human(&shown)))
 }
 
 async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
@@ -1396,13 +1634,25 @@ async fn sign_and_send<F: ChainFamily>(
     }
     let journal = chains::SendJournal::new(home, net.chain, from);
     let summary = send_summary(&out, net.chain, kind);
+    let mut duplicates_text = None;
     if send.nonce.is_none() {
         let now = crate::core::time::unix_secs(std::time::SystemTime::now());
         let duplicates = journal.recent_duplicates(&summary, now)?;
         if !duplicates.is_empty() && !send.dry_run && !send.allow_duplicate {
             return Err(journal.duplicate_error(duplicates));
         }
-        out.insert("duplicateSends".into(), Value::Array(duplicates));
+        // The journal's own lines, which anyone of this user can write: escaped in `--json`,
+        // and for a human each field only in the shape zwallet writes it, within one budget.
+        out.insert(
+            "duplicateSends".into(),
+            duplicates
+                .iter()
+                .map(crate::core::text::inert_json)
+                .collect(),
+        );
+        if !duplicates.is_empty() {
+            duplicates_text = Some(journal.entries_text(&duplicates));
+        }
     }
     // A dry-run the whitelist on disk refuses is explained without asking the daemon to sign.
     let checked = if send.dry_run {
@@ -1413,7 +1663,7 @@ async fn sign_and_send<F: ChainFamily>(
     if let whitelist::DryRunCheck::Denied(denied) = checked {
         out.insert("dryRun".into(), json!(true));
         out.insert("whitelist".into(), denied);
-        return Ok(Out::json(Value::Object(out)));
+        return Ok(send_out(out, duplicates_text.as_deref()));
     }
     let signed_value = protocol::send_unlocked(
         home,
@@ -1439,7 +1689,7 @@ async fn sign_and_send<F: ChainFamily>(
     out.insert("dryRun".into(), json!(send.dry_run));
     // What the key holder decoded from the bytes it signed (not what this process intended).
     if let Some(view) = signed_value.get("decoded") {
-        out.insert("signerDecoded".into(), view.clone());
+        out.insert("signerDecoded".into(), signer_decoded(view));
     }
     // The hash is computed from the signed bytes, never taken from the node.
     out.insert("txHash".into(), json!(signed.tx_hash));
@@ -1451,7 +1701,7 @@ async fn sign_and_send<F: ChainFamily>(
         // No rawTx: a dry-run must not hand out a transaction that can be broadcast without
         // zwallet.
         out.insert("recoveredFrom".into(), json!(signed.signer));
-        return Ok(Out::json(Value::Object(out)));
+        return Ok(send_out(out, duplicates_text.as_deref()));
     }
     let record = chains::SendRecord::new(journal, &signed, &summary);
     let outcome = fam
@@ -1482,7 +1732,22 @@ async fn sign_and_send<F: ChainFamily>(
         let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
         chains::record_receipt(&mut out, net.chain, receipt);
     }
-    Ok(Out::json(Value::Object(out)))
+    Ok(send_out(out, duplicates_text.as_deref()))
+}
+
+/// A send's result: `--json` as it is; the human text the same, but with `duplicateSends` as
+/// `duplicates` (the journal's matching lines through [`chains::SendJournal::entries_text`]) when
+/// there are any, so journal text reaches the terminal only in the shape zwallet writes.
+fn send_out(out: Map<String, Value>, duplicates: Option<&str>) -> Out {
+    let value = Value::Object(out);
+    match duplicates {
+        None => Out::json(value),
+        Some(text) => {
+            let mut human = value.clone();
+            human["duplicateSends"] = json!(text);
+            Out::with_text(value, render_human(&human))
+        }
+    }
 }
 
 /// `tx`: a transaction looked up by hash on the chain's node. Needs no wallet and no key, so it
@@ -1543,10 +1808,13 @@ async fn status(home: &Path, no_qr: bool) -> Result<Out> {
     }
     out["otherDaemonPids"] = json!(others);
     if let Some(d) = &serving {
+        // A number: `live_daemons` matched it against the process table.
         out["daemonPid"] = d["pid"].clone();
-        out["expiresAt"] = d["expiresAt"].clone();
+        // Whatever answers on `d.sock` writes these: the expiry as an escaped string (a real
+        // one is plain RFC 3339 and passes as it is), the whitelist with every string escaped.
+        out["expiresAt"] = json!(d["expiresAt"].as_str().map(shown));
         // The whitelist as the serving daemon verifies it right now.
-        out["whitelist"] = d["whitelist"].clone();
+        out["whitelist"] = inert_whitelist(&d["whitelist"]);
     }
     // The active key's address, and what verifies it.
     let mut shown = None;
@@ -1562,12 +1830,12 @@ async fn status(home: &Path, no_qr: bool) -> Result<Out> {
                         daemon.check_cache(key, primary, &d)?;
                         (Some(d), daemon.trust())
                     }
-                    None => (primary_address(key).cloned(), Trust::Locked),
+                    None => (primary_address(key)?, Trust::Locked),
                 }
             } else if locked {
-                (primary_address(key).cloned(), Trust::Locked)
+                (primary_address(key)?, Trust::Locked)
             } else {
-                (primary_address(key).cloned(), Trust::Unverified(None))
+                (primary_address(key)?, Trust::Unverified(None))
             };
             out["address"] = json!(address);
             trust.mark(&mut out);
@@ -1656,7 +1924,8 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
         "verifiedBy": BY_PASSWORD,
         // The whitelist this session signs under, as its daemon verified it: the generation and
         // the entries, so a rolled-back list is visible.
-        "whitelist": session["whitelist"],
+        // Its reason can quote whitelist.json, a file anyone of this user can write.
+        "whitelist": inert_whitelist(&session["whitelist"]),
     });
     if let Some(w) = session_index_warning(&file, &session) {
         out["warning"] = json!(w);
@@ -1749,6 +2018,75 @@ mod tests {
             },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_mismatch_blames_the_cache_only_for_a_derivation_from_the_seed() {
+        let (cached, other) = (
+            "0x1111111111111111111111111111111111111111",
+            "0x2222222222222222222222222222222222222222",
+        );
+        // This process (password) or this build's key daemon: the cache was modified.
+        let seed = mismatch_error(
+            "main",
+            "ethereum",
+            cached,
+            other,
+            &Deriver::Seed("this process"),
+        );
+        assert!(
+            seed.message.contains("derives from the seed"),
+            "{}",
+            seed.message
+        );
+        assert!(
+            seed.message.contains("the cache was modified"),
+            "{}",
+            seed.message
+        );
+        // Whatever answers on the socket, not known to be this build's (Linux; a failed kernel
+        // query): neutral, both addresses suspect, the password check decides; no relock advice.
+        let unknown = mismatch_error("main", "ethereum", cached, other, &Deriver::Socket(None));
+        let m = &unknown.message;
+        assert_eq!(unknown.code, ErrorCode::ValidationError);
+        assert!(
+            !m.contains("derives from the seed") && !m.contains("cache was modified"),
+            "{m}"
+        );
+        assert!(
+            m.contains(&format!(
+                "reported {other} as the ethereum address of key 'main', but wallet.json \
+                 caches {cached}: one of them was tampered with"
+            )) && m.contains("Do not send funds to either address")
+                && m.contains("`zwallet address --verify`")
+                && !m.contains("unlock again"),
+            "{m}"
+        );
+        // Known to be another process: named, with the relock advice once.
+        let other_proc = mismatch_error(
+            "main",
+            "ethereum",
+            cached,
+            other,
+            &Deriver::Socket(Some(
+                "the process answering on the key daemon socket (pid 7) is X",
+            )),
+        );
+        let m = &other_proc.message;
+        assert!(
+            m.contains("(pid 7) is X; run `zwallet lock` and unlock again"),
+            "{m}"
+        );
+        assert_eq!(m.matches("and unlock again").count(), 1, "{m}");
+        // An answer that is no address is shown escaped.
+        let evil = mismatch_error(
+            "main",
+            "ethereum",
+            cached,
+            "0x\u{1b}[2J\n",
+            &Deriver::Socket(None),
+        );
+        assert!(!evil.message.contains('\u{1b}') && !evil.message.contains('\n'));
     }
 
     #[test]

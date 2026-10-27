@@ -436,17 +436,25 @@ pub enum Toggle {
 pub struct Out {
     pub value: Value,
     pub text: Option<String>,
+    /// zwallet's own QR code of a verified address, printed after `text` as it is (block glyphs
+    /// and colour codes); never part of `text`, which the write point filters.
+    pub qr: Option<String>,
 }
 
 impl Out {
     pub fn json(value: Value) -> Self {
-        Self { value, text: None }
+        Self {
+            value,
+            text: None,
+            qr: None,
+        }
     }
 
     pub fn with_text(value: Value, text: String) -> Self {
         Self {
             value,
             text: Some(text),
+            qr: None,
         }
     }
 
@@ -454,6 +462,7 @@ impl Out {
         Self {
             value: Value::Null,
             text: Some(String::new()),
+            qr: None,
         }
     }
 }
@@ -579,11 +588,12 @@ const HUMAN_DETAILS: &[&str] = &[
     "command",
 ];
 
+/// Every error zwallet prints, through the write point ([`crate::core::terminal`]).
 fn print_error(json: bool, e: &WalletError) {
     if json {
-        println!("{}", e.to_json());
+        crate::core::terminal::print_json(&e.to_json(), false);
     } else {
-        eprintln!("{}", human_error(e));
+        crate::core::terminal::eprint_line(&human_error(e));
     }
 }
 
@@ -598,20 +608,25 @@ fn human_error(e: &WalletError) -> String {
     text
 }
 
+/// Every result zwallet prints, through the write point ([`crate::core::terminal`]): `--json` as
+/// printable ASCII, the human text filtered, then the QR code (zwallet's own rendering of a
+/// verified address, the one thing printed as it is).
 fn print_out(json: bool, out: &Out) {
+    use crate::core::terminal::{print_json, print_line};
     if json {
         if !out.value.is_null() {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&out.value).unwrap_or_default()
-            );
+            print_json(&out.value, true);
         }
         return;
     }
     match &out.text {
         Some(t) if t.is_empty() => {}
-        Some(t) => println!("{t}"),
-        None => println!("{}", render_human(&out.value)),
+        Some(t) => print_line(t),
+        None => print_line(&render_human(&out.value)),
+    }
+    if let Some(qr) = &out.qr {
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout().lock(), "{qr}");
     }
 }
 
@@ -628,10 +643,16 @@ pub fn render_human(value: &Value) -> String {
     }
 }
 
+/// One field's human value: a scalar as it is (addresses, keys, numbers zwallet builds), but a
+/// nested value (an array or object that may come from outside: a relayed whitelist, a decoded
+/// view, a `call` result) made inert and bounded ([`crate::core::text::human_capped`]), so one
+/// field is one printable-ASCII line of at most [`PROSE_MAX`](crate::core::text::PROSE_MAX)
+/// characters, never a block to draw a QR code with.
 fn scalar(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        other => other.to_string(),
+        Value::Null | Value::Bool(_) | Value::Number(_) => v.to_string(),
+        nested => crate::core::text::human_capped(nested, crate::core::text::PROSE_MAX),
     }
 }
 

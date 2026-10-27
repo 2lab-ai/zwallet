@@ -131,7 +131,13 @@ impl EvmProvider {
             }
             other => self.net.redact(&other.to_string()),
         };
-        WalletError::rpc(format!("{what} failed: {why}"))
+        // The node (or whatever answers at the URL) writes this text: escaped and cut where the
+        // error is built, after the key is scrubbed, so the terminal and `--json` get the same
+        // inert, bounded text.
+        WalletError::rpc(format!(
+            "{what} failed: {}",
+            crate::core::text::ascii_inert(&why, crate::core::text::PROSE_MAX)
+        ))
     }
 }
 
@@ -193,6 +199,13 @@ pub struct TokenMeta {
     pub decimals: u8,
 }
 
+/// The most characters of a token's on-chain `symbol()` that output shows.
+const SYMBOL_SHOWN: usize = 32;
+
+/// `decimals()` and `symbol()` of `token`, read from the chain. The symbol is whatever the
+/// contract returns, escaped and cut ([`SYMBOL_SHOWN`]), except that a registry token on this chain
+/// whose `symbol()` is exactly the registry's recorded `onchain_symbol` shows that constant (so
+/// USDT0's `USD₮0` reads as itself): those bytes are zwallet's own, not text from outside.
 pub async fn erc20_meta(p: &EvmProvider, net: &Net, token: Address) -> Result<TokenMeta> {
     let not_token = || {
         WalletError::invalid_address(format!(
@@ -220,6 +233,12 @@ pub async fn erc20_meta(p: &EvmProvider, net: &Net, token: Address) -> Result<To
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "?".to_string());
+    // The contract writes `symbol()`: escaped and cut where it enters the output, unless it is
+    // the recorded symbol of this registry token.
+    let symbol = match super::registry::lookup(config(net.chain).chain_id, &token) {
+        Some(t) if t.onchain_symbol == symbol => t.onchain_symbol.to_string(),
+        _ => crate::core::text::ascii_inert(&symbol, SYMBOL_SHOWN),
+    };
     Ok(TokenMeta { symbol, decimals })
 }
 
@@ -355,8 +374,11 @@ async fn original_fees(
         let shown = format!("{hash:#x}");
         if nonce < pending {
             // The hash the agent passed is known not to be the one at `nonce`.
-            let pointer = journal
-                .map(|j| format!(" {}.", j.pointer(nonce..=nonce, Some(&shown)).0))
+            let (pointer, entries) = journal
+                .map(|j| {
+                    let (text, entries) = j.pointer(nonce..=nonce, Some(&shown));
+                    (format!(" {text}."), entries)
+                })
                 .unwrap_or_default();
             let mut e = WalletError::rpc(format!(
                 "the node does not know --replace {shown}, but it holds another pending \
@@ -367,7 +389,9 @@ async fn original_fees(
             ))
             .with_detail("nonce", nonce);
             if let Some(j) = journal {
-                e = e.with_detail("journal", j.display());
+                e = e
+                    .with_detail("journal", j.display())
+                    .with_detail("journalEntries", Value::Array(entries));
             }
             return Err(e);
         }
@@ -889,18 +913,19 @@ fn different_payment(n: u64) -> String {
     )
 }
 
-/// `e` from [`check_nonce`] with the journal's entries at nonce `n` (each with how to look it
-/// up), or where else to look.
+/// `e` from [`check_nonce`] with the journal's entries at nonce `n` (then how to look a hash
+/// up), or where else to look; the entries as found in `journalEntries`.
 fn with_nonce_pointer(e: WalletError, n: u64, journal: Option<&SendJournal>) -> WalletError {
     let Some(j) = journal else {
         return e;
     };
-    let (text, _) = j.pointer(n..=n, None);
+    let (text, entries) = j.pointer(n..=n, None);
     WalletError {
         message: format!("{}. {text}", e.message),
         ..e
     }
     .with_detail("journal", j.display())
+    .with_detail("journalEntries", Value::Array(entries))
 }
 
 /// A transaction found mined at a nonce ([`mined_at`]), with what its receipt says about how it
