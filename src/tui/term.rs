@@ -13,22 +13,39 @@ use std::cell::UnsafeCell;
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::os::fd::RawFd;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 /// The one way the TUI writes cells to a terminal, as `write_human` is the CLI's: a cell whose
 /// symbol is not exactly one [`terminal_ok`] character other than the newline reaches the inner
 /// backend as `?`, and is counted. A replaced glyph two columns wide becomes one `?`, and this
-/// writes a space into the column it covered, whether or not ratatui's diff sends that column.
-/// So no byte of a cell's content (an ESC, a CSI or OSC sequence, a BEL, a block glyph) reaches
-/// the terminal; the inner backend's own cursor and style sequences do.
+/// writes a space into the column it covered, whether or not ratatui's diff sends that column,
+/// once a size has passed through it ([`FilteredBackend::width`]). So no byte of a cell's content
+/// (an ESC, a CSI or OSC sequence, a BEL, a block glyph) reaches the terminal; the inner backend's
+/// own cursor and style sequences do.
 pub struct FilteredBackend<B> {
     inner: B,
     replaced: usize,
+    /// The screen's width from the last `size()` that passed through this filter, where a
+    /// replaced wide cell's blank columns stop; a failed `size()` leaves it as it was. A draw
+    /// never asks the terminal itself: where none answers (no tty and no `TERM`) that fails the
+    /// whole frame. ratatui's `Terminal` reads the size when it is made and before every frame
+    /// (fullscreen and inline viewports), so in the TUI one has always passed.
+    ///
+    /// 0 until one has: then a draw writes no blank column, as on a screen 0 columns wide. Of the
+    /// other ways, a blank column written unclipped can land past the right edge, which a terminal
+    /// writes on its last column, and a failed draw loses the frame for one cell. The cost: a
+    /// column the glyph covered may still show what an earlier frame drew there, a cell that
+    /// passed this filter, never a byte of this one.
+    width: AtomicU16,
 }
 
 impl<B> FilteredBackend<B> {
     pub fn new(inner: B) -> Self {
-        Self { inner, replaced: 0 }
+        Self {
+            inner,
+            replaced: 0,
+            width: AtomicU16::new(0),
+        }
     }
 
     /// How many cells were replaced since this was made. Every frame the tests draw keeps it 0:
@@ -67,8 +84,7 @@ impl<B: Backend> Backend for FilteredBackend<B> {
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
         let mut cells: Vec<(u16, u16, Cell)> = Vec::new();
-        // The screen's width, read once per draw and only for a wide cell replaced.
-        let mut width = None;
+        let width = self.width.load(Ordering::Relaxed);
         for (x, y, cell) in content {
             if cell_ok(cell.symbol()) {
                 cells.push((x, y, cell.clone()));
@@ -79,17 +95,9 @@ impl<B: Backend> Backend for FilteredBackend<B> {
             shown.set_symbol("?");
             let covered = covered(cell);
             cells.push((x, y, shown.clone()));
-            if covered > 1 {
-                let width = match width {
-                    Some(w) => w,
-                    None => *width.insert(self.inner.size()?.width),
-                };
-                shown.set_symbol(" ");
-                for column in
-                    (x.saturating_add(1)..x.saturating_add(covered)).filter(|c| *c < width)
-                {
-                    cells.push((column, y, shown.clone()));
-                }
+            shown.set_symbol(" ");
+            for column in (x.saturating_add(1)..x.saturating_add(covered)).filter(|c| *c < width) {
+                cells.push((column, y, shown.clone()));
             }
         }
         self.inner.draw(cells.iter().map(|(x, y, c)| (*x, *y, c)))
@@ -123,8 +131,12 @@ impl<B: Backend> Backend for FilteredBackend<B> {
         self.inner.clear_region(clear_type)
     }
 
+    /// The inner backend's size; its width is kept for the draws that follow
+    /// ([`FilteredBackend::width`]).
     fn size(&self) -> Result<Size, Self::Error> {
-        self.inner.size()
+        let size = self.inner.size()?;
+        self.width.store(size.width, Ordering::Relaxed);
+        Ok(size)
     }
 
     fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
