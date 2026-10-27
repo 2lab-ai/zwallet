@@ -239,10 +239,16 @@ fn t1_both_keys_listed_the_active_one_marked_and_locked_once_in_the_bar() {
         .unwrap()
         .to_string();
     let mut app = app();
-    assert_eq!(app.start(), vec![Effect::LoadKeys, Effect::LoadStatus(0)]);
-    app.update(Msg::Keys(block_on(wallet::keys(home.path()))));
+    assert_eq!(
+        app.start(),
+        vec![Effect::LoadKeys(0), Effect::LoadStatus(0)]
+    );
+    app.update(Msg::Keys(
+        app.generation(),
+        block_on(wallet::keys(home.path())),
+    ));
     app.update(Msg::Status(
-        app.status_generation(),
+        app.generation(),
         block_on(wallet::status(home.path())),
     ));
     let (rows, _) = checked_frame(&mut screen(80, 24), &app);
@@ -262,11 +268,8 @@ fn t1_both_keys_listed_the_active_one_marked_and_locked_once_in_the_bar() {
 fn t9_the_list_and_the_two_bar_lines_fit_80x24() {
     let expires = now() + 3600;
     let mut app = app();
-    app.update(Msg::Keys(Ok(keys_ab())));
-    app.update(Msg::Status(
-        app.status_generation(),
-        Ok(open_status(expires)),
-    ));
+    app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+    app.update(Msg::Status(app.generation(), Ok(open_status(expires))));
     let (rows, _) = checked_frame(&mut screen(80, 24), &app);
     assert!(
         rows.iter()
@@ -303,11 +306,11 @@ fn at_80x24_the_widest_values_are_drawn_whole() {
     let mut keys = keys_ab();
     keys.rows[1].name = long_name.clone();
     keys.active = long_name.clone();
-    app.update(Msg::Keys(Ok(keys)));
+    app.update(Msg::Keys(app.generation(), Ok(keys)));
     let mut status = open_status(expires);
     status.active = Some(long_name.clone());
     status.address = Some((Some(B.into()), Trust::Unverified(None)));
-    app.update(Msg::Status(app.status_generation(), Ok(status)));
+    app.update(Msg::Status(app.generation(), Ok(status)));
     let (rows, _) = checked_frame(&mut screen(80, 24), &app);
     let date = rfc3339_utc(expires);
     let date = format!("{} {}Z", &date[..10], &date[11..16]);
@@ -326,6 +329,60 @@ fn at_80x24_the_widest_values_are_drawn_whole() {
 }
 
 #[test]
+fn an_index_of_1000_and_a_32_character_name_never_cut_the_address() {
+    let mut keys = keys_ab();
+    keys.rows[1].index = 1000;
+    keys.rows[1].name = "n".repeat(32);
+    let mut app = app();
+    app.update(Msg::Keys(app.generation(), Ok(keys)));
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    let b_row = rows.iter().find(|r| r.contains(" 1000 ")).expect("b's row");
+    assert!(b_row.contains(B), "{b_row:?}");
+    assert!(b_row.contains("..."), "the name is cut: {b_row:?}");
+}
+
+#[test]
+fn line_1_fits_80_columns_for_every_chain_with_a_32_character_key_name() {
+    let name = "n".repeat(32);
+    for chain in zwallet::chains::CHAINS {
+        for (trust, words) in [
+            (Trust::Session, "verified by session"),
+            (
+                Trust::Unverified(None),
+                if cfg!(target_os = "linux") {
+                    "not verified (no session check on Linux)"
+                } else {
+                    "not verified"
+                },
+            ),
+        ] {
+            let net = Net {
+                chain,
+                rpc_url: chain.default_rpc().to_string(),
+            };
+            let mut app = App::new(&net, Duration::from_secs(3600));
+            app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+            let mut status = open_status(now() + 3600);
+            status.active = Some(name.clone());
+            status.address = Some((Some(B.into()), trust));
+            app.update(Msg::Status(app.generation(), Ok(status)));
+            let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+            let line = rows[22].trim_end();
+            assert!(line.starts_with(chain.key), "{line:?}");
+            assert!(line.ends_with(words), "{}: {line:?}", chain.key);
+            assert!(line.contains("0x3C44...93BC"), "{line:?}");
+            // The widest name the bar can show on this platform is drawn whole.
+            let shown = if cfg!(target_os = "linux") {
+                "nnnnnnnn...".to_string()
+            } else {
+                name.clone()
+            };
+            assert!(line.contains(&format!(" {shown} ")), "{line:?}");
+        }
+    }
+}
+
+#[test]
 fn a_hostile_status_reply_is_drawn_inert_and_bounded() {
     // What a process answering on d.sock wrote, as it would reach the TUI if nothing escaped it
     // on the way: an expiry of 600 characters of ESC and half blocks, and a warning holding a
@@ -336,8 +393,8 @@ fn a_hostile_status_reply_is_drawn_inert_and_bounded() {
     status.serving.as_mut().unwrap().expires_at = Some(expiry);
     status.address = Some((Some(B.into()), Trust::Unverified(Some(warning))));
     let mut app = app();
-    app.update(Msg::Keys(Ok(keys_ab())));
-    app.update(Msg::Status(app.status_generation(), Ok(status)));
+    app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+    app.update(Msg::Status(app.generation(), Ok(status)));
     let (rows, placed) = checked_frame(&mut screen(80, 24), &app);
     assert!(
         rows[22].contains("NOT this build's key daemon: "),
@@ -353,8 +410,8 @@ fn a_hostile_status_reply_is_drawn_inert_and_bounded() {
 fn t9_below_80x24_the_frame_is_one_line() {
     for (width, height) in [(79, 24), (80, 23), (40, 10)] {
         let mut app = app();
-        app.update(Msg::Keys(Ok(keys_ab())));
-        app.update(Msg::Status(app.status_generation(), Ok(locked_status())));
+        app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+        app.update(Msg::Status(app.generation(), Ok(locked_status())));
         let (rows, _) = checked_frame(&mut screen(width, height), &app);
         assert_eq!(
             rows[0].trim_end(),
@@ -386,11 +443,8 @@ fn t9_q_ends_the_app_and_l_asks_to_lock_every_daemon() {
 fn t10_a_status_refresh_that_reports_locked_makes_the_bar_say_locked() {
     assert_eq!(zwallet::tui::REFRESH, Duration::from_secs(5));
     let mut app = app();
-    app.update(Msg::Keys(Ok(keys_ab())));
-    app.update(Msg::Status(
-        app.status_generation(),
-        Ok(open_status(now() + 3600)),
-    ));
+    app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+    app.update(Msg::Status(app.generation(), Ok(open_status(now() + 3600))));
     let mut screen = screen(80, 24);
     let (rows, _) = checked_frame(&mut screen, &app);
     assert!(rows[23].starts_with("signing (agent too) until "));
@@ -398,7 +452,7 @@ fn t10_a_status_refresh_that_reports_locked_makes_the_bar_say_locked() {
     // The refresh timer asks for the status once; a second tick while it runs asks nothing.
     assert_eq!(app.update(Msg::Tick), vec![Effect::LoadStatus(0)]);
     assert_eq!(app.update(Msg::Tick), vec![]);
-    app.update(Msg::Status(app.status_generation(), Ok(locked_status())));
+    app.update(Msg::Status(app.generation(), Ok(locked_status())));
     let (rows, _) = checked_frame(&mut screen, &app);
     assert!(rows[23].starts_with("locked | "), "{:?}", rows[23]);
     assert!(!rows.join("\n").contains("signing"));
@@ -408,11 +462,8 @@ fn t10_a_status_refresh_that_reports_locked_makes_the_bar_say_locked() {
 #[test]
 fn q_while_l_is_locking_quits_once_the_lock_is_done_and_its_error_comes_out() {
     let ready = |app: &mut App| {
-        app.update(Msg::Keys(Ok(keys_ab())));
-        app.update(Msg::Status(
-            app.status_generation(),
-            Ok(open_status(now() + 3600)),
-        ));
+        app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+        app.update(Msg::Status(app.generation(), Ok(open_status(now() + 3600))));
     };
     let mut app = app();
     ready(&mut app);
@@ -443,14 +494,20 @@ fn q_while_l_is_locking_quits_once_the_lock_is_done_and_its_error_comes_out() {
 #[test]
 fn a_status_read_from_before_the_lock_is_dropped_and_a_fresh_one_follows() {
     let mut app = app();
-    app.update(Msg::Keys(Ok(keys_ab())));
-    let before = app.status_generation();
+    app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+    let before = app.generation();
+    assert_eq!(app.update(Msg::Tick), vec![Effect::LoadStatus(before)]);
+    app.update(Msg::Status(before, Ok(open_status(now() + 3600))));
+    // A read in flight when `L` is pressed.
     assert_eq!(app.update(Msg::Tick), vec![Effect::LoadStatus(before)]);
     assert_eq!(app.update(Msg::Key(Key::Char('L'))), vec![Effect::LockAll]);
     let work = app.update(Msg::Locked(Ok(vec![4242])));
-    let after = app.status_generation();
+    let after = app.generation();
     assert_ne!(before, after);
     assert!(work.contains(&Effect::LoadStatus(after)), "{work:?}");
+    // Until the fresh read lands, the bar says it is checking, not what it showed before.
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    assert!(rows[23].starts_with("checking..."), "{:?}", rows[23]);
     // The read started before the lock lands after it: dropped, not drawn.
     app.update(Msg::Status(before, Ok(open_status(now() + 3600))));
     let mut screen = screen(80, 24);
@@ -459,6 +516,31 @@ fn a_status_read_from_before_the_lock_is_dropped_and_a_fresh_one_follows() {
     app.update(Msg::Status(after, Ok(locked_status())));
     let (rows, _) = checked_frame(&mut screen, &app);
     assert!(rows[23].starts_with("locked | "), "{:?}", rows[23]);
+}
+
+#[test]
+fn a_key_read_from_before_the_lock_is_dropped_and_the_reload_after_it_always_runs() {
+    let mut app = app();
+    let before = app.generation();
+    // A key read in flight when `L` is pressed (the one `start` asks for).
+    assert_eq!(
+        app.start(),
+        vec![Effect::LoadKeys(before), Effect::LoadStatus(before)]
+    );
+    app.update(Msg::Key(Key::Char('L')));
+    let work = app.update(Msg::Locked(Ok(vec![4242])));
+    let after = app.generation();
+    assert!(work.contains(&Effect::LoadKeys(after)), "{work:?}");
+    // The key read from before the lock lands: dropped (its rows are not drawn).
+    let mut stale = keys_ab();
+    stale.rows[0].name = "stale".into();
+    app.update(Msg::Keys(before, Ok(stale)));
+    let mut screen = screen(80, 24);
+    let (rows, _) = checked_frame(&mut screen, &app);
+    assert!(!rows.join("\n").contains("stale"));
+    app.update(Msg::Keys(after, Ok(keys_ab())));
+    let (rows, _) = checked_frame(&mut screen, &app);
+    assert!(rows.iter().any(|r| r.contains(A)));
 }
 
 #[test]
@@ -478,9 +560,9 @@ fn a_cached_address_that_is_no_address_fails_the_keys_pane_with_the_clis_error()
     let shown = zwallet::core::text::shown(&hostile, 64);
     assert!(e.message.contains(&shown), "{}", e.message);
     let mut app = app();
-    app.update(Msg::Keys(keys));
+    app.update(Msg::Keys(app.generation(), keys));
     app.update(Msg::Status(
-        app.status_generation(),
+        app.generation(),
         block_on(wallet::status(home.path())),
     ));
     let (rows, placed) = checked_frame(&mut screen(80, 24), &app);
