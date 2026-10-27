@@ -2049,9 +2049,11 @@ fn the_suite_stops_no_daemon_outside_its_test_homes() {
 #[test]
 #[should_panic(expected = "a release zwallet ignores ZWALLET_TEST_DAEMON_SCOPE")]
 fn a_release_profile_run_starts_no_zwallet() {
-    // `common::zwallet_at` builds every zwallet the tests start and first asserts this with
-    // `cfg!(debug_assertions)`: under `cargo test --release` it is false, and the run fails there.
-    common::refuse_a_build_without_the_test_scope(false);
+    // `common::zwallet_at` builds every zwallet the tests start, through this launcher with
+    // `cfg!(debug_assertions)`: under `cargo test --release` that is false, and it panics before
+    // it builds the command. Nothing here spawns it: a launcher that returned fails this test
+    // with nothing started.
+    let _unspawned = common::zwallet_at_with(env!("CARGO_BIN_EXE_zwallet"), false);
 }
 
 // The whitelist CLI (`.prd/04-whitelist.md`): `zwallet whitelist …` and `@nickname` recipients.
