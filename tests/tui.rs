@@ -444,10 +444,8 @@ fn line_1_fits_80_columns_for_every_chain_and_every_trust_with_a_32_character_ke
                 "{case}: the name {shown_name:?} in {line:?}"
             );
             match w {
-                None => assert!(
-                    whole_or_cut(rest, words, 4),
-                    "{case}: the trust words {rest:?} in {line:?}"
-                ),
+                // At 80 columns no state's words are cut.
+                None => assert_eq!(rest, words, "{case}: in {line:?}"),
                 Some(w) => {
                     // The words whole, then the warning whole or cut with `...`, never left out.
                     let shown = rest
@@ -479,6 +477,43 @@ fn assert_placed_catches_a_stray_copy_of_a_name_that_shares_another_names_prefix
     for p in &placed {
         assert_placed(&rows, p, &placed);
     }
+}
+
+#[test]
+#[should_panic(expected = "also on row 2 at column 1")]
+fn assert_placed_catches_a_stray_copy_that_a_border_cuts_short() {
+    // A warning placed on row 0, and drawn raw again in a bordered pane on row 2, where the
+    // border cuts it after 30 characters: fewer than the placed value, followed by `|`.
+    let text = "the process answering on the key daemon socket (pid 4242) is no";
+    let warning = Outside::warning(text);
+    let rows = vec![
+        format!("{text:<80}"),
+        " ".repeat(80),
+        format!("|{}|{}", &text[..30], " ".repeat(48)),
+    ];
+    let placed = vec![Placed {
+        area: Rect::new(0, 0, warning.text().len() as u16, 1),
+        outside: warning,
+    }];
+    assert_placed(&rows, &placed[0], &placed);
+}
+
+#[test]
+#[should_panic(expected = "also on row 1 at column 0")]
+fn assert_placed_catches_a_verbatim_copy_of_a_short_cut_value() {
+    // A key name cut to `abcdefghi...` (12 characters, a core of 9), placed on row 0, and copied
+    // verbatim on row 1 where nothing is placed.
+    let name = Outside::key_name("abcdefghijklmnop").cut(12);
+    assert_eq!(name.text(), "abcdefghi...");
+    let rows = vec![
+        format!("{:<40}", name.text()),
+        format!("{:<40}", name.text()),
+    ];
+    let placed = vec![Placed {
+        area: Rect::new(0, 0, 12, 1),
+        outside: name,
+    }];
+    assert_placed(&rows, &placed[0], &placed);
 }
 
 #[test]
