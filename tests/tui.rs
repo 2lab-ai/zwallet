@@ -831,6 +831,55 @@ fn quit(tui: &mut PtyChild) {
     assert_ne!(modes & libc::ECHO, 0, "echo is off");
 }
 
+/// A frame as ratatui's crossterm backend writes it at 79x24: the alternate screen, the cursor
+/// hidden, the one line of [`ui::TOO_SMALL`] (its blank cells skipped), the styles reset, the
+/// cursor hidden again; then the terminal given back.
+const SMALL_FRAME: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[1;1Hterminal\x1b[1;10Htoo\x1b[1;14Hsmall\
+\x1b[1;20H(80x24\x1b[1;27Hneeded)\x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?25l\x1b[?1049l\x1b[?25h";
+
+#[test]
+fn a_valid_stream_cut_anywhere_holds_no_stray_byte() {
+    // A pty read ends anywhere, so a snapshot of the output can end inside a sequence: after a
+    // lone ESC, or inside a CSI before its final byte. That is not a stray byte.
+    let stray: Vec<_> = (0..=SMALL_FRAME.len())
+        .filter_map(|end| {
+            let frame = Frame::parse(&SMALL_FRAME[..end], (79, 24));
+            let tail = String::from_utf8_lossy(&SMALL_FRAME[end.saturating_sub(8)..end]);
+            (!frame.stray.is_empty()).then(|| format!("cut after ...{tail:?}: {:?}", frame.stray))
+        })
+        .collect();
+    assert!(stray.is_empty(), "{stray:#?}");
+    // A stray byte before the end still counts.
+    for bad in [&b"x\x1b\x1b[0m"[..], b"x\x1bQ", b"\x1b[1\x07m", b"x\x07"] {
+        assert!(!Frame::parse(bad, (79, 24)).stray.is_empty(), "{bad:?}");
+    }
+}
+
+/// Whether `frame` is the 79x24 frame: the one `terminal too small` line and nothing else.
+fn only_the_warning(frame: &Frame) -> bool {
+    frame.rows[0].trim_end() == ui::TOO_SMALL && frame.rows[1..].iter().all(|r| r.trim().is_empty())
+}
+
+#[test]
+fn the_79x24_check_runs_on_the_last_frame_not_on_a_live_snapshot() {
+    // The warning is drawn, then a later draw (a later pty read) writes on row 5. A snapshot
+    // taken once row 0 shows the warning passes the check; the last frame before the terminal
+    // is given back does not.
+    let leave = b"\x1b[?1049l\x1b[?25h";
+    let (warning, given_back) = SMALL_FRAME.split_at(SMALL_FRAME.len() - leave.len());
+    let more = b"\x1b[5;1Hmore\x1b[0m\x1b[?25l";
+    let stream = [warning, &more[..], given_back].concat();
+    assert!(only_the_warning(&Frame::parse(warning, (79, 24))));
+    let last = Frame::last(&stream, (79, 24)).expect("the terminal is given back");
+    assert!(!only_the_warning(&last), "{last}");
+    // Without the later draw the last frame is the warning alone; before the terminal is given
+    // back there is no last frame.
+    assert!(only_the_warning(
+        &Frame::last(SMALL_FRAME, (79, 24)).unwrap()
+    ));
+    assert!(Frame::last(warning, (79, 24)).is_none());
+}
+
 #[test]
 fn t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo() {
     let home = Home::new();
