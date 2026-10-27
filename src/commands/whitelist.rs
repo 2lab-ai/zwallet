@@ -2285,11 +2285,12 @@ mod tests {
 
     #[test]
     fn the_summarys_fee_caps_from_the_files_share_one_budget() {
-        // Both list files (two lists, so whitelist.next.json is not a copy of whitelist.json) cap
-        // every chain zwallet knows at 2^256 - 1, 78 digits: 157 digits from a file per cap (the
-        // amount in the coin and in wei), 16 caps. The reset summary shows the caps that fit one
-        // 512-character budget of text from the files, then how many more; every chain's line
-        // still says what its cap goes back to.
+        // Both list files hold a list, with different bytes (so the summary reads
+        // whitelist.next.json as an unfinished edit), and each caps every chain zwallet knows at
+        // 2^256 - 1, 78 digits: 157 digits from a file per cap (the amount in the coin and in
+        // wei), 16 caps. The reset summary shows the caps that fit one 512-character budget of
+        // text from the files, then how many more; every chain's line still says what its cap
+        // goes back to.
         let tmp = tempfile::tempdir().unwrap();
         for (file, generation) in [(WHITELIST_FILE, 3), (NEXT_FILE, 4)] {
             let mut l = Whitelist::empty(&WHITELIST_RULES);
