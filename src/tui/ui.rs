@@ -40,10 +40,12 @@ const SEP: &str = " | ";
 const NAME_COLUMN: usize = 27;
 
 /// The narrowest bar line 1 cuts the key name to, `...` included (5 characters of the name): the
-/// trust words come first, and the name gives way down to this. At 80 columns the longest words
-/// (the 40 of `not verified (no session check on Linux)`, or the 29 of an impostor's
-/// `NOT this build's key daemon: ` and [`WARNING_ROOM`] of its warning) still fit beside it with
-/// the widest chain (9) and the short address (13).
+/// trust words come first, and the name gives way down to this. At 80 columns, beside it, the
+/// widest chain (9), the short address (13) and the separators (7): the 40 of
+/// `not verified (no session check on Linux)` fit with 3 to spare; an impostor's 29 of
+/// `NOT this build's key daemon: ` leave its warning 14 characters with a 9-character chain and
+/// 15 with an 8-character one, so the warning gets its full [`WARNING_ROOM`] only with chains of
+/// 7 characters or fewer.
 const BAR_NAME_MIN: usize = 8;
 
 /// How much of an impostor's warning line 1 keeps room for before the key name gets any more:
