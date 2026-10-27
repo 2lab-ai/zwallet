@@ -47,6 +47,7 @@ pub fn close_inherited_fds() -> Result<()> {
 }
 
 pub async fn run(cli: Cli) -> Result<Out> {
+    let json = cli.json;
     match cli.command {
         Command::Chains => Ok(chains_list()),
         Command::Create(a) => create(&home()?, a).await,
@@ -65,6 +66,7 @@ pub async fn run(cli: Cli) -> Result<Out> {
         Command::Unlock(a) => unlock(&home()?, a).await,
         Command::Lock => lock(),
         Command::Whitelist(w) => whitelist::run(&home()?, w).await,
+        Command::Tui { warm, chain } => tui(&home()?, &warm, &chain, json).await,
         Command::Daemon { home } => {
             daemon::run(home).await?;
             Ok(Out::silent())
@@ -82,6 +84,20 @@ pub(crate) fn net(chain: &'static Chain, flag: Option<&str>) -> Net {
         chain,
         rpc_url: rpc_url(chain, flag),
     }
+}
+
+/// `zwallet tui`: the arguments are checked first, then the terminal ([`crate::tui::run`]).
+/// Nothing is printed once it has given the terminal back.
+async fn tui(home: &Path, warm: &str, chain: &str, json: bool) -> Result<Out> {
+    let chain = chains::find(chain)?;
+    let warm = parse_duration(warm)?;
+    if json {
+        return Err(WalletError::validation(
+            "zwallet tui is interactive: --json does not apply",
+        ));
+    }
+    crate::tui::run(home.to_path_buf(), wallet::net(chain), warm).await?;
+    Ok(Out::silent())
 }
 
 fn chains_list() -> Out {

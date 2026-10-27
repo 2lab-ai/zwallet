@@ -78,6 +78,17 @@ pub enum Command {
     /// works while locked; every change asks for the password.
     #[command(subcommand)]
     Whitelist(WhitelistCommand),
+    /// The terminal UI for a human: the keys and the lock state (more screens follow). Needs a
+    /// terminal; `q` quits.
+    Tui {
+        /// How long a warm-up unlocks signing for: 30m, 1h, 24h (units s m h d w y). Warm-up is
+        /// not in this version yet; the value is checked.
+        #[arg(long, value_name = "DURATION", default_value = "1h")]
+        warm: String,
+        /// The chain the TUI shows (its RPC endpoint in the status bar).
+        #[arg(long, default_value = "ethereum")]
+        chain: String,
+    },
     /// The key-holding daemon (started by `unlock`).
     #[command(hide = true)]
     Daemon {
