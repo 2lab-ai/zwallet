@@ -23,10 +23,10 @@ is about 800; TUI-1b, TUI-3, TUI-4 and TUI-5 are estimated at it.
 - At least one counter-example test: text or state from outside built to break the screen or to
   get an address shown as payable.
 - "Nothing signed" is checked by counting `SignTx` requests where the daemon side records them
-  (`FakeDaemon.received`, tests/common/mod.rs:503-505), not only by the absence of
+  (`FakeDaemon.received`, tests/common/mod.rs:587), not only by the absence of
   `eth_sendRawTransaction` at the mock node.
 - Tests that reach `protocol::stop_all_daemons` (the `L` key, a whitelist change) take
-  `common::exclusive()` (tests/common/mod.rs:91), as the CLI's do (v0-1/loop.md:15).
+  `common::exclusive()` (tests/common/mod.rs:99), as the CLI's do (v0-1/loop.md:15).
 - No library entry point prints; the CLI command that used the code calls the new function and
   prints what it returns, so `tests/cli.rs` stays green unchanged.
 
@@ -69,7 +69,7 @@ is about 800; TUI-1b, TUI-3, TUI-4 and TUI-5 are estimated at it.
     too small` line. (`Msg` sequence): `q` ends the app. (unit, `term.rs`): the restore guard
     writes the leave-alternate-screen and show-cursor sequences to a test writer on drop and from
     the panic hook (`catch_unwind`); the hook then writes its one fixed line, never the payload.
-    (pty, `PtyChild`, tests/common/mod.rs:938): `zwallet tui`, then `q`; the pty is back in
+    (pty, `PtyChild`, tests/common/mod.rs:940): `zwallet tui`, then `q`; the pty is back in
     canonical mode with echo.
   - T10 (`Msg` sequence): a status refresh that reports locked makes the bar say `locked`. (pty):
     with a test daemon unlocked, `zwallet lock` from a second process; within two refreshes
@@ -112,7 +112,10 @@ Decisions (the dispatcher's, 2026-10-28):
 4. The RPC host is `redact_url`'s origin, the host only, at most 32 characters, cut with `...`;
    TUI-1b adds it to rule 3's table.
 5. TUI-1c extends `common::openpty` with a window size (default 120x40, settable), reading the
-   output while the child runs, and the slave's termios for the echo check.
+   output while the child runs, and the pty's termios for the echo check, read through the
+   master: when the child, its session's leader, exits, macOS revokes every open slave of its
+   terminal, the test's own too (a probe on 2026-10-28: `tcgetattr` on the slave failed with
+   `ENOTTY` after the exit, on the master it read the modes the child left).
 6. Moving the argv-listed attacker from `tests/cli.rs` into `tests/common` is allowed: helper
    lines change in `tests/cli.rs`, no assertion does.
 
@@ -136,7 +139,7 @@ Decisions (the dispatcher's, 2026-10-28):
     "b"`.
   - T2b (pty): `s` on `a`, confirm: `zwallet list --json` has `active: "a"`.
   - (unit): `open_with_password` then `check_list` on a seeded whitelist
-    (`common::seed_whitelist`, tests/common/mod.rs:265) returns that list's entries, gen and the
+    (`common::seed_whitelist`, tests/common/mod.rs:275) returns that list's entries, gen and the
     fingerprint of the files as read; with a zwallet 0.1.0 anchor `check_list` returns `list
     --verify`'s message and no list. `open_with_password` reads no list file (the files are
     removed before the call and it still succeeds).
@@ -178,7 +181,7 @@ Decisions (the dispatcher's, 2026-10-28):
   conditions).
 - **RED tests:**
   - Explorer fixture: a local HTTP server in the test, built like `tiny_rpc_reply`
-    (tests/common/mod.rs:926), serving single-line Blockscout bodies cut from the 2026-10-27
+    (tests/common/mod.rs:1523), serving single-line Blockscout bodies cut from the 2026-10-27
     captures to the kept fields plus a few dropped ones.
   - T3 (`TestBackend`, the `App` built with the fixture explorer and a fixture journal file): 14
     transactions, one hash in both the journal and the explorer, 2 pending: exactly 10 rows,
