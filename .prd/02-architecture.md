@@ -74,8 +74,9 @@ seed, so the wallet file and the daemon protocol do not change.
      `fexecve`, so a swap racing check→exec is started; once the child asks for input, the CLI
      writes the password only if the child's cdhash (`csops` by pid, the child unreaped) equals
      its own and the child is `CS_VALID`, and otherwise kills it (`VALIDATION_ERROR`). Code the
-     child ran before exec'ing this build, and an unsigned (x86_64) build, stay part of the
-     binary-swap limit.
+     child ran before exec'ing this build stays part of the binary-swap limit, and so does the
+     whole race on the x86_64 macOS build: the linker signs only arm64 output, so that build has
+     no cdhash of its own and skips the check.
   3. It spawns its **own** `zwallet daemon --home <canonical home>` child, with setsid. Every other
      open fd is marked close-on-exec: macOS lists them with `PROC_PIDLISTFDS`, Linux uses
      `close_range` and falls back to `/proc/self/fd`. Concurrent unlocks take turns on `u.lock`.
@@ -136,17 +137,19 @@ seed, so the wallet file and the daemon protocol do not change.
     - the readiness line of `unlock` and `create --unlock`;
     - the first `create`;
     - a subkey `create` at a terminal or with `--password-stdin`.
-  - **`verified: true, verifiedBy: "session"`** (macOS; cdhash 2026-10-26): `address`, `addresses`,
-    `status`, `change` and `balance` while unlocked, when the daemon's derivation equals the cache
-    and the kernel names the answering process as this build's key daemon of the home
-    (`protocol::check_peer`, decided on the **cdhash of the code actually running**, not a path or
-    a declared value, both forgeable by a same-user process). The legs: from the peer's audit
+  - **`verified: true, verifiedBy: "session"`** (arm64 macOS; cdhash 2026-10-26): `address`,
+    `addresses`, `status`, `change` and `balance` while unlocked, when the daemon's derivation
+    equals the cache and the kernel names the answering process as this build's key daemon of the
+    home (`protocol::check_peer`, decided on the **cdhash of the code actually running**, not a path
+    or a declared value, both forgeable by a same-user process). The legs: from the peer's audit
     token (`LOCAL_PEERTOKEN`), `csops_audittoken(CS_OPS_CDHASH)` equals this process's own
     `csops(CS_OPS_CDHASH)`; the peer is `CS_VALID`; `daemon_pids(home)` lists it; it holds the
     listening `d.sock` of this home (`proc_pidfdinfo`, so an attacker that exec'd this binary while
     its child squats the socket does not pass — the daemon closes inherited fds at start-up); and
     `LOCAL_PEERUUID` matches. Linux hides a non-dumpable daemon's `/proc/<pid>/exe`, so there this
-    level never applies.
+    level never applies. Nor on the x86_64 macOS build: the linker signs only arm64 output, so
+    `csops` has no cdhash for it, `check_peer` returns `Unknown` for every peer, and no peer is
+    named either.
   - **`verified: false`** otherwise, with "the wallet is locked; `zwallet unlock <dur>` or `zwallet
     address --verify` checks it" while locked, else "run `zwallet address --verify` before
     funding". A peer that fails the check adds a `warning` naming its pid and what it is; the
