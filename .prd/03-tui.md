@@ -82,12 +82,18 @@ Transfer and Whitelist, while the list is not checked: V = check it with the pas
 ```
 
 - **Status bar:** two lines at the bottom. Line 1: chain · key · short address · address trust
-  (§Address trust). Line 2: **`signing open (agent too) until 14:32Z`** or `locked` · RPC host
+  (§Address trust). Line 2: **`signing (agent too) until 14:32Z`** or `locked` · RPC host
   (rule 3). The expiry is drawn by zwallet from the RFC 3339 time the daemon reports
   (`core::time::parse_rfc3339_utc`), in UTC, with the date in front when it is a day or more
-  away (`2027-10-28 14:32Z`); one that does not parse is shown as it came (escaped, at most 64).
-  The warm-up opens signing for every client of the daemon, including the agent, and the bar
-  says so. The lock state is read again every 5 s and on `r`, and is said once, on line 2.
+  away (`2027-10-28 14:32Z`); one that does not parse is shown as it came (escaped, at most 64),
+  cut to 17 with `...` in the bar. The warm-up opens signing for every client of the daemon,
+  including the agent, and the bar says so. The lock state is read again every 5 s and on `r`,
+  and is said once, on line 2; a status read started before `L` finished is dropped. Each line
+  fits 80 columns with every value whole: the key name is cut to 11 with `...` on line 1 (and to
+  27 in the key list, so the address after it is whole), the expiry to 17 and a status error to
+  37 on line 2, the RPC host is at most 32. `q` while `L` is stopping daemons waits for it
+  (`locking... (quits when done)`); a stop that failed is printed after the terminal is given
+  back.
 - **Review screen:**
   - payee nickname and full address, asset and amount;
   - the fee estimate and the fee cap;
@@ -534,7 +540,7 @@ binary's explorer URLs are fixed (§History); a live test (`cargo test -- --igno
 | ID | Run | Observe |
 |---|---|---|
 | T1 | 2 keys, `b` globally active | both listed, `b` marked; lock state only in the status bar |
-| T2 | Enter on `a` (locked), type the password | bar shows `signing open (agent too) until` ≈ now+1h and `verified by password` for `a`; `zwallet status` agrees; the global active key is still `b` |
+| T2 | Enter on `a` (locked), type the password | bar shows `signing (agent too) until` ≈ now+1h and `verified by password` for `a`; `zwallet status` agrees; the global active key is still `b` |
 | T2b | `s` on `a`, confirm | `zwallet list` shows `a` active |
 | T3 | fixture: 14 txs, the same hash in the journal and in Blockscout, 2 pending | exactly 10 rows; pending rows first; that hash appears once with both sources; coverage note shown |
 | T3b | explorer unavailable (fixture 403) | journal rows only; the note says so; no error banner covering the list |
@@ -569,6 +575,10 @@ Decisions of the dispatcher when TUI-1 was split into three PRs
 2. Rule 3: the RPC host is the origin's host (and port), at most 32 characters, cut with `...`.
 3. Rule 4: a pane whose whole content is one error is an error view and wraps it.
 4. §Address trust: locked, line 1 says `not verified`; `locked` is said once, on line 2 (T1).
+5. Status bar, after TUI-1b's review round 1: line 2 says `signing (agent too) until`, not
+   `signing open (agent too) until`, and drops `rpc `, so the date form (17), the words (26), a
+   separator and a 32-character host fit 78 columns; every value is whole or cut with `...`;
+   `q` waits for a running `L`; a status read from before the lock is dropped.
 
 ## Changes on 2026-10-27
 

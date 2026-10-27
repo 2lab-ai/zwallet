@@ -87,12 +87,14 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `--allow-ptrace-scope-0` (see **The whitelist**).
 - **Durations** are positional: an integer and one unit of `s m h d w y` (`1y` = 365d). `0`,
   negatives, fractions and unknown units are `VALIDATION_ERROR`.
-- **`tui`** (needs stdin on a terminal, the one it sets to raw mode, and stdout on one): the key list with the globally active key marked
-  `*`, and a two-line status bar: chain, active key, its short address and how far it is
-  verified; then `locked` or `signing open (agent too) until HH:MMZ` (UTC), and the RPC host.
-  The lock state is read again every 5 s, so a `zwallet lock` from another shell shows. Keys:
-  `j`/`k` or the arrows move, `r` reads everything again, `L` locks every zwallet daemon of this
-  user (as `zwallet lock`), `q` or Ctrl-C quits. It needs 80x24 and says so on one line when the
+- **`tui`** (needs stdin on a terminal, the one it sets to raw mode, and stdout on one): the
+  key list with the globally active key marked `*`, and a two-line status bar: chain, active
+  key, its short address and how far it is verified; then `locked` or `signing (agent too) until
+  HH:MMZ` (UTC; `YYYY-MM-DD HH:MMZ` when a day or more away), and the RPC host. The lock state is
+  read again every 5 s, so a `zwallet lock` from another shell shows. Keys: `j`/`k` or the
+  arrows move, `r` reads everything again, `L` locks every zwallet daemon of this user (as
+  `zwallet lock`), `q` or Ctrl-C quits (after a running `L` is done; a stop that failed is
+  printed once the terminal is given back). It needs 80x24 and says so on one line when the
   terminal is smaller. Text from wallet.json, the daemon socket and the environment is escaped
   and bounded as in the CLI, every cell goes through one filter that lets only printable ASCII
   and `₮` through, and no QR code is drawn. This version shows the keys and the lock state;

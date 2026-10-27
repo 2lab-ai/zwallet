@@ -87,7 +87,8 @@ pub(crate) fn net(chain: &'static Chain, flag: Option<&str>) -> Net {
 }
 
 /// `zwallet tui`: the arguments are checked first, then the terminal ([`crate::tui::run`]).
-/// Nothing is printed once it has given the terminal back.
+/// Its error (the terminal, or a lock that failed while `q` waited for it) is printed as every
+/// command's is, after the terminal is given back; a clean quit prints nothing.
 async fn tui(home: &Path, warm: &str, chain: &str, json: bool) -> Result<Out> {
     let chain = chains::find(chain)?;
     let warm = parse_duration(warm)?;

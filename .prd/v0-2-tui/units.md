@@ -103,7 +103,7 @@ Decisions (the dispatcher's, 2026-10-28):
    `VALIDATION_ERROR`, its value escaped and cut at 64 as the CLI does, then wrapped inside the
    pane.
 2. The status bar is two lines at the bottom: line 1 chain · key · short address · trust; line 2
-   `locked` or `signing open (agent too) until HH:MMZ` (UTC, through
+   `locked` or `signing (agent too) until HH:MMZ` (UTC, through
    `core::time::parse_rfc3339_utc`) · RPC host. TUI-1b updates 03-tui.md §Status bar and the
    80x24 layout.
 3. `TestBackend` tests build `StatusView` fixtures; behaviour against a real daemon is covered by
@@ -131,7 +131,7 @@ Decisions (the dispatcher's, 2026-10-28):
 - **Depends on:** TUI-1.
 - **RED tests:**
   - T2 (pty): keys `a` and `b`, `b` active, locked. Enter on `a`, type the password: the frame's
-    bar shows `signing open (agent too) until` ≈ now+1h and `verified by password` for `a`;
+    bar shows `signing (agent too) until` ≈ now+1h and `verified by password` for `a`;
     `zwallet status --json` has the same `expiresAt`; `zwallet list --json` still has `active:
     "b"`.
   - T2b (pty): `s` on `a`, confirm: `zwallet list --json` has `active: "a"`.
