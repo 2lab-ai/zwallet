@@ -234,6 +234,8 @@ impl Write for Fd {
                 }
                 _ => {}
             }
+            #[cfg(test)]
+            seam::between_poll_and_write();
             // SAFETY: write(2) reads `buf.len()` bytes from `buf`.
             let n = unsafe { libc::write(self.0, buf.as_ptr().cast(), buf.len()) };
             match usize::try_from(n) {
@@ -289,6 +291,8 @@ fn on_panic<I: ?Sized>(
                 let taken = state.compare_exchange(held, FATAL, Ordering::SeqCst, Ordering::SeqCst);
                 if taken.is_ok() {
                     restore_modes();
+                    #[cfg(test)]
+                    seam::after_restore_modes();
                     let _ = out.write_all(RESTORE_SCREEN);
                     let _ = err.write_all(PANIC_OUTPUT);
                     return Panicked::Fatal;
@@ -372,6 +376,8 @@ impl<W: Write> Guard<W> {
         }
         MODES_SET.store(true, Ordering::Release);
         install_panic_hook();
+        #[cfg(test)]
+        seam::before_raw_mode();
         crossterm::terminal::enable_raw_mode()
     }
 
@@ -410,6 +416,56 @@ impl<W: Write> Drop for Guard<W> {
             restore(&mut self.out);
             MODES_SET.store(false, Ordering::Release);
             let _ = STATE.compare_exchange(RELEASING, IDLE, Ordering::SeqCst, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Points where a child-process test steps into the guard and the panic hook. Each does nothing
+/// unless that child set it; none exists outside tests.
+#[cfg(test)]
+mod seam {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// The write that follows a successful `poll` never returns (as when another writer filled
+    /// the pipe in between).
+    pub(super) static STUCK_WRITE: AtomicBool = AtomicBool::new(false);
+    /// The thread taking the terminal stops right before raw mode, until [`GO`].
+    pub(super) static PAUSE_ENTERING: AtomicBool = AtomicBool::new(false);
+    /// It has stopped there.
+    pub(super) static PAUSED: AtomicBool = AtomicBool::new(false);
+    /// It may go on.
+    pub(super) static GO: AtomicBool = AtomicBool::new(false);
+    /// `Guard::enter` returned to it.
+    pub(super) static ENTERED: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn between_poll_and_write() {
+        if STUCK_WRITE.load(Ordering::SeqCst) {
+            loop {
+                std::thread::park();
+            }
+        }
+    }
+
+    pub(super) fn before_raw_mode() {
+        if PAUSE_ENTERING.load(Ordering::SeqCst) {
+            PAUSED.store(true, Ordering::SeqCst);
+            while !GO.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    /// In the panic that took the terminal, right after it restored the modes: lets the paused
+    /// thread go on, and waits (at most 5 s) until its `Guard::enter` has returned, so a raw mode
+    /// it sets after the restore is what the process would end with.
+    pub(super) fn after_restore_modes() {
+        if PAUSE_ENTERING.load(Ordering::SeqCst) {
+            GO.store(true, Ordering::SeqCst);
+            let start = Instant::now();
+            while !ENTERED.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(5) {
+                std::thread::yield_now();
+            }
         }
     }
 }
@@ -653,8 +709,9 @@ mod tests {
         let _serial = HOLDING_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let out = Shared::default();
         let guard = Guard::on(out.clone()).unwrap();
-        // A second guard is refused before it touches the terminal (no raw mode, no hook).
-        let refused = Guard::enter(Shared::default()).err().expect("refused");
+        // A second guard is refused (probed through `claim`, which `Guard::enter` runs first, so
+        // a regression here cannot touch the terminal the tests run in).
+        let refused = claim().expect_err("refused");
         assert!(
             refused.to_string().contains("already holds the terminal"),
             "{refused}"
@@ -674,13 +731,17 @@ mod tests {
 
     #[test]
     fn the_hook_ends_a_held_terminal_says_nothing_once_fatal_and_delegates_only_when_idle() {
-        for (state, want) in [
-            (HELD, Panicked::Fatal),
-            (RELEASING, Panicked::Fatal),
-            (FATAL, Panicked::Suppressed),
-            (IDLE, Panicked::Delegated),
+        // (state, the panicking thread is the one taking the terminal, what the hook decides)
+        for (state, entering, want) in [
+            (HELD, false, Panicked::Fatal),
+            (RELEASING, false, Panicked::Fatal),
+            (ACQUIRING, true, Panicked::Fatal),
+            (FATAL, false, Panicked::Suppressed),
+            (IDLE, false, Panicked::Delegated),
         ] {
             let state = AtomicU8::new(state);
+            let alarms = Mutex::new(Vec::new());
+            let alarm = |secs: u32| alarms.lock().unwrap().push(secs);
             let (out, err) = (Shared::default(), Shared::default());
             let before_ran = AtomicBool::new(false);
             let before = |payload: &&str| {
@@ -691,10 +752,19 @@ mod tests {
                 &state,
                 &mut out.clone(),
                 &mut err.clone(),
+                &alarm,
+                entering,
                 &before,
                 &"secret pw-XYZ-0123456789",
             );
             assert_eq!(got, want);
+            // The deadline is armed by the panic that takes the terminal, and by no other.
+            let armed: &[u32] = if want == Panicked::Fatal {
+                &[DEADLINE_SECS]
+            } else {
+                &[]
+            };
+            assert_eq!(*alarms.lock().unwrap(), armed);
             let (written, said) = (out.bytes(), String::from_utf8(err.bytes()).unwrap());
             assert_eq!(
                 before_ran.load(Ordering::SeqCst),
@@ -710,6 +780,54 @@ mod tests {
             }
             assert!(!String::from_utf8_lossy(&written).contains("secret"));
             assert!(!said.contains("secret"));
+        }
+    }
+
+    #[test]
+    fn a_panic_while_another_thread_takes_the_terminal_waits_under_the_deadline_then_decides() {
+        // (where the taking thread goes, what the waiting panic then decides, the alarms set)
+        for (then, want, alarms_set) in [
+            (HELD, Panicked::Fatal, vec![DEADLINE_SECS]),
+            (IDLE, Panicked::Delegated, vec![DEADLINE_SECS, 0]),
+        ] {
+            let state = Arc::new(AtomicU8::new(ACQUIRING));
+            let (armed, armed_rx) = channel();
+            let alarms = Arc::new(Mutex::new(Vec::new()));
+            let (out, err) = (Shared::default(), Shared::default());
+            let before_ran = Arc::new(AtomicBool::new(false));
+            let waiting = {
+                let (state, alarms, out, err, before_ran) = (
+                    state.clone(),
+                    alarms.clone(),
+                    out.clone(),
+                    err.clone(),
+                    before_ran.clone(),
+                );
+                std::thread::spawn(move || {
+                    let alarm = |secs: u32| {
+                        alarms.lock().unwrap().push(secs);
+                        let _ = armed.send(());
+                    };
+                    let before = |_: &()| before_ran.store(true, Ordering::SeqCst);
+                    let (mut out, mut err) = (out.clone(), err.clone());
+                    on_panic(&state, &mut out, &mut err, &alarm, false, &before, &())
+                })
+            };
+            // The deadline is armed before the wait; the decision waits for the taking thread.
+            armed_rx.recv_timeout(WAIT).expect("the deadline was armed");
+            assert_eq!(state.load(Ordering::SeqCst), ACQUIRING);
+            assert!(out.bytes().is_empty() && err.bytes().is_empty());
+            state.store(then, Ordering::SeqCst);
+            assert_eq!(waiting.join().unwrap(), want);
+            assert_eq!(*alarms.lock().unwrap(), alarms_set);
+            assert_eq!(
+                before_ran.load(Ordering::SeqCst),
+                want == Panicked::Delegated
+            );
+            if want == Panicked::Fatal {
+                assert!(holds(&out.bytes(), LEAVE_ALTERNATE_SCREEN));
+                assert_eq!(err.bytes(), PANIC_OUTPUT);
+            }
         }
     }
 
@@ -732,7 +850,15 @@ mod tests {
                 (state.clone(), out.clone(), err.clone(), before_a.clone());
             std::thread::spawn(move || {
                 let before = |_: &()| before_a.store(true, Ordering::SeqCst);
-                on_panic(&state, &mut out.clone(), &mut err.clone(), &before, &())
+                on_panic(
+                    &state,
+                    &mut out.clone(),
+                    &mut err.clone(),
+                    &|_| {},
+                    false,
+                    &before,
+                    &(),
+                )
             })
         };
         // The first panic's hook is inside its restore.
@@ -740,7 +866,15 @@ mod tests {
         let (out_b, err_b) = (Shared::default(), Shared::default());
         let before_b = AtomicBool::new(false);
         let before = |_: &()| before_b.store(true, Ordering::SeqCst);
-        let second = on_panic(&state, &mut out_b.clone(), &mut err_b.clone(), &before, &());
+        let second = on_panic(
+            &state,
+            &mut out_b.clone(),
+            &mut err_b.clone(),
+            &|_| {},
+            false,
+            &before,
+            &(),
+        );
         control.release();
         assert_eq!(second, Panicked::Suppressed);
         assert!(!before_b.load(Ordering::SeqCst), "the payload hook ran");
@@ -763,7 +897,7 @@ mod tests {
         let dropping = std::thread::spawn(move || drop(guard));
         // The drop is inside its restore.
         control.entered();
-        let refused = Guard::enter(Shared::default()).err();
+        let refused = claim().err();
         control.release();
         let refused = refused.expect("refused while releasing");
         assert!(
@@ -780,7 +914,10 @@ mod tests {
     /// - `locks`: another thread holds both stdio locks when the panic comes;
     /// - `stdout-full`, `stderr-full`: that pipe is full and its reader never reads;
     /// - `two`: stdout is full, and a second thread panics while the first panic's hook is
-    ///   giving the terminal back.
+    ///   giving the terminal back;
+    /// - `stuck`: the hook's write after a successful `poll` never returns;
+    /// - `acquiring`: a thread panics while another is taking the terminal, stopped right before
+    ///   raw mode.
     const PANIC_CHILD: &str = "ZWALLET_TEST_TUI_PANIC_CHILD";
 
     /// Fills the pipe on `fd` to its last byte. `O_NONBLOCK` is set on it meanwhile, then taken
@@ -814,6 +951,21 @@ mod tests {
             return;
         };
         let mode = mode.to_string_lossy().into_owned();
+        if mode == "acquiring" {
+            seam::PAUSE_ENTERING.store(true, Ordering::SeqCst);
+            std::thread::spawn(|| {
+                let guard = Guard::enter(std::io::stdout()).expect("stdin is a pty");
+                seam::ENTERED.store(true, Ordering::SeqCst);
+                let _keep = guard;
+                loop {
+                    std::thread::park();
+                }
+            });
+            while !seam::PAUSED.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            panic!("secret pw-XYZ-0123456789");
+        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -836,6 +988,7 @@ mod tests {
                 }
                 "stdout-full" => fill(1),
                 "stderr-full" => fill(2),
+                "stuck" => seam::STUCK_WRITE.store(true, Ordering::SeqCst),
                 "two" => {
                     fill(1);
                     // The second panic comes once the first one's hook has taken the terminal
@@ -868,10 +1021,11 @@ mod tests {
     }
 
     /// Runs [`panic_child`] in `mode` with its stdin on a pty, killing it after [`WAIT`] (and
-    /// failing then), and asserts how it ended: exit 101; canonical mode with echo back on the
-    /// pty; the screen given back on stdout and the fixed line on stderr, where that pipe is
-    /// not full; and the payload nowhere. A full pipe is read only once the child is gone.
-    /// Returns what stdout and stderr held.
+    /// failing then), and asserts how it ended: exit 101 (or, in `stuck`, the hook's deadline,
+    /// SIGALRM); canonical mode with echo back on the pty; the screen given back on stdout and
+    /// the fixed line on stderr, where that pipe is not full and the write not stuck; and the
+    /// payload nowhere. A full pipe is read only once the child is gone. Returns what stdout and
+    /// stderr held.
     fn panic_in_a_child(mode: &str) -> (String, String) {
         use std::io::Read;
         let (mut master, mut slave) = (-1, -1);
@@ -887,6 +1041,8 @@ mod tests {
             )
         };
         assert_eq!(rc, 0);
+        cloexec(master);
+        cloexec(slave);
         // SAFETY: both fds were just returned by openpty and are owned by nobody else.
         let (_master, slave) =
             unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
@@ -904,6 +1060,7 @@ mod tests {
             mode == "stdout-full" || mode == "two",
             mode == "stderr-full",
         );
+        let stuck = mode == "stuck";
         let read = |mut r: Box<dyn Read + Send>| {
             let mut v = Vec::new();
             let _ = r.read_to_end(&mut v);
@@ -936,7 +1093,14 @@ mod tests {
             String::from_utf8_lossy(&out).into_owned(),
             String::from_utf8_lossy(&err).into_owned(),
         );
-        assert_eq!(status.code(), Some(101), "{mode}: {stdout}\n{stderr}");
+        {
+            use std::os::unix::process::ExitStatusExt;
+            let deadline = stuck && status.signal() == Some(libc::SIGALRM);
+            assert!(
+                status.code() == Some(101) || deadline,
+                "{mode}: {status:?}: {stdout}\n{stderr}"
+            );
+        }
         // SAFETY: tcgetattr fills a termios for an fd this test owns.
         let modes = unsafe {
             let mut t: libc::termios = std::mem::zeroed();
@@ -945,11 +1109,11 @@ mod tests {
         };
         assert_ne!(modes & libc::ICANON, 0, "{mode}: canonical mode is off");
         assert_ne!(modes & libc::ECHO, 0, "{mode}: echo is off");
-        if !stdout_full {
+        if !stdout_full && !stuck {
             assert!(holds(&out, LEAVE_ALTERNATE_SCREEN), "{mode}: {stdout}");
             assert!(holds(&out, SHOW_CURSOR), "{mode}: {stdout}");
         }
-        if !stderr_full {
+        if !stderr_full && !stuck {
             assert!(
                 stderr.contains(&format!("{PANIC_LINE}\n")),
                 "{mode}: {stderr}"
@@ -976,6 +1140,16 @@ mod tests {
     }
 
     #[test]
+    fn a_write_that_never_returns_cannot_keep_the_process_alive_and_the_modes_come_first() {
+        panic_in_a_child("stuck");
+    }
+
+    #[test]
+    fn a_panic_while_another_thread_takes_the_terminal_never_leaves_it_raw() {
+        panic_in_a_child("acquiring");
+    }
+
+    #[test]
     fn a_panic_ends_the_process_and_restores_the_modes_with_stdout_full() {
         panic_in_a_child("stdout-full");
     }
@@ -993,11 +1167,20 @@ mod tests {
         assert!(stderr.contains("second: panicking\n"), "{stderr}");
     }
 
+    /// Marks `fd` close-on-exec, so no other test's child inherits it (and holds a pipe open).
+    fn cloexec(fd: RawFd) {
+        // SAFETY: fcntl on an fd this process owns.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
+
     /// A pipe: `(read end, write end)`.
     fn pipe() -> (std::fs::File, OwnedFd) {
         let mut fds = [-1; 2];
         // SAFETY: pipe writes two fds into the array.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        fds.iter().for_each(|fd| cloexec(*fd));
         // SAFETY: both fds were just returned by pipe and are owned by nobody else.
         unsafe {
             (
@@ -1024,7 +1207,8 @@ mod tests {
         std::thread::spawn(move || {
             let state = AtomicU8::new(HELD);
             let before = |_: &()| panic!("not idle");
-            let got = emergency(&state, out_w.as_raw_fd(), err_w.as_raw_fd(), &before, &());
+            let (out, err) = (out_w.as_raw_fd(), err_w.as_raw_fd());
+            let got = emergency(&state, out, err, &|_| {}, false, &before, &());
             drop((out_w, err_w));
             let _ = sent.send(got);
         });
