@@ -1926,6 +1926,84 @@ fn r4c3_status_lists_the_daemons_of_other_homes() {
     assert!(pids.contains(&json!(pb)), "{s}");
 }
 
+/// A wallet home outside the suite's test homes (`/tmp/zwx-*`, not `/tmp/zwt-*`), standing for
+/// the user's real one. Its daemons are stopped when it drops, this home's only.
+struct Outside(tempfile::TempDir);
+
+impl Outside {
+    fn new() -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("zwx-")
+            .tempdir_in("/tmp")
+            .expect("outside home");
+        Self(dir)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+
+    fn run_stdin(&self, args: &[&str]) -> common::Run {
+        run_in(self.path(), args, Some(&format!("{PW}\n")), &[])
+    }
+
+    /// Unlocks it for 30 s and returns its daemon's pid.
+    fn unlock(&self) -> i32 {
+        self.run_stdin(&["unlock", "30s", "--password-stdin", "--json"])
+            .ok()["daemonPid"]
+            .as_i64()
+            .unwrap() as i32
+    }
+}
+
+impl Drop for Outside {
+    fn drop(&mut self) {
+        let _ = zwallet::core::protocol::stop_daemons(self.path(), None);
+    }
+}
+
+#[test]
+fn the_suite_stops_no_daemon_outside_its_test_homes() {
+    // `lock` and a whitelist edit stop every daemon in their reach. Run by the suite, that is the
+    // daemons of its test homes, never the user's own session.
+    let _alone = common::exclusive();
+    let outside = Outside::new();
+    outside
+        .run_stdin(&["create", "main", "--password-stdin", "--json"])
+        .ok();
+    let home = Home::new();
+    home.create("main", &[]);
+    let mut failures = Vec::new();
+    for what in ["lock", "whitelist add"] {
+        let kept = outside.unlock();
+        let ended = home.unlock("30s")["daemonPid"].as_i64().unwrap() as i32;
+        let (r, field) = match what {
+            "lock" => (home.run(&["lock", "--json"]), "stopped"),
+            _ => (
+                whitelist_edit(&home, &["add", "alice", PAYEE]),
+                "stoppedDaemons",
+            ),
+        };
+        let v: serde_json::Value = serde_json::from_str(&r.stdout).unwrap_or_default();
+        let stopped = |pid: i32| v[field].as_array().is_some_and(|s| s.contains(&json!(pid)));
+        if r.code != 0 || !stopped(ended) || !wait_dead(ended, Duration::from_secs(3)) {
+            failures.push(format!(
+                "{what} did not stop the daemon {ended} of its test home: {:?} / {:?}",
+                r.stdout.trim(),
+                r.stderr.trim()
+            ));
+        }
+        if stopped(kept) || !pid_alive(kept) || !common::daemon_pids(outside.path()).contains(&kept)
+        {
+            failures.push(format!(
+                "{what} stopped the daemon {kept} of {}, outside the test homes",
+                outside.path().display()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 // The whitelist CLI (`.prd/04-whitelist.md`): `zwallet whitelist …` and `@nickname` recipients.
 // Every mutating `whitelist` command stops every zwallet daemon of this user before it edits, so
 // the tests that run one take `common::exclusive()`.
