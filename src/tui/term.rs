@@ -10,6 +10,8 @@ use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::{Cell, CellDiffOption, CellWidth};
 use ratatui::layout::{Position, Size};
 use std::io::Write;
+use std::os::fd::RawFd;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// The one way the TUI writes cells to a terminal, as `write_human` is the CLI's: a cell whose
@@ -152,10 +154,50 @@ static STATE: AtomicU8 = AtomicU8::new(IDLE);
 
 /// Gives the terminal back to the shell: leaves the alternate screen, shows the cursor, and ends
 /// raw mode (which a terminal that never entered it ignores). Errors are ignored: there is no
-/// better place left to report them.
+/// better place left to report them. The guard's path; the panic hook has its own ([`on_panic`]).
 fn restore(out: &mut impl Write) {
     let _ = execute!(out, LeaveAlternateScreen, Show);
     let _ = crossterm::terminal::disable_raw_mode();
+}
+
+/// What crossterm writes for `LeaveAlternateScreen` and `Show`, for the panic hook to write
+/// without crossterm.
+const RESTORE_SCREEN: &[u8] = b"\x1b[?1049l\x1b[?25h";
+
+/// The terminal [`Guard::enter`] puts in raw mode: stdin, as crossterm picks it when stdin is a
+/// terminal (which `enter` requires).
+const TTY: RawFd = 0;
+
+/// [`TTY`]'s modes before the first guard of the process took it, for the panic hook. A
+/// `OnceLock` reads without a lock once set; it is set before raw mode is, so a hook that finds
+/// it unset has no raw mode to undo.
+static MODES: OnceLock<libc::termios> = OnceLock::new();
+
+/// Sets [`TTY`]'s modes back to [`MODES`], with no lock (crossterm's `disable_raw_mode` takes a
+/// mutex another thread may hold).
+fn restore_modes() {
+    if let Some(modes) = MODES.get() {
+        // SAFETY: tcsetattr reads a termios this process filled with tcgetattr.
+        unsafe {
+            libc::tcsetattr(TTY, libc::TCSANOW, modes);
+        }
+    }
+}
+
+/// A file descriptor written with plain `write(2)`: no buffer and no lock, unlike std's stdout
+/// and stderr, whose locks a thread that panicked later may hold forever ([`on_panic`]).
+struct Fd(RawFd);
+
+impl Write for Fd {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: write(2) reads `buf.len()` bytes from `buf`.
+        let n = unsafe { libc::write(self.0, buf.as_ptr().cast(), buf.len()) };
+        usize::try_from(n).map_err(|_| std::io::Error::last_os_error())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// What the panic hook decided ([`on_panic`]).
@@ -171,8 +213,9 @@ enum Panicked {
 }
 
 /// The panic hook's decision on `state`. The one panic that moves it from `HELD` or `RELEASING`
-/// to `FATAL` restores the terminal on `out` and writes [`PANIC_LINE`] on `err` through the write
-/// point. A panic that finds it `FATAL` writes nothing and never runs `before`, which would print
+/// to `FATAL` gives the terminal back ([`RESTORE_SCREEN`] on `out`, [`restore_modes`]) and writes
+/// [`PANIC_LINE`] on `err` through the write point, taking no lock besides what `out` and `err`
+/// take. A panic that finds it `FATAL` writes nothing and never runs `before`, which would print
 /// its payload. Only while `IDLE` does `before`, the hook that was there before, get `info`.
 fn on_panic<I: ?Sized>(
     state: &AtomicU8,
@@ -191,7 +234,8 @@ fn on_panic<I: ?Sized>(
             held => {
                 let taken = state.compare_exchange(held, FATAL, Ordering::SeqCst, Ordering::SeqCst);
                 if taken.is_ok() {
-                    restore(out);
+                    let _ = out.write_all(RESTORE_SCREEN);
+                    restore_modes();
                     let _ = write_human(err, &format!("{PANIC_LINE}\n"));
                     return Panicked::Fatal;
                 }
@@ -200,20 +244,36 @@ fn on_panic<I: ?Sized>(
     }
 }
 
+/// [`on_panic`] on file descriptors `out` and `err` written with plain `write(2)` ([`Fd`]): the
+/// panic hook's path, which must not wait on a lock. A thread that panics while another one is
+/// ending the process parks inside the hook before it unwinds, so it keeps every lock it holds,
+/// std's stdout and stderr locks included.
+fn emergency<I: ?Sized>(
+    state: &AtomicU8,
+    out: RawFd,
+    err: RawFd,
+    before: &dyn Fn(&I),
+    info: &I,
+) -> Panicked {
+    on_panic(state, &mut Fd(out), &mut Fd(err), before, info)
+}
+
 /// Installs the panic hook once per process. A hook runs for every panic, also one tokio catches
 /// (a panicking `spawn_blocking` task is a `JoinError` to the TUI), so while a [`Guard`] holds
-/// the terminal no panic is survivable: [`on_panic`] gives the terminal back through stdout (a
-/// guard of the TUI always holds stdout) and the process ends with [`PANIC_EXIT`]. A panic on
-/// another thread meanwhile waits here for that end. Without a guard the hook that was there
-/// before runs. It is never removed: a hook cannot be changed from a panicking thread.
+/// the terminal no panic is survivable: [`emergency`] gives the terminal back through fd 1 (a
+/// guard of the TUI always holds stdout) and writes the fixed line on fd 2, and the process ends
+/// at once with [`PANIC_EXIT`] (`_exit`: no destructor, no atexit, no flush that could wait on a
+/// lock). A panic on another thread meanwhile waits here for that end. Without a guard the hook
+/// that was there before runs. It is never removed: a hook cannot be changed from a panicking
+/// thread.
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let before = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
-            match on_panic(&STATE, &mut out, &mut err, &*before, info) {
-                Panicked::Fatal => std::process::exit(PANIC_EXIT),
+            match emergency(&STATE, 1, 2, &*before, info) {
+                // SAFETY: _exit ends the process; nothing after it runs.
+                Panicked::Fatal => unsafe { libc::_exit(PANIC_EXIT) },
                 Panicked::Suppressed => loop {
                     std::thread::park();
                 },
@@ -231,16 +291,30 @@ pub struct Guard<W: Write> {
 }
 
 impl<W: Write> Guard<W> {
-    /// Takes the terminal `out` writes to (raw mode is set on the controlling terminal). Refused,
-    /// before anything is touched, unless the terminal is free.
+    /// Takes the terminal: raw mode on stdin, which must be a terminal, and the screen `out`
+    /// writes to. Refused, before anything is touched, unless the terminal is free.
     pub fn enter(out: W) -> std::io::Result<Self> {
         claim()?;
-        install_panic_hook();
-        if let Err(e) = crossterm::terminal::enable_raw_mode() {
+        let taken = Self::take_modes();
+        if let Err(e) = taken {
             let _ = STATE.compare_exchange(HELD, IDLE, Ordering::SeqCst, Ordering::SeqCst);
             return Err(e);
         }
         Self::begin(out)
+    }
+
+    /// Records stdin's modes for the panic hook ([`MODES`]), installs the hook, then sets raw mode.
+    fn take_modes() -> std::io::Result<()> {
+        // SAFETY: tcgetattr fills a zeroed termios for fd 0, or fails without touching it.
+        let modes = unsafe {
+            let mut modes: libc::termios = std::mem::zeroed();
+            (libc::tcgetattr(TTY, &mut modes) == 0).then_some(modes)
+        };
+        let modes =
+            modes.ok_or_else(|| std::io::Error::other("zwallet tui needs stdin on a terminal"))?;
+        MODES.get_or_init(|| modes);
+        install_panic_hook();
+        crossterm::terminal::enable_raw_mode()
     }
 
     /// [`Guard::enter`] without raw mode or the panic hook, for a test.
