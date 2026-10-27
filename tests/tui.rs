@@ -82,7 +82,20 @@ fn checked_frame(screen: &mut Screen, app: &App) -> (Vec<String>, Vec<Placed>) {
     (rows, placed)
 }
 
-/// Rule 3 for one outside value `p` of a frame's `placed` values.
+/// Each source's budget (03-tui.md rule 3), written here rather than read from the code, so a
+/// budget raised in the code fails the tests.
+fn budget(source: Source) -> usize {
+    match source {
+        Source::KeyName | Source::RpcHost => 32,
+        Source::Address => 42,
+        Source::Expiry => 64,
+        Source::Error | Source::Warning => 512,
+    }
+}
+
+/// Rule 3 for one outside value `p` of a frame's `placed` values: inert, within its budget, and
+/// drawn whole where it was placed (a value one line long has its whole width there, never cut
+/// by the edge; a value that has to be shorter is cut with `...` before it is placed).
 fn assert_placed(rows: &[String], p: &Placed, placed: &[Placed]) {
     let (source, text) = (p.outside.source(), p.outside.text());
     assert!(
@@ -90,9 +103,9 @@ fn assert_placed(rows: &[String], p: &Placed, placed: &[Placed]) {
         "{source:?} is not inert: {text:?}"
     );
     assert!(
-        text.len() <= source.budget(),
+        text.len() <= budget(source),
         "{source:?} is over its budget of {}: {} characters",
-        source.budget(),
+        budget(source),
         text.len()
     );
     let area = p.area;
@@ -101,6 +114,13 @@ fn assert_placed(rows: &[String], p: &Placed, placed: &[Placed]) {
         "{source:?} spans {} rows",
         area.height
     );
+    if area.height == 1 {
+        assert_eq!(
+            usize::from(area.width),
+            text.len(),
+            "{source:?} {text:?} is drawn cut, or not at all, at {area:?}"
+        );
+    }
     // The area shows the start of the text, then nothing.
     let shown: Vec<char> = (area.y..area.bottom())
         .flat_map(|y| {
@@ -219,9 +239,12 @@ fn t1_both_keys_listed_the_active_one_marked_and_locked_once_in_the_bar() {
         .unwrap()
         .to_string();
     let mut app = app();
-    assert_eq!(app.start(), vec![Effect::LoadKeys, Effect::LoadStatus]);
+    assert_eq!(app.start(), vec![Effect::LoadKeys, Effect::LoadStatus(0)]);
     app.update(Msg::Keys(block_on(wallet::keys(home.path()))));
-    app.update(Msg::Status(block_on(wallet::status(home.path()))));
+    app.update(Msg::Status(
+        app.status_generation(),
+        block_on(wallet::status(home.path())),
+    ));
     let (rows, _) = checked_frame(&mut screen(80, 24), &app);
     let a_row = rows.iter().find(|r| r.contains(&a)).expect("a's row");
     let b_row = rows.iter().find(|r| r.contains(&b)).expect("b's row");
@@ -240,7 +263,10 @@ fn t9_the_list_and_the_two_bar_lines_fit_80x24() {
     let expires = now() + 3600;
     let mut app = app();
     app.update(Msg::Keys(Ok(keys_ab())));
-    app.update(Msg::Status(Ok(open_status(expires))));
+    app.update(Msg::Status(
+        app.status_generation(),
+        Ok(open_status(expires)),
+    ));
     let (rows, _) = checked_frame(&mut screen(80, 24), &app);
     assert!(
         rows.iter()
@@ -255,10 +281,71 @@ fn t9_the_list_and_the_two_bar_lines_fit_80x24() {
     assert_eq!(
         rows[23].trim_end(),
         format!(
-            "signing open (agent too) until {} | rpc ethereum-rpc.publicnode.com",
+            "signing (agent too) until {} | ethereum-rpc.publicnode.com",
             hhmm(expires)
         )
     );
+}
+
+#[test]
+fn at_80x24_the_widest_values_are_drawn_whole() {
+    // A session two days long (its date in front), a 32-character host and a 32-character key
+    // name: the bar's two lines and the key rows keep every value whole, or cut it with `...`.
+    let expires = now() + 2 * 86_400;
+    let long_name = "k".repeat(32);
+    let host = "h".repeat(28) + ".com";
+    let net = Net {
+        chain: chains::find("avalanche").unwrap(),
+        rpc_url: format!("https://{host}/v2/KEY"),
+    };
+    let mut app = App::new(&net, Duration::from_secs(3600));
+    let mut keys = keys_ab();
+    keys.rows[1].name = long_name.clone();
+    keys.active = long_name.clone();
+    app.update(Msg::Keys(Ok(keys)));
+    let mut status = open_status(expires);
+    status.active = Some(long_name.clone());
+    status.address = Some((Some(B.into()), Trust::Unverified(None)));
+    app.update(Msg::Status(app.status_generation(), Ok(status)));
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    let date = rfc3339_utc(expires);
+    let date = format!("{} {}Z", &date[..10], &date[11..16]);
+    assert!(rows[23].contains(&date), "{:?}", rows[23]);
+    assert!(rows[23].trim_end().ends_with(&host), "{:?}", rows[23]);
+    // Both key rows show the whole address; the long name is cut with `...`.
+    let b_row = rows.iter().find(|r| r.contains(B)).expect("b's row");
+    assert!(
+        b_row.contains(&format!("{}...", &long_name[..24])),
+        "{b_row:?}"
+    );
+    assert!(rows.iter().any(|r| r.contains(A)));
+    // Line 1 keeps the trust words whole, the long name cut.
+    assert!(rows[22].trim_end().ends_with("not verified") || rows[22].contains("Linux)"));
+    assert!(rows[22].contains("..."), "{:?}", rows[22]);
+}
+
+#[test]
+fn a_hostile_status_reply_is_drawn_inert_and_bounded() {
+    // What a process answering on d.sock wrote, as it would reach the TUI if nothing escaped it
+    // on the way: an expiry of 600 characters of ESC and half blocks, and a warning holding a
+    // terminal escape and a line break.
+    let expiry = "\u{1b}[2J\u{2580}\u{2584}".repeat(150);
+    let warning = format!("pid 7 \u{1b}]0;x\u{7}\n{}", "\u{2588}".repeat(600));
+    let mut status = open_status(now() + 3600);
+    status.serving.as_mut().unwrap().expires_at = Some(expiry);
+    status.address = Some((Some(B.into()), Trust::Unverified(Some(warning))));
+    let mut app = app();
+    app.update(Msg::Keys(Ok(keys_ab())));
+    app.update(Msg::Status(app.status_generation(), Ok(status)));
+    let (rows, placed) = checked_frame(&mut screen(80, 24), &app);
+    assert!(
+        rows[22].contains("NOT this build's key daemon: "),
+        "{:?}",
+        rows[22]
+    );
+    assert!(rows[23].contains("\\u{1b}"), "{:?}", rows[23]);
+    assert!(placed.iter().any(|p| p.outside.source() == Source::Expiry));
+    assert!(placed.iter().any(|p| p.outside.source() == Source::Warning));
 }
 
 #[test]
@@ -266,7 +353,7 @@ fn t9_below_80x24_the_frame_is_one_line() {
     for (width, height) in [(79, 24), (80, 23), (40, 10)] {
         let mut app = app();
         app.update(Msg::Keys(Ok(keys_ab())));
-        app.update(Msg::Status(Ok(locked_status())));
+        app.update(Msg::Status(app.status_generation(), Ok(locked_status())));
         let (rows, _) = checked_frame(&mut screen(width, height), &app);
         assert_eq!(
             rows[0].trim_end(),
@@ -299,19 +386,78 @@ fn t10_a_status_refresh_that_reports_locked_makes_the_bar_say_locked() {
     assert_eq!(zwallet::tui::REFRESH, Duration::from_secs(5));
     let mut app = app();
     app.update(Msg::Keys(Ok(keys_ab())));
-    app.update(Msg::Status(Ok(open_status(now() + 3600))));
+    app.update(Msg::Status(
+        app.status_generation(),
+        Ok(open_status(now() + 3600)),
+    ));
     let mut screen = screen(80, 24);
     let (rows, _) = checked_frame(&mut screen, &app);
-    assert!(rows[23].starts_with("signing open (agent too) until "));
+    assert!(rows[23].starts_with("signing (agent too) until "));
     assert!(!rows.join("\n").contains("locked"));
     // The refresh timer asks for the status once; a second tick while it runs asks nothing.
-    assert_eq!(app.update(Msg::Tick), vec![Effect::LoadStatus]);
+    assert_eq!(app.update(Msg::Tick), vec![Effect::LoadStatus(0)]);
     assert_eq!(app.update(Msg::Tick), vec![]);
-    app.update(Msg::Status(Ok(locked_status())));
+    app.update(Msg::Status(app.status_generation(), Ok(locked_status())));
     let (rows, _) = checked_frame(&mut screen, &app);
-    assert!(rows[23].starts_with("locked | rpc "), "{:?}", rows[23]);
-    assert!(!rows.join("\n").contains("signing open"));
-    assert_eq!(app.update(Msg::Tick), vec![Effect::LoadStatus]);
+    assert!(rows[23].starts_with("locked | "), "{:?}", rows[23]);
+    assert!(!rows.join("\n").contains("signing"));
+    assert_eq!(app.update(Msg::Tick), vec![Effect::LoadStatus(0)]);
+}
+
+#[test]
+fn q_while_l_is_locking_quits_once_the_lock_is_done_and_its_error_comes_out() {
+    let ready = |app: &mut App| {
+        app.update(Msg::Keys(Ok(keys_ab())));
+        app.update(Msg::Status(
+            app.status_generation(),
+            Ok(open_status(now() + 3600)),
+        ));
+    };
+    let mut app = app();
+    ready(&mut app);
+    assert_eq!(app.update(Msg::Key(Key::Char('L'))), vec![Effect::LockAll]);
+    app.update(Msg::Key(Key::Char('q')));
+    assert!(!app.quitting(), "quit while every daemon is being stopped");
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    assert!(
+        rows[23].starts_with("locking... (quits when done)"),
+        "{:?}",
+        rows[23]
+    );
+    app.update(Msg::Locked(Ok(vec![4242])));
+    assert!(app.quitting());
+    assert!(app.take_quit_error().is_none());
+    // A lock that failed: the TUI still quits, and the error comes out for the CLI to print.
+    let mut app = self::app();
+    ready(&mut app);
+    app.update(Msg::Key(Key::Char('L')));
+    app.update(Msg::Key(Key::Interrupt));
+    assert!(!app.quitting());
+    let failed = WalletError::validation("could not stop zwallet daemon(s) 4242");
+    app.update(Msg::Locked(Err(failed.clone())));
+    assert!(app.quitting());
+    assert_eq!(app.take_quit_error(), Some(failed));
+}
+
+#[test]
+fn a_status_read_from_before_the_lock_is_dropped_and_a_fresh_one_follows() {
+    let mut app = app();
+    app.update(Msg::Keys(Ok(keys_ab())));
+    let before = app.status_generation();
+    assert_eq!(app.update(Msg::Tick), vec![Effect::LoadStatus(before)]);
+    assert_eq!(app.update(Msg::Key(Key::Char('L'))), vec![Effect::LockAll]);
+    let work = app.update(Msg::Locked(Ok(vec![4242])));
+    let after = app.status_generation();
+    assert_ne!(before, after);
+    assert!(work.contains(&Effect::LoadStatus(after)), "{work:?}");
+    // The read started before the lock lands after it: dropped, not drawn.
+    app.update(Msg::Status(before, Ok(open_status(now() + 3600))));
+    let mut screen = screen(80, 24);
+    let (rows, _) = checked_frame(&mut screen, &app);
+    assert!(!rows.join("\n").contains("signing"), "{:?}", rows[23]);
+    app.update(Msg::Status(after, Ok(locked_status())));
+    let (rows, _) = checked_frame(&mut screen, &app);
+    assert!(rows[23].starts_with("locked | "), "{:?}", rows[23]);
 }
 
 #[test]
@@ -332,7 +478,10 @@ fn a_cached_address_that_is_no_address_fails_the_keys_pane_with_the_clis_error()
     assert!(e.message.contains(&shown), "{}", e.message);
     let mut app = app();
     app.update(Msg::Keys(keys));
-    app.update(Msg::Status(block_on(wallet::status(home.path()))));
+    app.update(Msg::Status(
+        app.status_generation(),
+        block_on(wallet::status(home.path())),
+    ));
     let (rows, placed) = checked_frame(&mut screen(80, 24), &app);
     let error = placed
         .iter()
@@ -367,7 +516,8 @@ fn every_outside_value_is_made_inert_and_bounded_where_it_comes_in() {
     for o in &values {
         let text = o.text();
         assert!(text.bytes().all(|b| (0x20..=0x7e).contains(&b)), "{o:?}");
-        assert!(text.len() <= o.source().budget(), "{o:?}");
+        assert_eq!(o.source().budget(), budget(o.source()), "{o:?}");
+        assert!(text.len() <= budget(o.source()), "{o:?}");
         assert!(!text.is_empty(), "{o:?}");
     }
     assert!(values[0].text().starts_with("\\u{1b}]0;x\\u{7}"));
