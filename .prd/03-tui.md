@@ -474,13 +474,19 @@ it as well.
   started.
 - The buffer is cleared on success, cancel and every failure path. It lives until its last use:
   the session start (if any) and the password check (§Password check), then it is cleared.
-- A panic hook and normal unwinding both restore the terminal. The panic hook then prints one
-  fixed line through the write filter (`eprint_line`, core/terminal.rs:57), "zwallet tui stopped
-  unexpectedly; the terminal was restored", never the panic's payload.
-- A panic while the TUI holds the terminal ends the process (`std::process::exit(101)`), also one
-  tokio would catch (`spawn_blocking`), so no TUI ever goes on after a panic; a second panic
-  meanwhile prints nothing (`src/tui/term.rs`). `exit` runs no destructors, so a `Zeroizing`
-  buffer such as `PasswordBuf` is not cleared on that path: its memory goes with the process.
+- A panic hook and normal unwinding both restore the terminal. The panic hook then writes one
+  fixed line, "zwallet tui stopped unexpectedly; the terminal was restored", never the panic's
+  payload: a constant byte string already in the terminal set (a test checks it), written with
+  `write(2)` on fd 2, not through the write filter, which allocates.
+- A panic while the TUI holds the terminal ends the process (`_exit(101)`), also one tokio would
+  catch (`spawn_blocking`), so no TUI ever goes on after a panic (`src/tui/term.rs`). The hook
+  restores the terminal's modes first (`tcsetattr` from the modes the guard recorded), then
+  writes the screen's restore sequences on fd 1 and the line on fd 2, each only when `poll(2)`
+  says the fd takes it within 100 ms: a full pipe or a stalled reader costs that output, never
+  the exit. A second panic meanwhile prints nothing and parks inside the hook; a parked thread
+  keeps every lock it holds (std's stdout and stderr locks too), which is why the hook's path
+  takes no lock and allocates nothing. `_exit` runs no destructors, so a `Zeroizing` buffer such
+  as `PasswordBuf` is not cleared on that path: its memory goes with the process.
 
 ## Architecture
 
