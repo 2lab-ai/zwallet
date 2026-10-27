@@ -845,8 +845,10 @@ mod tests {
             (IDLE, Panicked::Delegated),
         ] {
             let state = AtomicU8::new(state);
-            let alarms = Mutex::new(Vec::new());
-            let alarm = |secs: u32| alarms.lock().unwrap().push(secs);
+            let armed = std::sync::atomic::AtomicUsize::new(0);
+            let arm = || {
+                armed.fetch_add(1, Ordering::SeqCst);
+            };
             let (out, err) = (Shared::default(), Shared::default());
             let before_ran = AtomicBool::new(false);
             let before = |payload: &&str| {
@@ -857,18 +859,16 @@ mod tests {
                 &state,
                 &mut out.clone(),
                 &mut err.clone(),
-                &alarm,
+                &arm,
                 &before,
                 &"secret pw-XYZ-0123456789",
             );
             assert_eq!(got, want);
             // The deadline is armed by the panic that takes the terminal, and by no other.
-            let armed: &[u32] = if want == Panicked::Fatal {
-                &[DEADLINE_SECS]
-            } else {
-                &[]
-            };
-            assert_eq!(*alarms.lock().unwrap(), armed);
+            assert_eq!(
+                armed.load(Ordering::SeqCst),
+                usize::from(want == Panicked::Fatal)
+            );
             let (written, said) = (out.bytes(), String::from_utf8(err.bytes()).unwrap());
             assert_eq!(
                 before_ran.load(Ordering::SeqCst),
@@ -910,7 +910,7 @@ mod tests {
                     &state,
                     &mut out.clone(),
                     &mut err.clone(),
-                    &|_| {},
+                    &|| {},
                     false,
                     &before,
                     &(),
@@ -926,7 +926,7 @@ mod tests {
             &state,
             &mut out_b.clone(),
             &mut err_b.clone(),
-            &|_| {},
+            &|| {},
             &before,
             &(),
         );
@@ -951,6 +951,9 @@ mod tests {
     ///   giving the terminal back;
     /// - `stuck`: the hook's write after a successful `poll` never returns;
     /// - `acquiring-panics`: the thread taking the terminal panics right after raw mode;
+    /// - `acquiring-locked`: another thread holds stdout's lock, so the thread taking the
+    ///   terminal stops after raw mode, writing the alternate screen; then a third thread
+    ///   panics (which [`Guard::enter`]'s rule rules out in the TUI);
     /// - `twice-after-drop`, `twice-after-failure`: no panic; `Guard::enter` a second time after
     ///   a first guard dropped, or after a first `enter` failed (its stdin is no terminal), and
     ///   say both outcomes on stderr.
@@ -999,6 +1002,34 @@ mod tests {
             let second = outcome(Guard::enter(std::io::stdout()));
             eprintln!("first: {first}\nsecond: {second}");
             return;
+        }
+        if mode == "acquiring-locked" {
+            let (held, ready) = channel();
+            std::thread::spawn(move || {
+                let _out = std::io::stdout().lock();
+                held.send(()).unwrap();
+                loop {
+                    std::thread::park();
+                }
+            });
+            ready.recv().unwrap();
+            std::thread::spawn(|| {
+                let _guard = Guard::enter(std::io::stdout());
+                println!("CONTINUED past the alternate screen");
+            });
+            // Waits on the state itself: raw mode is on (canonical mode off) on stdin.
+            loop {
+                // SAFETY: tcgetattr fills a termios for fd 0, a pty here.
+                let raw = unsafe {
+                    let mut t: libc::termios = std::mem::zeroed();
+                    libc::tcgetattr(0, &mut t) == 0 && t.c_lflag & libc::ICANON == 0
+                };
+                if raw {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            panic!("secret pw-XYZ-0123456789");
         }
         if mode == "acquiring-panics" {
             seam::PANIC_AFTER_RAW.store(true, Ordering::SeqCst);
@@ -1061,8 +1092,8 @@ mod tests {
     }
 
     /// Runs [`panic_child`] in `mode` with its stdin on a pty, killing it after [`WAIT`] (and
-    /// failing then), and asserts how it ended: exit 101 (or, in `stuck`, the hook's deadline,
-    /// SIGALRM); canonical mode with echo back on the pty; the screen given back on stdout and
+    /// failing then), and asserts how it ended: exit 101 (in `stuck`, from the deadline's
+    /// handler); canonical mode with echo back on the pty; the screen given back on stdout and
     /// the fixed line on stderr, where that pipe is not full and the write not stuck; and the
     /// payload nowhere. A full pipe is read only once the child is gone. Returns what stdout and
     /// stderr held.
@@ -1078,14 +1109,7 @@ mod tests {
             String::from_utf8_lossy(out).into_owned(),
             String::from_utf8_lossy(err).into_owned(),
         );
-        {
-            use std::os::unix::process::ExitStatusExt;
-            let deadline = stuck && status.signal() == Some(libc::SIGALRM);
-            assert!(
-                status.code() == Some(101) || deadline,
-                "{mode}: {status:?}: {stdout}\n{stderr}"
-            );
-        }
+        assert_eq!(status.code(), Some(101), "{mode}: {stdout}\n{stderr}");
         let modes = ended.modes.expect("stdin on a pty");
         assert_ne!(modes & libc::ICANON, 0, "{mode}: canonical mode is off");
         assert_ne!(modes & libc::ECHO, 0, "{mode}: echo is off");
@@ -1232,6 +1256,11 @@ mod tests {
     }
 
     #[test]
+    fn a_panic_while_the_thread_taking_the_terminal_waits_on_stdout_restores_it() {
+        panic_in_a_child("acquiring-locked");
+    }
+
+    #[test]
     fn a_panic_while_a_guard_holds_the_terminal_ends_the_process() {
         panic_in_a_child("plain");
     }
@@ -1305,7 +1334,7 @@ mod tests {
             let state = AtomicU8::new(HELD);
             let before = |_: &()| panic!("not idle");
             let (out, err) = (out_w.as_raw_fd(), err_w.as_raw_fd());
-            let got = emergency(&state, out, err, &|_| {}, &before, &());
+            let got = emergency(&state, out, err, &|| {}, &before, &());
             drop((out_w, err_w));
             let _ = sent.send(got);
         });
