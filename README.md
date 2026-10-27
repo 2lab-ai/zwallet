@@ -205,8 +205,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   Two places keep `₮`, the one non-ASCII character the write point lets through: a registry
   token whose `symbol()` is exactly the symbol the registry records shows it as is (USDT0's
   `USD₮0`; any other symbol, from that address or another, is escaped), and a send journal
-  amount whose symbol has it (zwallet journaled that symbol; in `--json` it is `\u{20ae}`, as
-  every non-ASCII character of a file value is). An error from the process on `d.sock` reads as its own:
+  amount whose symbol has it (the shape check lets `₮` into any journaled symbol, so a line
+  zwallet did not write can carry up to 32 of them too; in `--json` it is `\u{20ae}`, as every
+  non-ASCII character of a file value is). An error from the process on `d.sock` reads as its own:
   prefixed ``the process answering on the key daemon socket reported:`` unless it is this
   build's key daemon, or, from a process known to be another one, named, with its details
   dropped. A `WALLET_LOCKED` reply from any process running this build's code gets the neutral
@@ -517,8 +518,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   space, `₮` included: the chain's, a registry token's, `?` when `symbol()` failed, or an
   on-chain one as `erc20_meta` escaped and cut it; one with a space in it shows as `<invalid>`),
   and the hash only when it is a 32-byte hash (`?` else). The journal's text in one message is at
-  most 512 characters: the newest entries that fit, at most 5, shown whole and oldest first, then
-  "(and N more there)". The human `duplicateSends` line of a dry-run or an `--allow-duplicate`
+  most 512 characters (an entry is at most 452, so the newest always fits): of the 5 newest
+  entries, newest first, each that still fits, shown whole and oldest first (one that does not
+  fit is skipped, so it cannot hide a smaller one behind it), then "(and N more there)" for every
+  entry not shown. The human `duplicateSends` line of a dry-run or an `--allow-duplicate`
   send shows its entries the same way. The entries in `duplicateSends`, `pendingSends` and
   `journalEntries` (on the other messages that name the journal's entries) keep all their fields,
   every string escaped.
