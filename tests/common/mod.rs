@@ -145,6 +145,7 @@ pub struct Home {
 
 impl Home {
     pub fn new() -> Self {
+        sign_the_binary();
         let serial = Shared::take();
         let dir = tempfile::Builder::new()
             .prefix("zwt-")
@@ -369,9 +370,39 @@ pub fn ptrace_scope_is_open() -> bool {
 /// ([`refuse_a_build_without_the_test_scope`]).
 pub fn zwallet_at(exe: impl AsRef<OsStr>) -> Command {
     refuse_a_build_without_the_test_scope(cfg!(debug_assertions));
+    sign_the_binary();
     let mut cmd = Command::new(exe);
     cmd.env_clear().env(TEST_SCOPE_ENV, TEST_HOMES);
     cmd
+}
+
+/// macOS: `CARGO_BIN_EXE_zwallet` ad-hoc signed, once per test process, before any test starts
+/// or copies it (from [`Home::new`] and [`zwallet_at`]). `unlock` refuses a zwallet build without
+/// a code signature (it compares the started daemon's cdhash with its own). The linker signs
+/// every arm64 build, so there this only verifies; an x86_64 build it does not sign.
+pub fn sign_the_binary() {
+    #[cfg(target_os = "macos")]
+    {
+        static SIGNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        SIGNED.get_or_init(|| {
+            let exe = env!("CARGO_BIN_EXE_zwallet");
+            let codesign = |args: &[&str]| {
+                Command::new("/usr/bin/codesign")
+                    .args(args)
+                    .arg(exe)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success())
+            };
+            if !codesign(&["--verify", "--strict"]) {
+                assert!(
+                    codesign(&["--force", "--sign", "-"]),
+                    "codesign could not sign {exe}"
+                );
+            }
+        });
+    }
 }
 
 /// Panics unless the build has `debug_assertions`. `CARGO_BIN_EXE_zwallet` is built with the

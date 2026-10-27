@@ -2605,8 +2605,9 @@ mod tests {
     /// A session-ending reply from this build's own daemon (it answers, then drops the socket
     /// and exits) is not named an impostor: same code, but no longer a listed daemon holding the
     /// socket, is `Unknown` for a relayed error. Modelled with this test process, which runs this
-    /// build's code (its own cdhash) and is no key daemon of the home.
-    #[cfg(target_os = "macos")]
+    /// build's code (its own cdhash) and is no key daemon of the home. arm64 only, as every
+    /// test that needs this test binary's own cdhash ([`own_token`]).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn a_relayed_error_from_this_builds_code_after_its_session_ended_is_not_named() {
         let home = tempfile::Builder::new()
@@ -2680,7 +2681,12 @@ mod tests {
 
     /// This process's own audit token (macOS), read over a socketpair to itself: the peer of
     /// either end is this process, so `LOCAL_PEERTOKEN` names us.
-    #[cfg(target_os = "macos")]
+    ///
+    /// The unit tests that need this test binary's own cdhash run on arm64 macOS only. The linker
+    /// signs every arm64 build; an x86_64 test binary is unsigned, so it has no cdhash and every
+    /// check refuses for that reason. The integration tests' harness signs the zwallet binary
+    /// (`tests/common`), but a running test binary cannot sign itself.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     fn own_token() -> AuditToken {
         let (a, b) = ChildChannel::pair().unwrap();
         (&a).write_all(&[0]).unwrap();
@@ -2693,12 +2699,13 @@ mod tests {
             .prefix("zwt-")
             .tempdir_in("/tmp")
             .unwrap();
-        let me = std::process::id() as i32;
         // This test process runs this build's code. On macOS that gets past the cdhash leg but is
-        // no key daemon of the home, so it is named. On Linux its executable is readable, so it is
-        // not the non-dumpable genuine daemon: Unknown (nothing is verified by session there).
-        #[cfg(target_os = "macos")]
+        // no key daemon of the home, so it is named (arm64 only: see `own_token`). On Linux its
+        // executable is readable, so it is not the non-dumpable genuine daemon: Unknown (nothing
+        // is verified by session there).
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
+            let me = std::process::id() as i32;
             let this = Peer {
                 pid: Some(me),
                 token: Some(own_token()),
@@ -2725,7 +2732,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             let this = Peer {
-                pid: Some(me),
+                pid: Some(std::process::id() as i32),
                 token: None,
                 exe_uuid: None,
             };
@@ -2743,15 +2750,6 @@ mod tests {
         // test binary; until then it still reads as own's id.
         #[cfg(target_os = "linux")]
         {
-            /// Killed and reaped on drop, so a failing assertion or panic below never leaves the
-            /// `sleep 30` child behind.
-            struct Reaped(std::process::Child);
-            impl Drop for Reaped {
-                fn drop(&mut self) {
-                    let _ = self.0.kill();
-                    let _ = self.0.wait();
-                }
-            }
             let own_id = file_id(Path::new("/proc/self/exe")).unwrap();
             let sleep = Reaped(Command::new("sleep").arg("30").spawn().unwrap());
             let spid = sleep.0.id() as i32;
@@ -2802,12 +2800,13 @@ mod tests {
         assert_eq!(holds_listening_socket(me, &path), Some(false));
     }
 
-    /// A child process killed and reaped on drop, so a failing assertion never leaves it behind.
-    #[cfg(target_os = "macos")]
-    struct KilledOnDrop(Child);
+    /// A child process killed and reaped on drop, so a failing assertion or panic never leaves
+    /// it behind. (x86_64 macOS has no test that starts one.)
+    #[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
+    struct Reaped(Child);
 
-    #[cfg(target_os = "macos")]
-    impl Drop for KilledOnDrop {
+    #[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
+    impl Drop for Reaped {
         fn drop(&mut self) {
             let _ = self.0.kill();
             let _ = self.0.wait();
@@ -2818,8 +2817,8 @@ mod tests {
     /// into the pinned path after [`DaemonExe::check`] (macOS has no `fexecve`) is started in its
     /// place; that is modelled here by starting another program as the child directly. It asks
     /// for input as the daemon does, then records whatever it is sent: it is refused, and gets
-    /// nothing.
-    #[cfg(target_os = "macos")]
+    /// nothing. arm64 only: it needs this test binary's own cdhash (see `own_token`).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[tokio::test(flavor = "current_thread")]
     async fn a_started_daemon_that_runs_other_code_is_given_nothing() {
         let dir = tempfile::Builder::new()
@@ -2830,7 +2829,7 @@ mod tests {
         let ask = serde_json::to_string(&Response::ok(json!({ "stage": STAGE_INPUT }))).unwrap();
         let (ours, theirs) = ChildChannel::pair().unwrap();
         let theirs_out = theirs.try_clone().unwrap();
-        let mut child = KilledOnDrop(
+        let mut child = Reaped(
             Command::new("/bin/sh")
                 .args([
                     "-c",
@@ -2955,13 +2954,13 @@ mod tests {
     }
 
     /// Set only for the child [`the_started_daemon_check_accepts_only_this_builds_code`] starts.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     const CHILD_WAITS: &str = "ZWT_CHILD_WAITS_FOR_STDIN";
 
     /// No check of its own: [`the_started_daemon_check_accepts_only_this_builds_code`] runs this
     /// test binary as a child (so it runs this build's code) through this test, which then waits
     /// until its stdin closes. Run any other way it returns at once.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn child_running_this_build_waits_for_stdin() {
         if std::env::var_os(CHILD_WAITS).is_some() {
@@ -2971,13 +2970,13 @@ mod tests {
 
     /// [`check_started_code`] refuses a child that runs other code, and one that already exited,
     /// and accepts one that runs this build's code. The test binary stands for the build here: it
-    /// is linker-signed like zwallet, and `own_cdhash` is its own.
-    #[cfg(target_os = "macos")]
+    /// is linker-signed like zwallet, and `own_cdhash` is its own (arm64 only: see `own_token`).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn the_started_daemon_check_accepts_only_this_builds_code() {
         assert!(own_cdhash().is_some(), "this test binary is linker-signed");
         // Other code: `sleep` is Apple-signed and CS_VALID, so only the cdhash refuses it.
-        let sleep = KilledOnDrop(
+        let sleep = Reaped(
             Command::new("/bin/sleep")
                 .arg("30")
                 .env_clear()
@@ -2999,7 +2998,7 @@ mod tests {
         drop(sleep);
 
         // This build's code: this test binary again, kept alive by the helper test above.
-        let mut this = KilledOnDrop(
+        let mut this = Reaped(
             Command::new(std::env::current_exe().unwrap())
                 .args([
                     "core::protocol::tests::child_running_this_build_waits_for_stdin",
