@@ -88,12 +88,14 @@ Transfer and Whitelist, while the list is not checked: V = check it with the pas
   away (`2027-10-28 14:32Z`); one that does not parse is shown as it came (escaped, at most 64),
   cut to 17 with `...` in the bar. The warm-up opens signing for every client of the daemon,
   including the agent, and the bar says so. The lock state is read again every 5 s and on `r`,
-  and is said once, on line 2; a status read started before `L` finished is dropped. Each line
-  fits 80 columns with every value whole: the key name is cut to 11 with `...` on line 1 (and to
-  27 in the key list, so the address after it is whole), the expiry to 17 and a status error to
-  37 on line 2, the RPC host is at most 32. `q` while `L` is stopping daemons waits for it
-  (`locking... (quits when done)`); a stop that failed is printed after the terminal is given
-  back.
+  and is said once, on line 2. After `L` the bar says `checking...` until a fresh status lands;
+  a key or status read started before the lock finished is dropped. Each line fits 80 columns
+  with every value whole: on line 1 the key name is cut with `...` to 11 on Linux (whose
+  `not verified (no session check on Linux)` is 40 long) and to 32 elsewhere; in the key list
+  to 27, or less when the index is wider than three digits, so the address after it is whole;
+  on line 2 the expiry to 17 and a status error to 37, and the RPC host is at most 32. `q` while
+  `L` is stopping daemons waits for it (`locking... (quits when done)`); a stop that failed is
+  printed after the terminal is given back.
 - **Review screen:**
   - payee nickname and full address, asset and amount;
   - the fee estimate and the fee cap;
@@ -584,6 +586,9 @@ Decisions of the dispatcher when TUI-1 was split into three PRs
    `signing open (agent too) until`, and drops `rpc `, so the date form (17), the words (26), a
    separator and a 32-character host fit 78 columns; every value is whole or cut with `...`;
    `q` waits for a running `L`; a status read from before the lock is dropped.
+6. After TUI-1b's review round 2: key reads carry the generation too; after a lock the bar
+   says `checking...` until a fresh status lands; the bar's key name is 32 wide where the Linux
+   note does not exist; the key list narrows the name for an index of four digits or more.
 
 ## Changes on 2026-10-27
 
