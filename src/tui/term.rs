@@ -363,7 +363,13 @@ mod tests {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::process::{Command, Stdio};
     use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Barrier, Mutex};
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// The longest a test waits for the code under test: past it, the test fails instead of
+    /// hanging.
+    const WAIT: Duration = Duration::from_secs(10);
 
     /// A writer the test reads back after the code under test wrote to it.
     #[derive(Clone, Default)]
@@ -385,31 +391,57 @@ mod tests {
         }
     }
 
-    /// A writer whose first write after it is armed meets the test's thread at `barrier` twice:
-    /// once when it is inside the write, once to go on. So a test can act while the code under
+    /// A writer whose first write after it is armed tells the test it is inside the write, then
+    /// waits for the test to let it go on (at most [`WAIT`]). So a test acts while the code under
     /// test is in the middle of restoring the terminal, without sleeping.
     #[derive(Clone)]
     struct Gate {
         written: Shared,
         armed: Arc<AtomicBool>,
-        barrier: Arc<Barrier>,
+        inside: Sender<()>,
+        go_on: Arc<Mutex<Receiver<()>>>,
     }
 
-    impl Gate {
-        fn new(armed: bool) -> Self {
-            Self {
-                written: Shared::default(),
-                armed: Arc::new(AtomicBool::new(armed)),
-                barrier: Arc::new(Barrier::new(2)),
-            }
+    /// The test's side of a [`Gate`].
+    struct GateControl {
+        inside: Receiver<()>,
+        go_on: Sender<()>,
+    }
+
+    impl GateControl {
+        /// Waits until the gated write has begun; fails the test after [`WAIT`].
+        fn entered(&self) {
+            self.inside
+                .recv_timeout(WAIT)
+                .expect("the code under test never wrote");
         }
+
+        fn release(&self) {
+            let _ = self.go_on.send(());
+        }
+    }
+
+    fn gate(armed: bool) -> (Gate, GateControl) {
+        let (inside, inside_rx) = channel();
+        let (go_on_tx, go_on) = channel();
+        let gate = Gate {
+            written: Shared::default(),
+            armed: Arc::new(AtomicBool::new(armed)),
+            inside,
+            go_on: Arc::new(Mutex::new(go_on)),
+        };
+        let control = GateControl {
+            inside: inside_rx,
+            go_on: go_on_tx,
+        };
+        (gate, control)
     }
 
     impl Write for Gate {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             if self.armed.swap(false, Ordering::SeqCst) {
-                self.barrier.wait();
-                self.barrier.wait();
+                let _ = self.inside.send(());
+                let _ = self.go_on.lock().unwrap().recv_timeout(WAIT);
             }
             self.written.write(buf)
         }
@@ -582,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn the_hook_writes_the_fixed_line_while_held_and_leaves_any_other_panic_to_the_hook_before() {
+    fn the_hook_ends_a_held_terminal_says_nothing_once_fatal_and_delegates_only_when_idle() {
         for (state, want) in [
             (HELD, Panicked::Fatal),
             (RELEASING, Panicked::Fatal),
@@ -623,9 +655,17 @@ mod tests {
     }
 
     #[test]
+    fn the_fixed_line_is_in_the_terminal_set_and_needs_no_filter() {
+        assert_eq!(PANIC_OUTPUT, format!("{PANIC_LINE}\n").as_bytes());
+        let line = std::str::from_utf8(PANIC_OUTPUT).unwrap();
+        assert!(line.chars().all(terminal_ok), "{line:?}");
+        assert!(RESTORE_SCREEN.len() < 512 && PANIC_OUTPUT.len() < 512);
+    }
+
+    #[test]
     fn a_second_panic_while_the_first_restores_the_terminal_is_suppressed_never_delegated() {
         let state = Arc::new(AtomicU8::new(HELD));
-        let out = Gate::new(true);
+        let (out, control) = gate(true);
         let err = Shared::default();
         let before_a = Arc::new(AtomicBool::new(false));
         let first = {
@@ -637,15 +677,15 @@ mod tests {
             })
         };
         // The first panic's hook is inside its restore.
-        out.barrier.wait();
+        control.entered();
         let (out_b, err_b) = (Shared::default(), Shared::default());
         let before_b = AtomicBool::new(false);
         let before = |_: &()| before_b.store(true, Ordering::SeqCst);
         let second = on_panic(&state, &mut out_b.clone(), &mut err_b.clone(), &before, &());
+        control.release();
         assert_eq!(second, Panicked::Suppressed);
         assert!(!before_b.load(Ordering::SeqCst), "the payload hook ran");
         assert!(out_b.bytes().is_empty() && err_b.bytes().is_empty());
-        out.barrier.wait();
         assert_eq!(first.join().unwrap(), Panicked::Fatal);
         assert!(!before_a.load(Ordering::SeqCst));
         assert_eq!(
@@ -658,66 +698,122 @@ mod tests {
     #[test]
     fn a_guard_being_dropped_holds_the_terminal_until_it_has_restored_it() {
         let _serial = HOLDING_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-        let out = Gate::new(false);
+        let (out, control) = gate(false);
         let guard = Guard::on(out.clone()).unwrap();
         out.armed.store(true, Ordering::SeqCst);
         let dropping = std::thread::spawn(move || drop(guard));
         // The drop is inside its restore.
-        out.barrier.wait();
-        let refused = Guard::enter(Shared::default())
-            .err()
-            .expect("refused while releasing");
+        control.entered();
+        let refused = Guard::enter(Shared::default()).err();
+        control.release();
+        let refused = refused.expect("refused while releasing");
         assert!(
             refused.to_string().contains("already holds the terminal"),
             "{refused}"
         );
-        out.barrier.wait();
         dropping.join().unwrap();
         assert!(holds(&out.written.bytes(), LEAVE_ALTERNATE_SCREEN));
         drop(Guard::on(Shared::default()).expect("free once restored"));
     }
 
-    /// Set on the child process [`panic_in_a_child`] starts, to run [`panic_child`]: `plain`, or
-    /// `locks` for a child where another thread holds both stdio locks when the panic comes.
+    /// Set on the child process [`panic_in_a_child`] starts, to run [`panic_child`] in a mode:
+    /// - `plain`;
+    /// - `locks`: another thread holds both stdio locks when the panic comes;
+    /// - `stdout-full`, `stderr-full`: that pipe is full and its reader never reads;
+    /// - `two`: stdout is full, and a second thread panics while the first panic's hook is
+    ///   giving the terminal back.
     const PANIC_CHILD: &str = "ZWALLET_TEST_TUI_PANIC_CHILD";
 
+    /// Fills the pipe on `fd` to its last byte. `O_NONBLOCK` is set on it meanwhile, then taken
+    /// off again: this is a test's own pipe, never a terminal.
+    fn fill(fd: RawFd) {
+        // SAFETY: fcntl and write on an fd this process owns, from a buffer that outlives them.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            let block = [b'.'; 512];
+            while libc::write(fd, block.as_ptr().cast(), block.len()) > 0 {}
+            while libc::write(fd, block.as_ptr().cast(), 1) > 0 {}
+            libc::fcntl(fd, libc::F_SETFL, flags);
+        }
+    }
+
+    /// Writes `text` on fd 2 with plain `write(2)`.
+    fn say(text: &[u8]) {
+        // SAFETY: write(2) reads `text.len()` bytes from `text`.
+        unsafe {
+            libc::write(2, text.as_ptr().cast(), text.len());
+        }
+    }
+
     /// In the child process only: takes the terminal (its stdin is a pty) with the real
-    /// `Guard::enter` and hook, then panics inside `spawn_blocking`, where tokio catches the
-    /// panic. Says `CONTINUED` if it gets past it.
+    /// `Guard::enter` and hook, sets up its [`PANIC_CHILD`] mode, then panics inside
+    /// `spawn_blocking`, where tokio catches the panic. Says `CONTINUED` if it gets past it.
     #[test]
     fn panic_child() {
         let Some(mode) = std::env::var_os(PANIC_CHILD) else {
             return;
         };
+        let mode = mode.to_string_lossy().into_owned();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         runtime.block_on(async {
             let _guard = Guard::enter(std::io::stdout()).expect("stdin is a pty");
-            if mode == "locks" {
-                // Another thread holds both stdio locks, and never lets go.
-                let (held, ready) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let _out = std::io::stdout().lock();
-                    let _err = std::io::stderr().lock();
-                    held.send(()).unwrap();
-                    loop {
-                        std::thread::park();
-                    }
-                });
-                ready.recv().unwrap();
+            match mode.as_str() {
+                "locks" => {
+                    // Another thread holds both stdio locks, and never lets go.
+                    let (held, ready) = channel();
+                    std::thread::spawn(move || {
+                        let _out = std::io::stdout().lock();
+                        let _err = std::io::stderr().lock();
+                        held.send(()).unwrap();
+                        loop {
+                            std::thread::park();
+                        }
+                    });
+                    ready.recv().unwrap();
+                }
+                "stdout-full" => fill(1),
+                "stderr-full" => fill(2),
+                "two" => {
+                    fill(1);
+                    // The second panic comes once the first one's hook has taken the terminal
+                    // (it waits on that very state, no timer), while that hook waits on the
+                    // full stdout.
+                    std::thread::spawn(|| {
+                        while STATE.load(Ordering::SeqCst) != FATAL {
+                            std::thread::yield_now();
+                        }
+                        say(b"second: panicking\n");
+                        panic!("secret second pw-XYZ-0123456789");
+                    });
+                }
+                _ => {}
             }
             let joined = tokio::task::spawn_blocking(|| panic!("secret pw-XYZ-0123456789")).await;
             println!("CONTINUED after a caught panic: {}", joined.is_err());
         });
     }
 
-    /// Runs [`panic_child`] in `mode` with its stdin on a pty, killing it after 10 s (and failing
-    /// then), and asserts how it ended: exit 101, the fixed line on stderr, the terminal given
-    /// back (the screen and the cursor through stdout, canonical mode with echo on the pty), and
-    /// the payload nowhere.
-    fn panic_in_a_child(mode: &str) {
+    /// A child process killed and reaped when this drops, so a failing assertion never leaves
+    /// it running.
+    struct Reaped(std::process::Child);
+
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Runs [`panic_child`] in `mode` with its stdin on a pty, killing it after [`WAIT`] (and
+    /// failing then), and asserts how it ended: exit 101; canonical mode with echo back on the
+    /// pty; the screen given back on stdout and the fixed line on stderr, where that pipe is
+    /// not full; and the payload nowhere. A full pipe is read only once the child is gone.
+    /// Returns what stdout and stderr held.
+    fn panic_in_a_child(mode: &str) -> (String, String) {
         use std::io::Read;
         let (mut master, mut slave) = (-1, -1);
         // SAFETY: openpty writes two fds into the out-params; null name/termios/winsize are
@@ -735,44 +831,53 @@ mod tests {
         // SAFETY: both fds were just returned by openpty and are owned by nobody else.
         let (_master, slave) =
             unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["tui::term::tests::panic_child", "--exact", "--nocapture"])
-            .env(PANIC_CHILD, mode)
-            .stdin(Stdio::from(slave.try_clone().unwrap()))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let pipe = |r: Option<Box<dyn Read + Send>>| {
-            std::thread::spawn(move || {
-                let mut v = Vec::new();
-                if let Some(mut r) = r {
-                    let _ = r.read_to_end(&mut v);
-                }
-                v
-            })
+        let mut child = Reaped(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["tui::term::tests::panic_child", "--exact", "--nocapture"])
+                .env(PANIC_CHILD, mode)
+                .stdin(Stdio::from(slave.try_clone().unwrap()))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let (stdout_full, stderr_full) = (
+            mode == "stdout-full" || mode == "two",
+            mode == "stderr-full",
+        );
+        let read = |mut r: Box<dyn Read + Send>| {
+            let mut v = Vec::new();
+            let _ = r.read_to_end(&mut v);
+            v
         };
-        let out = pipe(child.stdout.take().map(|s| Box::new(s) as _));
-        let err = pipe(child.stderr.take().map(|s| Box::new(s) as _));
-        let start = std::time::Instant::now();
+        let mut out: Box<dyn Read + Send> = Box::new(child.0.stdout.take().unwrap());
+        let mut err: Box<dyn Read + Send> = Box::new(child.0.stderr.take().unwrap());
+        let reading_out = (!stdout_full).then(|| {
+            let r = std::mem::replace(&mut out, Box::new(std::io::empty()));
+            std::thread::spawn(move || read(r))
+        });
+        let reading_err = (!stderr_full).then(|| {
+            let r = std::mem::replace(&mut err, Box::new(std::io::empty()));
+            std::thread::spawn(move || read(r))
+        });
+        let start = Instant::now();
         let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
+            if let Some(status) = child.0.try_wait().unwrap() {
                 break status;
             }
-            if start.elapsed() > std::time::Duration::from_secs(10) {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("{mode}: the child still ran 10 s after its panic");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            assert!(
+                start.elapsed() < WAIT,
+                "{mode}: the child still ran {WAIT:?} after its panic"
+            );
+            std::thread::sleep(Duration::from_millis(20));
         };
-        let (out, err) = (out.join().unwrap(), err.join().unwrap());
-        let (stdout, stderr) = (String::from_utf8_lossy(&out), String::from_utf8_lossy(&err));
+        let out = reading_out.map_or_else(|| read(out), |t| t.join().unwrap());
+        let err = reading_err.map_or_else(|| read(err), |t| t.join().unwrap());
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+        );
         assert_eq!(status.code(), Some(101), "{mode}: {stdout}\n{stderr}");
-        assert!(stderr.contains(&format!("{PANIC_LINE}\n")), "{stderr}");
-        assert!(!stdout.contains("CONTINUED"), "{stdout}");
-        assert!(holds(&out, LEAVE_ALTERNATE_SCREEN), "{stdout}");
-        assert!(holds(&out, SHOW_CURSOR), "{stdout}");
         // SAFETY: tcgetattr fills a termios for an fd this test owns.
         let modes = unsafe {
             let mut t: libc::termios = std::mem::zeroed();
@@ -781,12 +886,24 @@ mod tests {
         };
         assert_ne!(modes & libc::ICANON, 0, "{mode}: canonical mode is off");
         assert_ne!(modes & libc::ECHO, 0, "{mode}: echo is off");
+        if !stdout_full {
+            assert!(holds(&out, LEAVE_ALTERNATE_SCREEN), "{mode}: {stdout}");
+            assert!(holds(&out, SHOW_CURSOR), "{mode}: {stdout}");
+        }
+        if !stderr_full {
+            assert!(
+                stderr.contains(&format!("{PANIC_LINE}\n")),
+                "{mode}: {stderr}"
+            );
+        }
+        assert!(!stdout.contains("CONTINUED"), "{mode}: {stdout}");
         for text in [&stdout, &stderr] {
             assert!(
                 !text.contains("secret") && !text.contains("panicked"),
-                "{text}"
+                "{mode}: {text}"
             );
         }
+        (stdout, stderr)
     }
 
     #[test]
@@ -797,6 +914,24 @@ mod tests {
     #[test]
     fn a_panic_ends_the_process_even_while_another_thread_holds_both_stdio_locks() {
         panic_in_a_child("locks");
+    }
+
+    #[test]
+    fn a_panic_ends_the_process_and_restores_the_modes_with_stdout_full() {
+        panic_in_a_child("stdout-full");
+    }
+
+    #[test]
+    fn a_panic_ends_the_process_and_restores_the_modes_with_stderr_full() {
+        panic_in_a_child("stderr-full");
+    }
+
+    #[test]
+    fn a_second_panic_while_the_first_ends_the_process_parks_and_says_nothing() {
+        let (_, stderr) = panic_in_a_child("two");
+        // The second thread got to its panic before the process ended, and its hook printed
+        // nothing (no payload, no `panicked at`, checked above).
+        assert!(stderr.contains("second: panicking\n"), "{stderr}");
     }
 
     /// A pipe: `(read end, write end)`.
@@ -817,8 +952,8 @@ mod tests {
     fn the_emergency_path_takes_no_stdio_lock() {
         use std::io::Read;
         let ((mut out_r, out_w), (mut err_r, err_w)) = (pipe(), pipe());
-        let (held, ready) = std::sync::mpsc::channel();
-        let (release, done) = std::sync::mpsc::channel::<()>();
+        let (held, ready) = channel();
+        let (release, done) = channel::<()>();
         let holder = std::thread::spawn(move || {
             let _out = std::io::stdout().lock();
             let _err = std::io::stderr().lock();
@@ -826,7 +961,7 @@ mod tests {
             let _ = done.recv();
         });
         ready.recv().unwrap();
-        let (sent, result) = std::sync::mpsc::channel();
+        let (sent, result) = channel();
         std::thread::spawn(move || {
             let state = AtomicU8::new(HELD);
             let before = |_: &()| panic!("not idle");
@@ -834,7 +969,7 @@ mod tests {
             drop((out_w, err_w));
             let _ = sent.send(got);
         });
-        let got = result.recv_timeout(std::time::Duration::from_secs(10));
+        let got = result.recv_timeout(WAIT);
         release.send(()).unwrap();
         holder.join().unwrap();
         assert_eq!(
