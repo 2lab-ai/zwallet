@@ -1076,20 +1076,20 @@ fn edit_text(out: &Value) -> String {
     if let Some(w) = out["warning"].as_str() {
         lines.push(format!("warning: {w}"));
     }
+    // The reason can quote the file (the parser's message) and the entries are the file's as
+    // found: each on a line of its own, so no line holds more than 512 characters from it.
     if out["discarded"].is_object() {
         let entries = &out["discarded"]["entries"];
         lines.push(format!(
-            "discarded (not signed, the edit started from an empty list): {}{}",
-            printable(out["discarded"]["reason"].as_str().unwrap_or("?")),
-            if entries.is_null() {
-                String::new()
-            } else {
-                format!(
-                    "; its unverified entries: {}",
-                    crate::core::text::human_capped(entries, crate::core::text::PROSE_MAX)
-                )
-            }
+            "discarded (not signed, the edit started from an empty list): {}",
+            printable(out["discarded"]["reason"].as_str().unwrap_or("?"))
         ));
+        if !entries.is_null() {
+            lines.push(format!(
+                "  its unverified entries: {}",
+                crate::core::text::human_capped(entries, crate::core::text::PROSE_MAX)
+            ));
+        }
     }
     if out["discardedNext"].is_object() {
         let entries = &out["discardedNext"]["entries"];
@@ -2220,5 +2220,40 @@ mod tests {
             text.lines().last().unwrap(),
             "The password authorizes: remove n03; after the change: the wallet stays locked"
         );
+    }
+
+    #[test]
+    fn a_resets_discarded_reason_and_entries_are_on_two_lines() {
+        // The reason a whitelist.json was discarded can quote the file (the parser's message, 80
+        // characters of it at most), and its entries are the file's as found (512 at most): each
+        // on a line of its own, so no line holds more than 512 characters from the file.
+        use crate::core::text::PROSE_MAX;
+        let out = json!({
+            "change": "reset",
+            "gen": 3,
+            "previousGen": 2,
+            "entries": [],
+            "dropped": [],
+            "discarded": {
+                "reason": format!(
+                    "/tmp/zwt-x/whitelist.json: not a whitelist file: invalid type: string \"{}\"",
+                    "# ".repeat(40)
+                ),
+                "entries": "## ".repeat(667),
+            },
+        });
+        let text = edit_text(&out);
+        let reason = text
+            .lines()
+            .find(|l| l.starts_with("discarded (not signed"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(reason.contains("not a whitelist file"), "{reason}");
+        assert!(!reason.contains("entries"), "{reason}");
+        let entries = text
+            .lines()
+            .find_map(|l| l.strip_prefix("  its unverified entries: "))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(entries.starts_with("## ## "), "{entries}");
+        assert!(entries.chars().count() <= PROSE_MAX, "{}", entries.len());
     }
 }
