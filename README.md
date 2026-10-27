@@ -173,9 +173,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
     entries of the files it discards as found, at most 512 per file, on a line that holds nothing
     else from the file (`whitelist.json`'s below the line with its reason, which quotes at most
     the parser's 80, and `whitelist.next.json`'s when it is not the sealed list).
-  - **Names from those files** in one command: at most 512 characters in all, whole names, then
-    how many more (the change summary before the password, `whitelist list` and its fee caps for
-    a list that did not verify). A list the seal verified (`whitelist list --verify`) is the
+  - **Names and fee caps from those files** in one command: at most 512 characters in all, each
+    name or cap whole, then how many more (the change summary before the password, with the old
+    caps of a `fee-cap` and the caps a `reset` sets back; `whitelist list` and its fee caps for a
+    list that did not verify). A list the seal verified (`whitelist list --verify`) is the
     human's own, signed by the key only the password derives: up to 100 entries.
   - **The send journal:** at most 512 characters per message, each field in the shape zwallet
     writes it or `<invalid>` (see **The send journal**).
@@ -345,10 +346,12 @@ Commands that act on a key take `--key <name>` (default: the active key).
     full address, payee or contract, the chains (`*` as "every chain", otherwise zwallet's key for
     each or `<invalid>`, at most 16), the selectors, a policy change's old and new value (from
     both files when an unfinished edit is in `whitelist.next.json`), what a `reset` drops and
-    every fee cap it sets back (by zwallet's key for each chain, once), both files as they are
-    (at most 20 names per file and 512 characters of names in all, then how many more; a file
-    that exists but cannot be read, or is not a list, is "there but cannot be read: its entries
-    are unknown, and a reset drops them", never "none"), every outcome
+    every fee cap it sets back (by zwallet's key for each chain, once; a file's cap that differs
+    is shown beside it while the budget has room, then "and N more caps from the files, not
+    shown"), both files as they are (at most 20 names per file; names and fee caps from the files
+    share one budget of 512 characters, then how many more; a file that exists but cannot be
+    read, or is not a list, is "there but cannot be read: its entries are unknown, and a reset
+    drops them", never "none"), every outcome
     that can still happen (for an edit: the change lands on `whitelist.json` if it is the sealed
     list, on the unfinished edit if that is, on a first list from the defaults if there is no
     list file and no whitelist yet, otherwise nothing changes; for a `reset`: the generation it
