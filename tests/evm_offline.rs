@@ -1996,6 +1996,40 @@ fn balance_without_chain_fails_when_no_network_answers() {
 }
 
 #[test]
+fn balance_without_chain_cuts_each_networks_error_short_when_none_answers() {
+    // Every network's endpoint answers every call with a JSON-RPC error of 600 `#` (cut to 512
+    // where the error is built). The message that names all eight shows each one cut short, as a
+    // network's own line does when another network answers: not eight times 512 on one line.
+    const BRIEF: usize = 72; // commands.rs BRIEF_ERROR_CHARS
+    let home = Home::new();
+    home.create("t", &[]);
+    let node =
+        common::tiny_rpc_reply(|_, _| Err(json!({ "code": -32000, "message": "#".repeat(600) })));
+    let env: Vec<(String, String)> = zwallet::chains::CHAINS
+        .iter()
+        .map(|c| (c.rpc_env_var(), node.clone()))
+        .collect();
+    let msg = home
+        .run_env(&["balance", "--json"], &env_refs(&env))
+        .err("RPC_ERROR");
+    let why = msg
+        .strip_prefix("no network answered: ")
+        .unwrap_or_else(|| panic!("{msg}"));
+    let parts: Vec<&str> = why.split("; ").collect();
+    assert_eq!(parts.len(), ALL_CHAINS_ORDER.len(), "{msg}");
+    for (part, key) in parts.iter().zip(ALL_CHAINS_ORDER) {
+        let text = part
+            .strip_prefix(&format!("{key}: "))
+            .unwrap_or_else(|| panic!("{key}: {msg}"));
+        let n = text.chars().count();
+        assert!(n <= BRIEF, "{key}: {n} characters: {text}");
+    }
+    let human = home.run_env(&["balance"], &env_refs(&env));
+    assert_eq!(human.code, 1, "{}", human.stdout);
+    assert!(human.stderr.contains(&msg), "{}", human.stderr);
+}
+
+#[test]
 fn balance_with_chain_prints_what_it_always_did() {
     let home = Home::new();
     let me = home.create("t", &[])["address"]

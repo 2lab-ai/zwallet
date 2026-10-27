@@ -1138,7 +1138,8 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// The most characters of an error a network's line shows in `balance` without `--chain`
-/// (`--json` has the whole message).
+/// (`--json` has the whole message), and of each network's error when none answered (the one
+/// message, `--json` too).
 const BRIEF_ERROR_CHARS: usize = 72;
 
 /// One network's balances for `balance` without `--chain`: the native coin and every registry
@@ -1150,7 +1151,8 @@ type NetworkBalances = Result<(chains::Balance, Vec<chains::TokenBalance>)>;
 /// `ZWALLET_RPC_<CHAIN>` or the default RPC. A network whose endpoint, chain id or native balance
 /// fails is a row with `error` and `errorCode` instead of `native` and `tokens`; a token whose
 /// read fails is a token row with them instead of `balance` and `raw`. Only when no network
-/// answers is it an error (their shared code, else `RPC_ERROR`). While unlocked the address is
+/// answers is it an error (their shared code, else `RPC_ERROR`; each network's error cut short
+/// as its line shows it). While unlocked the address is
 /// the daemon's derivation (once per chain family), checked against the cache before any RPC.
 async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
@@ -1280,9 +1282,11 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
         } else {
             ErrorCode::RpcError
         };
+        // Each network's error cut short as its line shows it ([`brief`]): eight endpoints'
+        // texts of up to 512 each would be one line of about 4,000 characters from outside.
         let why: Vec<String> = failed
             .iter()
-            .map(|(chain, e)| format!("{chain}: {}", e.message))
+            .map(|(chain, e)| format!("{chain}: {}", brief(&e.message)))
             .collect();
         return Err(WalletError::new(
             code,
