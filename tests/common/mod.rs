@@ -384,25 +384,34 @@ pub fn sign_the_binary() {
     #[cfg(target_os = "macos")]
     {
         static SIGNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        SIGNED.get_or_init(|| {
-            let exe = env!("CARGO_BIN_EXE_zwallet");
-            let codesign = |args: &[&str]| {
-                Command::new("/usr/bin/codesign")
-                    .args(args)
-                    .arg(exe)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|s| s.success())
-            };
-            if !codesign(&["--verify", "--strict"]) {
-                assert!(
-                    codesign(&["--force", "--sign", "-"]),
-                    "codesign could not sign {exe}"
-                );
-            }
-        });
+        SIGNED.get_or_init(|| sign_if_unsigned(Path::new(env!("CARGO_BIN_EXE_zwallet"))));
     }
+}
+
+/// macOS: `path` ad-hoc signed when `codesign --verify --strict` fails on it (the linker signs
+/// arm64 output, not x86_64). Elsewhere nothing.
+pub fn sign_if_unsigned(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let codesign = |args: &[&str]| {
+            Command::new("/usr/bin/codesign")
+                .args(args)
+                .arg(path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !codesign(&["--verify", "--strict"]) {
+            assert!(
+                codesign(&["--force", "--sign", "-"]),
+                "codesign could not sign {}",
+                path.display()
+            );
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
 }
 
 /// Panics unless the build has `debug_assertions`. `CARGO_BIN_EXE_zwallet` is built with the

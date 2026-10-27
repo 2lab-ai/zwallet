@@ -1079,9 +1079,33 @@ const LOCKED_NOTE: &str = "not verified: the wallet is locked; `zwallet unlock <
 /// that connection's audit token, and compares it with its own. On Linux every zwallet
 /// process is non-dumpable, which hides its `/proc/<pid>/exe` from its own user, so the key
 /// daemon's executable cannot be checked and nothing is verified by session.
+///
+/// The tests' zwallet is signed on every Mac (the harness signs an x86_64 build, which the linker
+/// does not), so this holds on x86_64 macOS too.
 fn session_verifies() -> bool {
     cfg!(target_os = "macos")
 }
+
+/// Whether the test process itself (the one that hosts a [`FakeDaemon`]) is named when it answers
+/// on `d.sock`. On arm64 macOS the linker signed this test binary, so `check_peer` reads its
+/// cdhash and names it ([`TEST_PROCESS_NAMED`]); on Linux its readable executable names it. On an
+/// x86_64 Mac this test binary is unsigned: `csops` has no cdhash for it, `check_peer` returns
+/// `Unknown`, and the commands neither name it nor verify by it. The harness signs the zwallet
+/// binary, but a running test binary cannot sign itself. (`cc`-built attackers are signed by
+/// [`build_attacker`], so they are named on every Mac.)
+fn names_the_test_process() -> bool {
+    cfg!(any(
+        target_os = "linux",
+        all(target_os = "macos", target_arch = "aarch64")
+    ))
+}
+
+/// What names a peer that runs other code: its cdhash on macOS, its executable on Linux.
+const TEST_PROCESS_NAMED: &str = if cfg!(target_os = "macos") {
+    "runs other code than this zwallet build"
+} else {
+    "is not this zwallet build"
+};
 
 /// What a cache-vs-daemon mismatch says while this build's key daemon answers: on macOS the CLI
 /// knows it is this build's, so its derivation is the seed's and the cache is to blame; on Linux
@@ -3690,13 +3714,11 @@ fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
     );
     // The listener runs in this test harness binary, not zwallet: its code is not this build's.
     // On macOS the cdhash catches that; on Linux its readable executable is not this build's.
-    // Either way the pid is named and nothing is verified.
+    // Either way the pid is named and nothing is verified ([`names_the_test_process`]: on an
+    // x86_64 Mac it is not named, and still not verified).
     let me = std::process::id();
-    let want = if session_verifies() {
-        "runs other code than this zwallet build"
-    } else {
-        "is not this zwallet build"
-    };
+    let want = TEST_PROCESS_NAMED;
+    let named = names_the_test_process();
     let pid = format!("(pid {me})");
     let rpc = common::tiny_rpc(|method| match method {
         "eth_chainId" => json!("0x1"),
@@ -3712,14 +3734,19 @@ fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
         assert_eq!(shown_address(&v), POISON, "{args:?}: {v}");
         assert_eq!(v["verified"], false, "{args:?}: {v}");
         assert!(v.get("verifiedBy").is_none(), "{args:?}: {v}");
-        let w = v["warning"].as_str().unwrap_or("");
-        assert!(w.contains(want) && w.contains(&pid), "{args:?}: {w}");
+        if named {
+            let w = v["warning"].as_str().unwrap_or("");
+            assert!(w.contains(want) && w.contains(&pid), "{args:?}: {w}");
+        } else {
+            assert!(v.get("warning").is_none(), "{args:?}: {v}");
+        }
     }
-    // Human: the warning and the note; no code on a terminal either.
+    // Human: the warning (where named) and the note; no code on a terminal either.
     let piped = home.run(&["address"]);
     assert_eq!(piped.code, 0, "{}", piped.stderr);
-    assert!(
+    assert_eq!(
         piped.stdout.contains("warning: the process answering") && piped.stdout.contains(want),
+        named,
         "{}",
         piped.stdout
     );
@@ -3728,7 +3755,12 @@ fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
     assert_eq!(shown, piped.stdout);
     assert!(common::scan_qr(&shown).is_empty());
     let addresses = home.run(&["addresses"]);
-    assert!(addresses.stdout.contains(want), "{}", addresses.stdout);
+    assert_eq!(
+        addresses.stdout.contains(want),
+        named,
+        "{}",
+        addresses.stdout
+    );
     drop(fake);
 }
 
@@ -3746,17 +3778,26 @@ fn list_names_a_listener_whose_answers_match_an_edited_cache() {
             "chain": "ethereum", "index": 0, "active": "main", "address": POISON,
         }),
     );
-    // The listener runs in this test harness binary, not zwallet (see s3).
-    let want = if session_verifies() {
-        "runs other code than this zwallet build"
-    } else {
-        "is not this zwallet build"
-    };
+    // The listener runs in this test harness binary, not zwallet (see s3). On an x86_64 Mac it is
+    // not named ([`names_the_test_process`]): no warning, and still not verified.
+    let want = TEST_PROCESS_NAMED;
     let pid = format!("(pid {})", std::process::id());
     let v = home.run(&["list", "--json"]).ok();
     assert_eq!(v["keys"][0]["address"], POISON, "{v}");
     assert_eq!(v["verified"], false, "{v}");
     assert!(v.get("verifiedBy").is_none(), "{v}");
+    if !names_the_test_process() {
+        assert!(v.get("warning").is_none(), "{v}");
+        let human = home.run(&["list"]);
+        assert_eq!(human.code, 0, "{}", human.stderr);
+        assert!(
+            !human.stdout.contains("warning:") && human.stdout.contains(NOT_VERIFIED),
+            "{}",
+            human.stdout
+        );
+        drop(fake);
+        return;
+    }
     let w = v["warning"].as_str().unwrap_or("");
     assert!(
         w.starts_with("the process answering on the key daemon socket")
@@ -4037,20 +4078,8 @@ fn s6_an_attacker_running_its_own_code_on_the_socket_is_not_verified() {
         .prefix("zwt-")
         .tempdir_in("/tmp")
         .unwrap();
-    let src = dir.path().join("attacker.c");
     let bin = dir.path().join("attacker");
-    fs::write(&src, ATTACKER_C).unwrap();
-    let cc = std::process::Command::new("cc")
-        .arg("-o")
-        .arg(&bin)
-        .arg(&src)
-        .output()
-        .expect("run cc");
-    assert!(
-        cc.status.success(),
-        "cc: {}",
-        String::from_utf8_lossy(&cc.stderr)
-    );
+    build_attacker(dir.path(), &bin);
     // It runs with the daemon's argv, so it is in `daemon_pids` (what the old path/UUID check
     // trusted), yet it runs its own code. On macOS the cdhash catches it; on Linux its executable
     // is not this build's.
@@ -4144,11 +4173,10 @@ fn a_mismatch_answered_by_an_impostor_aborts_and_names_it() {
         }),
     );
     let pid = format!("(pid {})", std::process::id());
-    let want = if session_verifies() {
-        "runs other code than this zwallet build"
-    } else {
-        "is not this zwallet build"
-    };
+    let want = TEST_PROCESS_NAMED;
+    // On an x86_64 Mac the test process is not named ([`names_the_test_process`]): the error
+    // still aborts and blames neither side, but names no process and carries no `warning`.
+    let named = names_the_test_process();
     let closed: Vec<(String, String)> = chains::CHAINS
         .iter()
         .map(|c| (c.rpc_env_var(), "http://127.0.0.1:1".to_string()))
@@ -4176,6 +4204,18 @@ fn a_mismatch_answered_by_an_impostor_aborts_and_names_it() {
             ": one of them was tampered with. Do not send funds to either address; run \
              `zwallet address --verify`"
                 .to_string(),
+        ] {
+            assert!(msg.contains(&part), "{args:?}: missing {part:?} in {msg}");
+        }
+        if !named {
+            assert!(
+                !msg.contains("That process is not") && !msg.contains("and unlock again"),
+                "{args:?}: {msg}"
+            );
+            assert!(v.get("warning").is_none(), "{args:?}: {v}");
+            continue;
+        }
+        for part in [
             ". That process is not this build's key daemon: ".to_string(),
             want.to_string(),
             pid.clone(),
@@ -4251,9 +4291,11 @@ fn an_answer_that_is_no_address_is_rejected_and_shown_escaped() {
         );
         let msg = v["error"].as_str().unwrap_or("");
         assert!(msg.contains("which is not an address"), "{args:?}: {msg}");
-        assert!(
+        // The impostor is named where the test process can be ([`names_the_test_process`]).
+        assert_eq!(
             v["warning"].is_string(),
-            "{args:?}: the impostor is named: {v}"
+            names_the_test_process(),
+            "{args:?}: {v}"
         );
         assert!(inert(msg), "{args:?}: {msg:?}");
         assert!(
@@ -4308,7 +4350,9 @@ fn a_cached_value_that_is_no_address_is_rejected_and_shown_escaped() {
     }
 }
 
-/// Builds [`ATTACKER_C`] at `bin` with `cc`.
+/// Builds [`ATTACKER_C`] at `bin` with `cc`, ad-hoc signed on macOS where the linker did not sign
+/// it (x86_64), so its code is named by its cdhash on every Mac, as an attacker that signs its
+/// binary is.
 fn build_attacker(src_dir: &std::path::Path, bin: &std::path::Path) {
     let src = src_dir.join("attacker.c");
     fs::write(&src, ATTACKER_C).unwrap();
@@ -4323,6 +4367,7 @@ fn build_attacker(src_dir: &std::path::Path, bin: &std::path::Path) {
         "cc: {}",
         String::from_utf8_lossy(&cc.stderr)
     );
+    common::sign_if_unsigned(bin);
 }
 
 #[test]
@@ -4613,6 +4658,13 @@ fn an_impostor_error_reply_is_named_escaped_and_on_one_line() {
     // terminal (CR, erase line, new lines, then hiding the rest), and a fake `command` detail.
     // Its text comes out escaped and on one line, after the line naming it; its details are
     // dropped.
+    if !names_the_test_process() {
+        // On an x86_64 Mac the test process is `Unknown` ([`names_the_test_process`]), whose
+        // scalar details are kept, escaped and bounded, by design (as for any peer nothing can be
+        // established about; see `a_squatters_array_and_object_details_are_dropped…`). This test
+        // is about a peer known to be another program.
+        return;
+    }
     let home = Home::new();
     home.create("main", &[]);
     let forged = "\r\u{1b}[2Kaddress: 0x000000000000000000000000000000000000dEaD\nverified: \

@@ -855,8 +855,10 @@ things a same-user process can still do, and what to do about them:
   same-user process can open the pipe through `/proc/<pid>/fd` and race zwallet to read the
   password. This is the same class as reading the terminal; prefer the terminal prompt.
 - **Log keystrokes under X11**, where any client can read another's input.
-- **Attach a debugger on macOS**: a same-user debugger (where the system allows one) can read a
-  zwallet process's memory.
+- **Attach a debugger on macOS** to a build from source: a same-user debugger (where the system
+  allows one) can read a zwallet process's memory. The binaries zwallet ships carry the hardened
+  runtime without the `get-task-allow` entitlement, so a same-user debugger cannot attach to them
+  unless System Integrity Protection is off.
 - **Linux with `kernel.yama.ptrace_scope` 0** (or without Yama): any same-user process can
   attach to a new daemon before it turns non-dumpable and stay attached (or copy its descriptors
   with `pidfd_getfd`, which takes the same permission). `unlock` refuses this by
