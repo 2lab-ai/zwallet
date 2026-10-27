@@ -81,11 +81,22 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `whitelist fee-cap <chain> <amount> [--unlock <dur>]` | a change + `{ feeCap: { chain, maxFeeWei, maxFee } }` | asks for the password |
 | `whitelist allow-message-signing on\|off [--unlock <dur>]` | a change + `{ allowMessageSigning }` | asks for the password |
 | `whitelist reset [--unlock <dur>]` | a change + `{ dropped }` | asks for the password |
+| `tui [--chain <key>] [--warm <dur>]` | none: a terminal UI for a human (`--json` is refused) | works |
 
 - **Whitelist changes** also take `--password-stdin`, and with `--unlock <dur>` also
   `--allow-ptrace-scope-0` (see **The whitelist**).
 - **Durations** are positional: an integer and one unit of `s m h d w y` (`1y` = 365d). `0`,
   negatives, fractions and unknown units are `VALIDATION_ERROR`.
+- **`tui`** (stdin and stdout on a terminal): the key list with the globally active key marked
+  `*`, and a two-line status bar: chain, active key, its short address and how far it is
+  verified; then `locked` or `signing open (agent too) until HH:MMZ` (UTC), and the RPC host.
+  The lock state is read again every 5 s, so a `zwallet lock` from another shell shows. Keys:
+  `j`/`k` or the arrows move, `r` reads everything again, `L` locks every zwallet daemon of this
+  user (as `zwallet lock`), `q` or Ctrl-C quits. It needs 80x24 and says so on one line when the
+  terminal is smaller. Text from wallet.json, the daemon socket and the environment is escaped
+  and bounded as in the CLI, every cell goes through one filter that lets only printable ASCII
+  and `₮` through, and no QR code is drawn. This version shows the keys and the lock state;
+  the warm-up (`--warm`, checked but not used yet), home, transfer and whitelist screens follow.
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
   reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's
