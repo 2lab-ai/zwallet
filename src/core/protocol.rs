@@ -727,11 +727,24 @@ impl DaemonExe {
 /// macOS) has no cdhash of its own to compare, and checks nothing.
 #[cfg(target_os = "macos")]
 fn check_started_code(child: &Child) -> Result<()> {
-    let Some(own) = own_cdhash() else {
+    let pid = child.id() as libc::pid_t;
+    started_code_verdict(pid, own_cdhash(), pid_cdhash(pid), pid_cs_valid(pid))
+}
+
+/// [`check_started_code`]'s decision on what the kernel said: `own` is this process's cdhash,
+/// `child` and `child_valid` the started daemon's (pid `pid`) cdhash and `CS_VALID`, each `None`
+/// when `csops` failed.
+#[cfg(target_os = "macos")]
+fn started_code_verdict(
+    pid: libc::pid_t,
+    own: Option<[u8; CDHASH_LEN]>,
+    child: Option<[u8; CDHASH_LEN]>,
+    child_valid: Option<bool>,
+) -> Result<()> {
+    let Some(own) = own else {
         return Ok(());
     };
-    let pid = child.id() as libc::pid_t;
-    if pid_cdhash(pid) == Some(own) && pid_cs_valid(pid) == Some(true) {
+    if child == Some(own) && child_valid == Some(true) {
         return Ok(());
     }
     Err(WalletError::validation(format!(
@@ -2831,6 +2844,33 @@ mod tests {
                 e.message.contains(&part),
                 "missing {part:?} in {}",
                 e.message
+            );
+        }
+    }
+
+    /// [`started_code_verdict`] accepts only this build's cdhash on a `CS_VALID` child, and reads
+    /// a `csops` that failed as a refusal. A live child with this build's cdhash but `CS_VALID`
+    /// clear cannot be built as a process: arm64 macOS runs code with `CS_KILL` set (the status
+    /// words of a linker-signed binary and of `/bin/sleep` both carry 0x200), so a process whose
+    /// signature turns invalid is killed instead of left running. So that leg is tested here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_started_code_verdict_needs_the_same_cdhash_and_cs_valid() {
+        let (ours, other) = ([7u8; CDHASH_LEN], [8u8; CDHASH_LEN]);
+        assert!(started_code_verdict(9, Some(ours), Some(ours), Some(true)).is_ok());
+        for (child, valid) in [
+            (Some(ours), Some(false)),
+            (Some(ours), None),
+            (Some(other), Some(true)),
+            (None, Some(true)),
+            (None, None),
+        ] {
+            let e = started_code_verdict(9, Some(ours), child, valid)
+                .expect_err(&format!("accepted child {child:?} valid {valid:?}"));
+            assert_eq!(e.code, ErrorCode::ValidationError);
+            assert!(
+                e.message
+                    .contains("(pid 9) does not run this zwallet build's code")
             );
         }
     }
