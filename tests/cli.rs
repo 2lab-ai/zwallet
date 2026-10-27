@@ -3732,6 +3732,55 @@ fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
     drop(fake);
 }
 
+#[test]
+fn list_names_a_listener_whose_answers_match_an_edited_cache() {
+    // `list` without --verify asks d.sock for each key's address too. A listener that answers
+    // the edited cache raises no mismatch there, but it is named all the same, as in `address`.
+    let home = Home::new();
+    home.create("main", &[]);
+    poison_cache(&home);
+    let fake = FakeDaemon::answering(
+        &home.sock(),
+        serde_json::json!({
+            "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z",
+            "chain": "ethereum", "index": 0, "active": "main", "address": POISON,
+        }),
+    );
+    // The listener runs in this test harness binary, not zwallet (see s3).
+    let want = if session_verifies() {
+        "runs other code than this zwallet build"
+    } else {
+        "is not this zwallet build"
+    };
+    let pid = format!("(pid {})", std::process::id());
+    let v = home.run(&["list", "--json"]).ok();
+    assert_eq!(v["keys"][0]["address"], POISON, "{v}");
+    assert_eq!(v["verified"], false, "{v}");
+    assert!(v.get("verifiedBy").is_none(), "{v}");
+    let w = v["warning"].as_str().unwrap_or("");
+    assert!(
+        w.starts_with("the process answering on the key daemon socket")
+            && w.contains(want)
+            && w.contains(&pid)
+            && w.ends_with("run `zwallet lock` and unlock again"),
+        "{v}"
+    );
+    // Human: the warning line, then the note.
+    let human = home.run(&["list"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    let at = human
+        .stdout
+        .find("\nwarning: the process answering on the key daemon socket")
+        .unwrap_or_else(|| panic!("no warning line: {}", human.stdout));
+    assert!(human.stdout[at..].contains(want), "{}", human.stdout);
+    assert!(
+        human.stdout[at..].contains(&format!("\n{NOT_VERIFIED}")),
+        "{}",
+        human.stdout
+    );
+    drop(fake);
+}
+
 /// Unlocks `home` with a daemon started from the binary at `exe` (a copy), and returns its pids.
 fn unlock_from(home: &Home, exe: &std::path::Path) {
     let mut cmd = common::zwallet_at(exe);
