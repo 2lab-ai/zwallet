@@ -739,8 +739,9 @@ fn t10_on_a_pty_zwallet_lock_elsewhere_shows_locked_within_two_refreshes() {
     let frame = tui.wait_frame(PTY_WAIT, |f| bar(f).1.starts_with("locked | "));
     let took = locked.elapsed();
     eprintln!("t10: the bar said locked {took:?} after zwallet lock returned");
+    // Two refreshes, 10 s (03-tui.md T10), written here rather than read from the code.
     assert!(
-        took <= 2 * zwallet::tui::REFRESH,
+        took <= Duration::from_secs(10),
         "locked shown {took:?} after the lock, over two refreshes"
     );
     assert!(frame.stray.is_empty(), "{frame}");
@@ -769,17 +770,17 @@ fn an_argv_listed_fake_daemon_s_expiry_reaches_the_terminal_escaped_and_cut() {
     let fake = common::daemon_argv_impostor(&home, dir.path(), &[("ATTACKER_EXPIRES", &expires)]);
     assert!(home.daemon_pids().contains(&(fake.0.id() as i32)));
     let mut tui = tui_on_a_pty(&home, PTY_SIZE);
+    // The expiry is drawn whole once the separator after it is.
+    let until = "signing (agent too) until ";
     let frame = tui.wait_frame(PTY_WAIT, |f| {
         let (one, two) = bar(f);
-        one.contains("NOT this build's key daemon: ") && two.contains(HOST)
+        one.contains("NOT this build's key daemon: ")
+            && two
+                .strip_prefix(until)
+                .is_some_and(|rest| rest.contains(" | "))
     });
     // Line 2 shows the expiry escaped, cut within its budget, on that line alone.
-    let shown = bar(&frame)
-        .1
-        .trim_end()
-        .strip_prefix("signing (agent too) until ")
-        .and_then(|rest| rest.strip_suffix(HOST))
-        .unwrap_or_else(|| panic!("{frame}"));
+    let shown = bar(&frame).1[until.len()..].split(" | ").next().unwrap();
     assert!(shown.starts_with("\\u{1b}\\u{2580}"), "{shown:?}");
     assert!(
         shown.len() <= 64 && common::ascii_printable(shown),
