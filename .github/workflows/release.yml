@@ -74,6 +74,60 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      # The linker signs only arm64 output, and `unlock` refuses a zwallet build that has no
+      # code signature (src/core/protocol.rs check_started_code compares the daemon's cdhash
+      # with its own). So every macOS binary is ad-hoc signed here, with the hardened runtime,
+      # under which dyld ignores DYLD_* variables such as DYLD_INSERT_LIBRARIES.
+      # First the control: unsigned for the runtime, the binary obeys DYLD_INSERT_LIBRARIES
+      # (dyld aborts on the missing library), so the check after signing is not vacuous.
+      - name: DYLD_INSERT_LIBRARIES reaches the binary before signing
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if DYLD_INSERT_LIBRARIES=/nonexistent/x.dylib "target/$TARGET/release/zwallet" --version; then
+            echo "::error::dyld ignored DYLD_INSERT_LIBRARIES before signing; the hardened-runtime check would prove nothing"
+            exit 1
+          fi
+
+      - name: Sign macOS binary (ad-hoc, hardened runtime)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/zwallet"
+          codesign --force --sign - --options runtime "$bin"
+          codesign --verify --strict "$bin"
+          info="$(codesign -dv "$bin" 2>&1)"
+          echo "$info"
+          if ! grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime[^)]*\)' <<<"$info"; then
+            echo "::error::$bin is not signed with the hardened runtime"
+            exit 1
+          fi
+
+      # The x86_64 binary cannot run on this arm64 runner without Rosetta; its flags are checked
+      # in the signing step above.
+      - name: Hardened runtime ignores DYLD_INSERT_LIBRARIES
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          commit="$(git rev-parse HEAD)"
+          expected="zwallet $version (release ${commit:0:12})"
+          actual="$(DYLD_INSERT_LIBRARIES=/nonexistent/x.dylib "target/$TARGET/release/zwallet" --version)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::with DYLD_INSERT_LIBRARIES set: expected '$expected', got '$actual'"
+            exit 1
+          fi
+          echo "$actual"
+
       # Exact version line of the shipped binary, expected from sources independent of
       # the build env: channel literal, Cargo.toml version, checked-out commit. Every
       # target runs on its own runner except x86_64-apple-darwin (cross-built on arm64).
