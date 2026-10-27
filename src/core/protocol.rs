@@ -2706,6 +2706,82 @@ mod tests {
         assert_eq!(holds_listening_socket(me, &path), Some(false));
     }
 
+    /// A child process killed and reaped on drop, so a failing assertion never leaves it behind.
+    #[cfg(target_os = "macos")]
+    struct KilledOnDrop(Child);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for KilledOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// The password goes only to a started daemon that runs this build's code. A binary renamed
+    /// into the pinned path after [`DaemonExe::check`] (macOS has no `fexecve`) is started in its
+    /// place; that is modelled here by starting another program as the child directly. It asks
+    /// for input as the daemon does, then records whatever it is sent: it is refused, and gets
+    /// nothing.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_started_daemon_that_runs_other_code_is_given_nothing() {
+        let dir = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let got = dir.path().join("got");
+        let ask = serde_json::to_string(&Response::ok(json!({ "stage": STAGE_INPUT }))).unwrap();
+        let (ours, theirs) = ChildChannel::pair().unwrap();
+        let theirs_out = theirs.try_clone().unwrap();
+        let mut child = KilledOnDrop(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    r#"printf '%s\n' "$1"; exec /bin/dd bs=4096 count=1 of="$2" 2>/dev/null"#,
+                    "sh",
+                ])
+                .arg(&ask)
+                .arg(&got)
+                .env_clear()
+                .stdin(Stdio::from(OwnedFd::from(theirs)))
+                .stdout(Stdio::from(OwnedFd::from(theirs_out)))
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let pid = child.0.id();
+        let started = drive_daemon(
+            dir.path(),
+            &mut child.0,
+            ours,
+            "not the password",
+            Duration::from_secs(60),
+        )
+        .await;
+        // As `start_daemon` does on any failure.
+        let _ = child.0.kill();
+        let _ = child.0.wait();
+        let sent = std::fs::metadata(&got).map_or(0, |m| m.len());
+        assert_eq!(
+            sent, 0,
+            "the started process read {sent} bytes of the unlock input"
+        );
+        let e = started.expect_err("a daemon that runs other code was driven to readiness");
+        assert_eq!(e.code, ErrorCode::ValidationError);
+        for part in [
+            format!("the key daemon this command started (pid {pid}) does not run this zwallet"),
+            "nothing was given to it".to_string(),
+            "no new session was started".to_string(),
+        ] {
+            assert!(
+                e.message.contains(&part),
+                "missing {part:?} in {}",
+                e.message
+            );
+        }
+    }
+
     #[test]
     fn long_socket_path_is_a_validation_error() {
         let long = PathBuf::from(format!("/tmp/{}", "x".repeat(SUN_PATH_MAX)));
