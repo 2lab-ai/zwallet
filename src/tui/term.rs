@@ -638,7 +638,8 @@ mod tests {
 
     /// `cells` (column, row, symbol) handed to the `Backend` trait directly, as ratatui's
     /// `Terminal` hands it what its diff found changed. Only for a cell the diff refuses in a
-    /// debug build: a lone control character (ratatui-core's `cell_width` asserts on it).
+    /// debug build (a lone control character: ratatui-core's `cell_width` asserts on it), or for a
+    /// backend whose `size()` fails, which a `Terminal` reads before every frame.
     fn hand_over(backend: &mut impl Backend, cells: &[(u16, u16, &str)]) {
         let cells: Vec<(u16, u16, Cell)> = cells
             .iter()
