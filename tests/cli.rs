@@ -836,7 +836,9 @@ fn c14_unlock_durations_set_expires_at() {
         let v = home.unlock(duration);
         let after = now_secs();
         let expires = v["expiresAt"].as_str().unwrap().to_string();
-        let lo = zwallet::core::time::rfc3339_utc(before + secs);
+        // Both sides floor to whole seconds, so only a wall-clock step back makes the daemon's
+        // expiry earlier than `before + secs`: up to 2 s of one is tolerated.
+        let lo = zwallet::core::time::rfc3339_utc(before + secs - 2);
         let hi = zwallet::core::time::rfc3339_utc(after + secs + 1);
         assert!(
             lo <= expires && expires <= hi,
