@@ -836,17 +836,6 @@ fn quit(tui: &mut PtyChild) -> Frame {
     last
 }
 
-/// The draws in a TUI's output so far: ratatui hides the cursor after every draw, and the guard
-/// once before the first.
-fn draws(output: &[u8]) -> usize {
-    let hide = b"\x1b[?25l";
-    output
-        .windows(hide.len())
-        .filter(|w| w == hide)
-        .count()
-        .saturating_sub(1)
-}
-
 /// A frame as ratatui's crossterm backend writes it at 79x24: the alternate screen, the cursor
 /// hidden, the one line of [`ui::TOO_SMALL`] (its blank cells skipped), the styles reset, the
 /// cursor hidden again; then the terminal given back.
@@ -901,10 +890,35 @@ fn the_79x24_check_runs_on_the_last_frame_not_on_a_live_snapshot() {
 }
 
 #[test]
+fn a_tui_that_exits_early_is_reported_before_the_wait_ends() {
+    // `zwallet tui` refuses an unknown chain before it takes the terminal, and exits 1. A wait
+    // for a frame it never draws reports the exit once the reader has every byte, not at the
+    // wait's limit.
+    let home = Home::new();
+    let mut tui = PtyChild::spawn_full_screen(home.command(&["tui", "--chain", "nope"]), PTY_SIZE);
+    let start = Instant::now();
+    let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tui.wait_output(PTY_WAIT, |_| false)
+    }));
+    let took = start.elapsed();
+    let said = waited
+        .expect_err("nothing shows what the wait looks for")
+        .downcast::<String>()
+        .map(|m| *m)
+        .unwrap_or_default();
+    assert!(said.contains("exited (exit status: 1)"), "{said}");
+    assert!(
+        took < PTY_WAIT,
+        "reported only at the limit, after {took:?}"
+    );
+}
+
+#[test]
 fn t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo() {
     let home = Home::new();
     home.create("main", &[]);
-    // At 120x40, once the key list and the status are drawn.
+    // Loaded at 120x40 (the key list and the status drawn), then the window shrinks to 79x24:
+    // the kernel tells the TUI (SIGWINCH), and it draws the warning alone.
     let mut tui = tui_on_a_pty(&home, PTY_SIZE);
     tui.wait_frame(PTY_WAIT, |f| {
         let (one, two) = bar(f);
@@ -913,22 +927,13 @@ fn t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo() {
     // While the TUI holds the terminal: raw mode, no echo.
     let modes = tui.local_modes();
     assert_eq!(modes & (libc::ICANON | libc::ECHO), 0, "not raw");
+    tui.resize((79, 24));
+    tui.wait_frame(PTY_WAIT, |f| f.rows[0].trim_end() == ui::TOO_SMALL);
     let last = quit(&mut tui);
-    assert!(last.rows[0].starts_with("zwallet tui | keys"), "{last}");
-    assert!(last.rows.iter().any(|r| r.contains("* main ")), "{last}");
-    // At 79x24, once both reads are drawn: the TUI draws once at the start and once per
-    // message, and before any key the messages are the two reads and the refresh ticks, the
-    // first of which comes a refresh after the start. Three draws within a refresh of the spawn
-    // are the first one and the two reads'.
-    let spawned = Instant::now();
+    assert!(only_the_warning(&last), "{last}");
+    // Started at 79x24: the warning alone, judged on the last frame.
     let mut tui = tui_on_a_pty(&home, (79, 24));
-    tui.wait_output(PTY_WAIT, |output| draws(output) >= 3);
-    let took = spawned.elapsed();
-    eprintln!("t9: at 79x24 both reads were drawn {took:?} after the spawn");
-    assert!(
-        took < zwallet::tui::REFRESH,
-        "three draws only {took:?} after the spawn: a tick's cannot be told from a read's"
-    );
+    tui.wait_frame(PTY_WAIT, |f| f.rows[0].trim_end() == ui::TOO_SMALL);
     let modes = tui.local_modes();
     assert_eq!(modes & (libc::ICANON | libc::ECHO), 0, "not raw at 79x24");
     let last = quit(&mut tui);
