@@ -51,7 +51,7 @@ is about 800; TUI-1b, TUI-3, TUI-4 and TUI-5 are estimated at it.
   }`), `src/commands.rs` (`list` and `status` call `wallet::keys` and `wallet::status`; the `tui`
   dispatch), `src/wallet.rs` (new), `src/tui/mod.rs`, `app.rs`, `ui.rs`, `text.rs`, `style.rs`,
   `term.rs` (new), `tests/tui.rs` (new), `tests/common/mod.rs` (the argv-listed fake daemon below,
-  moved from `build_attacker`, tests/cli.rs:4163).
+  moved from tests/cli.rs with `build_attacker`, tests/common/mod.rs:815).
 - **RED tests:**
   - `FilteredBackend`, where it acts (unit): it wraps a recording inner backend (ratatui's
     `TestBackend`) and draws five bad cells, `█`, ESC, `┌` (box drawing), a two-character grapheme
@@ -69,7 +69,7 @@ is about 800; TUI-1b, TUI-3, TUI-4 and TUI-5 are estimated at it.
     too small` line. (`Msg` sequence): `q` ends the app. (unit, `term.rs`): the restore guard
     writes the leave-alternate-screen and show-cursor sequences to a test writer on drop and from
     the panic hook (`catch_unwind`); the hook then writes its one fixed line, never the payload.
-    (pty, `PtyChild`, tests/common/mod.rs:637): `zwallet tui`, then `q`; the pty is back in
+    (pty, `PtyChild`, tests/common/mod.rs:938): `zwallet tui`, then `q`; the pty is back in
     canonical mode with echo.
   - T10 (`Msg` sequence): a status refresh that reports locked makes the bar say `locked`. (pty):
     with a test daemon unlocked, `zwallet lock` from a second process; within two refreshes
@@ -80,10 +80,10 @@ is about 800; TUI-1b, TUI-3, TUI-4 and TUI-5 are estimated at it.
     CLI's `VALIDATION_ERROR` in place of the rows, the value escaped and cut at 64 (`shown`,
     commands.rs:195-200); no row shows it as an address; zero replaced cells.
   - A process started with argv `daemon --home <canonical home>`, so that `daemon_pids` lists it
-    and `status` uses its reply (commands.rs:1890-1900), as tests/cli.rs:3905-3912 starts one,
-    answers `status` with `locked: false`, its own pid, and an `expiresAt` of 600 characters of
-    ESC, `▀` and `▄`: the bar shows at most 64 escaped characters on one line (the budget
-    assertion), and the address is not marked verified.
+    and `status` uses its reply (commands.rs:1890-1900), as `common::daemon_argv_impostor`
+    (tests/common/mod.rs:834) starts one, answers `status` with `locked: false`, its own pid, and
+    an `expiresAt` of 600 characters of ESC, `▀` and `▄`: the bar shows at most 64 escaped
+    characters on one line (the budget assertion), and the address is not marked verified.
 
 ### TUI-1 split (2026-10-28)
 
@@ -96,7 +96,7 @@ each lands in the PR named below.
 |---|---|---|---|---|
 | TUI-1a | `feat/tui-1-shell` | `Cargo.toml`/`Cargo.lock` (ratatui 0.30.2, crossterm 0.29.0; kasuari 0.4.12 and num_threads 0.1.7 pinned to releases at least two weeks old); `src/tui/term.rs`: `FilteredBackend` and `Guard` with the panic hook (one guard per process; a panic while it holds the terminal restores it, writes the fixed line and ends the process with 101), with their RED tests, one of them a child process that panics inside `spawn_blocking`; `src/wallet.rs`: `keys`, `status`, `net`; `list` and `status` call them (no `list` or `status` assertion in `tests/cli.rs` changed; c14's lower bound tolerates a 2 s clock step, 5119e36). `Trust` is `pub`, re-exported as `wallet::Trust`; `Daemon` and its helpers stay in `src/commands.rs` as `pub(crate)` | none | in review |
 | TUI-1b | `feat/tui-1b-screens` | `Command::Tui { warm, chain }` and its dispatch; `src/tui/mod.rs`, `app.rs`, `ui.rs`, `text.rs`, `style.rs`; `tests/tui.rs` with the cell, style and budget helpers, T1, the T9 frames and the `q` `Msg` test, the T10 `Msg` test, the cached-address counter-example; the README `zwallet tui` section; 03-tui.md §Status bar, the 80x24 layout and rule 3's RPC host row (decisions 2 and 4), rule 4's error view (decision 1) and the locked trust wording (§Changes on 2026-10-28); after review rounds 1 and 2, `q` waits for `L`, reads carry a generation, the bar and the key rows keep every value whole at 80x24 | T1 | in review (round 3), 2026-10-28 |
-| TUI-1c | at dispatch | the T9 pty test (`q`, then canonical mode with echo), the T10 pty test (`zwallet lock` from a second process, `locked` within two refreshes), the argv-listed fake counter-example, the attacker moved into `tests/common`, the pty helpers (decision 5) | T9, T10 | planned |
+| TUI-1c | `feat/tui-1c-pty` | the T9 pty test (`q`, then canonical mode with echo; the 79x24 frame), the T10 pty test (`zwallet lock` from a second process, `locked` within two refreshes), the argv-listed fake counter-example, the attacker and its helpers moved into `tests/common`, the pty helpers (decision 5: `openpty_sized`, `PtyChild::spawn_full_screen`, `Frame`). The tests pass on TUI-1b's code: no `src` change | T9, T10 | in review, 2026-10-28 |
 
 Decisions (the dispatcher's, 2026-10-28):
 1. The keys pane's error is a single-source error view, rule 4's exception: the CLI's
