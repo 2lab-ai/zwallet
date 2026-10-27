@@ -166,13 +166,13 @@ Commands that act on a key take `--key <name>` (default: the active key).
     only if every value in it is in the shape zwallet writes — a nickname of `a-z 0-9 _ -`, an
     address or selector of `0x` and hex digits, a chain `*` or a chain key's shape (`a-z 0-9 -`),
     a fee cap of decimal digits — else it is not a list, and the message names the field, never
-    its value; the daemon then trusts nothing. So every value from these files a human sees is
-    in that alphabet, or `<invalid>` (a chain zwallet does not know, a field of a file that is not
-    a list). Two exceptions, each bounded: the parser's message for a file JSON cannot read as a
-    list quotes at most 80 characters of it; and `whitelist reset` shows the entries of the files
-    it discards as found, at most 512 per file, on a line that holds nothing else from the file
-    (`whitelist.json`'s below the line with its reason, which quotes at most the parser's 80, and
-    `whitelist.next.json`'s when it is not the sealed list).
+    its value; the daemon then trusts nothing from that file. So every value from these files a
+    human sees is in that alphabet, or `<invalid>` (a chain zwallet does not know, a field of a
+    file that is not a list). Two exceptions, each bounded: the parser's message for a file JSON
+    cannot read as a list quotes at most 80 characters of it; and `whitelist reset` shows the
+    entries of the files it discards as found, at most 512 per file, on a line that holds nothing
+    else from the file (`whitelist.json`'s below the line with its reason, which quotes at most
+    the parser's 80, and `whitelist.next.json`'s when it is not the sealed list).
   - **Names from those files** in one command: at most 512 characters in all, whole names, then
     how many more (the change summary before the password, `whitelist list` and its fee caps for
     a list that did not verify). A list the seal verified (`whitelist list --verify`) is the
