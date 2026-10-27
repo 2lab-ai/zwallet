@@ -57,7 +57,7 @@ Each CLI handler then keeps only its argument parsing, its password prompt and i
 
 | Behaviour | Code today | Returns | Status | Split (new entry point) |
 |---|---|---|---|---|
-| Read the key list | `store::read_wallet_file` (core/store.rs:538) | `WalletFile { active, next_index, keys: [KeyEntry { name, index, addresses }] }` (store.rs:131, :146), unverified metadata; key names already pass `validate_key_name` (store.rs:176) | exists | none |
+| Read the key list | `store::read_wallet_file` (core/store.rs:538) | `WalletFile { active, next_index, keys: [KeyEntry { name, index, addresses }] }` (store.rs:131, :146), unverified metadata; key names and `active` already pass `validate_key_name` at parse (store.rs:568-576) | exists | none |
 | Each row's address | `list` without `--verify` (commands.rs:825-887): the daemon's derivation through `Daemon::derive` and `check_cache` (:840-844), else the cache (`primary_address`, :185) | `{ active, keys: [{ name, index, address, active }], verified: false }` (:878); a cache the daemon contradicts is `VALIDATION_ERROR` | exists, needs a library entry point | `wallet::keys(home)`: the rows and the warning, no text |
 | Mark the globally active key | `WalletFile.active` (store.rs:134) | the name | exists | none |
 | Lock state, once, in the status bar | see **Status bar** below | | | |

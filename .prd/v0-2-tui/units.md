@@ -50,8 +50,10 @@ adds a few hundred lines there). The cap is about 800.
     with a test daemon unlocked, `zwallet lock` from a second process; within 5 s the captured
     frame shows `locked`.
 - **Counter-examples:**
-  - `wallet.json` caches as an address `"\u{1b}[2J"` followed by 600 `█`: the T1 row shows the
-    CLI's `VALIDATION_ERROR` with the value escaped and cut at 64; the cell rule holds.
+  - `wallet.json` caches as an address `"\u{1b}[2J"` followed by 600 `█`: the whole key list
+    fails, as `list` does (`primary_address(k)?`, commands.rs:845), so the keys pane shows the
+    CLI's `VALIDATION_ERROR` in place of the rows, the value escaped and cut at 64 (`shown`,
+    commands.rs:195-200); no row shows it as an address; the cell rule holds.
   - A `FakeDaemon` (tests/common/mod.rs:503) on `d.sock` answers `status` with an `expiresAt` of
     600 characters of ESC, `▀` and `▄`: the bar shows at most 64 escaped characters on one line.
 

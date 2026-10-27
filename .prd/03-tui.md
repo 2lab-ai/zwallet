@@ -112,7 +112,7 @@ any process of this user can edit, a reply on `d.sock`, an RPC endpoint, the exp
 
 | Source | What the TUI shows from it | Check and budget (the CLI's own) |
 |---|---|---|
-| `wallet.json` key names and cached addresses | T1 rows, the status bar | names pass `validate_key_name` at parse (core/store.rs:176); a cached value that is not an address is an error that shows it escaped, at most 64 (`cached_address`, commands.rs:251; `VALUE_SHOWN`, :195) |
+| `wallet.json` key names and cached addresses | T1 rows, the status bar | names (and `active`) pass `validate_key_name` when wallet.json is parsed (core/store.rs:568-576), else the file is refused; a cached value that is not an address is an error that shows it escaped, at most 64 (`cached_address`, commands.rs:251; `VALUE_SHOWN`, :195) |
 | `d.sock`: an address | T1 rows, the status bar | `reply_address` (commands.rs:267): an address's shape, else an error that shows it escaped, at most 64 |
 | `d.sock`: the session's expiry | the status bar | `shown`, at most 64 (commands.rs:1827) |
 | `d.sock`: the session's whitelist view | T7, the payee picker | `inert_whitelist` (commands.rs:208): every string escaped, `reason` at most 512 |
@@ -220,7 +220,8 @@ Sources:
 **Reachability, measured 2026-10-27 11:53:24Z** with `curl 8.7.1`, no key, `GET
 /api/v2/addresses/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045/transactions`; rechecked at
 11:54:29Z with no `User-Agent` header, as reqwest 0.13.5 sends by default (its client builder
-sets only `Accept`: reqwest `src/async_impl/client.rs:284-285`):
+sets only `Accept`: the crate's own source, `reqwest-0.13.5/src/async_impl/client.rs:284-285` in the
+cargo registry, not a zwallet file):
 
 | Chain | Host | HTTP | Content-Type | Notes |
 |---|---|---|---|---|
