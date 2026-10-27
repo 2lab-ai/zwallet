@@ -248,10 +248,10 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::{CrosstermBackend, TestBackend};
-    use std::os::fd::{FromRawFd, OwnedFd};
-    use std::panic::PanicHookInfo;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::process::{Command, Stdio};
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::AtomicU8;
+    use std::sync::{Arc, Barrier, Mutex};
 
     /// A writer the test reads back after the code under test wrote to it.
     #[derive(Clone, Default)]
@@ -270,6 +270,39 @@ mod tests {
     impl Shared {
         fn bytes(&self) -> Vec<u8> {
             self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// A writer whose first write after it is armed meets the test's thread at `barrier` twice:
+    /// once when it is inside the write, once to go on. So a test can act while the code under
+    /// test is in the middle of restoring the terminal, without sleeping.
+    #[derive(Clone)]
+    struct Gate {
+        written: Shared,
+        armed: Arc<AtomicBool>,
+        barrier: Arc<Barrier>,
+    }
+
+    impl Gate {
+        fn new(armed: bool) -> Self {
+            Self {
+                written: Shared::default(),
+                armed: Arc::new(AtomicBool::new(armed)),
+                barrier: Arc::new(Barrier::new(2)),
+            }
+        }
+    }
+
+    impl Write for Gate {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.armed.swap(false, Ordering::SeqCst) {
+                self.barrier.wait();
+                self.barrier.wait();
+            }
+            self.written.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
@@ -437,47 +470,98 @@ mod tests {
 
     #[test]
     fn the_hook_writes_the_fixed_line_while_held_and_leaves_any_other_panic_to_the_hook_before() {
-        for held in [true, false] {
-            let holding = Arc::new(AtomicBool::new(held));
+        for (state, want) in [
+            (HELD, Panicked::Fatal),
+            (RELEASING, Panicked::Fatal),
+            (FATAL, Panicked::Suppressed),
+            (IDLE, Panicked::Delegated),
+        ] {
+            let state = AtomicU8::new(state);
             let (out, err) = (Shared::default(), Shared::default());
-            let before_ran = Arc::new(AtomicBool::new(false));
-            let handled = Arc::new(AtomicBool::new(false));
-            let me = std::thread::current().id();
-            let previous = Arc::new(std::panic::take_hook());
-            {
-                let (holding, out, err) = (holding.clone(), out.clone(), err.clone());
-                let (before_ran, handled, previous) =
-                    (before_ran.clone(), handled.clone(), previous.clone());
-                std::panic::set_hook(Box::new(move |info| {
-                    if std::thread::current().id() != me {
-                        return previous(info);
-                    }
-                    let before = |_: &PanicHookInfo<'_>| before_ran.store(true, Ordering::SeqCst);
-                    let done =
-                        on_panic(&holding, &mut out.clone(), &mut err.clone(), &before, info);
-                    handled.store(done, Ordering::SeqCst);
-                }));
-            }
-            let caught = std::panic::catch_unwind(|| panic!("secret pw-XYZ-0123456789"));
-            let _ = std::panic::take_hook();
-            let restore_previous = previous.clone();
-            std::panic::set_hook(Box::new(move |info| restore_previous(info)));
-            assert!(caught.is_err());
+            let before_ran = AtomicBool::new(false);
+            let before = |payload: &&str| {
+                assert_eq!(*payload, "secret pw-XYZ-0123456789");
+                before_ran.store(true, Ordering::SeqCst);
+            };
+            let got = on_panic(
+                &state,
+                &mut out.clone(),
+                &mut err.clone(),
+                &before,
+                &"secret pw-XYZ-0123456789",
+            );
+            assert_eq!(got, want);
             let (written, said) = (out.bytes(), String::from_utf8(err.bytes()).unwrap());
-            if held {
-                assert!(handled.load(Ordering::SeqCst));
-                assert!(!before_ran.load(Ordering::SeqCst));
+            assert_eq!(
+                before_ran.load(Ordering::SeqCst),
+                want == Panicked::Delegated
+            );
+            if want == Panicked::Fatal {
+                assert_eq!(state.load(Ordering::SeqCst), FATAL);
                 assert!(holds(&written, LEAVE_ALTERNATE_SCREEN), "{written:?}");
                 assert!(holds(&written, SHOW_CURSOR), "{written:?}");
                 assert_eq!(said, format!("{PANIC_LINE}\n"));
             } else {
-                assert!(!handled.load(Ordering::SeqCst));
-                assert!(before_ran.load(Ordering::SeqCst));
                 assert!(written.is_empty() && said.is_empty());
             }
             assert!(!String::from_utf8_lossy(&written).contains("secret"));
             assert!(!said.contains("secret"));
         }
+    }
+
+    #[test]
+    fn a_second_panic_while_the_first_restores_the_terminal_is_suppressed_never_delegated() {
+        let state = Arc::new(AtomicU8::new(HELD));
+        let out = Gate::new(true);
+        let err = Shared::default();
+        let before_a = Arc::new(AtomicBool::new(false));
+        let first = {
+            let (state, out, err, before_a) =
+                (state.clone(), out.clone(), err.clone(), before_a.clone());
+            std::thread::spawn(move || {
+                let before = |_: &()| before_a.store(true, Ordering::SeqCst);
+                on_panic(&state, &mut out.clone(), &mut err.clone(), &before, &())
+            })
+        };
+        // The first panic's hook is inside its restore.
+        out.barrier.wait();
+        let (out_b, err_b) = (Shared::default(), Shared::default());
+        let before_b = AtomicBool::new(false);
+        let before = |_: &()| before_b.store(true, Ordering::SeqCst);
+        let second = on_panic(&state, &mut out_b.clone(), &mut err_b.clone(), &before, &());
+        assert_eq!(second, Panicked::Suppressed);
+        assert!(!before_b.load(Ordering::SeqCst), "the payload hook ran");
+        assert!(out_b.bytes().is_empty() && err_b.bytes().is_empty());
+        out.barrier.wait();
+        assert_eq!(first.join().unwrap(), Panicked::Fatal);
+        assert!(!before_a.load(Ordering::SeqCst));
+        assert_eq!(
+            String::from_utf8(err.bytes()).unwrap(),
+            format!("{PANIC_LINE}\n")
+        );
+        assert!(holds(&out.written.bytes(), LEAVE_ALTERNATE_SCREEN));
+    }
+
+    #[test]
+    fn a_guard_being_dropped_holds_the_terminal_until_it_has_restored_it() {
+        let _serial = HOLDING_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let out = Gate::new(false);
+        let guard = Guard::on(out.clone()).unwrap();
+        out.armed.store(true, Ordering::SeqCst);
+        let dropping = std::thread::spawn(move || drop(guard));
+        // The drop is inside its restore.
+        out.barrier.wait();
+        let refused = Guard::enter(Shared::default())
+            .err()
+            .expect("refused while releasing");
+        assert!(
+            refused.to_string().contains("already holds the terminal"),
+            "{refused}"
+        );
+        out.barrier.wait();
+        dropping.join().unwrap();
+        assert!(holds(&out.written.bytes(), LEAVE_ALTERNATE_SCREEN));
+        drop(Guard::on(Shared::default()).expect("free once restored"));
     }
 
     /// Set on the child process [`a_panic_while_a_guard_holds_the_terminal_ends_the_process`]
@@ -521,10 +605,11 @@ mod tests {
         // SAFETY: both fds were just returned by openpty and are owned by nobody else.
         let (_master, slave) =
             unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        let child_slave = slave.try_clone().unwrap();
         let out = Command::new(std::env::current_exe().unwrap())
             .args(["tui::term::tests::panic_child", "--exact", "--nocapture"])
             .env(PANIC_CHILD, "1")
-            .stdin(Stdio::from(slave))
+            .stdin(Stdio::from(child_slave))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -536,8 +621,18 @@ mod tests {
         assert_eq!(out.status.code(), Some(101), "{stdout}\n{stderr}");
         assert!(stderr.contains(&format!("{PANIC_LINE}\n")), "{stderr}");
         assert!(!stdout.contains("CONTINUED"), "{stdout}");
-        // The terminal was given back through stdout, and the payload went nowhere.
+        // The terminal was given back: the screen and the cursor through stdout, canonical mode
+        // with echo on the pty; and the payload went nowhere.
         assert!(holds(&out.stdout, LEAVE_ALTERNATE_SCREEN), "{stdout}");
+        assert!(holds(&out.stdout, SHOW_CURSOR), "{stdout}");
+        // SAFETY: tcgetattr fills a termios for an fd this test owns.
+        let modes = unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(slave.as_raw_fd(), &mut t), 0);
+            t.c_lflag
+        };
+        assert_ne!(modes & libc::ICANON, 0, "canonical mode is off");
+        assert_ne!(modes & libc::ECHO, 0, "echo is off");
         for text in [&stdout, &stderr] {
             assert!(
                 !text.contains("secret") && !text.contains("panicked"),
