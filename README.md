@@ -228,7 +228,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
   swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
   genuine daemon of a wallet the human did not make), or injects code into the genuine binary
-  (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, `LD_PRELOAD`) — the same
+  (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, or on any binary while System
+  Integrity Protection is off; `LD_PRELOAD`) — the same
   class as replacing the binary, which nothing here can prevent. So keep the address you saved
   from your first unlock; if it ever changes, stop. **Piped and `--json` output changed with
   this check**: the locked note now names `zwallet unlock`, and a session-verified result gains
@@ -841,7 +842,8 @@ things a same-user process can still do, and what to do about them:
   swapped-in program can fork a process that keeps the channel, then exec this build, which
   passes, and that process can read the password. (It could also exec this build with
   `DYLD_INSERT_LIBRARIES`; the binaries zwallet ships carry the hardened runtime, under which dyld
-  ignores that variable, but a build from source does not.) A Homebrew-installed binary is
+  ignores that variable while System Integrity Protection is on, but a build from source does
+  not.) A Homebrew-installed binary is
   writable by the user, and so by the agent. For
   real protection install zwallet where the agent cannot write (e.g. a root-owned directory), or
   run the agent as a different OS user.

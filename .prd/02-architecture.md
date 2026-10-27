@@ -157,10 +157,10 @@ seed, so the wallet file and the daemon protocol do not change.
     command does not fail.
   - A cache the daemon contradicts is a VALIDATION_ERROR; it blames the cache only when every answering process is this build's key daemon, else it says the two disagree and names a known impostor (2026-10-26). With the password, `address --verify` repairs cached addresses that differ from the seed; other password paths refuse and point to it. Residual risk: a same-user process that
     swaps in its own wallet and unlocks it with its own password through the genuine binary, or
-    injects code into the genuine binary (`DYLD_INSERT_LIBRARIES` without the hardened runtime,
-    `LD_PRELOAD`) — the same class as replacing the binary. The human keeps the address saved from
-    the first unlock; if it ever changes, stop. Piped/`--json` output changed (the locked note, and
-    `verifiedBy` on a session result); agents read `--json`.
+    injects code into the genuine binary (`DYLD_INSERT_LIBRARIES` without the hardened runtime or
+    with SIP off, `LD_PRELOAD`) — the same class as replacing the binary. The human keeps the
+    address saved from the first unlock; if it ever changes, stop. Piped/`--json` output changed
+    (the locked note, and `verifiedBy` on a session result); agents read `--json`.
 - **Locked matrix**: `address`, `addresses`, `balance`, `call` and `status` work while locked
   (they use cached addresses, `verified: false`). `sign-message`, `transfer` and `invoke` → `WALLET_LOCKED`, with the
   hint `zwallet unlock 24h`.
@@ -351,8 +351,12 @@ RPC endpoint precedence: `--rpc` flag, then `ZWALLET_RPC_<KEY>` env, then the de
   `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, and
   `aarch64-unknown-linux-gnu` (on `ubuntu-24.04-arm`). Both macOS binaries are ad-hoc signed
   with the hardened runtime (`codesign --force --sign - --options runtime`, then `--verify
-  --strict`); the aarch64 job checks that dyld obeys `DYLD_INSERT_LIBRARIES` before signing and
-  ignores it after. Publishes bare binaries named `zwallet-<os>-<arch>` plus `SHA256SUMS`.
+  --strict`, and the `runtime` flag is required); the aarch64 job checks that dyld obeys
+  `DYLD_INSERT_LIBRARIES` before signing and, on a runner with System Integrity Protection on,
+  ignores it after. GitHub's macOS runners run with SIP off, which lifts that dyld restriction,
+  so there the step only leaves a notice; the post-deploy smoke on a SIP-enabled Mac checks it
+  for each preview. Publishes bare binaries named `zwallet-<os>-<arch>` plus
+  `SHA256SUMS`.
 - `preview.yml`: every push to `main` publishes the prerelease `preview-<YYYY-MM-DD-HHMM>-<sha12>`
   with the same assets.
 - Version line: `zwallet <ver> (<channel> <rev12>)`, built from `ZWALLET_BUILD_CHANNEL` and
