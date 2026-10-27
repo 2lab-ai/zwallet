@@ -10,13 +10,15 @@ use crate::core::{protocol, store};
 use serde_json::Value;
 use std::path::Path;
 
-/// One key of the master as `zwallet list` shows it without the password.
+/// One key of the master as `zwallet list` shows it. [`keys`] builds it without the password;
+/// `list --verify` builds it with the address derived from the seed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyRow {
     pub name: String,
     pub index: u32,
-    /// The key's address on [`PRIMARY_CHAIN`]: while unlocked the daemon's derivation, checked
-    /// against the cache; else the cache; `None` when the cache has none. Never verified.
+    /// The key's address on [`PRIMARY_CHAIN`]. From [`keys`]: while unlocked the daemon's
+    /// derivation, checked against the cache; else the cache; `None` when the cache has none;
+    /// never verified. From `list --verify`: derived from the seed, verified by the password.
     pub address: Option<String>,
     /// The globally active key (the one the agent uses by default).
     pub active: bool,
