@@ -76,7 +76,9 @@ pub struct KeyList {
 pub enum TrustLine {
     /// This build's key daemon of this home derived it ([`Trust::Session`]).
     Session,
-    /// The cache, and no session checked it.
+    /// Locked: the cache.
+    Locked,
+    /// Unlocked, but no session check passed (a cached address, or Linux, where it never does).
     NotVerified,
     /// Another process answered on `d.sock`: what `PeerCheck::warning` says about it.
     Impostor(Outside),
@@ -295,7 +297,8 @@ fn bar(status: StatusView) -> Bar {
             address.as_deref().map(Outside::short_address),
             Some(match trust {
                 Trust::Session => TrustLine::Session,
-                Trust::Locked | Trust::Unverified(None) => TrustLine::NotVerified,
+                Trust::Locked => TrustLine::Locked,
+                Trust::Unverified(None) => TrustLine::NotVerified,
                 Trust::Unverified(Some(w)) => TrustLine::Impostor(Outside::warning(&w)),
             }),
         ),

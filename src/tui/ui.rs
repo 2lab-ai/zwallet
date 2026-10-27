@@ -233,7 +233,9 @@ fn key_line(row: Row, bar: &Bar) -> Row {
         Some(TrustLine::NotVerified) if cfg!(target_os = "linux") => row
             .text(SEP, NORMAL)
             .text("not verified (no session check on Linux)", HINT),
-        Some(TrustLine::NotVerified) => row.text(SEP, NORMAL).text("not verified", HINT),
+        Some(TrustLine::NotVerified | TrustLine::Locked) => {
+            row.text(SEP, NORMAL).text("not verified", HINT)
+        }
         Some(TrustLine::Impostor(warning)) => row
             .text(SEP, NORMAL)
             .text("NOT this build's key daemon: ", WARNING)
