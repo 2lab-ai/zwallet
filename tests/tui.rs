@@ -96,7 +96,13 @@ fn budget(source: Source) -> usize {
 
 /// Rule 3 for one outside value `p` of a frame's `placed` values: inert, within its budget, and
 /// drawn whole where it was placed (a value one line long has its whole width there, never cut
-/// by the edge; a value that has to be shorter is cut with `...` before it is placed).
+/// by the edge; a value that has to be shorter is cut with `...` before it is placed), and
+/// nowhere else but inside placed areas.
+///
+/// Fixtures: a value of 4 or more characters that also occurs in zwallet's own text (`lock`,
+/// `keys`, `quit`, `status`, `verified`, `warning`, `zwallet`, ...) fails the frame, and so does
+/// one that is a substring of some other text drawn where nothing is placed. Pick fixture names
+/// and values that occur in neither.
 fn assert_placed(rows: &[String], p: &Placed, placed: &[Placed]) {
     let (source, text) = (p.outside.source(), p.outside.text());
     assert!(
@@ -140,11 +146,10 @@ fn assert_placed(rows: &[String], p: &Placed, placed: &[Placed]) {
         "{source:?} at {area:?}: {shown:?}"
     );
     // And no other place shows it: a verbatim copy of it (or of its core, without `...`) of 4
-    // characters or more, or a part of 12 or more, that starts where nothing is placed is a
-    // stray, whatever follows it. Inside a placed area such a match is that value's own text
-    // unless it reads as a copy (whole, or cut with `...`, at the edge or before blanks), and a
-    // copy there must be the same value from the same source: one of the two shown texts a
-    // `...`-cut of the other, compared whole.
+    // characters or more, or a part of 12 or more, is a stray unless it lies wholly inside a
+    // placed area. Each placed area holds that value's own text (checked for it as for this one),
+    // so a match there is part of it, whatever its source: an error quoting a key name the list
+    // shows too.
     let full: Vec<char> = text.chars().collect();
     let core: Vec<char> = text.trim_end_matches("...").chars().collect();
     for (y, row) in rows.iter().enumerate() {
@@ -152,41 +157,25 @@ fn assert_placed(rows: &[String], p: &Placed, placed: &[Placed]) {
         for x in 0..row.len() {
             let tail = &row[x..];
             let common = tail.iter().zip(&core).take_while(|(a, b)| a == b).count();
-            let exact = (core.len() >= 4 && common == core.len())
-                || (full.len() >= 4 && tail.starts_with(&full));
+            let whole = full.len() >= 4 && tail.starts_with(&full);
+            let exact = whole || (core.len() >= 4 && common == core.len());
             if !exact && common < 12 {
                 continue;
             }
-            let (cx, cy) = (x as u16, y as u16);
-            let inside: Vec<&Placed> = placed
-                .iter()
-                .filter(|q| {
-                    (q.area.x..q.area.right()).contains(&cx)
-                        && (q.area.y..q.area.bottom()).contains(&cy)
-                })
-                .collect();
-            let after = &tail[common..];
-            let copy = common == core.len()
-                || after.is_empty()
-                || after.starts_with(&['.', '.', '.'])
-                || after.iter().all(|c| *c == ' ');
-            let explained = !inside.is_empty()
-                && (!copy
-                    || inside.iter().any(|q| {
-                        q.outside.source() == source && same_value(q.outside.text(), text)
-                    }));
+            let end = x + if whole { full.len() } else { common };
+            let (cy, from, to) = (y as u16, x as u16, end as u16);
+            let inside = placed.iter().any(|q| {
+                (q.area.y..q.area.bottom()).contains(&cy)
+                    && q.area.x <= from
+                    && to <= q.area.right()
+            });
             assert!(
-                explained,
+                inside,
                 "{source:?} {text:?} also on row {y} at column {x}: {:?}",
                 rows[y]
             );
         }
     }
-}
-
-/// Whether `a` and `b` show one value: one of them a `...`-cut of the other (or both whole).
-fn same_value(a: &str, b: &str) -> bool {
-    a.starts_with(b.trim_end_matches("...")) || b.starts_with(a.trim_end_matches("..."))
 }
 
 fn block_on<F: std::future::Future>(work: F) -> F::Output {
