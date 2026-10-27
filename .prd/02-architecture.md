@@ -71,7 +71,13 @@ seed, so the wallet file and the daemon protocol do not change.
      overrides this (needed in containers without Yama).
   2. Before prompting, the CLI pins the daemon executable. Linux spawns `/proc/self/exe`; macOS
      records the (dev, ino) of `current_exe` and re-checks it right before the spawn. macOS has no
-     `fexecve`, so a swap racing check→exec is part of the binary-swap limit.
+     `fexecve`, so a swap racing check→exec is started; once the child asks for input, the CLI
+     kills it unless its cdhash (`csops` by pid, the child unreaped) equals the CLI's own and it
+     is `CS_VALID` (`VALIDATION_ERROR`, nothing written). Partial hardening: it does not prove that
+     no other process holds the channel (a swapped-in child can fork a process that keeps it,
+     then exec this build), so a swap stays part of the binary-swap limit. A CLI that cannot read
+     its own cdhash (a build that is not code-signed) refuses before the prompt; every macOS
+     binary CI publishes is ad-hoc signed with the hardened runtime.
   3. It spawns its **own** `zwallet daemon --home <canonical home>` child, with setsid. Every other
      open fd is marked close-on-exec: macOS lists them with `PROC_PIDLISTFDS`, Linux uses
      `close_range` and falls back to `/proc/self/fd`. Concurrent unlocks take turns on `u.lock`.
@@ -142,7 +148,9 @@ seed, so the wallet file and the daemon protocol do not change.
     listening `d.sock` of this home (`proc_pidfdinfo`, so an attacker that exec'd this binary while
     its child squats the socket does not pass — the daemon closes inherited fds at start-up); and
     `LOCAL_PEERUUID` matches. Linux hides a non-dumpable daemon's `/proc/<pid>/exe`, so there this
-    level never applies.
+    level never applies. It needs a signed build (every macOS binary zwallet ships; the linker
+    signs only arm64 output, so CI signs both): a build without a cdhash of its own gets `Unknown`
+    for every peer, and `unlock` refuses it.
   - **`verified: false`** otherwise, with "the wallet is locked; `zwallet unlock <dur>` or `zwallet
     address --verify` checks it" while locked, else "run `zwallet address --verify` before
     funding". A peer that fails the check adds a `warning` naming its pid and what it is; the
@@ -341,8 +349,10 @@ RPC endpoint precedence: `--rpc` flag, then `ZWALLET_RPC_<KEY>` env, then the de
 - `ci.yml`: fmt, clippy `-D warnings`, and test on `ubuntu-latest` and `macos-latest`.
 - `release.yml`: on a `v*` tag, checks that the tag equals the `Cargo.toml` version. Builds for
   `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, and
-  `aarch64-unknown-linux-gnu` (on `ubuntu-24.04-arm`). Publishes bare binaries named
-  `zwallet-<os>-<arch>` plus `SHA256SUMS`.
+  `aarch64-unknown-linux-gnu` (on `ubuntu-24.04-arm`). Both macOS binaries are ad-hoc signed
+  with the hardened runtime (`codesign --force --sign - --options runtime`, then `--verify
+  --strict`); the aarch64 job checks that dyld obeys `DYLD_INSERT_LIBRARIES` before signing and
+  ignores it after. Publishes bare binaries named `zwallet-<os>-<arch>` plus `SHA256SUMS`.
 - `preview.yml`: every push to `main` publishes the prerelease `preview-<YYYY-MM-DD-HHMM>-<sha12>`
   with the same assets.
 - Version line: `zwallet <ver> (<channel> <rev12>)`, built from `ZWALLET_BUILD_CHANNEL` and

@@ -145,6 +145,7 @@ pub struct Home {
 
 impl Home {
     pub fn new() -> Self {
+        sign_the_binary();
         let serial = Shared::take();
         let dir = tempfile::Builder::new()
             .prefix("zwt-")
@@ -371,9 +372,47 @@ pub fn zwallet_at(exe: impl AsRef<OsStr>) -> Command {
     zwallet_at_with(exe, cfg!(debug_assertions))
 }
 
+/// macOS: `CARGO_BIN_EXE_zwallet` ad-hoc signed, once per test process, before any test starts
+/// or copies it (from [`Home::new`] and [`zwallet_at_with`]). `unlock` refuses a zwallet build
+/// without a code signature (it compares the started daemon's cdhash with its own). The linker
+/// signs every arm64 build, so there this only verifies; an x86_64 build it does not sign.
+pub fn sign_the_binary() {
+    #[cfg(target_os = "macos")]
+    {
+        static SIGNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        SIGNED.get_or_init(|| sign_if_unsigned(Path::new(env!("CARGO_BIN_EXE_zwallet"))));
+    }
+}
+
+/// macOS: `path` ad-hoc signed when `codesign --verify --strict` fails on it (the linker signs
+/// arm64 output, not x86_64). Elsewhere nothing.
+pub fn sign_if_unsigned(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let codesign = |args: &[&str]| {
+            Command::new("/usr/bin/codesign")
+                .args(args)
+                .arg(path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !codesign(&["--verify", "--strict"]) {
+            assert!(
+                codesign(&["--force", "--sign", "-"]),
+                "codesign could not sign {}",
+                path.display()
+            );
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
+}
+
 /// [`zwallet_at`] for a build with or without `debug_assertions`: without, it panics before it
-/// builds the command. `CARGO_BIN_EXE_zwallet` is built with the same profile as these tests,
-/// and only a build with `debug_assertions` reads [`TEST_SCOPE_ENV`]: under
+/// signs or builds anything. `CARGO_BIN_EXE_zwallet` is built with the same profile as these
+/// tests, and only a build with `debug_assertions` reads [`TEST_SCOPE_ENV`]: under
 /// `cargo test --release` every `lock` would stop the user's own session too.
 pub fn zwallet_at_with(exe: impl AsRef<OsStr>, debug_assertions: bool) -> Command {
     assert!(
@@ -381,6 +420,7 @@ pub fn zwallet_at_with(exe: impl AsRef<OsStr>, debug_assertions: bool) -> Comman
         "a release zwallet ignores {TEST_SCOPE_ENV}, so a `lock` the tests run would stop the \
          user's own session: run the tests without --release"
     );
+    sign_the_binary();
     let mut cmd = Command::new(exe);
     cmd.env_clear().env(TEST_SCOPE_ENV, TEST_HOMES);
     cmd

@@ -24,6 +24,12 @@ formula on macOS and the checksummed release binary on Arch. Or download a binar
 `zwallet-macos-x86_64`, `zwallet-linux-aarch64`, `zwallet-linux-x86_64`, checksums in
 `SHA256SUMS`), make it executable and put it on your `PATH` as `zwallet`.
 
+On macOS every binary zwallet publishes (arm64 and x86_64) is ad-hoc code-signed with the hardened
+runtime. `unlock` needs a signed build: it compares the code of the key daemon it starts with its
+own. The linker signs arm64 output only: any x86_64 build, including one built on Apple silicon,
+is unsigned until it is signed afterwards, and `unlock` refuses it until then:
+`codesign --force --sign - "$(command -v zwallet)"`.
+
 `zwallet --version` prints `zwallet <version> (<channel> <rev12>)`: channel `release` or `preview`
 for published binaries, `dev` for a local build.
 
@@ -122,21 +128,23 @@ Commands that act on a key take `--key <name>` (default: the active key).
     the binary declares about itself (both of which a same-user attacker can forge): using the
     peer's audit token (`LOCAL_PEERTOKEN`, so pid reuse cannot swap the target), the peer's
     code-signing hash (`csops` `CS_OPS_CDHASH`, the hash the kernel validates against the mapped
-    code pages — arm64 macOS runs only signed code, and a Rust binary is linker ad-hoc signed)
-    must equal this process's own, the peer must be `CS_VALID`, its argv must be in the process
-    table as a key daemon of this home, it must hold the listening `d.sock` of this home, and the
-    executable UUID it used the socket with (`LOCAL_PEERUUID`) must match. That daemon decrypted
-    this home's `wallet.json` with the password typed at `unlock`. On **Linux** every zwallet
-    process is non-dumpable, which hides `/proc/<pid>/exe` from its own user, so the daemon's code
-    cannot be checked there and nothing is verified by session: the address is shown as below.
+    code pages; every macOS build zwallet ships is signed, see **Install**) must equal this
+    process's own, the peer must be `CS_VALID`, its argv must be in the process table as a key
+    daemon of this home, it must hold the listening `d.sock` of this home, and the executable UUID
+    it used the socket with (`LOCAL_PEERUUID`) must match. That daemon decrypted this home's
+    `wallet.json` with the password typed at `unlock`. On **Linux** every zwallet process is
+    non-dumpable, which hides `/proc/<pid>/exe` from its own user, so the daemon's code cannot be
+    checked there and nothing is verified by session: the address is shown as below.
   - `verified: false`: the cache while locked, with the line ``not verified: the wallet is locked;
     `zwallet unlock <dur>` or `zwallet address --verify` checks it`` in human output; or, while
     unlocked, an address no session verified (an agent's `create`, `list` without `--verify`, or
     Linux), with ``not verified: run `zwallet address --verify` before funding``. When the
-    process answering on `d.sock` is not this build's key daemon of this home (another program,
-    another zwallet build such as the one before a `brew upgrade`, or one that does not hold the
-    socket), the command still succeeds, unverified, with a `warning` naming the pid and what it
-    is, ending ``run `zwallet lock` and unlock again``. `balance` adds no note line.
+    process answering on `d.sock` is known not to be this build's key daemon of this home
+    (another program, another zwallet build such as the one before a `brew upgrade`, or one that
+    does not hold the socket), the command still succeeds, unverified, with a `warning` naming the
+    pid and what it is, ending ``run `zwallet lock` and unlock again``. A process whose code cannot
+    be read (an unsigned program, such as an x86_64 one on any Mac, or a non-dumpable one on
+    Linux) is not named: its answer is only not verified. `balance` adds no note line.
 
   While a daemon answers, a cache that its answer contradicts fails these commands (and `list`)
   with `VALIDATION_ERROR`. Only when every process that answered is this build's key daemon (so
@@ -728,9 +736,17 @@ data).
 - **Daemon**: `unlock` pins the zwallet binary before it asks for the password. On Linux that is
   the running image (`/proc/self/exe`), so a file swapped in at the binary's path while the human
   types is never started. On macOS it is the file's identity, checked again right before the
-  start: a binary swapped in while the human types is refused, but one swapped in between that
-  check and the exec is not (macOS has no `fexecve`), and one swapped in before `unlock` ran gets
-  the password on any OS (see **Known limits**). On Linux, `unlock` and `create --unlock` also
+  start: a binary swapped in while the human types is refused. One swapped in between that check
+  and the exec is still started (macOS has no `fexecve`). Once the started process asks for
+  input, and before the password is written, `unlock` refuses it unless it runs this build's code
+  (its `csops` cdhash equals `unlock`'s own and it is `CS_VALID`): it is stopped, given nothing,
+  and `unlock` fails with `VALIDATION_ERROR`. That is partial hardening: it does not prove that
+  no other process holds the daemon's channel, so a binary swapped in as it starts can still pass
+  the password to a process it forked before it exec'd this build. A build that is not
+  code-signed cannot make the check and refuses to unlock before the prompt (see **Install**).
+  One swapped in before `unlock` ran gets the password on any OS. Against a swapped binary the
+  only real protection is to install zwallet where an agent cannot write it (see **Known
+  limits**). On Linux, `unlock` and `create --unlock` also
   refuse, before the password prompt, when `kernel.yama.ptrace_scope` is 0 or Yama is missing
   (any same-user process could attach to the new daemon during its start-up); set it to 1 or
   more, or pass `--allow-ptrace-scope-0` to accept that. `unlock` then starts the pinned binary
@@ -818,10 +834,17 @@ the phrase, `lock` must end all signing, and no output may present its address a
 things a same-user process can still do, and what to do about them:
 
 - **Swap the zwallet binary.** A binary replaced before `unlock` (or `create`, `backup`,
-  `--verify`) runs gets the password; on macOS so does one swapped in between `unlock`'s identity
-  check and its exec of the daemon (there is no `fexecve`). A Homebrew-installed binary is
-  writable by the user, and so by the agent. For real protection install zwallet where the agent
-  cannot write (e.g. a root-owned directory), or run the agent as a different OS user.
+  `--verify`) runs gets the password. On macOS one swapped in between `unlock`'s identity check
+  and its exec of the daemon (there is no `fexecve`) is started; `unlock` refuses it, and gives
+  it nothing, when it does not run this build's code once it asks for input (same cdhash,
+  `CS_VALID`). That check does not prove that no other process holds the daemon's channel: the
+  swapped-in program can fork a process that keeps the channel, then exec this build, which
+  passes, and that process can read the password. (It could also exec this build with
+  `DYLD_INSERT_LIBRARIES`; the binaries zwallet ships carry the hardened runtime, under which dyld
+  ignores that variable, but a build from source does not.) A Homebrew-installed binary is
+  writable by the user, and so by the agent. For
+  real protection install zwallet where the agent cannot write (e.g. a root-owned directory), or
+  run the agent as a different OS user.
 - **Read the human's terminal** while the password is typed: a same-user process can open the
   terminal device the prompt reads. The same access lets it write there too, so it can draw
   whatever it likes on that terminal: the escaping above covers zwallet's own output only.
@@ -835,8 +858,10 @@ things a same-user process can still do, and what to do about them:
   same-user process can open the pipe through `/proc/<pid>/fd` and race zwallet to read the
   password. This is the same class as reading the terminal; prefer the terminal prompt.
 - **Log keystrokes under X11**, where any client can read another's input.
-- **Attach a debugger on macOS**: a same-user debugger (where the system allows one) can read a
-  zwallet process's memory.
+- **Attach a debugger on macOS** to a build from source: a same-user debugger (where the system
+  allows one) can read a zwallet process's memory. The binaries zwallet ships carry the hardened
+  runtime without the `get-task-allow` entitlement, so a same-user debugger cannot attach to them
+  unless System Integrity Protection is off.
 - **Linux with `kernel.yama.ptrace_scope` 0** (or without Yama): any same-user process can
   attach to a new daemon before it turns non-dumpable and stay attached (or copy its descriptors
   with `pidfd_getfd`, which takes the same permission). `unlock` refuses this by

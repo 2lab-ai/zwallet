@@ -359,10 +359,13 @@ fn cache_mismatch(key: &KeyEntry, chain: &str, derived: &str) -> Result<Option<S
 /// - `verified: true, verifiedBy: "password"`: derived from the seed after the human's password,
 ///   in this process or by the daemon child `unlock` just started.
 /// - `verified: true, verifiedBy: "session"` ([`Trust::Session`]): while unlocked, derived by this
-///   zwallet build's own key daemon for this home ([`protocol::check_peer`]), and equal to the
-///   cache. That daemon decrypted this home's wallet.json with the password typed at `unlock`.
+///   zwallet build's own key daemon for this home ([`protocol::check_peer`]: on macOS, for signed
+///   builds, every build zwallet ships), and equal to the cache. That daemon decrypted this home's
+///   wallet.json with the password typed at `unlock`.
 /// - `verified: false`: the cache in wallet.json, which any process of this user can edit, or a
-///   derivation by something else on `d.sock` (with a `warning` naming it).
+///   derivation by something else on `d.sock`: with a `warning` naming it when it is known to be
+///   another program; one whose code cannot be read (an unsigned program, such as an x86_64 one
+///   on any Mac, or a non-dumpable one on Linux) is not named, only not verified.
 ///
 /// What a session cannot rule out: a process of this user that swapped in its own wallet.json
 /// and unlocked it with its own password through this very binary, or injected code into it. Only
@@ -832,7 +835,7 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
     };
     let mut keys = Vec::new();
     // Without the password `list` is never verified; asking through `Daemon` only decides how a
-    // mismatch is worded (and names an impostor).
+    // mismatch is worded, and names an impostor (in that error, or as the `warning`).
     let mut daemon = Daemon::new(home);
     for k in &file.keys {
         let address = match &opened {
@@ -856,7 +859,9 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
     let warning = if verified {
         index_warning(&file, &file.keys.iter().collect::<Vec<_>>())
     } else {
-        None
+        // Whatever answered on `d.sock` and is known not to be this build's key daemon, also
+        // when its answers matched the cache.
+        daemon.trust().warning().map(str::to_string)
     };
     let mut text = keys
         .iter()
@@ -871,17 +876,18 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    if !verified {
-        text.push('\n');
-        text.push_str(UNVERIFIED_NOTE);
-    }
     let mut out = json!({ "active": file.active, "keys": keys, "verified": verified });
     if verified {
         out["verifiedBy"] = json!(BY_PASSWORD);
     }
+    // The warning line before the note, as in `address`.
     if let Some(w) = warning {
         text.push_str(&format!("\nwarning: {w}"));
         out["warning"] = json!(w);
+    }
+    if !verified {
+        text.push('\n');
+        text.push_str(UNVERIFIED_NOTE);
     }
     Ok(Out::with_text(out, text))
 }
