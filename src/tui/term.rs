@@ -7,9 +7,10 @@ use crossterm::cursor::{Hide, Show};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::{Backend, ClearType, WindowSize};
-use ratatui::buffer::{Cell, CellWidth};
+use ratatui::buffer::{Cell, CellDiffOption, CellWidth};
 use ratatui::layout::{Position, Size};
 use std::io::Write;
+use std::panic::PanicHookInfo;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The one way the TUI writes cells to a terminal, as `write_human` is the CLI's: a cell whose
@@ -45,10 +46,11 @@ fn cell_ok(symbol: &str) -> bool {
     matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && terminal_ok(c))
 }
 
-/// The columns ratatui counts `cell` as covering. A symbol holding a control character counts
-/// as one: ratatui's text never puts one in a cell, and its width function refuses a lone one.
+/// The columns ratatui's diff counts `cell` as covering (it skips all but the first): its own
+/// width function, `CellWidth` for a cell. That function counts a lone byte as one column, and in
+/// a debug build asserts that it is no control character; here it is counted without the check.
 fn covered(cell: &Cell) -> u16 {
-    if cell.symbol().chars().any(char::is_control) {
+    if cell.symbol().len() == 1 && !matches!(cell.diff_option, CellDiffOption::ForcedWidth(_)) {
         1
     } else {
         cell.cell_width()
@@ -63,6 +65,8 @@ impl<B: Backend> Backend for FilteredBackend<B> {
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
         let mut cells: Vec<(u16, u16, Cell)> = Vec::new();
+        // The screen's width, read once per draw and only for a wide cell replaced.
+        let mut width = None;
         for (x, y, cell) in content {
             if cell_ok(cell.symbol()) {
                 cells.push((x, y, cell.clone()));
@@ -74,7 +78,10 @@ impl<B: Backend> Backend for FilteredBackend<B> {
             let covered = covered(cell);
             cells.push((x, y, shown.clone()));
             if covered > 1 {
-                let width = self.inner.size()?.width;
+                let width = match width {
+                    Some(w) => w,
+                    None => *width.insert(self.inner.size()?.width),
+                };
                 shown.set_symbol(" ");
                 for column in
                     (x.saturating_add(1)..x.saturating_add(covered)).filter(|c| *c < width)
@@ -84,6 +91,10 @@ impl<B: Backend> Backend for FilteredBackend<B> {
             }
         }
         self.inner.draw(cells.iter().map(|(x, y, c)| (*x, *y, c)))
+    }
+
+    fn append_lines(&mut self, n: u16) -> Result<(), Self::Error> {
+        self.inner.append_lines(n)
     }
 
     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
@@ -127,7 +138,10 @@ impl<B: Backend> Backend for FilteredBackend<B> {
 /// which may quote anything the TUI held.
 pub const PANIC_LINE: &str = "zwallet tui stopped unexpectedly; the terminal was restored";
 
-/// Set while a [`Guard`] holds the terminal: the panic hook restores it only then.
+/// How a process ends after a panic while the TUI held the terminal (Rust's own panic code).
+const PANIC_EXIT: i32 = 101;
+
+/// Set while a [`Guard`] holds the terminal: one at a time, per process.
 static HOLDING: AtomicBool = AtomicBool::new(false);
 
 /// Gives the terminal back to the shell: leaves the alternate screen, shows the cursor, and ends
@@ -138,59 +152,94 @@ fn restore(out: &mut impl Write) {
     let _ = crossterm::terminal::disable_raw_mode();
 }
 
-/// What the panic hook does while the TUI holds the terminal: [`restore`] on `out`, then
-/// [`PANIC_LINE`] on `err` through the write point.
-fn on_panic(out: &mut impl Write, err: &mut impl Write) {
-    restore(out);
-    let _ = write_human(err, &format!("{PANIC_LINE}\n"));
+/// The panic hook's decision. While `holding` (it is taken back here, so this runs once): the
+/// terminal is restored on `out`, [`PANIC_LINE`] written on `err` through the write point, and
+/// `true` returned, for the caller to end the process. Otherwise `before`, the hook that was
+/// there before, runs, and `false`.
+fn on_panic(
+    holding: &AtomicBool,
+    out: &mut impl Write,
+    err: &mut impl Write,
+    before: &dyn Fn(&PanicHookInfo<'_>),
+    info: &PanicHookInfo<'_>,
+) -> bool {
+    if holding.swap(false, Ordering::SeqCst) {
+        restore(out);
+        let _ = write_human(err, &format!("{PANIC_LINE}\n"));
+        true
+    } else {
+        before(info);
+        false
+    }
 }
 
-/// Installs the panic hook once per process: while a [`Guard`] holds the terminal, [`on_panic`]
-/// on stdout and stderr; otherwise the hook that was there before. It is never removed: a hook
-/// cannot be changed from a thread that is panicking, which is when a guard drops on unwinding.
+/// Installs the panic hook once per process. A hook runs for every panic, also one tokio catches
+/// (a panicking `spawn_blocking` task is a `JoinError` to the TUI), so while a [`Guard`] holds
+/// the terminal no panic is survivable: [`on_panic`] gives the terminal back through stdout (a
+/// guard of the TUI always holds stdout) and the process ends with [`PANIC_EXIT`]. Without a
+/// guard the hook that was there before runs. It is never removed: a hook cannot be changed from
+/// a panicking thread.
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let before = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if HOLDING.swap(false, Ordering::SeqCst) {
-                on_panic(&mut std::io::stdout(), &mut std::io::stderr());
-            } else {
-                before(info);
+            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+            if on_panic(&HOLDING, &mut out, &mut err, &*before, info) {
+                std::process::exit(PANIC_EXIT);
             }
         }));
     });
 }
 
 /// The terminal as the TUI holds it: raw mode (no echo), the alternate screen, the cursor hidden.
-/// Dropping it, on return or on unwinding, gives the terminal back ([`restore`]); a panic gives
-/// it back first, from the hook.
+/// One at a time per process. Dropping it, on return or on unwinding, gives the terminal back
+/// ([`restore`]) unless the panic hook already did, and ended the process.
 pub struct Guard<W: Write> {
     out: W,
 }
 
 impl<W: Write> Guard<W> {
-    /// Takes the terminal `out` writes to (raw mode is set on the controlling terminal).
+    /// Takes the terminal `out` writes to (raw mode is set on the controlling terminal). Refused,
+    /// before anything is touched, while another guard holds it.
     pub fn enter(out: W) -> std::io::Result<Self> {
+        claim()?;
         install_panic_hook();
-        crossterm::terminal::enable_raw_mode()?;
-        Self::on(out)
+        if let Err(e) = crossterm::terminal::enable_raw_mode() {
+            HOLDING.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+        Self::begin(out)
     }
 
-    /// The alternate screen and a hidden cursor on `out`, restored on drop. Raw mode is the
-    /// caller's ([`Guard::enter`]); a test calls this alone.
+    /// [`Guard::enter`] without raw mode or the panic hook, for a test.
+    #[cfg(test)]
     fn on(out: W) -> std::io::Result<Self> {
+        claim()?;
+        Self::begin(out)
+    }
+
+    /// The alternate screen and a hidden cursor on `out`, for a guard that holds the terminal.
+    fn begin(out: W) -> std::io::Result<Self> {
         let mut guard = Self { out };
-        HOLDING.store(true, Ordering::SeqCst);
         execute!(guard.out, EnterAlternateScreen, Hide)?;
         Ok(guard)
     }
 }
 
+/// Takes [`HOLDING`], or refuses while a guard has it.
+fn claim() -> std::io::Result<()> {
+    HOLDING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map(|_| ())
+        .map_err(|_| std::io::Error::other("another zwallet tui guard already holds the terminal"))
+}
+
 impl<W: Write> Drop for Guard<W> {
     fn drop(&mut self) {
-        HOLDING.store(false, Ordering::SeqCst);
-        restore(&mut self.out);
+        if HOLDING.swap(false, Ordering::SeqCst) {
+            restore(&mut self.out);
+        }
     }
 }
 
