@@ -832,7 +832,7 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
     };
     let mut keys = Vec::new();
     // Without the password `list` is never verified; asking through `Daemon` only decides how a
-    // mismatch is worded (and names an impostor).
+    // mismatch is worded, and names an impostor (in that error, or as the `warning`).
     let mut daemon = Daemon::new(home);
     for k in &file.keys {
         let address = match &opened {
@@ -856,7 +856,9 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
     let warning = if verified {
         index_warning(&file, &file.keys.iter().collect::<Vec<_>>())
     } else {
-        None
+        // Whatever answered on `d.sock` and is known not to be this build's key daemon, also
+        // when its answers matched the cache.
+        daemon.trust().warning().map(str::to_string)
     };
     let mut text = keys
         .iter()
@@ -871,17 +873,18 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    if !verified {
-        text.push('\n');
-        text.push_str(UNVERIFIED_NOTE);
-    }
     let mut out = json!({ "active": file.active, "keys": keys, "verified": verified });
     if verified {
         out["verifiedBy"] = json!(BY_PASSWORD);
     }
+    // The warning line before the note, as in `address`.
     if let Some(w) = warning {
         text.push_str(&format!("\nwarning: {w}"));
         out["warning"] = json!(w);
+    }
+    if !verified {
+        text.push('\n');
+        text.push_str(UNVERIFIED_NOTE);
     }
     Ok(Out::with_text(out, text))
 }

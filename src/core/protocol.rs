@@ -748,8 +748,8 @@ pub enum PeerCheck {
 // `check_peer` can never read it and returns `Unknown` for the genuine daemon. Nothing is
 // verified by session on Linux. The code is here so that `address`, `addresses`, `change`,
 // `status`, `balance` and `list` still name an impostor whose executable is readable (another
-// program): in their `warning`, or in the error of a mismatch (`list`, which never claims
-// verification without the password, asks who answered only for that).
+// program): in their `warning`, or in the error of a mismatch (`list` never claims verification
+// without the password; who answered only words its error and its `warning`).
 
 /// The executable of a running process, as the kernel names it.
 #[cfg(target_os = "linux")]
