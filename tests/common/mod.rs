@@ -868,8 +868,10 @@ pub fn openpty() -> (File, OwnedFd) {
 }
 
 /// [`openpty`] with a window of `(columns, rows)`, which `zwallet tui` reads from its controlling
-/// terminal. Both ends are close-on-exec: the child a test wires them to gets them as its fds 0-2,
-/// and a process another test starts meanwhile gets neither, so it never holds the pty open.
+/// terminal. Both ends are made close-on-exec as soon as `openpty` returns: the child a test wires
+/// them to gets them as its fds 0-2, and a process another thread starts later gets neither, so it
+/// cannot hold the pty open. One started in the moment between `openpty` and the `fcntl` can
+/// still inherit both (macOS has no close-on-exec flag for `openpty`).
 pub fn openpty_sized((columns, rows): (u16, u16)) -> (File, OwnedFd) {
     let (mut master, mut slave) = (-1, -1);
     let mut window = libc::winsize {
@@ -1053,29 +1055,55 @@ impl PtyChild {
         Frame::parse(&self.output(), self.full_screen().size)
     }
 
-    /// Waits (bounded) until the terminal shows what `until` looks for, and returns that frame.
-    /// A frame reaches the terminal in pieces (a pty read ends anywhere), so `until` should look
-    /// for the last thing the test reads in it. Panics with the last frame if the child exits
-    /// first or `limit` passes.
-    pub fn wait_frame(&mut self, limit: Duration, until: impl Fn(&Frame) -> bool) -> Frame {
+    /// Waits (bounded) until what the child wrote to the terminal so far satisfies `until`, and
+    /// returns it. Past `limit` this panics with the frame, and with the exit and stderr if the
+    /// child has exited (a child that exits early is reported then, not before: its last bytes
+    /// may still be on their way to the reader).
+    pub fn wait_output(&mut self, limit: Duration, until: impl Fn(&[u8]) -> bool) -> Vec<u8> {
         let start = Instant::now();
         loop {
-            let frame = self.frame();
-            if until(&frame) {
-                return frame;
+            let output = self.output();
+            if until(&output) {
+                return output;
             }
-            if let Ok(Some(status)) = self.child.try_wait() {
+            if start.elapsed() >= limit {
+                let size = self.full_screen().size;
+                let exit = match self.child.try_wait() {
+                    Ok(Some(status)) => format!("exited ({status}), stderr {:?}", self.stderr()),
+                    _ => "still running".to_string(),
+                };
                 panic!(
-                    "exited ({status}) first; stderr {:?}; the terminal showed:\n{frame}",
-                    self.stderr()
+                    "not shown within {limit:?}; {exit}; the terminal showed:\n{}",
+                    Frame::parse(&output, size)
                 );
             }
-            assert!(
-                start.elapsed() < limit,
-                "not shown within {limit:?}; the terminal showed:\n{frame}"
-            );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// [`PtyChild::wait_output`] for a frame: until the terminal shows what `until` looks for.
+    /// A frame reaches the terminal in pieces (a pty read ends anywhere), so `until` should look
+    /// for the last thing the test reads in it; whether the frame holds a stray byte is decided on
+    /// the whole output ([`PtyChild::final_frame`]).
+    pub fn wait_frame(&mut self, limit: Duration, until: impl Fn(&Frame) -> bool) -> Frame {
+        let size = self.full_screen().size;
+        Frame::parse(
+            &self.wait_output(limit, |output| until(&Frame::parse(output, size))),
+            size,
+        )
+    }
+
+    /// Once the child has exited: its last frame ([`Frame::last`]), from everything it wrote
+    /// before it gave the terminal back. All of it was written before the exit; the wait (bounded)
+    /// is for the reader to catch up, and fails if the terminal was never given back.
+    pub fn final_frame(&mut self, limit: Duration) -> Frame {
+        assert!(
+            matches!(self.child.try_wait(), Ok(Some(_))),
+            "the child still runs"
+        );
+        let size = self.full_screen().size;
+        let output = self.wait_output(limit, |output| Frame::last(output, size).is_some());
+        Frame::last(&output, size).unwrap()
     }
 
     /// Keys as typed at the terminal, no newline added (raw mode takes each byte as it comes).
@@ -1394,22 +1422,29 @@ fn read_all_along(
     })
 }
 
+/// The sequence a full-screen program writes when it gives the terminal back (crossterm's
+/// `LeaveAlternateScreen`); `zwallet tui`'s guard writes it once, last.
+pub const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
+
 /// What a terminal shows after a full-screen program's output, as ratatui's crossterm backend
 /// writes it: `CSI row;col H` moves the cursor, `CSI 2J` and `CSI ?1049h` (the alternate screen)
 /// clear it, any other CSI (styles, the cursor's visibility, leaving the alternate screen) changes
 /// no cell; CR, LF (raw mode: no CR added) and BS move the cursor. Every other ESC and every
 /// other control character is kept in `stray`: none may come from a cell's content (03-tui.md
-/// §Display integrity rule 1).
+/// §Display integrity rule 1). A sequence the bytes end inside (a lone ESC, or a CSI before its
+/// final byte) is `pending`, not stray: a read of a live terminal ends anywhere.
 pub struct Frame {
     /// One string per row, every column (trailing spaces included).
     pub rows: Vec<String>,
     pub stray: Vec<String>,
+    /// The unfinished sequence the bytes end with, if any.
+    pub pending: String,
 }
 
 impl Frame {
     pub fn parse(bytes: &[u8], (columns, rows): (u16, u16)) -> Self {
         let blank = || vec![vec![' '; usize::from(columns)]; usize::from(rows)];
-        let (mut cells, mut stray) = (blank(), Vec::new());
+        let (mut cells, mut stray, mut pending) = (blank(), Vec::new(), String::new());
         let (mut x, mut y) = (0usize, 0usize);
         let text = String::from_utf8_lossy(bytes);
         let mut chars = text.chars().peekable();
@@ -1425,6 +1460,7 @@ impl Frame {
                         }
                     };
                     match (end, params.as_str()) {
+                        (None, _) => pending = format!("\u{1b}[{params}"),
                         (Some('H'), at) => {
                             let mut at = at.split(';').map(|n| n.parse().unwrap_or(1).max(1));
                             y = at.next().unwrap_or(1) - 1;
@@ -1435,6 +1471,7 @@ impl Frame {
                         _ => stray.push(format!("CSI {params:?} {end:?}")),
                     }
                 }
+                '\u{1b}' if chars.peek().is_none() => pending.push(c),
                 '\r' => x = 0,
                 '\n' => y += 1,
                 '\u{8}' => x = x.saturating_sub(1),
@@ -1450,7 +1487,19 @@ impl Frame {
         Self {
             rows: cells.into_iter().map(String::from_iter).collect(),
             stray,
+            pending,
         }
+    }
+
+    /// The last frame of a full-screen program, from its whole output: what the terminal showed
+    /// when the program gave it back (the bytes before [`LEAVE_ALTERNATE_SCREEN`]); `None` before
+    /// it has. Every draw is done by then, so the frame is finished, and its `stray` covers the
+    /// whole run.
+    pub fn last(bytes: &[u8], size: (u16, u16)) -> Option<Self> {
+        let end = bytes
+            .windows(LEAVE_ALTERNATE_SCREEN.len())
+            .position(|w| w == LEAVE_ALTERNATE_SCREEN)?;
+        Some(Self::parse(&bytes[..end], size))
     }
 }
 
@@ -1459,7 +1508,7 @@ impl std::fmt::Display for Frame {
         for row in &self.rows {
             writeln!(f, "{}", row.trim_end())?;
         }
-        write!(f, "stray: {:?}", self.stray)
+        write!(f, "stray: {:?}, pending: {:?}", self.stray, self.pending)
     }
 }
 

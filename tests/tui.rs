@@ -821,7 +821,9 @@ fn bar(frame: &Frame) -> (&str, &str) {
 }
 
 /// `q`, then the exit: status 0, nothing on stderr, and the pty back in canonical mode with echo.
-fn quit(tui: &mut PtyChild) {
+/// Returns the last frame, the TUI's whole output up to giving the terminal back: no stray byte
+/// in all of it, and no sequence left unfinished.
+fn quit(tui: &mut PtyChild) -> Frame {
     tui.send(b"q");
     let (status, stderr) = tui.wait_exit(PTY_WAIT);
     assert!(status.success(), "{status}: {stderr}");
@@ -829,6 +831,20 @@ fn quit(tui: &mut PtyChild) {
     let modes = tui.local_modes();
     assert_ne!(modes & libc::ICANON, 0, "canonical mode is off");
     assert_ne!(modes & libc::ECHO, 0, "echo is off");
+    let last = tui.final_frame(PTY_WAIT);
+    assert!(last.stray.is_empty() && last.pending.is_empty(), "{last}");
+    last
+}
+
+/// The draws in a TUI's output so far: ratatui hides the cursor after every draw, and the guard
+/// once before the first.
+fn draws(output: &[u8]) -> usize {
+    let hide = b"\x1b[?25l";
+    output
+        .windows(hide.len())
+        .filter(|w| w == hide)
+        .count()
+        .saturating_sub(1)
 }
 
 /// A frame as ratatui's crossterm backend writes it at 79x24: the alternate screen, the cursor
@@ -849,6 +865,10 @@ fn a_valid_stream_cut_anywhere_holds_no_stray_byte() {
         })
         .collect();
     assert!(stray.is_empty(), "{stray:#?}");
+    // The unfinished sequence is pending, and only at the end.
+    assert_eq!(Frame::parse(b"x\x1b", (79, 24)).pending, "\u{1b}");
+    assert_eq!(Frame::parse(b"x\x1b[1;2", (79, 24)).pending, "\u{1b}[1;2");
+    assert!(Frame::parse(SMALL_FRAME, (79, 24)).pending.is_empty());
     // A stray byte before the end still counts.
     for bad in [&b"x\x1b\x1b[0m"[..], b"x\x1bQ", b"\x1b[1\x07m", b"x\x07"] {
         assert!(!Frame::parse(bad, (79, 24)).stray.is_empty(), "{bad:?}");
@@ -884,28 +904,35 @@ fn the_79x24_check_runs_on_the_last_frame_not_on_a_live_snapshot() {
 fn t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo() {
     let home = Home::new();
     home.create("main", &[]);
-    for size in [PTY_SIZE, (79, 24)] {
-        let mut tui = tui_on_a_pty(&home, size);
-        let frame = if size == PTY_SIZE {
-            let frame = tui.wait_frame(PTY_WAIT, |f| bar(f).1.contains(HOST));
-            assert!(frame.rows[0].starts_with("zwallet tui | keys"), "{frame}");
-            frame
-        } else {
-            let frame = tui.wait_frame(PTY_WAIT, |f| f.rows[0].trim_end() == ui::TOO_SMALL);
-            // The one line, nothing else on the screen. (The stream itself skips the spaces
-            // between the words: the diff moves the cursor over cells that stay blank.)
-            assert!(
-                frame.rows[1..].iter().all(|r| r.trim().is_empty()),
-                "{frame}"
-            );
-            frame
-        };
-        assert!(frame.stray.is_empty(), "{frame}");
-        // While the TUI holds the terminal: raw mode, no echo.
-        let modes = tui.local_modes();
-        assert_eq!(modes & (libc::ICANON | libc::ECHO), 0, "{size:?}: not raw");
-        quit(&mut tui);
-    }
+    // At 120x40, once the key list and the status are drawn.
+    let mut tui = tui_on_a_pty(&home, PTY_SIZE);
+    tui.wait_frame(PTY_WAIT, |f| {
+        let (one, two) = bar(f);
+        one.starts_with("ethereum | main 0x") && two.starts_with("locked | ") && two.contains(HOST)
+    });
+    // While the TUI holds the terminal: raw mode, no echo.
+    let modes = tui.local_modes();
+    assert_eq!(modes & (libc::ICANON | libc::ECHO), 0, "not raw");
+    let last = quit(&mut tui);
+    assert!(last.rows[0].starts_with("zwallet tui | keys"), "{last}");
+    assert!(last.rows.iter().any(|r| r.contains("* main ")), "{last}");
+    // At 79x24, once both reads are drawn: the TUI draws once at the start and once per
+    // message, and before any key the messages are the two reads and the refresh ticks, the
+    // first of which comes a refresh after the start. Three draws within a refresh of the spawn
+    // are the first one and the two reads'.
+    let spawned = Instant::now();
+    let mut tui = tui_on_a_pty(&home, (79, 24));
+    tui.wait_output(PTY_WAIT, |output| draws(output) >= 3);
+    let took = spawned.elapsed();
+    eprintln!("t9: at 79x24 both reads were drawn {took:?} after the spawn");
+    assert!(
+        took < zwallet::tui::REFRESH,
+        "three draws only {took:?} after the spawn: a tick's cannot be told from a read's"
+    );
+    let modes = tui.local_modes();
+    assert_eq!(modes & (libc::ICANON | libc::ECHO), 0, "not raw at 79x24");
+    let last = quit(&mut tui);
+    assert!(only_the_warning(&last), "{last}");
 }
 
 #[test]
@@ -937,8 +964,8 @@ fn t10_on_a_pty_zwallet_lock_elsewhere_shows_locked_within_two_refreshes() {
         took <= Duration::from_secs(10),
         "locked shown {took:?} after the lock, over two refreshes"
     );
-    assert!(frame.stray.is_empty(), "{frame}");
-    quit(&mut tui);
+    let last = quit(&mut tui);
+    assert!(bar(&last).1.starts_with("locked | "), "{frame}\n{last}");
 }
 
 #[test]
@@ -963,17 +990,23 @@ fn an_argv_listed_fake_daemon_s_expiry_reaches_the_terminal_escaped_and_cut() {
     let fake = common::daemon_argv_impostor(&home, dir.path(), &[("ATTACKER_EXPIRES", &expires)]);
     assert!(home.daemon_pids().contains(&(fake.0.id() as i32)));
     let mut tui = tui_on_a_pty(&home, PTY_SIZE);
-    // The expiry is drawn whole once the separator after it is.
+    // The fake's status is drawn once its expiry and the separator after it are; then the checks
+    // run on the last frame.
     let until = "signing (agent too) until ";
-    let frame = tui.wait_frame(PTY_WAIT, |f| {
+    tui.wait_frame(PTY_WAIT, |f| {
         let (one, two) = bar(f);
         one.contains("NOT this build's key daemon: ")
             && two
                 .strip_prefix(until)
                 .is_some_and(|rest| rest.contains(" | "))
     });
+    let frame = quit(&mut tui);
     // Line 2 shows the expiry escaped, cut within its budget, on that line alone.
-    let shown = bar(&frame).1[until.len()..].split(" | ").next().unwrap();
+    let shown = bar(&frame)
+        .1
+        .strip_prefix(until)
+        .and_then(|rest| rest.split(" | ").next())
+        .unwrap_or_else(|| panic!("{frame}"));
     assert!(shown.starts_with("\\u{1b}\\u{2580}"), "{shown:?}");
     assert!(
         shown.len() <= 64 && common::ascii_printable(shown),
@@ -981,8 +1014,8 @@ fn an_argv_listed_fake_daemon_s_expiry_reaches_the_terminal_escaped_and_cut() {
     );
     let rows = frame.rows.iter().filter(|r| r.contains("\\u{1b}")).count();
     assert_eq!(rows, 1, "{frame}");
-    // No raw ESC from the value reached the terminal, and no half block.
-    assert!(frame.stray.is_empty(), "{frame}");
+    // No raw ESC from the value reached the terminal (`quit`: no stray byte in the whole run),
+    // and no half block.
     let output = String::from_utf8_lossy(&tui.output()).into_owned();
     assert!(!output.contains(['\u{2580}', '\u{2584}']), "{output:?}");
     // The address is not marked verified anywhere.
@@ -990,6 +1023,5 @@ fn an_argv_listed_fake_daemon_s_expiry_reaches_the_terminal_escaped_and_cut() {
         !frame.rows.iter().any(|r| r.contains("verified by")),
         "{frame}"
     );
-    quit(&mut tui);
     drop(fake);
 }
