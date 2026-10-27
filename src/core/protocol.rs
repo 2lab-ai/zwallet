@@ -696,6 +696,16 @@ impl DaemonExe {
                 .map_err(io_err("cannot locate the zwallet binary"))?;
             let meta =
                 std::fs::metadata(&exe).map_err(io_err("cannot inspect the zwallet binary"))?;
+            // Without a cdhash of its own this build cannot check the daemon it starts
+            // ([`check_started_code`]): refused here, before the password is asked for.
+            #[cfg(target_os = "macos")]
+            if own_cdhash().is_none() {
+                return Err(WalletError::validation(format!(
+                    "this zwallet build is not code-signed, so it cannot check that the key \
+                     daemon it would start runs its code; not asking for the password. {}",
+                    sign_this_build(&exe.display().to_string())
+                )));
+            }
             Ok(Self {
                 path: exe,
                 id: (meta.dev(), meta.ino()),
@@ -722,9 +732,13 @@ impl DaemonExe {
 
 /// Fails unless the daemon `child` that [`spawn_daemon`] started runs this build's code (macOS):
 /// its cdhash is this process's own and it is `CS_VALID`. Asked by pid, which is safe here: the
-/// child has not been reaped, so its pid names no other process. A `csops` that fails (unsigned
-/// code, or a child that already exited) refuses it. A build the linker did not sign (x86_64
-/// macOS) has no cdhash of its own to compare, and checks nothing.
+/// child has not been reaped, so its pid names no other process. Every `csops` that fails refuses
+/// it: unsigned code, a child that already exited, or this build's own cdhash (a build that is
+/// not code-signed; [`DaemonExe::resolve`] refuses that one before the prompt).
+///
+/// This refuses a started process that does not run this build's code. It does not prove that no
+/// other process holds the channel: a binary swapped in as it starts can fork a process that
+/// keeps the channel, then exec this build, which passes; that process can read the password.
 #[cfg(target_os = "macos")]
 fn check_started_code(child: &Child) -> Result<()> {
     let pid = child.id() as libc::pid_t;
@@ -742,17 +756,33 @@ fn started_code_verdict(
     child_valid: Option<bool>,
 ) -> Result<()> {
     let Some(own) = own else {
-        return Ok(());
+        // `DaemonExe::resolve` refuses such a build before the prompt; this is in case the read
+        // fails only now. Nothing is accepted for want of a cdhash.
+        return Err(WalletError::validation(format!(
+            "this zwallet build is not code-signed, so it cannot check that the key daemon it \
+             started (pid {pid}) runs its code: it was stopped and nothing was given to it. {}",
+            sign_this_build("<path to zwallet>")
+        )));
     };
     if child == Some(own) && child_valid == Some(true) {
         return Ok(());
     }
     Err(WalletError::validation(format!(
-        "the key daemon this command started (pid {pid}) does not run this zwallet build's code: \
-         the zwallet binary was replaced as it was started, and nothing was given to it. It was \
-         stopped and no new session was started, so the wallet stays locked (a session that was \
-         already running is untouched)"
+        "the key daemon this command started (pid {pid}) does not run this zwallet build's code \
+         (the zwallet binary may have been replaced as it was started), or exited before it could \
+         be checked. It was stopped and nothing was given to it; no new session was started, and \
+         this did not stop a session that was already running"
     )))
+}
+
+/// How to sign a zwallet build at `path` that has no code signature (an x86_64 macOS build from
+/// source: the linker signs only arm64 output).
+#[cfg(target_os = "macos")]
+fn sign_this_build(path: &str) -> String {
+    format!(
+        "zwallet's release binaries are signed; sign this build with `codesign --force --sign - \
+         {path}`"
+    )
 }
 
 // ---- Who answered on `d.sock` ----
@@ -1574,8 +1604,8 @@ async fn drive_daemon(
             .map_err(io_err("cannot read from the key daemon"))?,
     );
     expect_stage(&lines, STAGE_INPUT, INPUT_TIMEOUT)?;
-    // What started may not be the file `DaemonExe::check` saw (no `fexecve`): only this build's
-    // code gets the password.
+    // What started may not be the file `DaemonExe::check` saw (no `fexecve`): a child that does
+    // not run this build's code is refused before the password is written.
     #[cfg(target_os = "macos")]
     check_started_code(child)?;
     // Unbuffered socket writes: no intermediate copy of the password in this process.
@@ -2784,7 +2814,7 @@ mod tests {
         }
     }
 
-    /// The password goes only to a started daemon that runs this build's code. A binary renamed
+    /// A started daemon that does not run this build's code gets no password. A binary renamed
     /// into the pinned path after [`DaemonExe::check`] (macOS has no `fexecve`) is started in its
     /// place; that is modelled here by starting another program as the child directly. It asks
     /// for input as the daemon does, then records whatever it is sent: it is refused, and gets
