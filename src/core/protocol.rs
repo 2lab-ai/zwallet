@@ -2875,6 +2875,55 @@ mod tests {
         }
     }
 
+    /// A build whose own cdhash cannot be read has nothing to compare the child with: it refuses
+    /// (fail closed), says the build is not code-signed, and how to sign it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_started_code_verdict_refuses_when_this_build_has_no_cdhash() {
+        let h = [7u8; CDHASH_LEN];
+        for (child, valid) in [(Some(h), Some(true)), (None, None)] {
+            let e = started_code_verdict(9, None, child, valid)
+                .expect_err("a build without a cdhash of its own accepted the started daemon");
+            assert_eq!(e.code, ErrorCode::ValidationError);
+            for part in [
+                "this zwallet build is not code-signed",
+                "nothing was given to it",
+                "codesign --force --sign -",
+                "release binaries are signed",
+            ] {
+                assert!(
+                    e.message.contains(part),
+                    "missing {part:?} in {}",
+                    e.message
+                );
+            }
+        }
+    }
+
+    /// The refusal says what this start did, not what state the wallet is in: `unlock` refuses
+    /// before it stops a running session, and `whitelist ... --unlock` stopped every daemon
+    /// before. A genuine child that exited after asking for input is refused the same way (its
+    /// `csops` fails), so the cause names that too.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_started_daemon_refusal_claims_no_lock_state() {
+        let e = started_code_verdict(42, Some([7; CDHASH_LEN]), Some([8; CDHASH_LEN]), Some(true))
+            .unwrap_err();
+        let m = &e.message;
+        for part in [
+            "the key daemon this command started (pid 42) does not run this zwallet build's code",
+            "or exited before it could be checked",
+            "It was stopped and nothing was given to it; no new session was started, and this did \
+             not stop a session that was already running",
+        ] {
+            assert!(m.contains(part), "missing {part:?} in {m}");
+        }
+        assert!(
+            !m.contains("stays locked") && !m.contains("untouched"),
+            "{m}"
+        );
+    }
+
     /// Set only for the child [`the_started_daemon_check_accepts_only_this_builds_code`] starts.
     #[cfg(target_os = "macos")]
     const CHILD_WAITS: &str = "ZWT_CHILD_WAITS_FOR_STDIN";
