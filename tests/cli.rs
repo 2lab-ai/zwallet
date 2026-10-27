@@ -1553,7 +1553,7 @@ fn r2_lock_stops_a_daemon_behind_a_repointed_symlink() {
     assert_eq!(
         common::all_daemon_pids(),
         Vec::<i32>::new(),
-        "a zwallet daemon of this user survived lock"
+        "a zwallet daemon of a test home survived lock"
     );
 }
 
@@ -1961,11 +1961,23 @@ impl Outside {
             .as_i64()
             .unwrap() as i32
     }
+
+    /// Its daemons, by the process table, among those of the outside homes.
+    fn daemon_pids(&self) -> Vec<i32> {
+        zwallet::core::protocol::home_daemon_pids_under(
+            std::path::Path::new(OUTSIDE_HOMES),
+            self.path(),
+        )
+        .expect("process table")
+    }
 }
 
 impl Drop for Outside {
     fn drop(&mut self) {
-        let _ = zwallet::core::protocol::stop_daemons(self.path(), None);
+        let _ = zwallet::core::protocol::stop_daemons_under(
+            std::path::Path::new(OUTSIDE_HOMES),
+            self.path(),
+        );
     }
 }
 
@@ -2000,8 +2012,7 @@ fn the_suite_stops_no_daemon_outside_its_test_homes() {
                 r.stderr.trim()
             ));
         }
-        if stopped(kept) || !pid_alive(kept) || !common::daemon_pids(outside.path()).contains(&kept)
-        {
+        if stopped(kept) || !pid_alive(kept) || !outside.daemon_pids().contains(&kept) {
             failures.push(format!(
                 "{what} stopped the daemon {kept} of {}, outside the test homes",
                 outside.path().display()
@@ -2009,6 +2020,14 @@ fn the_suite_stops_no_daemon_outside_its_test_homes() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+#[should_panic(expected = "a release zwallet ignores ZWALLET_TEST_DAEMON_SCOPE")]
+fn a_release_profile_run_starts_no_zwallet() {
+    // `common::zwallet_at` builds every zwallet the tests start and first asserts this with
+    // `cfg!(debug_assertions)`: under `cargo test --release` it is false, and the run fails there.
+    common::refuse_a_build_without_the_test_scope(false);
 }
 
 // The whitelist CLI (`.prd/04-whitelist.md`): `zwallet whitelist …` and `@nickname` recipients.

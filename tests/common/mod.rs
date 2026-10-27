@@ -180,7 +180,8 @@ impl Home {
         run_in(self.path(), args, None, env)
     }
 
-    /// The bare command (empty env except `ZWALLET_HOME`) for tests that wire stdio themselves.
+    /// The bare command (empty env except `ZWALLET_HOME` and the test scope, see [`zwallet_at`])
+    /// for tests that wire stdio themselves.
     pub fn command(&self, args: &[&str]) -> Command {
         command_in(self.path(), args)
     }
@@ -249,7 +250,7 @@ impl Home {
     /// that need the wallet locked but do not test `zwallet lock` itself (which stops every
     /// daemon of a test home, see [`exclusive`]).
     pub fn stop_daemons(&self) {
-        zwallet::core::protocol::stop_daemons(self.path(), None).expect("stop this home's daemons");
+        stop_daemons(self.path()).expect("stop this home's daemons");
     }
 
     /// Rewrites `wallet.json` through a JSON edit (metadata only unless the edit says otherwise).
@@ -321,7 +322,7 @@ impl Drop for Home {
     fn drop(&mut self) {
         // Only this home's daemons, by the process table: `zwallet lock` would also stop the
         // daemons of tests running alongside.
-        let _ = zwallet::core::protocol::stop_daemons(self.path(), None);
+        let _ = stop_daemons(self.path());
         for pid in self.daemon_pids() {
             // Never 0 or 1: kill(0) would hit this whole process group.
             if pid > 1 && pid_alive(pid) {
@@ -363,11 +364,26 @@ pub fn ptrace_scope_is_open() -> bool {
 
 /// The zwallet binary at `exe` with an empty environment but the test scope: [`TEST_SCOPE_ENV`]
 /// set to [`TEST_HOMES`], so a `lock` or a whitelist edit it runs stops only the daemons of test
-/// homes, never the user's own session. Every zwallet the tests start is built here.
+/// homes, never the user's own session. Every zwallet the tests start is built here, so a
+/// release-profile run (whose zwallet ignores the scope) fails here before any starts
+/// ([`refuse_a_build_without_the_test_scope`]).
 pub fn zwallet_at(exe: impl AsRef<OsStr>) -> Command {
+    refuse_a_build_without_the_test_scope(cfg!(debug_assertions));
     let mut cmd = Command::new(exe);
     cmd.env_clear().env(TEST_SCOPE_ENV, TEST_HOMES);
     cmd
+}
+
+/// Panics unless the build has `debug_assertions`. `CARGO_BIN_EXE_zwallet` is built with the
+/// same profile as these tests, and only a build with `debug_assertions` reads
+/// [`TEST_SCOPE_ENV`]: under `cargo test --release` every `lock` would stop the user's own
+/// session too.
+pub fn refuse_a_build_without_the_test_scope(debug_assertions: bool) {
+    assert!(
+        debug_assertions,
+        "a release zwallet ignores {TEST_SCOPE_ENV}, so a `lock` the tests run would stop the \
+         user's own session: run the tests without --release"
+    );
 }
 
 /// The binary with `args`, an empty environment but `ZWALLET_HOME` and the test scope
@@ -426,9 +442,17 @@ pub fn run_command(mut cmd: Command, stdin: Option<&str>) -> Run {
 /// Pids of the zwallet daemons for `home` (other than this process), found by argv
 /// (`zwallet daemon --home <home>`) in the OS process table: the same lookup `unlock` and
 /// `status` use, which also sees a non-dumpable daemon on Linux whose /proc fd directory is
-/// unreadable.
+/// unreadable. Only among the daemons of test homes: [`TEST_HOMES`] is given here, so a
+/// [`TEST_SCOPE_ENV`] exported in the shell changes nothing.
 pub fn daemon_pids(home: &Path) -> Vec<i32> {
-    zwallet::core::protocol::daemon_pids(home, None).expect("process table")
+    zwallet::core::protocol::home_daemon_pids_under(Path::new(TEST_HOMES), home)
+        .expect("process table")
+}
+
+/// Stops the daemons of `home` (only this home's) among those of test homes, as [`daemon_pids`]
+/// finds them.
+pub fn stop_daemons(home: &Path) -> zwallet::core::error::Result<Vec<i32>> {
+    zwallet::core::protocol::stop_daemons_under(Path::new(TEST_HOMES), home)
 }
 
 /// Pids of every zwallet daemon of a test home, whatever the home: what `zwallet lock` stops when

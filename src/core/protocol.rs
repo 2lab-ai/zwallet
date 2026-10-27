@@ -1768,6 +1768,8 @@ fn daemon_processes(keep: Option<i32>) -> Result<Vec<(i32, OsString)>> {
     daemon_processes_in(test_scope().as_ref(), keep)
 }
 
+/// [`daemon_processes`] under `scope` as given (`None`: every home), whatever the environment
+/// says: the one place the process table is filtered by home.
 fn daemon_processes_in(
     scope: Option<&HomePrefix>,
     keep: Option<i32>,
@@ -1796,14 +1798,16 @@ fn pids_of(daemons: Vec<(i32, OsString)>) -> Vec<i32> {
     sorted(daemons.into_iter().map(|(pid, _)| pid).collect())
 }
 
-/// Pids of every zwallet daemon of this user, whatever home it serves.
+/// Pids of every zwallet daemon of this user, whatever home it serves (in a debug build given
+/// [`TEST_SCOPE_ENV`], only those under it).
 pub fn all_daemon_pids() -> Result<Vec<i32>> {
     Ok(pids_of(daemon_processes(None)?))
 }
 
-/// Pids of every zwallet daemon of this user whose `--home` starts with `prefix`, matched as
-/// [`TEST_SCOPE_ENV`] is: what the test suite looks up from its own process, which carries no
-/// test scope.
+/// Test harness only: pids of every zwallet daemon of this user whose `--home` starts with
+/// `prefix`, matched as [`TEST_SCOPE_ENV`] is. The prefix is given, so a [`TEST_SCOPE_ENV`] in
+/// the environment changes nothing here.
+#[doc(hidden)]
 pub fn daemon_pids_under(prefix: &Path) -> Result<Vec<i32>> {
     let scope = HomePrefix::new(prefix.as_os_str());
     Ok(pids_of(daemon_processes_in(Some(&scope), None)?))
@@ -1811,11 +1815,23 @@ pub fn daemon_pids_under(prefix: &Path) -> Result<Vec<i32>> {
 
 /// Pids of this user's zwallet daemons for `home`, other than this process and `keep`.
 pub fn daemon_pids(home: &Path, keep: Option<i32>) -> Result<Vec<i32>> {
-    home_daemons(&HomeMatch::new(home), keep)
+    home_daemons(test_scope().as_ref(), &HomeMatch::new(home), keep)
 }
 
-fn home_daemons(wanted: &HomeMatch, keep: Option<i32>) -> Result<Vec<i32>> {
-    Ok(sorted(wanted.select(&daemon_processes(keep)?)))
+/// Test harness only: [`daemon_pids`] among the daemons under `prefix` (as in
+/// [`daemon_pids_under`]), whatever the environment says.
+#[doc(hidden)]
+pub fn home_daemon_pids_under(prefix: &Path, home: &Path) -> Result<Vec<i32>> {
+    let scope = HomePrefix::new(prefix.as_os_str());
+    home_daemons(Some(&scope), &HomeMatch::new(home), None)
+}
+
+fn home_daemons(
+    scope: Option<&HomePrefix>,
+    wanted: &HomeMatch,
+    keep: Option<i32>,
+) -> Result<Vec<i32>> {
+    Ok(sorted(wanted.select(&daemon_processes_in(scope, keep)?)))
 }
 
 /// Pids of this user's zwallet daemons for any home but `home` (`zwallet lock` stops them too):
@@ -1835,15 +1851,31 @@ pub fn other_daemon_pids(home: &Path) -> Result<Vec<i32>> {
 /// Stops every daemon for `home` except `keep` (`unlock` replacing a session); see
 /// [`stop_until_gone`].
 pub fn stop_daemons(home: &Path, keep: Option<i32>) -> Result<Vec<i32>> {
+    stop_home_daemons(test_scope().as_ref(), home, keep)
+}
+
+/// Test harness only: [`stop_daemons`] among the daemons under `prefix` (as in
+/// [`daemon_pids_under`]), whatever the environment says.
+#[doc(hidden)]
+pub fn stop_daemons_under(prefix: &Path, home: &Path) -> Result<Vec<i32>> {
+    let scope = HomePrefix::new(prefix.as_os_str());
+    stop_home_daemons(Some(&scope), home, None)
+}
+
+fn stop_home_daemons(
+    scope: Option<&HomePrefix>,
+    home: &Path,
+    keep: Option<i32>,
+) -> Result<Vec<i32>> {
     let wanted = HomeMatch::new(home);
     stop_until_gone(
-        || home_daemons(&wanted, keep),
+        || home_daemons(scope, &wanted, keep),
         &format!(" for {}", home.display()),
     )
 }
 
-/// Stops every zwallet daemon of this user, whatever home it serves (`zwallet lock`); see
-/// [`stop_until_gone`].
+/// Stops every zwallet daemon of this user, whatever home it serves (`zwallet lock`; in a debug
+/// build given [`TEST_SCOPE_ENV`], only those under it); see [`stop_until_gone`].
 pub fn stop_all_daemons() -> Result<Vec<i32>> {
     stop_until_gone(all_daemon_pids, "")
 }
