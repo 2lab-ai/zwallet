@@ -89,11 +89,17 @@ Transfer and Whitelist, while the list is not checked: V = check it with the pas
   cut to 17 with `...` in the bar. The warm-up opens signing for every client of the daemon,
   including the agent, and the bar says so. The lock state is read again every 5 s and on `r`,
   and is said once, on line 2. After `L` the bar says `checking...` until a fresh status lands;
-  a key or status read started before the lock finished is dropped. Each line fits 80 columns
-  with every value whole: on line 1 the key name is cut with `...` to 11 on Linux (whose
-  `not verified (no session check on Linux)` is 40 long) and to 32 elsewhere; in the key list
-  to 27, or less when the index is wider than three digits, so the address after it is whole;
-  on line 2 the expiry to 17 and a status error to 37, and the RPC host is at most 32. `q` while
+  a key or status read started before the lock finished is dropped. Each line fits its width
+  with every value whole or cut with `...`, never at the edge. On line 1 the trust words of the
+  state come first and the key name gives way: it is cut with `...` to what the chain, the short
+  address and those words leave, at most 32 and at least 8 (5 characters and `...`). An
+  impostor's `NOT this build's key daemon: ` keeps room for 16 characters of its warning before
+  the name gets more; the rest of the warning is cut with `...`. Only words that cannot fit beside
+  the narrowest name are cut, with `...` too; at 80 columns none are (the longest, the 40 of
+  `not verified (no session check on Linux)`, fit beside 8 with the widest chain). In the key
+  list the name is cut to 27, or less when the index is wider than three digits, so the address
+  after it is whole; on line 2 the expiry is cut to 17 and a status error to 37, and the RPC host
+  is at most 32. `q` while
   `L` is stopping daemons waits for it (`locking... (quits when done)`); a stop that failed is
   printed after the terminal is given back.
 - **Review screen:**
@@ -511,9 +517,12 @@ it as well.
   after the first guard dropped or the first call failed), and before it starts any other thread
   or blocking task. So a panic while the terminal is being taken (modes recorded, raw mode on, the
   screen not yet set up) comes on the taking thread, and is handled like one while it is held:
-  the recorded modes are restored and the process ends. A panic on another thread then (which
-  that order rules out) gets the same, without waiting for the taking thread. `_exit` runs no destructors, so a `Zeroizing` buffer such
-  as `PasswordBuf` is not cleared on that path: its memory goes with the process.
+  the recorded modes are restored and the process ends. A panic on another thread then is what
+  that call order rules out, and the hook does not make it safe: if it comes before raw mode is
+  set, it restores the modes (or finds none recorded), the taking thread then sets raw mode, and
+  the process can end raw. The `acquiring-locked` test covers only the other order, raw mode
+  first. `_exit` runs no destructors, so a `Zeroizing` buffer such as `PasswordBuf` is not
+  cleared on that path: its memory goes with the process.
 
 ## Architecture
 
@@ -587,8 +596,10 @@ Decisions of the dispatcher when TUI-1 was split into three PRs
    separator and a 32-character host fit 78 columns; every value is whole or cut with `...`;
    `q` waits for a running `L`; a status read from before the lock is dropped.
 6. After TUI-1b's review round 2: key reads carry the generation too; after a lock the bar
-   says `checking...` until a fresh status lands; the bar's key name is 32 wide where the Linux
-   note does not exist; the key list narrows the name for an index of four digits or more.
+   says `checking...` until a fresh status lands; the key list narrows the name for an index of
+   four digits or more.
+7. After TUI-1b's review round 3: line 1's key name is sized from the trust words drawn in each
+   state (at least 8), so an impostor's warning words are never lost to a long name.
 
 ## Changes on 2026-10-27
 

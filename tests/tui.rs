@@ -10,6 +10,7 @@ use common::{Frame, Home, PTY_SIZE, PtyChild};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, Cell};
+use ratatui::layout::Rect;
 use serde_json::Value;
 use std::time::{Duration, Instant, SystemTime};
 use zwallet::chains::{self, Net};
@@ -96,7 +97,13 @@ fn budget(source: Source) -> usize {
 
 /// Rule 3 for one outside value `p` of a frame's `placed` values: inert, within its budget, and
 /// drawn whole where it was placed (a value one line long has its whole width there, never cut
-/// by the edge; a value that has to be shorter is cut with `...` before it is placed).
+/// by the edge; a value that has to be shorter is cut with `...` before it is placed), and
+/// nowhere else but inside placed areas.
+///
+/// Fixtures: a value of 4 or more characters that also occurs in zwallet's own text (`lock`,
+/// `keys`, `quit`, `status`, `verified`, `warning`, `zwallet`, ...) fails the frame, and so does
+/// one that is a substring of some other text drawn where nothing is placed. Pick fixture names
+/// and values that occur in neither.
 fn assert_placed(rows: &[String], p: &Placed, placed: &[Placed]) {
     let (source, text) = (p.outside.source(), p.outside.text());
     assert!(
@@ -139,20 +146,34 @@ fn assert_placed(rows: &[String], p: &Placed, placed: &[Placed]) {
         shown[n..].iter().all(|c| *c == ' '),
         "{source:?} at {area:?}: {shown:?}"
     );
-    // And no other row shows it (rows where the same value is placed again, maybe cut to
-    // another width, excepted).
-    if text.len() >= 12 {
-        let probe = &text[..12];
-        for (y, r) in rows.iter().enumerate() {
-            let y = y as u16;
-            let placed_here = placed.iter().any(|q| {
-                q.outside.source() == source
-                    && q.outside.text().starts_with(probe)
-                    && (q.area.y..q.area.bottom()).contains(&y)
+    // And no other place shows it: a verbatim copy of it (or of its core, without `...`) of 4
+    // characters or more, or a part of 12 or more, is a stray unless it lies wholly inside a
+    // placed area. Each placed area holds that value's own text (checked for it as for this one),
+    // so a match there is part of it, whatever its source: an error quoting a key name the list
+    // shows too.
+    let full: Vec<char> = text.chars().collect();
+    let core: Vec<char> = text.trim_end_matches("...").chars().collect();
+    for (y, row) in rows.iter().enumerate() {
+        let row: Vec<char> = row.chars().collect();
+        for x in 0..row.len() {
+            let tail = &row[x..];
+            let common = tail.iter().zip(&core).take_while(|(a, b)| a == b).count();
+            let whole = full.len() >= 4 && tail.starts_with(&full);
+            let exact = whole || (core.len() >= 4 && common == core.len());
+            if !exact && common < 12 {
+                continue;
+            }
+            let end = x + if whole { full.len() } else { common };
+            let (cy, from, to) = (y as u16, x as u16, end as u16);
+            let inside = placed.iter().any(|q| {
+                (q.area.y..q.area.bottom()).contains(&cy)
+                    && q.area.x <= from
+                    && to <= q.area.right()
             });
             assert!(
-                placed_here || !r.contains(probe),
-                "{source:?} {probe:?} also on row {y}: {r:?}"
+                inside,
+                "{source:?} {text:?} also on row {y} at column {x}: {:?}",
+                rows[y]
             );
         }
     }
@@ -351,19 +372,49 @@ fn an_index_of_1000_and_a_32_character_name_never_cut_the_address() {
     assert!(b_row.contains("..."), "the name is cut: {b_row:?}");
 }
 
+/// The shortest a key name is cut to on bar line 1, `...` included; written here, not read from
+/// the code.
+const BAR_NAME_MIN: usize = 8;
+
+/// `shown` is `whole`, or a cut of it that ends in `...` (and is at least `min` long).
+fn whole_or_cut(shown: &str, whole: &str, min: usize) -> bool {
+    shown == whole
+        || (shown.len() >= min
+            && shown.ends_with("...")
+            && whole.starts_with(shown.trim_end_matches("...")))
+}
+
 #[test]
-fn line_1_fits_80_columns_for_every_chain_with_a_32_character_key_name() {
+fn line_1_fits_80_columns_for_every_chain_and_every_trust_with_a_32_character_key_name() {
     let name = "n".repeat(32);
+    // The longest warning `PeerCheck::warning` writes: its words, a pid, and the executable path
+    // (an outside value) it quotes; and one past every budget.
+    let warning = format!(
+        "the process answering on the key daemon socket (pid 4294967295) runs other code than \
+         this zwallet build ({}); run `zwallet lock` and unlock again",
+        "/p".repeat(32)
+    );
+    let flood = "w".repeat(600);
+    let not_verified = if cfg!(target_os = "linux") {
+        "not verified (no session check on Linux)"
+    } else {
+        "not verified"
+    };
+    let impostor = "NOT this build's key daemon: ";
     for chain in zwallet::chains::CHAINS {
-        for (trust, words) in [
-            (Trust::Session, "verified by session"),
+        for (trust, words, w) in [
+            (Trust::Session, "verified by session", None),
+            (Trust::Unverified(None), not_verified, None),
+            (Trust::Locked, "not verified", None),
             (
-                Trust::Unverified(None),
-                if cfg!(target_os = "linux") {
-                    "not verified (no session check on Linux)"
-                } else {
-                    "not verified"
-                },
+                Trust::Unverified(Some(warning.clone())),
+                impostor,
+                Some(warning.as_str()),
+            ),
+            (
+                Trust::Unverified(Some(flood.clone())),
+                impostor,
+                Some(flood.as_str()),
             ),
         ] {
             let net = Net {
@@ -378,18 +429,89 @@ fn line_1_fits_80_columns_for_every_chain_with_a_32_character_key_name() {
             app.update(Msg::Status(app.generation(), Ok(status)));
             let (rows, _) = checked_frame(&mut screen(80, 24), &app);
             let line = rows[22].trim_end();
-            assert!(line.starts_with(chain.key), "{line:?}");
-            assert!(line.ends_with(words), "{}: {line:?}", chain.key);
-            assert!(line.contains("0x3C44...93BC"), "{line:?}");
-            // The widest name the bar can show on this platform is drawn whole.
-            let shown = if cfg!(target_os = "linux") {
-                "nnnnnnnn...".to_string()
-            } else {
-                name.clone()
-            };
-            assert!(line.contains(&format!(" {shown} ")), "{line:?}");
+            let case = format!("{} {words:?}", chain.key);
+            // chain | name 0x3C44...93BC | trust words [warning]
+            let rest = line
+                .strip_prefix(&format!("{} | ", chain.key))
+                .unwrap_or_else(|| panic!("{case}: {line:?}"));
+            let (shown_name, rest) = rest
+                .split_once(" 0x3C44...93BC | ")
+                .unwrap_or_else(|| panic!("{case}: {line:?}"));
+            assert!(
+                whole_or_cut(shown_name, &name, BAR_NAME_MIN),
+                "{case}: the name {shown_name:?} in {line:?}"
+            );
+            match w {
+                // At 80 columns no state's words are cut.
+                None => assert_eq!(rest, words, "{case}: in {line:?}"),
+                Some(w) => {
+                    // The words whole, then the warning whole or cut with `...`, never left out.
+                    let shown = rest
+                        .strip_prefix(impostor)
+                        .unwrap_or_else(|| panic!("{case}: the words cut in {line:?}"));
+                    let whole = Outside::warning(w).text().to_string();
+                    assert!(
+                        whole_or_cut(shown, &whole, 4),
+                        "{case}: the warning {shown:?} in {line:?}"
+                    );
+                }
+            }
         }
     }
+}
+
+#[test]
+#[should_panic(expected = "also on row 1 at column 20")]
+fn assert_placed_catches_a_stray_copy_of_a_name_that_shares_another_names_prefix() {
+    // Two key names with the same first 12 characters, each placed on its own row; a stray copy
+    // of the first one on the second one's row must not pass for the second one.
+    let (a, b) = ("treasury-main-01", "treasury-main-02");
+    let rows = vec![format!("{a:<40}"), format!("{b:<20}{a:<20}")];
+    let at = |text: &str, y: u16| Placed {
+        outside: Outside::key_name(text),
+        area: Rect::new(0, y, text.len() as u16, 1),
+    };
+    let placed = vec![at(a, 0), at(b, 1)];
+    for p in &placed {
+        assert_placed(&rows, p, &placed);
+    }
+}
+
+#[test]
+#[should_panic(expected = "also on row 2 at column 1")]
+fn assert_placed_catches_a_stray_copy_that_a_border_cuts_short() {
+    // A warning placed on row 0, and drawn raw again in a bordered pane on row 2, where the
+    // border cuts it after 30 characters: fewer than the placed value, followed by `|`.
+    let text = "the process answering on the key daemon socket (pid 4242) is no";
+    let warning = Outside::warning(text);
+    let rows = vec![
+        format!("{text:<80}"),
+        " ".repeat(80),
+        format!("|{}|{}", &text[..30], " ".repeat(48)),
+    ];
+    let placed = vec![Placed {
+        area: Rect::new(0, 0, warning.text().len() as u16, 1),
+        outside: warning,
+    }];
+    assert_placed(&rows, &placed[0], &placed);
+}
+
+#[test]
+#[should_panic(expected = "also on row 1 at column 0")]
+fn assert_placed_catches_a_verbatim_copy_of_a_short_cut_value() {
+    // A key name cut to `abcdefghi...` (12 characters, a core of 9), placed on row 0, and copied
+    // verbatim on row 1 where nothing is placed.
+    let name = Outside::key_name("abcdefghijklmnop").cut(12);
+    assert_eq!(name.text(), "abcdefghi...");
+    let rows = vec![
+        format!("{:<40}", name.text()),
+        format!("{:<40}", name.text()),
+    ];
+    let placed = vec![Placed {
+        area: Rect::new(0, 0, 12, 1),
+        outside: name,
+    }];
+    assert_placed(&rows, &placed[0], &placed);
 }
 
 #[test]
@@ -467,6 +589,28 @@ fn t10_a_status_refresh_that_reports_locked_makes_the_bar_say_locked() {
     assert!(rows[23].starts_with("locked | "), "{:?}", rows[23]);
     assert!(!rows.join("\n").contains("signing"));
     assert_eq!(app.update(Msg::Tick), vec![Effect::LoadStatus(0)]);
+}
+
+#[test]
+fn an_error_that_quotes_a_listed_key_name_is_drawn_beside_it() {
+    // A lock that failed, its error naming the key `treasury`, while the key list shows that key:
+    // the name is placed twice, once on its own and once inside the error.
+    let mut keys = keys_ab();
+    keys.rows[0].name = "treasury".into();
+    let mut app = app();
+    app.update(Msg::Keys(app.generation(), Ok(keys)));
+    app.update(Msg::Status(app.generation(), Ok(open_status(now() + 3600))));
+    app.update(Msg::Key(Key::Char('L')));
+    let failed = WalletError::validation("could not stop the daemon of key 'treasury'");
+    app.update(Msg::Locked(Err(failed)));
+    let (rows, placed) = checked_frame(&mut screen(80, 24), &app);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains(" treasury ") && r.contains(A))
+    );
+    assert!(placed
+        .iter()
+        .any(|p| p.outside.source() == Source::Error && p.outside.text().contains("'treasury'")));
 }
 
 #[test]
