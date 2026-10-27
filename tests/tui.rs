@@ -602,6 +602,28 @@ fn t10_a_status_refresh_that_reports_locked_makes_the_bar_say_locked() {
 }
 
 #[test]
+fn an_error_that_quotes_a_listed_key_name_is_drawn_beside_it() {
+    // A lock that failed, its error naming the key `treasury`, while the key list shows that key:
+    // the name is placed twice, once on its own and once inside the error.
+    let mut keys = keys_ab();
+    keys.rows[0].name = "treasury".into();
+    let mut app = app();
+    app.update(Msg::Keys(app.generation(), Ok(keys)));
+    app.update(Msg::Status(app.generation(), Ok(open_status(now() + 3600))));
+    app.update(Msg::Key(Key::Char('L')));
+    let failed = WalletError::validation("could not stop the daemon of key 'treasury'");
+    app.update(Msg::Locked(Err(failed)));
+    let (rows, placed) = checked_frame(&mut screen(80, 24), &app);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains(" treasury ") && r.contains(A))
+    );
+    assert!(placed
+        .iter()
+        .any(|p| p.outside.source() == Source::Error && p.outside.text().contains("'treasury'")));
+}
+
+#[test]
 fn q_while_l_is_locking_quits_once_the_lock_is_done_and_its_error_comes_out() {
     let ready = |app: &mut App| {
         app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
