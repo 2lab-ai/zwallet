@@ -364,7 +364,9 @@ fn cache_mismatch(key: &KeyEntry, chain: &str, derived: &str) -> Result<Option<S
 ///   builds, every build zwallet ships), and equal to the cache. That daemon decrypted this home's
 ///   wallet.json with the password typed at `unlock`.
 /// - `verified: false`: the cache in wallet.json, which any process of this user can edit, or a
-///   derivation by something else on `d.sock` (with a `warning` naming it).
+///   derivation by something else on `d.sock`: with a `warning` naming it when it is known to be
+///   another program; one whose code cannot be read (an unsigned program, such as an x86_64 one
+///   on any Mac, or a non-dumpable one on Linux) is not named, only not verified.
 ///
 /// What a session cannot rule out: a process of this user that swapped in its own wallet.json
 /// and unlocked it with its own password through this very binary, or injected code into it. Only
