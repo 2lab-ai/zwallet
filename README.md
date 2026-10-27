@@ -728,9 +728,12 @@ data).
 - **Daemon**: `unlock` pins the zwallet binary before it asks for the password. On Linux that is
   the running image (`/proc/self/exe`), so a file swapped in at the binary's path while the human
   types is never started. On macOS it is the file's identity, checked again right before the
-  start: a binary swapped in while the human types is refused, but one swapped in between that
-  check and the exec is not (macOS has no `fexecve`), and one swapped in before `unlock` ran gets
-  the password on any OS (see **Known limits**). On Linux, `unlock` and `create --unlock` also
+  start: a binary swapped in while the human types is refused. One swapped in between that check
+  and the exec is still started (macOS has no `fexecve`), but once it asks for input, and before
+  the password is written, `unlock` requires that it runs this build's code (its `csops` cdhash
+  equals `unlock`'s own and it is `CS_VALID`); otherwise it is stopped, given nothing, and
+  `unlock` fails with `VALIDATION_ERROR`. One swapped in before `unlock` ran gets the password on
+  any OS (see **Known limits**). On Linux, `unlock` and `create --unlock` also
   refuse, before the password prompt, when `kernel.yama.ptrace_scope` is 0 or Yama is missing
   (any same-user process could attach to the new daemon during its start-up); set it to 1 or
   more, or pass `--allow-ptrace-scope-0` to accept that. `unlock` then starts the pinned binary
@@ -818,10 +821,15 @@ the phrase, `lock` must end all signing, and no output may present its address a
 things a same-user process can still do, and what to do about them:
 
 - **Swap the zwallet binary.** A binary replaced before `unlock` (or `create`, `backup`,
-  `--verify`) runs gets the password; on macOS so does one swapped in between `unlock`'s identity
-  check and its exec of the daemon (there is no `fexecve`). A Homebrew-installed binary is
-  writable by the user, and so by the agent. For real protection install zwallet where the agent
-  cannot write (e.g. a root-owned directory), or run the agent as a different OS user.
+  `--verify`) runs gets the password. On macOS one swapped in between `unlock`'s identity check
+  and its exec of the daemon (there is no `fexecve`) is started, but gets the password only if it
+  runs this build's code when it asks for input (same cdhash, `CS_VALID`). That check does not
+  see what the started program did before it exec'd this build: a process it forked can keep the
+  daemon's channel and race it for the password, or it can exec this build with
+  `DYLD_INSERT_LIBRARIES`. It checks nothing on a build the linker did not sign (the x86_64
+  macOS binary). A Homebrew-installed binary is writable by the user, and so by the agent. For
+  real protection install zwallet where the agent cannot write (e.g. a root-owned directory), or
+  run the agent as a different OS user.
 - **Read the human's terminal** while the password is typed: a same-user process can open the
   terminal device the prompt reads. The same access lets it write there too, so it can draw
   whatever it likes on that terminal: the escaping above covers zwallet's own output only.

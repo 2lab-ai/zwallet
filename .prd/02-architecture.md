@@ -71,7 +71,11 @@ seed, so the wallet file and the daemon protocol do not change.
      overrides this (needed in containers without Yama).
   2. Before prompting, the CLI pins the daemon executable. Linux spawns `/proc/self/exe`; macOS
      records the (dev, ino) of `current_exe` and re-checks it right before the spawn. macOS has no
-     `fexecve`, so a swap racing check→exec is part of the binary-swap limit.
+     `fexecve`, so a swap racing check→exec is started; once the child asks for input, the CLI
+     writes the password only if the child's cdhash (`csops` by pid, the child unreaped) equals
+     its own and the child is `CS_VALID`, and otherwise kills it (`VALIDATION_ERROR`). Code the
+     child ran before exec'ing this build, and an unsigned (x86_64) build, stay part of the
+     binary-swap limit.
   3. It spawns its **own** `zwallet daemon --home <canonical home>` child, with setsid. Every other
      open fd is marked close-on-exec: macOS lists them with `PROC_PIDLISTFDS`, Linux uses
      `close_range` and falls back to `/proc/self/fd`. Concurrent unlocks take turns on `u.lock`.

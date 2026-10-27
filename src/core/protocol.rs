@@ -663,9 +663,18 @@ pub fn read_go(fd: RawFd, wait: Duration) -> Result<()> {
 /// the image this process runs (`/proc/self/exe`), so a binary swapped in at that path meanwhile
 /// is never started. Elsewhere it is the canonical path of `current_exe()`, whose (dev, ino) is
 /// recorded now and checked again right before the spawn: that refuses a binary swapped in while
-/// the human types, but not one swapped in between that check and the exec (macOS has no
-/// `fexecve`). A binary swapped in before `unlock` started gets the password either way; the
-/// README's "Known limits" says where to install zwallet so an agent cannot write it.
+/// the human types. One renamed in between that check and the exec is still started (macOS has
+/// no `fexecve`), but gets nothing: once the child asks for input, and before the password is
+/// written, [`check_started_code`] requires that it runs this build's code (its cdhash is this
+/// process's own, and it is `CS_VALID`), and otherwise it is killed.
+///
+/// What that check does not cover: a binary swapped in before `unlock` started (it is this
+/// process, and gets the password on any OS); code the child ran before it exec'd this build,
+/// since the cdhash is read once it asks for input (a process it forked can keep the channel and
+/// race the daemon for the password, or it can pass `DYLD_INSERT_LIBRARIES` to the exec: the
+/// exec trick [`check_peer_macos`] guards against on `d.sock`); and a build the linker did not
+/// sign (x86_64 macOS), which has no cdhash to compare. The README's "Known limits" says where to
+/// install zwallet so an agent cannot write it.
 pub struct DaemonExe {
     path: PathBuf,
     #[cfg(not(target_os = "linux"))]
@@ -709,6 +718,28 @@ impl DaemonExe {
         }
         Ok(())
     }
+}
+
+/// Fails unless the daemon `child` that [`spawn_daemon`] started runs this build's code (macOS):
+/// its cdhash is this process's own and it is `CS_VALID`. Asked by pid, which is safe here: the
+/// child has not been reaped, so its pid names no other process. A `csops` that fails (unsigned
+/// code, or a child that already exited) refuses it. A build the linker did not sign (x86_64
+/// macOS) has no cdhash of its own to compare, and checks nothing.
+#[cfg(target_os = "macos")]
+fn check_started_code(child: &Child) -> Result<()> {
+    let Some(own) = own_cdhash() else {
+        return Ok(());
+    };
+    let pid = child.id() as libc::pid_t;
+    if pid_cdhash(pid) == Some(own) && pid_cs_valid(pid) == Some(true) {
+        return Ok(());
+    }
+    Err(WalletError::validation(format!(
+        "the key daemon this command started (pid {pid}) does not run this zwallet build's code: \
+         the zwallet binary was replaced as it was started, and nothing was given to it. It was \
+         stopped and no new session was started, so the wallet stays locked (a session that was \
+         already running is untouched)"
+    )))
 }
 
 // ---- Who answered on `d.sock` ----
@@ -814,20 +845,37 @@ const CS_VALID: u32 = 0x0000_0001;
 #[cfg(target_os = "macos")]
 const CDHASH_LEN: usize = 20;
 
-/// This process's own cdhash (`csops` on `getpid`).
+/// This process's own cdhash (`csops` on `getpid`). `None` for a build the linker did not sign
+/// (x86_64 macOS): `csops` has no cdhash for unsigned code.
 #[cfg(target_os = "macos")]
 fn own_cdhash() -> Option<[u8; CDHASH_LEN]> {
+    pid_cdhash(std::process::id() as libc::pid_t)
+}
+
+/// The cdhash of the process `pid` (`csops`). Only for a pid that cannot name another process by
+/// now: this process's own, or its child that has not been reaped.
+#[cfg(target_os = "macos")]
+fn pid_cdhash(pid: libc::pid_t) -> Option<[u8; CDHASH_LEN]> {
     let mut hash = [0u8; CDHASH_LEN];
-    // SAFETY: csops writes at most CDHASH_LEN bytes into `hash` for this pid.
+    // SAFETY: csops writes at most CDHASH_LEN bytes into `hash` for `pid`.
+    let rc = unsafe { csops(pid, CS_OPS_CDHASH, hash.as_mut_ptr().cast(), CDHASH_LEN) };
+    (rc == 0).then_some(hash)
+}
+
+/// Whether the process `pid` is `CS_VALID` (`csops`), with the caveat of [`pid_cdhash`].
+#[cfg(target_os = "macos")]
+fn pid_cs_valid(pid: libc::pid_t) -> Option<bool> {
+    let mut status: u32 = 0;
+    // SAFETY: csops writes one u32 of status for `pid`.
     let rc = unsafe {
         csops(
-            libc::getpid(),
-            CS_OPS_CDHASH,
-            hash.as_mut_ptr().cast(),
-            CDHASH_LEN,
+            pid,
+            CS_OPS_STATUS,
+            (&mut status as *mut u32).cast(),
+            std::mem::size_of::<u32>(),
         )
     };
-    (rc == 0).then_some(hash)
+    (rc == 0).then_some(status & CS_VALID != 0)
 }
 
 /// The cdhash of the process `token` names (`csops_audittoken`, so pid reuse cannot swap the
@@ -1203,7 +1251,8 @@ fn macos_exe_path(pid: i32, max: usize) -> String {
 /// The new daemon is this process's own child (`setsid`, argv `zwallet daemon --home <canonical
 /// home>`, no environment, no descriptor but its channel), started from `exe`. Its fds 0 and 1
 /// are one end of a socketpair whose other end only this process holds. Over that channel:
-/// 1. it asks for input only once core dumps are off; it then gets the TTL and the password,
+/// 1. it asks for input only once core dumps are off; on macOS it must then run this build's
+///    code ([`check_started_code`]); it then gets the TTL and the password,
 /// 2. it decrypts and reports `decrypted`. A wrong password ends here and leaves any running
 ///    session untouched;
 /// 3. only then are the old daemons stopped (polite `lock`, then the process table);
@@ -1512,6 +1561,10 @@ async fn drive_daemon(
             .map_err(io_err("cannot read from the key daemon"))?,
     );
     expect_stage(&lines, STAGE_INPUT, INPUT_TIMEOUT)?;
+    // What started may not be the file `DaemonExe::check` saw (no `fexecve`): only this build's
+    // code gets the password.
+    #[cfg(target_os = "macos")]
+    check_started_code(child)?;
     // Unbuffered socket writes: no intermediate copy of the password in this process.
     (&chan)
         .write_all(&encode_unlock_input(ttl, password)?)
@@ -2780,6 +2833,84 @@ mod tests {
                 e.message
             );
         }
+    }
+
+    /// Set only for the child [`the_started_daemon_check_accepts_only_this_builds_code`] starts.
+    #[cfg(target_os = "macos")]
+    const CHILD_WAITS: &str = "ZWT_CHILD_WAITS_FOR_STDIN";
+
+    /// No check of its own: [`the_started_daemon_check_accepts_only_this_builds_code`] runs this
+    /// test binary as a child (so it runs this build's code) through this test, which then waits
+    /// until its stdin closes. Run any other way it returns at once.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn child_running_this_build_waits_for_stdin() {
+        if std::env::var_os(CHILD_WAITS).is_some() {
+            let _ = std::io::stdin().read_to_end(&mut Vec::new());
+        }
+    }
+
+    /// [`check_started_code`] refuses a child that runs other code, and one that already exited,
+    /// and accepts one that runs this build's code. The test binary stands for the build here: it
+    /// is linker-signed like zwallet, and `own_cdhash` is its own.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_started_daemon_check_accepts_only_this_builds_code() {
+        assert!(own_cdhash().is_some(), "this test binary is linker-signed");
+        // Other code: `sleep` is Apple-signed and CS_VALID, so only the cdhash refuses it.
+        let sleep = KilledOnDrop(
+            Command::new("/bin/sleep")
+                .arg("30")
+                .env_clear()
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let spid = sleep.0.id();
+        assert_eq!(pid_cs_valid(spid as libc::pid_t), Some(true));
+        let e = check_started_code(&sleep.0).expect_err("sleep passed as this build's code");
+        assert_eq!(e.code, ErrorCode::ValidationError);
+        assert!(
+            e.message.contains(&format!(
+                "(pid {spid}) does not run this zwallet build's code"
+            )),
+            "{}",
+            e.message
+        );
+        drop(sleep);
+
+        // This build's code: this test binary again, kept alive by the helper test above.
+        let mut this = KilledOnDrop(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "core::protocol::tests::child_running_this_build_waits_for_stdin",
+                    "--exact",
+                    "--test-threads=1",
+                    "-q",
+                ])
+                .env_clear()
+                .env(CHILD_WAITS, "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        check_started_code(&this.0).expect("a child that runs this build's code is refused");
+
+        // Exited but not reaped (a zombie): the kernel has no code for it any more, so refused.
+        drop(this.0.stdin.take());
+        let tpid = this.0.id();
+        // SAFETY: `info` is a valid siginfo_t; waits, without reaping it (WNOWAIT), for this
+        // process's own child to exit.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc =
+            unsafe { libc::waitid(libc::P_PID, tpid, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        assert!(
+            check_started_code(&this.0).is_err(),
+            "an exited child passed as this build's code"
+        );
     }
 
     #[test]
