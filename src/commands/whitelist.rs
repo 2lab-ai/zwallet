@@ -416,8 +416,9 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
     let fresh = Whitelist::empty(&WHITELIST_RULES);
     // Every nickname and fee cap this summary shows from the files shares one budget. The
     // change's caps are charged first: a reset sets them back, so they are the ones to set again,
-    // and no list of names may crowd them out. Then each file's names, once, for every line that
-    // names the file.
+    // and no list of names may crowd them out. Then each file's names, charged once and shown
+    // once: a reset names them where it says what it drops, and each file's own line then gives
+    // its generation and count only.
     let budget = FileTextBudget::new();
     let fee_cap_was = match change {
         Change::FeeCap { chain, .. } => {
@@ -436,6 +437,8 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
         _ => Vec::new(),
     };
     let names = FileNames::of(&current, &next, &budget);
+    let reset = matches!(change, Change::Reset);
+    let on_file_line = |names: &Option<String>| (!reset).then(|| names.clone().unwrap_or_default());
     let mut lines = vec!["The password authorizes this whitelist change:".to_string()];
     match change {
         Change::Add(e) => {
@@ -491,7 +494,7 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
     match &current {
         FileView::List(l) => lines.push(format!(
             "  whitelist.json now: {}, not verified yet",
-            gen_entries(l, names.current.as_deref().unwrap_or_default())
+            gen_entries(l, on_file_line(&names.current).as_deref())
         )),
         FileView::Absent => lines.push("  whitelist.json: none yet".to_string()),
         FileView::Unreadable(why) => lines.push(unreadable_line(WHITELIST_FILE, why)),
@@ -499,7 +502,7 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
     match &next {
         FileView::List(l) => lines.push(format!(
             "  whitelist.next.json: {}, an unfinished edit, not verified yet",
-            gen_entries(l, names.next.as_deref().unwrap_or_default())
+            gen_entries(l, on_file_line(&names.next).as_deref())
         )),
         FileView::Absent if leftover => lines.push(
             "  whitelist.next.json: a copy of whitelist.json (e.g. left after a change)"
@@ -508,7 +511,7 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
         FileView::Absent => {}
         FileView::Unreadable(why) => lines.push(unreadable_line(NEXT_FILE, why)),
     }
-    outcome_lines(&mut lines, &current, &next, matches!(change, Change::Reset));
+    outcome_lines(&mut lines, &current, &next, reset);
     lines.push(
         "  every zwallet daemon of this user is stopped first, as `zwallet lock` does".to_string(),
     );
@@ -766,14 +769,19 @@ fn headline(change: &Change) -> String {
     }
 }
 
-/// `gen G, n entries (names)` of a list read from a file, `names` as [`FileNames`] has them.
-fn gen_entries(list: &Whitelist, names: &str) -> String {
+/// `gen G, n entries (names)` of a list read from a file, `names` as [`FileNames`] has them, or
+/// `gen G, n entries` where another line names them.
+fn gen_entries(list: &Whitelist, names: Option<&str>) -> String {
     let n = list.entries.len();
-    format!(
-        "gen {}, {n} {} ({names})",
+    let mut text = format!(
+        "gen {}, {n} {}",
         list.generation,
         if n == 1 { "entry" } else { "entries" },
-    )
+    );
+    if let Some(names) = names {
+        text.push_str(&format!(" ({names})"));
+    }
+    text
 }
 
 /// What `file` says about the entry `nickname`.
@@ -886,8 +894,8 @@ const NAMES_SHOWN: usize = 20;
 /// (anyone of this user's to write): every nickname it names and every fee cap it shows
 /// ([`file_cap`], the amount in the coin and in wei). A parsed list's values are in `add`'s
 /// shapes (a nickname `[a-z0-9_-]`, at most 32; a cap at most 78 digits), but 20 names per file in
-/// a column, or 16 caps of 157 digits, are a grid of their own. A file's names are charged once
-/// per command ([`FileNames`]), however many lines repeat them.
+/// a column, or 16 caps of 157 digits, are a grid of their own. What it counts is what reaches
+/// the screen: a file's names are charged once and shown once ([`FileNames`]).
 struct FileTextBudget(std::cell::Cell<usize>);
 
 impl FileTextBudget {
@@ -925,8 +933,8 @@ fn list_names(list: &Whitelist, budget: &FileTextBudget) -> String {
 }
 
 /// Each list file's names as one summary shows them ([`list_names`]): whitelist.json's, then
-/// whitelist.next.json's, charged to the summary's budget once, after its fee caps, and the same
-/// text on every line that names the file (`None` for a file that is not a list).
+/// whitelist.next.json's, charged to the summary's budget once, after its fee caps, and shown on
+/// one line only (`None` for a file that is not a list).
 struct FileNames {
     current: Option<String>,
     next: Option<String>,
@@ -2385,7 +2393,7 @@ mod tests {
         // nicknames of 12 characters (240 per file) and their own caps on 4 chains (32
         // characters each, 256 for both files). A reset sets those caps back to the defaults, so
         // they are the ones to set again: they are charged before any name, and all 8 show. Each
-        // file's names are charged once, though the summary names them on two lines.
+        // file's names are charged once and shown once, where the reset says what it drops.
         let tmp = tempfile::tempdir().unwrap();
         let caps = [
             ("arbitrum", 1u64),
@@ -2430,9 +2438,20 @@ mod tests {
             }
         }
         assert!(!text.contains("more caps from the files"), "{text}");
-        // whitelist.json's names fit in what the caps left, and the same text names them on the
-        // line of what the reset drops and on the file's own line.
+        // whitelist.json's names fit in what the caps left, on the line of what the reset drops
+        // only; each file's own line gives its generation and count.
         let names: Vec<String> = (0..20).map(|i| format!("payee-num-{i:02}")).collect();
-        assert_eq!(text.matches(&names.join(", ")).count(), 2, "{text}");
+        let dropped = text
+            .lines()
+            .find(|l| l.contains("every entry is dropped: "))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(dropped.contains(&names.join(", ")), "{text}");
+        assert_eq!(text.matches("payee-num-00").count(), 1, "{text}");
+        for line in [
+            "  whitelist.json now: gen 3, 20 entries, not verified yet",
+            "  whitelist.next.json: gen 4, 20 entries, an unfinished edit, not verified yet",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line:?} not in {text}");
+        }
     }
 }
