@@ -1982,9 +1982,10 @@ impl Outside {
         )
     }
 
-    /// Unlocks it for 30 s and returns its daemon's pid.
+    /// Unlocks it for 10 minutes and returns its daemon's pid: long enough that a slow run never
+    /// sees it expire (its drop stops it).
     fn unlock(&self) -> i32 {
-        self.run_stdin(&["unlock", "30s", "--password-stdin", "--json"])
+        self.run_stdin(&["unlock", "10m", "--password-stdin", "--json"])
             .ok()["daemonPid"]
             .as_i64()
             .unwrap() as i32
@@ -2040,10 +2041,23 @@ fn the_suite_stops_no_daemon_outside_its_test_homes() {
                 r.stderr.trim()
             ));
         }
-        if stopped(kept) || !pid_alive(kept) || !outside.daemon_pids().contains(&kept) {
+        // Which of the three happened: an outside daemon that merely expired is not alive, but
+        // not listed as stopped.
+        let mut seen = Vec::new();
+        if stopped(kept) {
+            seen.push(format!("{what} listed it as stopped"));
+        }
+        if !pid_alive(kept) {
+            seen.push("it is not alive".to_string());
+        }
+        if !outside.daemon_pids().contains(&kept) {
+            seen.push("the process table no longer lists it for its home".to_string());
+        }
+        if !seen.is_empty() {
             failures.push(format!(
-                "{what} stopped the daemon {kept} of {}, outside the test homes",
-                outside.path().display()
+                "{what}: the daemon {kept} of {}, outside the test homes: {}",
+                outside.path().display(),
+                seen.join("; ")
             ));
         }
     }
