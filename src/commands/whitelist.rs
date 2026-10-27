@@ -422,7 +422,11 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
     let fee_cap_was = match change {
         Change::FeeCap { chain, .. } => {
             old_values(&current, &next, &cap_text(&fresh, chain), |l| {
-                file_cap(l, chain, &budget).unwrap_or_else(|| "a cap not shown".to_string())
+                let cap = file_cap(l, chain, &budget);
+                // At most two caps of at most 169 characters each (78 digits in the coin and 78
+                // in wei, a symbol of 4), charged before anything else: 338 of 512 always fit.
+                debug_assert!(cap.is_some(), "a fee-cap's old caps always fit the budget");
+                cap.unwrap_or_else(|| "a cap not shown".to_string())
             })
         }
         _ => String::new(),
