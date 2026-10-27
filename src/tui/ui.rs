@@ -5,7 +5,7 @@
 
 use crate::tui::app::{App, Bar, KeyList, LockLine, Pane, TrustLine};
 use crate::tui::style::{ERROR, HINT, NORMAL, SELECTED, TITLE, WARNING};
-use crate::tui::text::Outside;
+use crate::tui::text::{Outside, Source};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -39,11 +39,16 @@ const SEP: &str = " | ";
 /// name 27, index 6 and address 42 fill the pane's 78 columns).
 const NAME_COLUMN: usize = 27;
 
-/// The widest key name the status bar shows: with the widest chain (9), the short address (13),
-/// this platform's longest trust words and the separators (7), line 1 fits 80 columns. The 40
-/// characters of `not verified (no session check on Linux)` exist only on Linux; elsewhere the
-/// longest are `verified by session` (19).
-const BAR_NAME: usize = if cfg!(target_os = "linux") { 11 } else { 32 };
+/// The narrowest bar line 1 cuts the key name to, `...` included (5 characters of the name): the
+/// trust words come first, and the name gives way down to this. At 80 columns the longest words
+/// (the 40 of `not verified (no session check on Linux)`, or the 29 of an impostor's
+/// `NOT this build's key daemon: ` and [`WARNING_ROOM`] of its warning) still fit beside it with
+/// the widest chain (9) and the short address (13).
+const BAR_NAME_MIN: usize = 8;
+
+/// How much of an impostor's warning line 1 keeps room for before the key name gets any more:
+/// enough to read whose process it is (`the process an...`).
+const WARNING_ROOM: usize = 16;
 
 /// The widest expiry the status bar shows, `YYYY-MM-DD HH:MMZ`: with the words before it (26),
 /// a separator and the RPC host (32), line 2 fills 78 columns.
@@ -229,7 +234,7 @@ fn status_bar(frame: &mut Frame, [one, two]: [Rect; 2], app: &App, placed: &mut 
                 .outside(&error.cut(BAR_ERROR), ERROR)
         }
         Pane::Ready(bar) => {
-            key_line(first, bar).draw(frame, one, placed);
+            key_line(first, app.chain().key, bar, usize::from(one.width)).draw(frame, one, placed);
             lock_line(app, bar)
         }
     };
@@ -239,31 +244,60 @@ fn status_bar(frame: &mut Frame, [one, two]: [Rect; 2], app: &App, placed: &mut 
         .draw(frame, two, placed);
 }
 
-fn key_line(row: Row, bar: &Bar) -> Row {
+/// Line 1 after `<chain> | `, `width` columns in all: the key name, the short address, then the
+/// trust words of this state. The words stay whole and the name gives way, cut with `...` down
+/// to [`BAR_NAME_MIN`]; only when the words cannot fit beside that are they cut, with `...` too.
+fn key_line(row: Row, chain: &str, bar: &Bar, width: usize) -> Row {
     if !bar.configured {
         return row.text("no wallet in this home", HINT);
     }
+    let (words, style, warning) = match &bar.trust {
+        Some(TrustLine::Session) => ("verified by session", NORMAL, None),
+        Some(TrustLine::NotVerified) if cfg!(target_os = "linux") => {
+            ("not verified (no session check on Linux)", HINT, None)
+        }
+        Some(TrustLine::NotVerified | TrustLine::Locked) => ("not verified", HINT, None),
+        Some(TrustLine::Impostor(w)) => ("NOT this build's key daemon: ", WARNING, Some(w)),
+        None => ("", NORMAL, None),
+    };
+    let address = bar.address.as_ref().map_or(0, |a| 1 + a.text().len());
+    let trust = if words.is_empty() {
+        0
+    } else {
+        SEP.len() + words.len() + warning.map_or(0, |w| w.text().len().min(WARNING_ROOM))
+    };
+    let fixed = chain.len() + SEP.len() + address;
+    let name = width
+        .saturating_sub(fixed + trust)
+        .clamp(BAR_NAME_MIN, Source::KeyName.budget());
     let mut row = match &bar.key {
-        Some(key) => row.outside(&key.cut(BAR_NAME), NORMAL),
+        Some(key) => row.outside(&key.cut(name), NORMAL),
         None => row,
     };
+    let name_shown = bar.key.as_ref().map_or(0, |k| k.cut(name).text().len());
     row = match &bar.address {
         Some(address) => row.text(" ", NORMAL).outside(address, NORMAL),
         None => row,
     };
-    match &bar.trust {
-        Some(TrustLine::Session) => row.text(SEP, NORMAL).text("verified by session", NORMAL),
-        Some(TrustLine::NotVerified) if cfg!(target_os = "linux") => row
-            .text(SEP, NORMAL)
-            .text("not verified (no session check on Linux)", HINT),
-        Some(TrustLine::NotVerified | TrustLine::Locked) => {
-            row.text(SEP, NORMAL).text("not verified", HINT)
-        }
-        Some(TrustLine::Impostor(warning)) => row
-            .text(SEP, NORMAL)
-            .text("NOT this build's key daemon: ", WARNING)
-            .outside(warning, WARNING),
-        None => row,
+    if words.is_empty() {
+        return row;
+    }
+    let room = width.saturating_sub(fixed + name_shown + SEP.len());
+    let row = row.text(SEP, NORMAL).text(&cut_words(words, room), style);
+    match warning {
+        Some(w) if words.len() <= room => row.outside(w, style),
+        _ => row,
+    }
+}
+
+/// zwallet's own `words` cut to `room` with a visible `...` when they do not fit.
+fn cut_words(words: &str, room: usize) -> String {
+    if words.len() <= room {
+        words.to_string()
+    } else if room >= 4 {
+        format!("{}...", &words[..room - 3])
+    } else {
+        ".".repeat(room.min(3))
     }
 }
 

@@ -139,23 +139,46 @@ fn assert_placed(rows: &[String], p: &Placed, placed: &[Placed]) {
         shown[n..].iter().all(|c| *c == ' '),
         "{source:?} at {area:?}: {shown:?}"
     );
-    // And no other row shows it (rows where the same value is placed again, maybe cut to
-    // another width, excepted).
+    // And no other place shows a copy of it, whole or cut (with `...`, at the edge, or before
+    // blanks), but a placement of the same value: one of the two shown texts a `...`-cut of the
+    // other, compared whole (two values that only share a prefix are not the same value).
     if text.len() >= 12 {
-        let probe = &text[..12];
-        for (y, r) in rows.iter().enumerate() {
-            let y = y as u16;
-            let placed_here = placed.iter().any(|q| {
-                q.outside.source() == source
-                    && q.outside.text().starts_with(probe)
-                    && (q.area.y..q.area.bottom()).contains(&y)
-            });
-            assert!(
-                placed_here || !r.contains(probe),
-                "{source:?} {probe:?} also on row {y}: {r:?}"
-            );
+        let core: Vec<char> = text.trim_end_matches("...").chars().collect();
+        for (y, row) in rows.iter().enumerate() {
+            let row: Vec<char> = row.chars().collect();
+            for x in 0..row.len() {
+                let tail = &row[x..];
+                let common = tail.iter().zip(&core).take_while(|(a, b)| a == b).count();
+                if common < 12 {
+                    continue;
+                }
+                let after = &tail[common..];
+                let copy = common == core.len()
+                    || after.is_empty()
+                    || after.starts_with(&['.', '.', '.'])
+                    || after.iter().all(|c| *c == ' ');
+                if !copy {
+                    continue;
+                }
+                let (cx, cy) = (x as u16, y as u16);
+                let placed_there = placed.iter().any(|q| {
+                    (q.area.x..q.area.right()).contains(&cx)
+                        && (q.area.y..q.area.bottom()).contains(&cy)
+                        && same_value(q.outside.text(), text)
+                });
+                assert!(
+                    placed_there,
+                    "{source:?} {text:?} also on row {y} at column {x}: {:?}",
+                    rows[y]
+                );
+            }
         }
     }
+}
+
+/// Whether `a` and `b` show one value: one of them a `...`-cut of the other (or both whole).
+fn same_value(a: &str, b: &str) -> bool {
+    a.starts_with(b.trim_end_matches("...")) || b.starts_with(a.trim_end_matches("..."))
 }
 
 fn block_on<F: std::future::Future>(work: F) -> F::Output {
