@@ -2,7 +2,7 @@
 
 Status: **in-progress**, 2026-10-27. Target = [`ssot.md`](ssot.md), [`../03-tui.md`](../03-tui.md)
 acceptance T1–T11. Current code, function by function: [`flow.md`](flow.md). Units:
-[`units.md`](units.md). This file holds only open work. No code yet.
+[`units.md`](units.md). This file holds only open work.
 
 ## Start condition
 
@@ -26,7 +26,7 @@ end); the dispatcher's decision in review round 1 the same day.
 
 | WU | Repo · branch · worktree | Scope | Owner | State |
 |---|---|---|---|---|
-| TUI-1 | zwallet · `feat/tui-1-keys` · `.worktrees/feat-tui-1-keys` | `zwallet tui`, ratatui/crossterm, `FilteredBackend`, cell/style/budget checks, keys list, status bar, lock detection (T1, T9, T10) | coding agent + dispatcher gate | planned, after the start condition |
+| TUI-1 | zwallet · `feat/tui-1-shell` · `.worktrees/feat-tui-1-shell` | `zwallet tui`, ratatui/crossterm, `FilteredBackend`, cell/style/budget checks, keys list, status bar, lock detection (T1, T9, T10) | coding agent + dispatcher gate | in progress, 2026-10-28: on the branch, ratatui 0.30.2 and crossterm 0.29.0, `FilteredBackend` and the terminal guard (`src/tui/term.rs`), `wallet::keys`, `wallet::status`, `wallet::net` with `list` and `status` on them; not yet the `tui` command, the screens or `tests/tui.rs` (the unit outgrew the cap; split proposed to the dispatcher) |
 | TUI-2 | zwallet · `feat/tui-2-warmup` · `.worktrees/feat-tui-2-warmup` | warm-up, password field, password check (checked list, pinned addresses), make active, address trust (T2, T2b) | coding agent + dispatcher gate | planned, after TUI-1 |
 | TUI-3 | zwallet · `feat/tui-3-history` · `.worktrees/feat-tui-3-history` | balance, journal rows, explorer client, merge (T3, T3b) | coding agent + dispatcher gate | planned, after TUI-2 and the explorer re-measure |
 | TUI-4 | zwallet · `feat/tui-4-detail` · `.worktrees/feat-tui-4-detail` | tx detail with receipt token movements, `dropped/replaced`, chain switch (T4, T6c, T8) | coding agent + dispatcher gate | planned, after TUI-3 |
