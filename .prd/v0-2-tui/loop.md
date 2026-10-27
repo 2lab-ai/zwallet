@@ -26,8 +26,10 @@ end); the dispatcher's decision in review round 1 the same day.
 
 | WU | Repo · branch · worktree | Scope | Owner | State |
 |---|---|---|---|---|
-| TUI-1 | zwallet · `feat/tui-1-shell` · `.worktrees/feat-tui-1-shell` | `zwallet tui`, ratatui/crossterm, `FilteredBackend`, cell/style/budget checks, keys list, status bar, lock detection (T1, T9, T10) | coding agent + dispatcher gate | in progress, 2026-10-28: on the branch, ratatui 0.30.2 and crossterm 0.29.0, `FilteredBackend` and the terminal guard (`src/tui/term.rs`), `wallet::keys`, `wallet::status`, `wallet::net` with `list` and `status` on them; not yet the `tui` command, the screens or `tests/tui.rs` (the unit outgrew the cap; split proposed to the dispatcher) |
-| TUI-2 | zwallet · `feat/tui-2-warmup` · `.worktrees/feat-tui-2-warmup` | warm-up, password field, password check (checked list, pinned addresses), make active, address trust (T2, T2b) | coding agent + dispatcher gate | planned, after TUI-1 |
+| TUI-1a | zwallet · `feat/tui-1-shell` · `.worktrees/feat-tui-1-shell` | ratatui/crossterm, `FilteredBackend` and the terminal guard, `wallet::keys`, `wallet::status`, `wallet::net` with `list` and `status` on them (no acceptance ID) | coding agent + dispatcher gate | in review, 2026-10-28: 66f038c (RED), 4f527f5, 784cfa3, 5119e36 (c14's clock-step tolerance), this docs commit; about 610 counted lines |
+| TUI-1b | zwallet · branch at dispatch | `zwallet tui`, the screens, the cell/style/budget helpers, T1 frames, the T9 frames and `q`, the T10 `Msg` test, the cached-address counter-example, README (T1) | coding agent + dispatcher gate | planned, after TUI-1a |
+| TUI-1c | zwallet · branch at dispatch | the pty runs for T9 and T10, the argv-listed fake, the attacker moved into `tests/common`, the pty helpers (T9, T10) | coding agent + dispatcher gate | planned, after TUI-1b |
+| TUI-2 | zwallet · `feat/tui-2-warmup` · `.worktrees/feat-tui-2-warmup` | warm-up, password field, password check (checked list, pinned addresses), make active, address trust (T2, T2b) | coding agent + dispatcher gate | planned, after TUI-1c |
 | TUI-3 | zwallet · `feat/tui-3-history` · `.worktrees/feat-tui-3-history` | balance, journal rows, explorer client, merge (T3, T3b) | coding agent + dispatcher gate | planned, after TUI-2 and the explorer re-measure |
 | TUI-4 | zwallet · `feat/tui-4-detail` · `.worktrees/feat-tui-4-detail` | tx detail with receipt token movements, `dropped/replaced`, chain switch (T4, T6c, T8) | coding agent + dispatcher gate | planned, after TUI-3 |
 | TUI-5 | zwallet · `feat/tui-5-transfer` · `.worktrees/feat-tui-5-transfer` | assets, transfer from the checked list, exact-intent confirm, send status (T5, T6, T6b) | coding agent + dispatcher gate | planned, after TUI-4 |
@@ -57,7 +59,7 @@ end); the dispatcher's decision in review round 1 the same day.
 
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
-| T1 | key list, active marked, lock state in the bar only | no `zwallet tui`, no `wallet::keys` | TUI-1 | 🚪 |
+| T1 | key list, active marked, lock state in the bar only | no `zwallet tui` (`wallet::keys` landed in TUI-1a) | TUI-1b | 🚪 |
 | T2 | warm-up ≈ 1h, open key verified by password, global active key unchanged | no `wallet::prepare_unlock` / `wallet::unlock` / `wallet::open_with_password` / `wallet::check_list`, no password field | TUI-2 | 🚪 |
 | T2b | `s` makes the key active | no `wallet::set_active` | TUI-2 | 🚪 |
 | T3 | 10 rows, merged, pending first, coverage note | no journal reader, explorer client or merge | TUI-3 | 🚪 |
@@ -69,12 +71,12 @@ end); the dispatcher's decision in review round 1 the same day.
 | T6c | `dropped/replaced` | no code tells it | TUI-4 | 🚪 |
 | T7 | add `bob` while warm, summary above the password, locked after | edit path reads `/dev/tty` itself | TUI-6 | 🚪 |
 | T8 | `c` → base reloads every pane, host redacted | no chain picker | TUI-4 | 🚪 |
-| T9 | 80×24 fits, smaller says so, terminal restored after `q` and a panic | no terminal setup, no write point | TUI-1 | 🚪 |
-| T10 | `zwallet lock` elsewhere shows `locked` within two refreshes (10 s) | no `wallet::status` | TUI-1 | 🚪 |
+| T9 | 80×24 fits, smaller says so, terminal restored after `q` and a panic | no `zwallet tui` yet; the write point and the guard landed in TUI-1a | TUI-1c | 🚪 |
+| T10 | `zwallet lock` elsewhere shows `locked` within two refreshes (10 s) | no `zwallet tui` yet; `wallet::status` landed in TUI-1a | TUI-1c | 🚪 |
 | T11 | pty across T2 and T7: no echo, no password in a frame, cancel and retry | needs TUI-2 and TUI-6 | TUI-6 | 🚪 |
 
 ## Next
 
-Merge the agent-side v0.1 work (§Start condition). Then TUI-1 on `feat/tui-1-keys`, one coding
-agent, RED tests first as [`units.md`](units.md) lists them, the gate above, an outside review,
-merge.
+TUI-1 is three PRs ([`units.md`](units.md) §TUI-1 split, with the dispatcher's six decisions of
+2026-10-28). Gate and review TUI-1a on `feat/tui-1-shell`, merge; then TUI-1b, then TUI-1c, each
+with RED tests first, the gate above, an outside review, merge.
