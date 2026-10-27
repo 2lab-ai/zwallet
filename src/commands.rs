@@ -359,8 +359,9 @@ fn cache_mismatch(key: &KeyEntry, chain: &str, derived: &str) -> Result<Option<S
 /// - `verified: true, verifiedBy: "password"`: derived from the seed after the human's password,
 ///   in this process or by the daemon child `unlock` just started.
 /// - `verified: true, verifiedBy: "session"` ([`Trust::Session`]): while unlocked, derived by this
-///   zwallet build's own key daemon for this home ([`protocol::check_peer`]), and equal to the
-///   cache. That daemon decrypted this home's wallet.json with the password typed at `unlock`.
+///   zwallet build's own key daemon for this home ([`protocol::check_peer`]: on macOS, for signed
+///   builds, every build zwallet ships), and equal to the cache. That daemon decrypted this home's
+///   wallet.json with the password typed at `unlock`.
 /// - `verified: false`: the cache in wallet.json, which any process of this user can edit, or a
 ///   derivation by something else on `d.sock` (with a `warning` naming it).
 ///

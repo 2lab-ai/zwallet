@@ -664,17 +664,20 @@ pub fn read_go(fd: RawFd, wait: Duration) -> Result<()> {
 /// is never started. Elsewhere it is the canonical path of `current_exe()`, whose (dev, ino) is
 /// recorded now and checked again right before the spawn: that refuses a binary swapped in while
 /// the human types. One renamed in between that check and the exec is still started (macOS has
-/// no `fexecve`), but gets nothing: once the child asks for input, and before the password is
-/// written, [`check_started_code`] requires that it runs this build's code (its cdhash is this
-/// process's own, and it is `CS_VALID`), and otherwise it is killed.
+/// no `fexecve`). On macOS, once the child asks for input and before the password is written,
+/// [`check_started_code`] refuses a child that does not run this build's code (its cdhash is not
+/// this process's own, or it is not `CS_VALID`): it is killed and given nothing. A build that is
+/// not code-signed cannot make that check, so [`Self::resolve`] refuses it before the prompt;
+/// every macOS binary zwallet ships is ad-hoc signed, with the hardened runtime.
 ///
-/// What that check does not cover: a binary swapped in before `unlock` started (it is this
-/// process, and gets the password on any OS); code the child ran before it exec'd this build,
-/// since the cdhash is read once it asks for input (a process it forked can keep the channel and
-/// race the daemon for the password, or it can pass `DYLD_INSERT_LIBRARIES` to the exec: the
-/// exec trick [`check_peer_macos`] guards against on `d.sock`); and a build the linker did not
-/// sign (x86_64 macOS), which has no cdhash to compare. The README's "Known limits" says where to
-/// install zwallet so an agent cannot write it.
+/// That check is partial hardening. It does not prove that no other process holds the channel:
+/// the cdhash is read once the child asks for input, so a binary swapped in as it starts can fork
+/// a process that keeps the channel and then exec this build, which passes, and that process can
+/// read the password. It could also exec this build with `DYLD_INSERT_LIBRARIES`, which the
+/// hardened runtime of the shipped binaries makes dyld ignore (a build from source has none). A
+/// binary swapped in before `unlock` started is this process, and gets the password on any OS.
+/// The only real protection against a swapped binary is to install zwallet where an agent cannot
+/// write it (the README's "Known limits").
 pub struct DaemonExe {
     path: PathBuf,
     #[cfg(not(target_os = "linux"))]
@@ -799,10 +802,11 @@ pub fn file_id(path: &Path) -> Option<(u64, u64)> {
 /// What [`check_peer`] establishes about a connection's [`Peer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeerCheck {
-    /// This build's key daemon for the home. On macOS: the kernel-validated code-signing hash
-    /// (cdhash) of the code the peer is running equals this process's own, the peer is
-    /// `CS_VALID`, it holds the listening `d.sock` of this home, its argv is in `daemon_pids`,
-    /// and its socket-use executable UUID matches. Never on Linux.
+    /// This build's key daemon for the home. On macOS, for a signed build (every build zwallet
+    /// ships): the kernel-validated code-signing hash (cdhash) of the code the peer is running
+    /// equals this process's own, the peer is `CS_VALID`, it holds the listening `d.sock` of this
+    /// home, its argv is in `daemon_pids`, and its socket-use executable UUID matches. Never on
+    /// Linux, nor for a build that is not code-signed (it has no cdhash of its own).
     ThisBuild,
     /// Another program, another zwallet build (say the one before a `brew upgrade`), or not the
     /// key daemon of this home: why, naming the process (without advice: [`PeerCheck::warning`]
@@ -857,8 +861,8 @@ fn process_exe(pid: i32) -> ProcessExe {
 // itself: a same-user attacker can exec its own code from a path it then symlinks to the genuine
 // binary (so dev/ino match) and embed the genuine `LC_UUID`, and it passes. So the decision rests
 // on the cdhash the kernel validates against the code pages actually mapped (arm64 macOS runs only
-// signed code; a Rust binary is linker ad-hoc signed). `csops`/`csops_audittoken` live in
-// libsystem.
+// signed code; the linker ad-hoc signs arm64 output only, so CI signs every macOS binary zwallet
+// ships, x86_64 included). `csops`/`csops_audittoken` live in libsystem.
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn csops(
@@ -1157,10 +1161,11 @@ fn peer_not_ours(pid: i32, what: &str) -> PeerCheck {
 /// Whether `peer` is this build's key daemon for `home` ([`PeerCheck`]). Any kernel query that
 /// fails gives `Unknown` (fail closed): nothing is verified by session.
 ///
-/// On macOS the decision rests on the cdhash the kernel validates against the code actually
-/// running, not on a path or a value the Mach-O declares; see [`check_peer_macos`]. On Linux the
-/// key daemon is non-dumpable, so its executable is unreadable and this returns `Unknown`; see
-/// [`check_peer_linux`].
+/// On macOS, for a signed build (every build zwallet ships), the decision rests on the cdhash the
+/// kernel validates against the code actually running, not on a path or a value the Mach-O
+/// declares; see [`check_peer_macos`]. A build that is not code-signed has no cdhash of its own
+/// and gets `Unknown` for every peer. On Linux the key daemon is non-dumpable, so its executable
+/// is unreadable and this returns `Unknown`; see [`check_peer_linux`].
 ///
 /// This cannot stop a process of this user that runs this very binary over its own `wallet.json`
 /// with its own password, or injects code into it (`DYLD_INSERT_LIBRARIES` on a binary without the

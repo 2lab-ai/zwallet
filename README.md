@@ -24,6 +24,11 @@ formula on macOS and the checksummed release binary on Arch. Or download a binar
 `zwallet-macos-x86_64`, `zwallet-linux-aarch64`, `zwallet-linux-x86_64`, checksums in
 `SHA256SUMS`), make it executable and put it on your `PATH` as `zwallet`.
 
+On macOS every binary zwallet publishes (arm64 and x86_64) is ad-hoc code-signed with the hardened
+runtime. `unlock` needs a signed build: it compares the code of the key daemon it starts with its
+own. A build from source is signed by the linker on Apple silicon, but not on an Intel Mac, where
+`unlock` refuses it until it is signed: `codesign --force --sign - "$(command -v zwallet)"`.
+
 `zwallet --version` prints `zwallet <version> (<channel> <rev12>)`: channel `release` or `preview`
 for published binaries, `dev` for a local build.
 
@@ -118,33 +123,29 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - `verified: true, verifiedBy: "session"`: while unlocked, `address`, `addresses`, `status`,
     `change` and `balance` (with or without `--chain`) ask the key daemon to derive the address
     (once per chain family), compare it with the cache, and check with the kernel which process
-    answered. On **arm64 macOS** that check identifies the code actually running, not a path or a
-    value the binary declares about itself (both of which a same-user attacker can forge): using
-    the peer's audit token (`LOCAL_PEERTOKEN`, so pid reuse cannot swap the target), the peer's
+    answered. On **macOS** that check identifies the code actually running, not a path or a value
+    the binary declares about itself (both of which a same-user attacker can forge): using the
+    peer's audit token (`LOCAL_PEERTOKEN`, so pid reuse cannot swap the target), the peer's
     code-signing hash (`csops` `CS_OPS_CDHASH`, the hash the kernel validates against the mapped
-    code pages — arm64 macOS runs only signed code, and the linker ad-hoc signs every arm64
-    build) must equal this process's own, the peer must be `CS_VALID`, its argv must be in the
-    process table as a key daemon of this home, it must hold the listening `d.sock` of this home,
-    and the executable UUID it used the socket with (`LOCAL_PEERUUID`) must match. That daemon
-    decrypted this home's `wallet.json` with the password typed at `unlock`. The **x86_64 macOS**
-    build is not signed (the linker signs only arm64 output), so `csops` has no cdhash for it to
-    compare with: nothing is verified by session there, and no process on `d.sock` is named as
-    another program either (the check cannot tell). On **Linux** every zwallet process is
+    code pages; every macOS build zwallet ships is signed, see **Install**) must equal this
+    process's own, the peer must be `CS_VALID`, its argv must be in the process table as a key
+    daemon of this home, it must hold the listening `d.sock` of this home, and the executable UUID
+    it used the socket with (`LOCAL_PEERUUID`) must match. That daemon decrypted this home's
+    `wallet.json` with the password typed at `unlock`. On **Linux** every zwallet process is
     non-dumpable, which hides `/proc/<pid>/exe` from its own user, so the daemon's code cannot be
     checked there and nothing is verified by session: the address is shown as below.
   - `verified: false`: the cache while locked, with the line ``not verified: the wallet is locked;
     `zwallet unlock <dur>` or `zwallet address --verify` checks it`` in human output; or, while
-    unlocked, an address no session verified (an agent's `create`, `list` without `--verify`,
-    Linux, or the x86_64 macOS build), with ``not verified: run `zwallet address --verify` before
-    funding``. When the process answering on `d.sock` is known not to be this build's key daemon
-    of this home (another program,
+    unlocked, an address no session verified (an agent's `create`, `list` without `--verify`, or
+    Linux), with ``not verified: run `zwallet address --verify` before funding``. When the
+    process answering on `d.sock` is not this build's key daemon of this home (another program,
     another zwallet build such as the one before a `brew upgrade`, or one that does not hold the
     socket), the command still succeeds, unverified, with a `warning` naming the pid and what it
     is, ending ``run `zwallet lock` and unlock again``. `balance` adds no note line.
 
   While a daemon answers, a cache that its answer contradicts fails these commands (and `list`)
   with `VALIDATION_ERROR`. Only when every process that answered is this build's key daemon (so
-  only on arm64 macOS) does that error say the cache was modified. Otherwise the answer is no proven
+  only on macOS) does that error say the cache was modified. Otherwise the answer is no proven
   derivation, so the error says the two addresses disagree, that one of them was tampered with,
   to fund neither and to run `zwallet address --verify`, which decides with the password; a
   process known to be another one is also named, in the message and the `warning` field. An
@@ -733,13 +734,16 @@ data).
   the running image (`/proc/self/exe`), so a file swapped in at the binary's path while the human
   types is never started. On macOS it is the file's identity, checked again right before the
   start: a binary swapped in while the human types is refused. One swapped in between that check
-  and the exec is still started (macOS has no `fexecve`). On an arm64 build, once it asks for
-  input and before the password is written, `unlock` requires that it runs this build's code (its
-  `csops` cdhash equals `unlock`'s own and it is `CS_VALID`); otherwise it is stopped, given
-  nothing, and `unlock` fails with `VALIDATION_ERROR`. The x86_64 macOS build is not signed, so it
-  has no cdhash of its own to compare and skips this check: there such a binary gets the password.
-  One swapped in before `unlock` ran gets the password on any OS (see **Known limits**). On Linux,
-  `unlock` and `create --unlock` also
+  and the exec is still started (macOS has no `fexecve`). Once the started process asks for
+  input, and before the password is written, `unlock` refuses it unless it runs this build's code
+  (its `csops` cdhash equals `unlock`'s own and it is `CS_VALID`): it is stopped, given nothing,
+  and `unlock` fails with `VALIDATION_ERROR`. That is partial hardening: it does not prove that
+  no other process holds the daemon's channel, so a binary swapped in as it starts can still pass
+  the password to a process it forked before it exec'd this build. A build that is not
+  code-signed cannot make the check and refuses to unlock before the prompt (see **Install**).
+  One swapped in before `unlock` ran gets the password on any OS. Against a swapped binary the
+  only real protection is to install zwallet where an agent cannot write it (see **Known
+  limits**). On Linux, `unlock` and `create --unlock` also
   refuse, before the password prompt, when `kernel.yama.ptrace_scope` is 0 or Yama is missing
   (any same-user process could attach to the new daemon during its start-up); set it to 1 or
   more, or pass `--allow-ptrace-scope-0` to accept that. `unlock` then starts the pinned binary
@@ -828,13 +832,14 @@ things a same-user process can still do, and what to do about them:
 
 - **Swap the zwallet binary.** A binary replaced before `unlock` (or `create`, `backup`,
   `--verify`) runs gets the password. On macOS one swapped in between `unlock`'s identity check
-  and its exec of the daemon (there is no `fexecve`) is started. On an arm64 build it gets the
-  password only if it runs this build's code when it asks for input (same cdhash, `CS_VALID`).
-  That check does not see what the started program did before it exec'd this build: a process it
-  forked can keep the daemon's channel and race it for the password, or it can exec this build
-  with `DYLD_INSERT_LIBRARIES`. The x86_64 macOS build, which the linker does not sign, has no
-  cdhash of its own to compare, so it skips the check and such a binary gets the password. A
-  Homebrew-installed binary is writable by the user, and so by the agent. For
+  and its exec of the daemon (there is no `fexecve`) is started; `unlock` refuses it, and gives
+  it nothing, when it does not run this build's code once it asks for input (same cdhash,
+  `CS_VALID`). That check does not prove that no other process holds the daemon's channel: the
+  swapped-in program can fork a process that keeps the channel, then exec this build, which
+  passes, and that process can read the password. (It could also exec this build with
+  `DYLD_INSERT_LIBRARIES`; the binaries zwallet ships carry the hardened runtime, under which dyld
+  ignores that variable, but a build from source does not.) A Homebrew-installed binary is
+  writable by the user, and so by the agent. For
   real protection install zwallet where the agent cannot write (e.g. a root-owned directory), or
   run the agent as a different OS user.
 - **Read the human's terminal** while the password is typed: a same-user process can open the
