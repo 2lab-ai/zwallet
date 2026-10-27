@@ -104,8 +104,8 @@ jobs:
       # Integrity Protection is on. GitHub's macOS runners run with SIP off, which lifts that
       # restriction, so the check after signing observes it only on a runner with SIP on, is a
       # notice where SIP is off, and fails when the SIP state cannot be read; the runtime flag
-      # itself is checked in the signing step on every
-      # runner, and the deploy smoke on a SIP-enabled Mac checks dyld for each preview.
+      # itself is checked in the signing step on every runner, and the deploy smoke on a
+      # SIP-enabled Mac checks dyld for each preview.
       # First the control: unsigned for the runtime, the binary obeys DYLD_INSERT_LIBRARIES
       # (dyld aborts on the missing library), so the check after signing is not vacuous.
       - name: DYLD_INSERT_LIBRARIES reaches the binary before signing
@@ -154,15 +154,16 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          # Three outcomes: SIP on runs the check, SIP off is a notice, and anything else (no
-          # csrutil, a failing one, a custom or unknown configuration) fails the step.
+          # Three outcomes: SIP on (exactly "enabled.") runs the check, SIP off (any line starting
+          # "…status: disabled") is a notice, and anything else (no csrutil, a failing one, a
+          # custom or unknown configuration) fails the step.
           if ! sip="$(csrutil status 2>&1)"; then
             echo "::error::csrutil status failed, so it is unknown whether dyld's restriction applies here: $sip"
             exit 1
           fi
           case "$sip" in
             "System Integrity Protection status: enabled.") ;;
-            "System Integrity Protection status: disabled.")
+            "System Integrity Protection status: disabled"*)
               echo "::notice::System Integrity Protection is off on this runner, so dyld's DYLD_* restriction for hardened binaries cannot be observed here; the runtime flag was checked in the signing step"
               echo "$sip"
               exit 0
