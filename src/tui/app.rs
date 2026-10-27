@@ -29,7 +29,8 @@ pub enum Msg {
     Resize,
     /// The refresh timer (`tui::REFRESH`): read the lock state again.
     Tick,
-    Keys(Result<Keys>),
+    /// A key read, with the generation it was started in ([`Effect::LoadKeys`]).
+    Keys(u64, Result<Keys>),
     /// A status read, with the generation it was started in ([`Effect::LoadStatus`]).
     Status(u64, Result<StatusView>),
     /// What `protocol::stop_all_daemons` did (`L`).
@@ -39,10 +40,10 @@ pub enum Msg {
 /// Work the state asks for; its result comes back as a [`Msg`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
-    /// `wallet::keys`, then [`Msg::Keys`].
-    LoadKeys,
-    /// `wallet::status`, then [`Msg::Status`] with this generation: a lock started a new one, and
-    /// a read from an older one is dropped.
+    /// `wallet::keys`, then [`Msg::Keys`] with this generation: a lock starts a new one, and a
+    /// read from an older one is dropped.
+    LoadKeys(u64),
+    /// `wallet::status`, then [`Msg::Status`] with this generation, as for [`Effect::LoadKeys`].
     LoadStatus(u64),
     /// `protocol::stop_all_daemons`: every zwallet daemon of this user, then [`Msg::Locked`].
     LockAll,
@@ -113,8 +114,8 @@ pub struct App {
     selected: usize,
     keys_pending: bool,
     status_pending: bool,
-    /// The generation of status reads the bar takes ([`Effect::LoadStatus`]).
-    status_generation: u64,
+    /// The generation of reads the panes take ([`Effect::LoadKeys`], [`Effect::LoadStatus`]).
+    generation: u64,
     locking: bool,
     /// An error to show in place of the key hints until the next key.
     notice: Option<Outside>,
@@ -135,7 +136,7 @@ impl App {
             selected: 0,
             keys_pending: false,
             status_pending: false,
-            status_generation: 0,
+            generation: 0,
             locking: false,
             notice: None,
             quit: false,
@@ -158,7 +159,8 @@ impl App {
             }
             Msg::Resize => Vec::new(),
             Msg::Tick => self.load_status(),
-            Msg::Keys(keys) => {
+            Msg::Keys(generation, _) if generation != self.generation => Vec::new(),
+            Msg::Keys(_, keys) => {
                 self.keys_pending = false;
                 self.keys = match keys {
                     Ok(keys) => Pane::Ready(key_list(keys)),
@@ -167,7 +169,7 @@ impl App {
                 self.selected = self.selected.min(self.rows().saturating_sub(1));
                 Vec::new()
             }
-            Msg::Status(generation, _) if generation != self.status_generation => Vec::new(),
+            Msg::Status(generation, _) if generation != self.generation => Vec::new(),
             Msg::Status(_, status) => {
                 self.status_pending = false;
                 self.status = match status {
@@ -184,10 +186,13 @@ impl App {
                         self.quit_error = Some(e);
                     }
                 }
-                // A status read started before the lock may land after it and say unlocked:
-                // reads of the older generation are dropped, and a fresh one starts.
-                self.status_generation += 1;
+                // A read started before the lock may land after it and say unlocked: reads of
+                // the older generation are dropped, fresh ones start, and the bar says it is
+                // checking until the status lands.
+                self.generation += 1;
                 self.status_pending = false;
+                self.keys_pending = false;
+                self.status = Pane::Loading;
                 let mut work = self.load_status();
                 work.extend(self.load_keys());
                 work
@@ -218,12 +223,12 @@ impl App {
         Vec::new()
     }
 
-    /// [`Effect::LoadKeys`], unless a read is running already.
+    /// [`Effect::LoadKeys`], unless a read of this generation is running already.
     fn load_keys(&mut self) -> Vec<Effect> {
         if std::mem::replace(&mut self.keys_pending, true) {
             return Vec::new();
         }
-        vec![Effect::LoadKeys]
+        vec![Effect::LoadKeys(self.generation)]
     }
 
     /// [`Effect::LoadStatus`], unless a read of this generation is running already.
@@ -231,7 +236,7 @@ impl App {
         if std::mem::replace(&mut self.status_pending, true) {
             return Vec::new();
         }
-        vec![Effect::LoadStatus(self.status_generation)]
+        vec![Effect::LoadStatus(self.generation)]
     }
 
     fn rows(&self) -> usize {
@@ -257,9 +262,10 @@ impl App {
         self.quit_error.take()
     }
 
-    /// The generation a status read for the bar must carry ([`Effect::LoadStatus`]).
-    pub fn status_generation(&self) -> u64 {
-        self.status_generation
+    /// The generation a read must carry for a pane to take it ([`Effect::LoadKeys`],
+    /// [`Effect::LoadStatus`]).
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn chain(&self) -> &'static Chain {

@@ -34,14 +34,16 @@ const ASCII: border::Set = border::Set {
 
 const SEP: &str = " | ";
 
-/// The widest key name the key list shows; a longer one is cut to it, ending in `...`, so the
-/// address after it is always whole: marker 3, name 27, index 6 and address 42 fill the pane's
-/// 78 columns.
+/// The widest key name the key list shows; a longer one is cut to it, ending in `...`. Narrower
+/// still when the index is wider than three digits, so the address is always whole (marker 3,
+/// name 27, index 6 and address 42 fill the pane's 78 columns).
 const NAME_COLUMN: usize = 27;
 
 /// The widest key name the status bar shows: with the widest chain (9), the short address (13),
-/// the longest trust words (40) and the separators, line 1 fills 80 columns.
-const BAR_NAME: usize = 11;
+/// this platform's longest trust words and the separators (7), line 1 fits 80 columns. The 40
+/// characters of `not verified (no session check on Linux)` exist only on Linux; elsewhere the
+/// longest are `verified by session` (19).
+const BAR_NAME: usize = if cfg!(target_os = "linux") { 11 } else { 32 };
 
 /// The widest expiry the status bar shows, `YYYY-MM-DD HH:MMZ`: with the words before it (26),
 /// a separator and the RPC host (32), line 2 fills 78 columns.
@@ -140,7 +142,10 @@ fn key_rows(
         .enumerate()
     {
         let style = if i == selected { SELECTED } else { NORMAL };
-        let name = key.name.cut(NAME_COLUMN);
+        let index = format!(" {:>3}  ", key.index);
+        let address = key.address.as_ref().map_or(1, |a| a.text().len());
+        let room = usize::from(area.width).saturating_sub(3 + index.len() + address);
+        let name = key.name.cut(NAME_COLUMN.min(room));
         let row = Row::default()
             .text(if i == selected { ">" } else { " " }, style)
             .text(if key.active { "* " } else { "  " }, style)
@@ -149,7 +154,7 @@ fn key_rows(
                 &" ".repeat(16usize.saturating_sub(name.text().len())),
                 style,
             )
-            .text(&format!(" {:>3}  ", key.index), style);
+            .text(&index, style);
         match &key.address {
             Some(address) => row.outside(address, style),
             None => row.text("-", style),

@@ -42,11 +42,12 @@ pub async fn run(home: PathBuf, net: Net, warm: Duration) -> Result<()> {
         ));
     }
     let terminal_error = |e: std::io::Error| WalletError::validation(format!("terminal: {e}"));
-    let mut app = App::new(&net, warm);
-    // Both write through the unlocked `Stdout` handle, which takes its lock per write: no
-    // `StdoutLock` is ever held across an `.await`, so a task parked there never keeps stdout
-    // from the rest of the TUI.
+    // First, before any thread or task starts (the input thread, the reads, the timer), as
+    // `Guard::enter` requires: a panic while it takes the terminal then comes on this thread.
+    // The guard and the backend write through the unlocked `Stdout` handle, which takes its lock
+    // per write: no `StdoutLock` is ever held across an `.await`.
     let _guard = Guard::enter(std::io::stdout()).map_err(terminal_error)?;
+    let mut app = App::new(&net, warm);
     let mut terminal = Terminal::new(FilteredBackend::new(CrosstermBackend::new(
         std::io::stdout(),
     )))
@@ -89,9 +90,9 @@ pub async fn run(home: PathBuf, net: Net, warm: Duration) -> Result<()> {
 fn start(effect: Effect, home: &Path, tx: &UnboundedSender<Msg>) {
     let (home, tx) = (home.to_path_buf(), tx.clone());
     match effect {
-        Effect::LoadKeys => {
+        Effect::LoadKeys(generation) => {
             tokio::spawn(async move {
-                let _ = tx.send(Msg::Keys(wallet::keys(&home).await));
+                let _ = tx.send(Msg::Keys(generation, wallet::keys(&home).await));
             });
         }
         Effect::LoadStatus(generation) => {

@@ -138,14 +138,17 @@ fn assert_placed(rows: &[String], p: &Placed, placed: &[Placed]) {
         shown[n..].iter().all(|c| *c == ' '),
         "{source:?} at {area:?}: {shown:?}"
     );
-    // And no other row shows it (rows where the same text is placed again excepted).
+    // And no other row shows it (rows where the same value is placed again, maybe cut to
+    // another width, excepted).
     if text.len() >= 12 {
         let probe = &text[..12];
         for (y, r) in rows.iter().enumerate() {
             let y = y as u16;
-            let placed_here = placed
-                .iter()
-                .any(|q| q.outside.text() == text && (q.area.y..q.area.bottom()).contains(&y));
+            let placed_here = placed.iter().any(|q| {
+                q.outside.source() == source
+                    && q.outside.text().starts_with(probe)
+                    && (q.area.y..q.area.bottom()).contains(&y)
+            });
             assert!(
                 placed_here || !r.contains(probe),
                 "{source:?} {probe:?} also on row {y}: {r:?}"
@@ -323,9 +326,15 @@ fn at_80x24_the_widest_values_are_drawn_whole() {
         "{b_row:?}"
     );
     assert!(rows.iter().any(|r| r.contains(A)));
-    // Line 1 keeps the trust words whole, the long name cut.
+    // Line 1 keeps the trust words whole, and the name whole where the platform's trust words
+    // leave room for it (the Linux note does not).
     assert!(rows[22].trim_end().ends_with("not verified") || rows[22].contains("Linux)"));
-    assert!(rows[22].contains("..."), "{:?}", rows[22]);
+    let name_shown = if cfg!(target_os = "linux") {
+        format!("{}...", &long_name[..8])
+    } else {
+        long_name.clone()
+    };
+    assert!(rows[22].contains(&name_shown), "{:?}", rows[22]);
 }
 
 #[test]
