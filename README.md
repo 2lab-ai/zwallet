@@ -228,7 +228,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
   swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
   genuine daemon of a wallet the human did not make), or injects code into the genuine binary
-  (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, `LD_PRELOAD`) — the same
+  (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, or on any binary while System
+  Integrity Protection is off; `LD_PRELOAD`) — the same
   class as replacing the binary, which nothing here can prevent. So keep the address you saved
   from your first unlock; if it ever changes, stop. **Piped and `--json` output changed with
   this check**: the locked note now names `zwallet unlock`, and a session-verified result gains

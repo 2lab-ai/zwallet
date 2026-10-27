@@ -674,7 +674,8 @@ pub fn read_go(fd: RawFd, wait: Duration) -> Result<()> {
 /// the cdhash is read once the child asks for input, so a binary swapped in as it starts can fork
 /// a process that keeps the channel and then exec this build, which passes, and that process can
 /// read the password. It could also exec this build with `DYLD_INSERT_LIBRARIES`, which the
-/// hardened runtime of the shipped binaries makes dyld ignore (a build from source has none). A
+/// hardened runtime of the shipped binaries makes dyld ignore while System Integrity Protection
+/// is on (a build from source has no hardened runtime, and with SIP off dyld loads it). A
 /// binary swapped in before `unlock` started is this process, and gets the password on any OS.
 /// The only real protection against a swapped binary is to install zwallet where an agent cannot
 /// write it (the README's "Known limits").
@@ -1182,8 +1183,8 @@ fn peer_not_ours(pid: i32, what: &str) -> PeerCheck {
 ///
 /// This cannot stop a process of this user that runs this very binary over its own `wallet.json`
 /// with its own password, or injects code into it (`DYLD_INSERT_LIBRARIES` on a binary without the
-/// hardened runtime, `LD_PRELOAD`): that is the same as replacing the binary, which nothing here
-/// can prevent.
+/// hardened runtime, or on any binary while System Integrity Protection is off; `LD_PRELOAD`):
+/// that is the same as replacing the binary, which nothing here can prevent.
 pub fn check_peer(home: &Path, peer: &Peer) -> Result<PeerCheck> {
     check_peer_shown(home, peer, EXE_SHOWN)
 }
