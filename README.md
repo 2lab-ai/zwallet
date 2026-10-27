@@ -349,9 +349,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
     full address, payee or contract, the chains (`*` as "every chain", otherwise zwallet's key for
     each or `<invalid>`, at most 16), the selectors, a policy change's old and new value (from
     both files when an unfinished edit is in `whitelist.next.json`), what a `reset` drops and
-    every fee cap it sets back (by zwallet's key for each chain, once; a file's cap that differs
-    is shown beside it while the budget has room, then "and N more caps from the files, not
-    shown"), both files as they are (at most 20 names per file; names and fee caps from the files
+    every fee cap it sets back (by zwallet's key for each chain, once; of the files' caps that
+    differ, each that still fits the budget is shown beside it, then "and N more caps from the
+    files, not shown"), both files as they are (at most 20 names per file; names and fee caps from the files
     share one budget of 512 characters, the caps first and each file's names once, then how many
     more; a file that exists but cannot be read, or is not a list, is "there but cannot be read:
     its entries are unknown, and a reset drops them", never "none"), every outcome
