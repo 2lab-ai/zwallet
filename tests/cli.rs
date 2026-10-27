@@ -1015,9 +1015,8 @@ fn k5_binary_swapped_during_the_prompt_never_gets_the_password() {
     let exe = home.path().join("zwallet");
     fs::copy(env!("CARGO_BIN_EXE_zwallet"), &exe).unwrap();
     let captured = home.path().join("captured");
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.env_clear()
-        .env("ZWALLET_HOME", home.path())
+    let mut cmd = common::zwallet_at(&exe);
+    cmd.env("ZWALLET_HOME", home.path())
         .args(["unlock", "30s", "--json"]);
     if common::ptrace_scope_is_open() {
         cmd.arg("--allow-ptrace-scope-0");
@@ -1450,9 +1449,8 @@ fn r1_daemon_refuses_a_pipe_for_its_channel() {
 fn r1_unlock_refuses_ptrace_scope_0_without_the_flag() {
     // Built without `command_in`, which adds --allow-ptrace-scope-0 where the host needs it.
     let raw = |home: &Home, args: &[&str]| {
-        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_zwallet"));
-        cmd.env_clear()
-            .env("ZWALLET_HOME", home.path())
+        let mut cmd = common::zwallet_at(env!("CARGO_BIN_EXE_zwallet"));
+        cmd.env("ZWALLET_HOME", home.path())
             .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1927,8 +1925,12 @@ fn r4c3_status_lists_the_daemons_of_other_homes() {
 }
 
 /// A wallet home outside the suite's test homes (`/tmp/zwx-*`, not `/tmp/zwt-*`), standing for
-/// the user's real one. Its daemons are stopped when it drops, this home's only.
+/// the user's real one. Its own commands are scoped to the outside homes: one scoped to the test
+/// homes cannot see this home's daemon, and `unlock` checks that it can. Its daemons are stopped
+/// when it drops, this home's only.
 struct Outside(tempfile::TempDir);
+
+const OUTSIDE_HOMES: &str = "/tmp/zwx-";
 
 impl Outside {
     fn new() -> Self {
@@ -1944,7 +1946,12 @@ impl Outside {
     }
 
     fn run_stdin(&self, args: &[&str]) -> common::Run {
-        run_in(self.path(), args, Some(&format!("{PW}\n")), &[])
+        run_in(
+            self.path(),
+            args,
+            Some(&format!("{PW}\n")),
+            &[(zwallet::core::protocol::TEST_SCOPE_ENV, OUTSIDE_HOMES)],
+        )
     }
 
     /// Unlocks it for 30 s and returns its daemon's pid.
@@ -3708,13 +3715,9 @@ fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
 
 /// Unlocks `home` with a daemon started from the binary at `exe` (a copy), and returns its pids.
 fn unlock_from(home: &Home, exe: &std::path::Path) {
-    let mut cmd = std::process::Command::new(exe);
-    cmd.env_clear().env("ZWALLET_HOME", home.path()).args([
-        "unlock",
-        "10m",
-        "--password-stdin",
-        "--json",
-    ]);
+    let mut cmd = common::zwallet_at(exe);
+    cmd.env("ZWALLET_HOME", home.path())
+        .args(["unlock", "10m", "--password-stdin", "--json"]);
     if common::ptrace_scope_is_open() {
         cmd.arg("--allow-ptrace-scope-0");
     }

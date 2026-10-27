@@ -1713,9 +1713,65 @@ fn daemon_argv_home(argv: &[OsString]) -> Option<&OsStr> {
     }
 }
 
+/// Test-only, not a user feature: a home-path prefix that confines every lookup below to the
+/// daemons whose `--home` starts with it, and so the stop-all of `zwallet lock`, of a whitelist
+/// edit and of the `create --unlock` mismatch. The test suite sets it on every zwallet it starts,
+/// so that `cargo test` stops only the daemons of its own test homes, never the user's session.
+/// Only builds with `debug_assertions` (what `cargo test` builds) read it; it is compiled out of
+/// release builds, which neither read it nor carry its name.
+pub const TEST_SCOPE_ENV: &str = "ZWALLET_TEST_DAEMON_SCOPE";
+
+/// The `--home`s under a path prefix, compared byte by byte (the prefix may end inside a name,
+/// as `/tmp/zwt-` does). A daemon's `--home` is canonical, so the prefix counts as written and
+/// with its directory canonical (`/tmp/zwt-` is `/private/tmp/zwt-` there on macOS).
+struct HomePrefix(Vec<Vec<u8>>);
+
+impl HomePrefix {
+    fn new(prefix: &OsStr) -> Self {
+        let raw = prefix.as_bytes();
+        let mut forms = vec![raw.to_vec()];
+        if let Some(slash) = raw.iter().rposition(|b| *b == b'/') {
+            let (dir, name) = raw.split_at(slash + 1);
+            if let Ok(dir) = std::fs::canonicalize(OsStr::from_bytes(dir)) {
+                let mut form = dir.as_os_str().as_bytes().to_vec();
+                if !form.ends_with(b"/") {
+                    form.push(b'/');
+                }
+                form.extend_from_slice(name);
+                forms.push(form);
+            }
+        }
+        Self(forms)
+    }
+
+    fn holds(&self, home: &OsStr) -> bool {
+        self.0.iter().any(|form| home.as_bytes().starts_with(form))
+    }
+}
+
+/// The [`TEST_SCOPE_ENV`] prefix of a debug build.
+#[cfg(debug_assertions)]
+fn test_scope() -> Option<HomePrefix> {
+    std::env::var_os(TEST_SCOPE_ENV).map(|prefix| HomePrefix::new(&prefix))
+}
+
+/// A release build has no test scope.
+#[cfg(not(debug_assertions))]
+fn test_scope() -> Option<HomePrefix> {
+    None
+}
+
 /// `(pid, --home)` of every zwallet daemon of this user, other than this process and `keep`:
-/// any process whose argv is `<any> daemon --home <absolute path>`.
+/// any process whose argv is `<any> daemon --home <absolute path>` (in a debug build given
+/// [`TEST_SCOPE_ENV`], only those under it).
 fn daemon_processes(keep: Option<i32>) -> Result<Vec<(i32, OsString)>> {
+    daemon_processes_in(test_scope().as_ref(), keep)
+}
+
+fn daemon_processes_in(
+    scope: Option<&HomePrefix>,
+    keep: Option<i32>,
+) -> Result<Vec<(i32, OsString)>> {
     let me = std::process::id() as i32;
     Ok(process_argvs()?
         .into_iter()
@@ -1726,6 +1782,7 @@ fn daemon_processes(keep: Option<i32>) -> Result<Vec<(i32, OsString)>> {
                 .is_absolute()
                 .then(|| (pid, home.to_os_string()))
         })
+        .filter(|(_, home)| scope.is_none_or(|scope| scope.holds(home)))
         .collect())
 }
 
@@ -1735,14 +1792,21 @@ fn sorted(mut pids: Vec<i32>) -> Vec<i32> {
     pids
 }
 
+fn pids_of(daemons: Vec<(i32, OsString)>) -> Vec<i32> {
+    sorted(daemons.into_iter().map(|(pid, _)| pid).collect())
+}
+
 /// Pids of every zwallet daemon of this user, whatever home it serves.
 pub fn all_daemon_pids() -> Result<Vec<i32>> {
-    Ok(sorted(
-        daemon_processes(None)?
-            .into_iter()
-            .map(|(pid, _)| pid)
-            .collect(),
-    ))
+    Ok(pids_of(daemon_processes(None)?))
+}
+
+/// Pids of every zwallet daemon of this user whose `--home` starts with `prefix`, matched as
+/// [`TEST_SCOPE_ENV`] is: what the test suite looks up from its own process, which carries no
+/// test scope.
+pub fn daemon_pids_under(prefix: &Path) -> Result<Vec<i32>> {
+    let scope = HomePrefix::new(prefix.as_os_str());
+    Ok(pids_of(daemon_processes_in(Some(&scope), None)?))
 }
 
 /// Pids of this user's zwallet daemons for `home`, other than this process and `keep`.
@@ -2639,6 +2703,27 @@ mod tests {
             argv(&["a", "bc", "", "d"])
         );
         assert_eq!(split_nul(b"a\0b\0c\0", 2), argv(&["a", "b"]));
+    }
+
+    #[test]
+    fn a_test_scope_holds_the_homes_under_its_prefix_as_written_or_canonical() {
+        let tmp = std::fs::canonicalize("/tmp").unwrap();
+        let scope = HomePrefix::new(OsStr::new("/tmp/zwt-"));
+        for home in [
+            PathBuf::from("/tmp/zwt-a1"),
+            tmp.join("zwt-a1"),
+            tmp.join("zwt-a1").join("nested"),
+        ] {
+            assert!(scope.holds(home.as_os_str()), "{home:?}");
+        }
+        for home in [
+            PathBuf::from("/tmp/zwx-a1"),
+            tmp.join("zwx-a1"),
+            tmp.clone(),
+            PathBuf::from("/Users/u/.zwallet"),
+        ] {
+            assert!(!scope.holds(home.as_os_str()), "{home:?}");
+        }
     }
 
     #[test]
