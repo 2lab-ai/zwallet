@@ -212,14 +212,14 @@ const RESTORE_SCREEN: &[u8] = b"\x1b[?1049l\x1b[?25h";
 /// terminal (which `enter` requires).
 const TTY: RawFd = 0;
 
-/// [`TTY`]'s modes as the guard that holds the terminal found them, for the panic hook. Written
-/// only by the thread that has just taken the terminal ([`claim`]), while [`MODES_SET`] is
-/// false; read only by the panic that took the terminal from a guard (`FATAL`, after which no
-/// guard takes it again), once it has seen [`MODES_SET`] true.
+/// [`TTY`]'s modes as the guard took them over, for the panic hook and the deadline's handler.
+/// Written once per process ([`ENTERED`]), by the thread taking the terminal, before
+/// [`MODES_SET`] is published; never written again. Read, once [`MODES_SET`] is seen true, by
+/// the panic that took the terminal ([`on_panic`]) and by [`on_deadline`], maybe both.
 struct Modes(UnsafeCell<MaybeUninit<libc::termios>>);
 
-// SAFETY: the protocol above: one writer, before `MODES_SET` is published (Release); one reader,
-// after it saw it (Acquire), and no writer can start once a reader may run.
+// SAFETY: the protocol above: one write, before `MODES_SET` is published (Release); after it the
+// data never changes, and every reader reads it only after seeing `MODES_SET` (Acquire).
 unsafe impl Sync for Modes {}
 
 static MODES: Modes = Modes(UnsafeCell::new(MaybeUninit::uninit()));
@@ -243,9 +243,11 @@ const EMERGENCY_WAIT_MS: libc::c_int = 100;
 
 /// A file descriptor the panic hook writes with plain `write(2)`: no buffer, no lock (std's
 /// stdout and stderr have locks that a thread that panicked later may hold forever, see
-/// [`emergency`]), no allocation, and no wait past [`EMERGENCY_WAIT_MS`]: each write comes only
-/// once `poll(2)` says the fd takes one, and what the hook writes is far below `PIPE_BUF`, so
-/// that write does not block. `O_NONBLOCK` is never set: it would stay on the shell's terminal.
+/// [`emergency`]), no allocation. Each write comes only once `poll(2)` says the fd takes one;
+/// when it does not within [`EMERGENCY_WAIT_MS`], that output is skipped. Readiness reserves no
+/// room: another writer may fill the pipe between the `poll` and the write, which then blocks,
+/// whatever its size. The deadline ([`arm_deadline`]) bounds that wait, not `poll`. `O_NONBLOCK`
+/// is never set: it would stay on the shell's terminal.
 struct Fd(RawFd);
 
 impl Write for Fd {
@@ -311,10 +313,12 @@ enum Panicked {
 /// then [`RESTORE_SCREEN`] on `out` and [`PANIC_OUTPUT`] on `err`, each best effort; nothing here
 /// locks or allocates besides what `out` and `err` do. `ACQUIRING` is taken like the rest, without
 /// waiting for the thread taking the terminal: [`Guard::enter`] runs before the TUI starts any
-/// other thread, so a panic then comes on that thread; one on another thread would break that
-/// rule, and still gets the modes back and the exit. A panic that finds it `FATAL` writes nothing
-/// and never runs `before`, which would print its payload. Only while `IDLE` does `before`, the
-/// hook that was there before, get `info`.
+/// other thread, so a panic then comes on that thread. One on another thread would break that
+/// rule, and this hook does not make it safe: if it comes before raw mode is set, it restores the
+/// modes (or finds none recorded), the taking thread then sets raw mode, and the process ends raw.
+/// The call order rules that out; the `acquiring-locked` test covers only a panic after raw mode.
+/// A panic that finds it `FATAL` writes nothing and never runs `before`, which would print its
+/// payload. Only while `IDLE` does `before`, the hook that was there before, get `info`.
 fn on_panic<I: ?Sized>(
     state: &AtomicU8,
     out: &mut impl Write,
@@ -1104,21 +1108,28 @@ mod tests {
         // SAFETY: both fds were just returned by openpty and are owned by nobody else.
         let (_master, slave) =
             unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-        let stdin = if pty {
-            Stdio::from(slave.try_clone().unwrap())
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["tui::term::tests::panic_child", "--exact", "--nocapture"])
+            .env(PANIC_CHILD, mode)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if pty {
+            cmd.stdin(Stdio::from(slave.try_clone().unwrap()));
         } else {
-            Stdio::null()
-        };
-        let mut child = Reaped(
-            Command::new(std::env::current_exe().unwrap())
-                .args(["tui::term::tests::panic_child", "--exact", "--nocapture"])
-                .env(PANIC_CHILD, mode)
-                .stdin(stdin)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap(),
-        );
+            cmd.stdin(Stdio::null());
+            // A session of its own, with no controlling terminal: a regression that fell back
+            // to `/dev/tty` (as crossterm does when stdin is no terminal) cannot reach the
+            // terminal the tests run in.
+            // SAFETY: setsid is async-signal-safe, called in the child before exec.
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+        let mut child = Reaped(cmd.spawn().unwrap());
         let read = |mut r: Box<dyn Read + Send>| {
             let mut v = Vec::new();
             let _ = r.read_to_end(&mut v);

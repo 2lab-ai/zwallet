@@ -517,9 +517,12 @@ it as well.
   after the first guard dropped or the first call failed), and before it starts any other thread
   or blocking task. So a panic while the terminal is being taken (modes recorded, raw mode on, the
   screen not yet set up) comes on the taking thread, and is handled like one while it is held:
-  the recorded modes are restored and the process ends. A panic on another thread then (which
-  that order rules out) gets the same, without waiting for the taking thread. `_exit` runs no destructors, so a `Zeroizing` buffer such
-  as `PasswordBuf` is not cleared on that path: its memory goes with the process.
+  the recorded modes are restored and the process ends. A panic on another thread then is what
+  that call order rules out, and the hook does not make it safe: if it comes before raw mode is
+  set, it restores the modes (or finds none recorded), the taking thread then sets raw mode, and
+  the process can end raw. The `acquiring-locked` test covers only the other order, raw mode
+  first. `_exit` runs no destructors, so a `Zeroizing` buffer such as `PasswordBuf` is not
+  cleared on that path: its memory goes with the process.
 
 ## Architecture
 
