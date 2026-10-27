@@ -483,14 +483,19 @@ it as well.
   restores the terminal's modes first (`tcsetattr` from the modes the guard recorded), then
   writes the screen's restore sequences on fd 1 and the line on fd 2, each only when `poll(2)`
   says the fd takes it within 100 ms: a full pipe or a stalled reader costs that output, never
-  the exit. Right after the modes it arms `alarm(2)` with SIGALRM's default action, so a write
-  that blocks anyway (another writer filled the pipe after `poll`) ends with the process killed
-  within 2 s, the modes already restored. A panic on another thread while a guard is still
-  taking the terminal (between recording the modes and raw mode) waits for it, under the same
-  deadline, so the modes are never restored before raw mode is set. A second panic meanwhile
-  prints nothing and parks inside the hook; a parked thread
-  keeps every lock it holds (std's stdout and stderr locks too), which is why the hook's path
-  takes no lock and allocates nothing. `_exit` runs no destructors, so a `Zeroizing` buffer such
+  the exit. Right after the modes it arms a 2 s deadline: `alarm(2)` with a SIGALRM handler
+  (installed with `sigaction`, SIGALRM unblocked on that thread) that restores the recorded
+  modes and calls `_exit(101)`, async-signal-safe calls only; so a write that blocks anyway
+  (another writer filled the pipe after `poll`) still ends the process, with the modes back. A
+  second panic meanwhile prints nothing and parks inside the hook; a parked thread keeps every
+  lock it holds (std's stdout and stderr locks too), which is why the hook's path takes no lock
+  and allocates nothing.
+- The TUI takes the terminal once per process (`Guard::enter`; every later call is refused, also
+  after the first guard dropped or the first call failed), and before it starts any other thread
+  or blocking task. So a panic while the terminal is being taken (modes recorded, raw mode on, the
+  screen not yet set up) comes on the taking thread, and is handled like one while it is held:
+  the recorded modes are restored and the process ends. A panic on another thread then (which
+  that order rules out) gets the same, without waiting for the taking thread. `_exit` runs no destructors, so a `Zeroizing` buffer such
   as `PasswordBuf` is not cleared on that path: its memory goes with the process.
 
 ## Architecture
