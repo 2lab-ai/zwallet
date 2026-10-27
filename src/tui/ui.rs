@@ -34,6 +34,22 @@ const ASCII: border::Set = border::Set {
 
 const SEP: &str = " | ";
 
+/// The widest key name the key list shows; a longer one is cut to it, ending in `...`, so the
+/// address after it is always whole: marker 3, name 27, index 6 and address 42 fill the pane's
+/// 78 columns.
+const NAME_COLUMN: usize = 27;
+
+/// The widest key name the status bar shows: with the widest chain (9), the short address (13),
+/// the longest trust words (40) and the separators, line 1 fills 80 columns.
+const BAR_NAME: usize = 11;
+
+/// The widest expiry the status bar shows, `YYYY-MM-DD HH:MMZ`: with the words before it (26),
+/// a separator and the RPC host (32), line 2 fills 78 columns.
+const BAR_EXPIRY: usize = 17;
+
+/// The widest status error line 2 shows before the RPC host (80 columns).
+const BAR_ERROR: usize = 37;
+
 /// Where a frame shows an outside value: one row, or for an error alone in a pane its block.
 #[derive(Clone, Debug)]
 pub struct Placed {
@@ -124,12 +140,13 @@ fn key_rows(
         .enumerate()
     {
         let style = if i == selected { SELECTED } else { NORMAL };
+        let name = key.name.cut(NAME_COLUMN);
         let row = Row::default()
             .text(if i == selected { ">" } else { " " }, style)
             .text(if key.active { "* " } else { "  " }, style)
-            .outside(&key.name, style)
+            .outside(&name, style)
             .text(
-                &" ".repeat(16usize.saturating_sub(key.name.text().len())),
+                &" ".repeat(16usize.saturating_sub(name.text().len())),
                 style,
             )
             .text(&format!(" {:>3}  ", key.index), style);
@@ -202,7 +219,9 @@ fn status_bar(frame: &mut Frame, [one, two]: [Rect; 2], app: &App, placed: &mut 
         }
         Pane::Failed(error) => {
             first.text("status unknown", ERROR).draw(frame, one, placed);
-            Row::default().text("status: ", ERROR).outside(error, ERROR)
+            Row::default()
+                .text("status: ", ERROR)
+                .outside(&error.cut(BAR_ERROR), ERROR)
         }
         Pane::Ready(bar) => {
             key_line(first, bar).draw(frame, one, placed);
@@ -211,7 +230,6 @@ fn status_bar(frame: &mut Frame, [one, two]: [Rect; 2], app: &App, placed: &mut 
     };
     second
         .text(SEP, NORMAL)
-        .text("rpc ", NORMAL)
         .outside(app.rpc_host(), NORMAL)
         .draw(frame, two, placed);
 }
@@ -221,7 +239,7 @@ fn key_line(row: Row, bar: &Bar) -> Row {
         return row.text("no wallet in this home", HINT);
     }
     let mut row = match &bar.key {
-        Some(key) => row.outside(key, NORMAL),
+        Some(key) => row.outside(&key.cut(BAR_NAME), NORMAL),
         None => row,
     };
     row = match &bar.address {
@@ -245,54 +263,74 @@ fn key_line(row: Row, bar: &Bar) -> Row {
 }
 
 fn lock_line(app: &App, bar: &Bar) -> Row {
+    if app.quit_pending() {
+        return Row::default().text("locking... (quits when done)", HINT);
+    }
     if app.locking() {
         return Row::default().text("locking every zwallet daemon...", HINT);
     }
     match &bar.lock {
         LockLine::Locked => Row::default().text("locked", NORMAL),
         LockLine::Open(Some(until)) => Row::default()
-            .text("signing open (agent too) until ", WARNING)
-            .outside(until, WARNING),
-        LockLine::Open(None) => Row::default().text("signing open (agent too)", WARNING),
+            .text("signing (agent too) until ", WARNING)
+            .outside(&until.cut(BAR_EXPIRY), WARNING),
+        LockLine::Open(None) => Row::default().text("signing (agent too)", WARNING),
     }
 }
 
-/// One line of text being built: its spans, and where each outside value in it starts.
+/// A piece of a [`Row`]: zwallet's own text, or a value from outside.
+enum Part {
+    Text(String),
+    Outside(Outside),
+}
+
+/// One line of text being built.
 #[derive(Default)]
 struct Row {
-    spans: Vec<Span<'static>>,
-    width: usize,
-    outside: Vec<(usize, Outside)>,
+    parts: Vec<(Part, Style)>,
 }
 
 impl Row {
     /// zwallet's own text (ASCII).
     fn text(mut self, text: &str, style: Style) -> Self {
-        self.width += text.len();
-        self.spans.push(Span::styled(text.to_string(), style));
+        self.parts.push((Part::Text(text.to_string()), style));
         self
     }
 
     fn outside(mut self, value: &Outside, style: Style) -> Self {
-        self.outside.push((self.width, value.clone()));
-        self.text(value.text(), style)
+        self.parts.push((Part::Outside(value.clone()), style));
+        self
     }
 
-    /// Draws the line into `area` (one row), cut at its width, never wrapped.
+    /// Draws the line into `area` (one row), never wrapped. zwallet's text is cut at the edge;
+    /// an outside value is drawn whole: cut with `...` to the room left when longer, or left out
+    /// when not even that fits.
     fn draw(self, frame: &mut Frame, area: Rect, placed: &mut Vec<Placed>) {
-        frame.render_widget(Paragraph::new(Line::from(self.spans)), area);
-        for (at, outside) in self.outside {
-            let x = area
-                .x
-                .saturating_add(u16::try_from(at).unwrap_or(u16::MAX))
-                .min(area.right());
-            let width = u16::try_from(outside.text().len())
-                .unwrap_or(u16::MAX)
-                .min(area.right() - x);
-            placed.push(Placed {
-                outside,
-                area: Rect::new(x, area.y, width, 1),
-            });
+        let width = usize::from(area.width);
+        let mut spans = Vec::new();
+        let mut x = 0;
+        for (part, style) in self.parts {
+            let text = match part {
+                Part::Text(text) => text,
+                Part::Outside(value) => {
+                    let room = width.saturating_sub(x);
+                    if value.text().len() > room && room < 4 {
+                        continue;
+                    }
+                    let value = value.cut(room);
+                    let at = area.x + u16::try_from(x).unwrap_or(u16::MAX);
+                    let shown = u16::try_from(value.text().len()).unwrap_or(u16::MAX);
+                    let text = value.text().to_string();
+                    placed.push(Placed {
+                        outside: value,
+                        area: Rect::new(at, area.y, shown, 1),
+                    });
+                    text
+                }
+            };
+            x += text.len();
+            spans.push(Span::styled(text, style));
         }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 }

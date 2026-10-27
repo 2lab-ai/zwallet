@@ -293,7 +293,8 @@ fn at_80x24_the_widest_values_are_drawn_whole() {
     // name: the bar's two lines and the key rows keep every value whole, or cut it with `...`.
     let expires = now() + 2 * 86_400;
     let long_name = "k".repeat(32);
-    let host = "h".repeat(28) + ".com";
+    let host = "eth-mainnet-rpc.provider-name.io".to_string();
+    assert_eq!(host.len(), 32);
     let net = Net {
         chain: chains::find("avalanche").unwrap(),
         rpc_url: format!("https://{host}/v2/KEY"),

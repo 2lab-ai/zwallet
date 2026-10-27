@@ -79,7 +79,10 @@ pub async fn run(home: PathBuf, net: Net, warm: Duration) -> Result<()> {
     };
     stop.store(true, Ordering::SeqCst);
     let _ = input.join();
-    result
+    match app.take_quit_error() {
+        Some(e) => result.and(Err(e)),
+        None => result,
+    }
 }
 
 /// Starts `effect` as a task that posts its result on `tx`.
@@ -91,9 +94,9 @@ fn start(effect: Effect, home: &Path, tx: &UnboundedSender<Msg>) {
                 let _ = tx.send(Msg::Keys(wallet::keys(&home).await));
             });
         }
-        Effect::LoadStatus => {
+        Effect::LoadStatus(generation) => {
             tokio::spawn(async move {
-                let _ = tx.send(Msg::Status(wallet::status(&home).await));
+                let _ = tx.send(Msg::Status(generation, wallet::status(&home).await));
             });
         }
         Effect::LockAll => {

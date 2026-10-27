@@ -3,7 +3,7 @@
 //! the loop's (`tui::run`). What comes in from outside is made [`Outside`] here, where it arrives.
 
 use crate::chains::{Chain, Net};
-use crate::core::error::Result;
+use crate::core::error::{Result, WalletError};
 use crate::core::time::unix_secs;
 use crate::tui::text::Outside;
 use crate::wallet::{Keys, StatusView, Trust};
@@ -30,7 +30,8 @@ pub enum Msg {
     /// The refresh timer (`tui::REFRESH`): read the lock state again.
     Tick,
     Keys(Result<Keys>),
-    Status(Result<StatusView>),
+    /// A status read, with the generation it was started in ([`Effect::LoadStatus`]).
+    Status(u64, Result<StatusView>),
     /// What `protocol::stop_all_daemons` did (`L`).
     Locked(Result<Vec<i32>>),
 }
@@ -40,8 +41,9 @@ pub enum Msg {
 pub enum Effect {
     /// `wallet::keys`, then [`Msg::Keys`].
     LoadKeys,
-    /// `wallet::status`, then [`Msg::Status`].
-    LoadStatus,
+    /// `wallet::status`, then [`Msg::Status`] with this generation: a lock started a new one, and
+    /// a read from an older one is dropped.
+    LoadStatus(u64),
     /// `protocol::stop_all_daemons`: every zwallet daemon of this user, then [`Msg::Locked`].
     LockAll,
 }
@@ -111,10 +113,14 @@ pub struct App {
     selected: usize,
     keys_pending: bool,
     status_pending: bool,
+    /// The generation of status reads the bar takes ([`Effect::LoadStatus`]).
+    status_generation: u64,
     locking: bool,
     /// An error to show in place of the key hints until the next key.
     notice: Option<Outside>,
     quit: bool,
+    /// The error of a lock that failed while a quit waited for it, for the CLI to print.
+    quit_error: Option<WalletError>,
 }
 
 impl App {
@@ -129,9 +135,11 @@ impl App {
             selected: 0,
             keys_pending: false,
             status_pending: false,
+            status_generation: 0,
             locking: false,
             notice: None,
             quit: false,
+            quit_error: None,
         }
     }
 
@@ -159,7 +167,8 @@ impl App {
                 self.selected = self.selected.min(self.rows().saturating_sub(1));
                 Vec::new()
             }
-            Msg::Status(status) => {
+            Msg::Status(generation, _) if generation != self.status_generation => Vec::new(),
+            Msg::Status(_, status) => {
                 self.status_pending = false;
                 self.status = match status {
                     Ok(status) => Pane::Ready(bar(status)),
@@ -171,7 +180,14 @@ impl App {
                 self.locking = false;
                 if let Err(e) = stopped {
                     self.notice = Some(Outside::error(&e));
+                    if self.quit {
+                        self.quit_error = Some(e);
+                    }
                 }
+                // A status read started before the lock may land after it and say unlocked:
+                // reads of the older generation are dropped, and a fresh one starts.
+                self.status_generation += 1;
+                self.status_pending = false;
                 let mut work = self.load_status();
                 work.extend(self.load_keys());
                 work
@@ -210,12 +226,12 @@ impl App {
         vec![Effect::LoadKeys]
     }
 
-    /// [`Effect::LoadStatus`], unless a read is running already.
+    /// [`Effect::LoadStatus`], unless a read of this generation is running already.
     fn load_status(&mut self) -> Vec<Effect> {
         if std::mem::replace(&mut self.status_pending, true) {
             return Vec::new();
         }
-        vec![Effect::LoadStatus]
+        vec![Effect::LoadStatus(self.status_generation)]
     }
 
     fn rows(&self) -> usize {
@@ -225,8 +241,25 @@ impl App {
         }
     }
 
+    /// `q` was pressed, and no lock (`L`) is still stopping daemons: the TUI never leaves while
+    /// one is, or the stop would be cut off with the process.
     pub fn quitting(&self) -> bool {
-        self.quit
+        self.quit && !self.locking
+    }
+
+    /// `q` waits for the lock to finish ([`App::quitting`]).
+    pub fn quit_pending(&self) -> bool {
+        self.quit && self.locking
+    }
+
+    /// The error of a lock that failed while a quit waited for it.
+    pub fn take_quit_error(&mut self) -> Option<WalletError> {
+        self.quit_error.take()
+    }
+
+    /// The generation a status read for the bar must carry ([`Effect::LoadStatus`]).
+    pub fn status_generation(&self) -> u64 {
+        self.status_generation
     }
 
     pub fn chain(&self) -> &'static Chain {

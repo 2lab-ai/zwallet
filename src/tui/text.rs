@@ -123,6 +123,20 @@ impl Outside {
         Self::inert(Source::Warning, warning)
     }
 
+    /// This value cut to `width` characters, ending in `...` when it is longer; still inert and
+    /// from the same source.
+    pub fn cut(&self, width: usize) -> Self {
+        if self.text.len() <= width {
+            return self.clone();
+        }
+        let keep = width.saturating_sub(3);
+        let text = format!("{}...", &self.text[..keep]);
+        Self {
+            source: self.source,
+            text: text[..width.min(text.len())].to_string(),
+        }
+    }
+
     pub fn source(&self) -> Source {
         self.source
     }
