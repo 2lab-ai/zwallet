@@ -657,6 +657,198 @@ impl Drop for FakeDaemon {
     }
 }
 
+/// Whether `tool` is on the PATH, for tests that need `cc` or `codesign`.
+pub fn have(tool: &str) -> bool {
+    std::process::Command::new(tool)
+        .arg(if tool == "codesign" {
+            "--help"
+        } else {
+            "--version"
+        })
+        .output()
+        .map(|o| o.status.success() || o.status.code().is_some())
+        .unwrap_or(false)
+}
+
+/// A child process killed and reaped when this drops, so a failing assertion never leaves a test
+/// double's `accept()` loop running (as [`DaemonChild`] does for a daemon).
+pub struct KillOnDrop(pub std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Waits (bounded by `limit`) until the listener on `home`'s `d.sock` answers a request with a
+/// non-empty reply. The socket file exists from `bind`, but a connect before `listen` is refused
+/// (ECONNREFUSED), so existence alone is not readiness. Each attempt is one full exchange, as the
+/// CLI does it (a status request, EOF, then the reply read with a timeout): a probe that hung up
+/// early would leave the listener writing to a gone peer (SIGPIPE), and one that read without a
+/// timeout would hang on a listener that accepts but never replies. A refused connect, an error,
+/// a timeout or an empty reply is retried; after `limit` this panics saying which it last saw.
+pub fn wait_until_answering(home: &Home, limit: Duration) {
+    let start = Instant::now();
+    let sock = home.sock();
+    loop {
+        let last = match std::os::unix::net::UnixStream::connect(&sock) {
+            Err(e) => format!("connect: {e}"),
+            Ok(mut s) => {
+                let exchange = s
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .and_then(|()| s.write_all(b"{\"op\":\"status\"}\n"))
+                    .and_then(|()| s.shutdown(std::net::Shutdown::Write))
+                    .and_then(|()| {
+                        let mut buf = Vec::new();
+                        s.read_to_end(&mut buf).map(|_| buf)
+                    });
+                match exchange {
+                    Ok(reply) if !reply.is_empty() => return,
+                    Ok(_) => "an empty reply".to_string(),
+                    Err(e) => format!("exchange: {e}"),
+                }
+            }
+        };
+        assert!(
+            start.elapsed() < limit,
+            "nothing answered on {} within {limit:?}; last attempt: {last}",
+            sock.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A tiny attacker: binds `$1/d.sock` and answers every request with an ok reply carrying the
+/// POISON address, from its own code. Built with `cc` in the test, so its cdhash and executable
+/// are not zwallet's. `ATTACKER_REPLY` replaces the whole reply (one JSON line), and
+/// `ATTACKER_NONDUMPABLE` makes it non-dumpable on Linux, as a genuine key daemon is, so its
+/// executable cannot be read and who answered is not known (`Unknown`).
+pub const ATTACKER_C: &str = r#"
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/time.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+/* When $ATTACKER_LOG is set, append a timestamped event (sub-second) so a flake can be read from
+   the log rather than guessed. Inert (one getenv) when the variable is unset. */
+static void logev(const char *ev, long n) {
+  const char *p = getenv("ATTACKER_LOG");
+  if (!p) return;
+  FILE *f = fopen(p, "a");
+  if (!f) return;
+  struct timeval tv; gettimeofday(&tv, 0);
+  fprintf(f, "%ld.%06d pid=%d %s %ld\n", (long)tv.tv_sec, (int)tv.tv_usec, (int)getpid(), ev, n);
+  fclose(f);
+}
+/* One connection, in its own process: read what the client sends (bounded by SO_RCVTIMEO so a
+   client that is slow to send its request or its EOF never blocks us), then answer. */
+static void handle(int s, const char *reply) {
+  struct timeval to; to.tv_sec = 2; to.tv_usec = 0;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+  char b[1024]; ssize_t n; long got = 0;
+  while ((n = read(s, b, sizeof b)) > 0) got += n;
+  logev(n == 0 ? "eof" : "read-stop", got);
+  size_t len = strlen(reply), off = 0;
+  while (off < len) { ssize_t w = write(s, reply + off, len - off); if (w <= 0) break; off += w; }
+  logev("replied", got);
+  shutdown(s, SHUT_WR); close(s);
+}
+int main(int argc, char **argv) {
+  if (argc < 3) return 2;              /* argv: daemon --home <HOME> */
+  signal(SIGPIPE, SIG_IGN);            /* a client that hangs up must not kill us mid-reply */
+  signal(SIGCHLD, SIG_IGN);            /* reap per-connection handlers, no zombies */
+#ifdef __linux__
+  if (getenv("ATTACKER_NONDUMPABLE")) prctl(PR_SET_DUMPABLE, 0);
+#endif
+  /* Release any descriptor inherited from the test (its captured stdout/stderr pipe, say) so
+     nothing waits on this process for EOF and no handler shares one. */
+  int dn = open("/dev/null", O_RDWR);
+  if (dn >= 0) { dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); }
+  char path[512];
+  snprintf(path, sizeof path, "%s/d.sock", argv[argc - 1]);
+  unlink(path);
+  int l = socket(AF_UNIX, SOCK_STREAM, 0);
+  struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
+  strncpy(a.sun_path, path, sizeof a.sun_path - 1);
+  if (bind(l, (struct sockaddr *)&a, sizeof a) || listen(l, 8)) return 3;
+  /* Its own pid, so `status` takes the reply as coming from a listed daemon process. The
+     expiry (JSON string text) and the whitelist (a JSON value) can be set from the environment. */
+  const char *exp = getenv("ATTACKER_EXPIRES");
+  if (!exp) exp = "2099-01-01T00:00:00Z";
+  const char *wl = getenv("ATTACKER_WHITELIST");
+  if (!wl) wl = "null";
+  const char *raw = getenv("ATTACKER_REPLY");
+  size_t cap = (raw ? strlen(raw) : strlen(exp) + strlen(wl)) + 512;
+  char *reply = malloc(cap);
+  if (!reply) return 4;
+  if (raw) snprintf(reply, cap, "%s\n", raw);
+  else snprintf(reply, cap,
+    "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
+    "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"ethereum\",\"index\":0,"
+    "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n",
+    (int)getpid(), exp, wl);
+  logev("listening", 0);
+  for (;;) {
+    int s = accept(l, 0, 0);
+    if (s < 0) { logev("accept-err", 0); continue; }
+    logev("accepted", 0);
+    /* Each connection is served in its own child, so a client that is slow on one connection
+       never keeps us from accepting and answering another. */
+    pid_t pid = fork();
+    if (pid == 0) { close(l); handle(s, reply); _exit(0); }
+    close(s);
+  }
+}
+"#;
+
+/// Builds [`ATTACKER_C`] at `bin` with `cc`, ad-hoc signed on macOS where the linker did not sign
+/// it (x86_64), so its code is named by its cdhash on every Mac, as an attacker that signs its
+/// binary is.
+pub fn build_attacker(src_dir: &Path, bin: &Path) {
+    let src = src_dir.join("attacker.c");
+    std::fs::write(&src, ATTACKER_C).unwrap();
+    let cc = std::process::Command::new("cc")
+        .arg("-o")
+        .arg(bin)
+        .arg(&src)
+        .output()
+        .expect("run cc");
+    assert!(
+        cc.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+    sign_if_unsigned(bin);
+}
+
+/// Starts [`ATTACKER_C`] (built into `dir`) as a daemon-argv impostor for `home`, with `env`
+/// set, and waits until it answers.
+pub fn daemon_argv_impostor(home: &Home, dir: &Path, env: &[(&str, &str)]) -> KillOnDrop {
+    assert!(
+        have("cc"),
+        "needs cc (rustc's linker) to build the attacker"
+    );
+    let bin = dir.join("attacker");
+    build_attacker(dir, &bin);
+    let canonical = std::fs::canonicalize(home.path()).unwrap();
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("daemon").arg("--home").arg(&canonical);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let attacker = KillOnDrop(cmd.spawn().expect("spawn attacker"));
+    wait_until_answering(home, Duration::from_secs(15));
+    attacker
+}
+
 /// Whether every byte of `s` is printable ASCII (0x20..=0x7E): no control, no `\n`, no non-ASCII.
 /// The one rule the tests assert of any text that came from outside zwallet — a daemon reply, an
 /// RPC answer, a file. `\n` is NOT exempt: a value from outside must never carry a line break,
