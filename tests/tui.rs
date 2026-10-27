@@ -9,6 +9,7 @@ use common::Home;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, Cell};
+use ratatui::layout::Rect;
 use serde_json::Value;
 use std::time::{Duration, SystemTime};
 use zwallet::chains::{self, Net};
@@ -350,19 +351,49 @@ fn an_index_of_1000_and_a_32_character_name_never_cut_the_address() {
     assert!(b_row.contains("..."), "the name is cut: {b_row:?}");
 }
 
+/// The shortest a key name is cut to on bar line 1, `...` included; written here, not read from
+/// the code.
+const BAR_NAME_MIN: usize = 8;
+
+/// `shown` is `whole`, or a cut of it that ends in `...` (and is at least `min` long).
+fn whole_or_cut(shown: &str, whole: &str, min: usize) -> bool {
+    shown == whole
+        || (shown.len() >= min
+            && shown.ends_with("...")
+            && whole.starts_with(shown.trim_end_matches("...")))
+}
+
 #[test]
-fn line_1_fits_80_columns_for_every_chain_with_a_32_character_key_name() {
+fn line_1_fits_80_columns_for_every_chain_and_every_trust_with_a_32_character_key_name() {
     let name = "n".repeat(32);
+    // The longest warning `PeerCheck::warning` writes: its words, a pid, and the executable path
+    // (an outside value) it quotes; and one past every budget.
+    let warning = format!(
+        "the process answering on the key daemon socket (pid 4294967295) runs other code than \
+         this zwallet build ({}); run `zwallet lock` and unlock again",
+        "/p".repeat(32)
+    );
+    let flood = "w".repeat(600);
+    let not_verified = if cfg!(target_os = "linux") {
+        "not verified (no session check on Linux)"
+    } else {
+        "not verified"
+    };
+    let impostor = "NOT this build's key daemon: ";
     for chain in zwallet::chains::CHAINS {
-        for (trust, words) in [
-            (Trust::Session, "verified by session"),
+        for (trust, words, w) in [
+            (Trust::Session, "verified by session", None),
+            (Trust::Unverified(None), not_verified, None),
+            (Trust::Locked, "not verified", None),
             (
-                Trust::Unverified(None),
-                if cfg!(target_os = "linux") {
-                    "not verified (no session check on Linux)"
-                } else {
-                    "not verified"
-                },
+                Trust::Unverified(Some(warning.clone())),
+                impostor,
+                Some(warning.as_str()),
+            ),
+            (
+                Trust::Unverified(Some(flood.clone())),
+                impostor,
+                Some(flood.as_str()),
             ),
         ] {
             let net = Net {
@@ -377,17 +408,53 @@ fn line_1_fits_80_columns_for_every_chain_with_a_32_character_key_name() {
             app.update(Msg::Status(app.generation(), Ok(status)));
             let (rows, _) = checked_frame(&mut screen(80, 24), &app);
             let line = rows[22].trim_end();
-            assert!(line.starts_with(chain.key), "{line:?}");
-            assert!(line.ends_with(words), "{}: {line:?}", chain.key);
-            assert!(line.contains("0x3C44...93BC"), "{line:?}");
-            // The widest name the bar can show on this platform is drawn whole.
-            let shown = if cfg!(target_os = "linux") {
-                "nnnnnnnn...".to_string()
-            } else {
-                name.clone()
-            };
-            assert!(line.contains(&format!(" {shown} ")), "{line:?}");
+            let case = format!("{} {words:?}", chain.key);
+            // chain | name 0x3C44...93BC | trust words [warning]
+            let rest = line
+                .strip_prefix(&format!("{} | ", chain.key))
+                .unwrap_or_else(|| panic!("{case}: {line:?}"));
+            let (shown_name, rest) = rest
+                .split_once(" 0x3C44...93BC | ")
+                .unwrap_or_else(|| panic!("{case}: {line:?}"));
+            assert!(
+                whole_or_cut(shown_name, &name, BAR_NAME_MIN),
+                "{case}: the name {shown_name:?} in {line:?}"
+            );
+            match w {
+                None => assert!(
+                    whole_or_cut(rest, words, 4),
+                    "{case}: the trust words {rest:?} in {line:?}"
+                ),
+                Some(w) => {
+                    // The words whole, then the warning whole or cut with `...`, never left out.
+                    let shown = rest
+                        .strip_prefix(impostor)
+                        .unwrap_or_else(|| panic!("{case}: the words cut in {line:?}"));
+                    let whole = Outside::warning(w).text().to_string();
+                    assert!(
+                        whole_or_cut(shown, &whole, 4),
+                        "{case}: the warning {shown:?} in {line:?}"
+                    );
+                }
+            }
         }
+    }
+}
+
+#[test]
+#[should_panic(expected = "also on row 1 at column 20")]
+fn assert_placed_catches_a_stray_copy_of_a_name_that_shares_another_names_prefix() {
+    // Two key names with the same first 12 characters, each placed on its own row; a stray copy
+    // of the first one on the second one's row must not pass for the second one.
+    let (a, b) = ("treasury-main-01", "treasury-main-02");
+    let rows = vec![format!("{a:<40}"), format!("{b:<20}{a:<20}")];
+    let at = |text: &str, y: u16| Placed {
+        outside: Outside::key_name(text),
+        area: Rect::new(0, y, text.len() as u16, 1),
+    };
+    let placed = vec![at(a, 0), at(b, 1)];
+    for p in &placed {
+        assert_placed(&rows, p, &placed);
     }
 }
 
