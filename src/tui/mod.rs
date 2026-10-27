@@ -42,6 +42,9 @@ pub async fn run(home: PathBuf, net: Net, warm: Duration) -> Result<()> {
     }
     let terminal_error = |e: std::io::Error| WalletError::validation(format!("terminal: {e}"));
     let mut app = App::new(&net, warm);
+    // Both write through the unlocked `Stdout` handle, which takes its lock per write: no
+    // `StdoutLock` is ever held across an `.await`, so a task parked there never keeps stdout
+    // from the rest of the TUI.
     let _guard = Guard::enter(std::io::stdout()).map_err(terminal_error)?;
     let mut terminal = Terminal::new(FilteredBackend::new(CrosstermBackend::new(
         std::io::stdout(),
