@@ -951,10 +951,12 @@ pub struct PtyChild {
     screen: Option<FullScreen>,
 }
 
-/// What [`PtyChild::spawn_full_screen`] keeps: the window, every byte read from the master so far
-/// (by a thread, all along, so a full pty never holds the child's writes), the thread's stop flag,
-/// and the thread reading stderr.
+/// What [`PtyChild::spawn_full_screen`] keeps: the grid frames are parsed on, every byte read from
+/// the master so far (by a thread, all along, so a full pty never holds the child's writes), the
+/// thread's stop flag, and the thread reading stderr.
 struct FullScreen {
+    /// The widest and tallest the window has been ([`PtyChild::resize`]): after a shrink nothing
+    /// drawn can lie outside the grid a frame is parsed on.
     size: (u16, u16),
     read: Arc<Mutex<Vec<u8>>>,
     stop: Arc<AtomicBool>,
@@ -1056,24 +1058,31 @@ impl PtyChild {
     }
 
     /// Waits (bounded) until what the child wrote to the terminal so far satisfies `until`, and
-    /// returns it. Past `limit` this panics with the frame, and with the exit and stderr if the
-    /// child has exited (a child that exits early is reported then, not before: its last bytes
-    /// may still be on their way to the reader).
+    /// returns it. Panics with the frame (and the exit and stderr, once the child has exited) when
+    /// the child has exited and the reader has every byte (it ends when the pty does, after the
+    /// last one), or past `limit`.
     pub fn wait_output(&mut self, limit: Duration, until: impl Fn(&[u8]) -> bool) -> Vec<u8> {
         let start = Instant::now();
         loop {
+            // Looked at before the bytes: if the reader had ended, they are all of them.
+            let all_read = self
+                .full_screen()
+                .reader
+                .as_ref()
+                .is_none_or(JoinHandle::is_finished);
             let output = self.output();
             if until(&output) {
                 return output;
             }
-            if start.elapsed() >= limit {
+            let exited = self.child.try_wait().ok().flatten();
+            if (exited.is_some() && all_read) || start.elapsed() >= limit {
                 let size = self.full_screen().size;
-                let exit = match self.child.try_wait() {
-                    Ok(Some(status)) => format!("exited ({status}), stderr {:?}", self.stderr()),
-                    _ => "still running".to_string(),
+                let exit = match exited {
+                    Some(status) => format!("exited ({status}), stderr {:?}", self.stderr()),
+                    None => format!("still running after {limit:?}"),
                 };
                 panic!(
-                    "not shown within {limit:?}; {exit}; the terminal showed:\n{}",
+                    "not shown; {exit}; the terminal showed:\n{}",
                     Frame::parse(&output, size)
                 );
             }
@@ -1094,8 +1103,9 @@ impl PtyChild {
     }
 
     /// Once the child has exited: its last frame ([`Frame::last`]), from everything it wrote
-    /// before it gave the terminal back. All of it was written before the exit; the wait (bounded)
-    /// is for the reader to catch up, and fails if the terminal was never given back.
+    /// before it gave the terminal back. All of it was written before the exit; the wait is for
+    /// the reader to catch up, and fails once it has read everything if the terminal was never
+    /// given back.
     pub fn final_frame(&mut self, limit: Duration) -> Frame {
         assert!(
             matches!(self.child.try_wait(), Ok(Some(_))),
@@ -1104,6 +1114,23 @@ impl PtyChild {
         let size = self.full_screen().size;
         let output = self.wait_output(limit, |output| Frame::last(output, size).is_some());
         Frame::last(&output, size).unwrap()
+    }
+
+    /// Sets the window to `(columns, rows)`, as a human resizing the terminal does: the kernel
+    /// sends SIGWINCH to the child, its terminal's foreground process group.
+    pub fn resize(&mut self, (columns, rows): (u16, u16)) {
+        use std::os::fd::AsRawFd;
+        let window = libc::winsize {
+            ws_row: rows,
+            ws_col: columns,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: TIOCSWINSZ reads one winsize this frame owns, on an fd this test owns.
+        let set = unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &window) };
+        assert_eq!(set, 0, "TIOCSWINSZ: {}", std::io::Error::last_os_error());
+        let screen = self.screen.as_mut().expect("spawned full screen");
+        screen.size = (screen.size.0.max(columns), screen.size.1.max(rows));
     }
 
     /// Keys as typed at the terminal, no newline added (raw mode takes each byte as it comes).

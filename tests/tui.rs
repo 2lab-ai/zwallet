@@ -838,9 +838,10 @@ fn quit(tui: &mut PtyChild) -> Frame {
 
 /// A frame as ratatui's crossterm backend writes it at 79x24: the alternate screen, the cursor
 /// hidden, the one line of [`ui::TOO_SMALL`] (its blank cells skipped), the styles reset, the
-/// cursor hidden again; then the terminal given back.
+/// cursor hidden again; then the terminal given back: ratatui shows the cursor, the guard leaves
+/// the alternate screen and shows it.
 const SMALL_FRAME: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[1;1Hterminal\x1b[1;10Htoo\x1b[1;14Hsmall\
-\x1b[1;20H(80x24\x1b[1;27Hneeded)\x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?25l\x1b[?1049l\x1b[?25h";
+\x1b[1;20H(80x24\x1b[1;27Hneeded)\x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?25l\x1b[?25h\x1b[?1049l\x1b[?25h";
 
 #[test]
 fn a_valid_stream_cut_anywhere_holds_no_stray_byte() {
@@ -874,7 +875,7 @@ fn the_79x24_check_runs_on_the_last_frame_not_on_a_live_snapshot() {
     // The warning is drawn, then a later draw (a later pty read) writes on row 5. A snapshot
     // taken once row 0 shows the warning passes the check; the last frame before the terminal
     // is given back does not.
-    let leave = b"\x1b[?1049l\x1b[?25h";
+    let leave = b"\x1b[?25h\x1b[?1049l\x1b[?25h";
     let (warning, given_back) = SMALL_FRAME.split_at(SMALL_FRAME.len() - leave.len());
     let more = b"\x1b[5;1Hmore\x1b[0m\x1b[?25l";
     let stream = [warning, &more[..], given_back].concat();
