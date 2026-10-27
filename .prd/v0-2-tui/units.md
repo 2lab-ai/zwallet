@@ -1,7 +1,7 @@
 # v0.2 TUI — units and order
 
-Status: **planned**, 2026-10-27, revised after review round 1 the same day. Six units, TUI-1 …
-TUI-6, each one PR, in dependency order. Each closes the acceptance IDs of
+Status: **planned**, 2026-10-27, revised after review rounds 1 and 2 the same day. Six units,
+TUI-1 … TUI-6, each one PR, in dependency order. Each closes the acceptance IDs of
 [`../03-tui.md`](../03-tui.md) §Acceptance listed for it; every ID T1–T11 (15 with T2b, T3b, T6b,
 T6c) is closed by exactly one unit. The library entry points are the ones [`flow.md`](flow.md)
 names in its "Split" column.
@@ -50,9 +50,16 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
   `term.rs` (new), `tests/tui.rs` (new), `tests/common/mod.rs` (the argv-listed fake daemon below,
   moved from `build_attacker`, tests/cli.rs:4163).
 - **RED tests:**
-  - `FilteredBackend` (unit, a `Vec<u8>` writer under crossterm's backend): cells holding `█`, ESC,
-    `┌` (box drawing) and a two-character grapheme are drawn; the bytes written contain none of
-    them, each shows as `?`, and the replacement count is 4. An all-ASCII frame has count 0.
+  - `FilteredBackend`, where it acts (unit): it wraps a recording inner backend (ratatui's
+    `TestBackend`) and draws five bad cells, `█`, ESC, `┌` (box drawing), a two-character grapheme
+    (`e` and U+0301) and the two-column glyph `漢`, among ASCII cells. The cells the inner backend
+    receives: each bad cell is `?`, the column after `漢`'s `?` is a space, every ASCII cell is
+    unchanged, and the replacement count is 5. An all-ASCII frame has count 0.
+  - `FilteredBackend` over a real crossterm backend writing to a `Vec<u8>` (unit): cells whose
+    content is `ESC[31m` and `ESC]0;x BEL`, all in the default style. The bytes written contain
+    neither sequence and no BEL byte, and a `?` where each cell was; the backend's own cursor and
+    style sequences (which contain ESC) are allowed and not asserted on (03-tui.md §Display
+    integrity rule 1).
   - T1 (`TestBackend`): 2 keys, `b` active: both rows, `b` marked, `locked` appears once, in the
     bar.
   - T9 (`TestBackend`): at 80×24 the bar and the list fit; at 79×24 the frame is the one `terminal
@@ -79,10 +86,11 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
 
 - **Closes:** T2, T2b.
 - **Entry points added:** `wallet::prepare_unlock`, `wallet::unlock`, `wallet::address`,
-  `wallet::set_active`, `wallet::check_with_password` (03-tui.md §Password check: the open and
-  active keys' addresses from the seed, and the checked list with its fingerprint). The CLI's
-  `unlock`, `change`, `address --verify` and `whitelist list --verify` call them (commands.rs:1912,
-  :930, :949; commands/whitelist.rs:1343).
+  `wallet::set_active`, `wallet::open_with_password` (the named keys' addresses from the seed,
+  the sealed anchor) and `wallet::check_list` (the checked list with its fingerprint), 03-tui.md
+  §Password check. The CLI's `unlock`, `change`, `list --verify` and `whitelist list --verify`
+  call them (commands.rs:1912, :930, :825; commands/whitelist.rs:1343). `address --verify`
+  (commands.rs:949-1022) does not move: it repairs the cache and reads no list file.
 - **Files:** `src/wallet.rs`, `src/commands.rs`, `src/commands/whitelist.rs`, `src/tui/app.rs`,
   `ui.rs`, `password.rs` (new), `tests/tui.rs`.
 - **Depends on:** TUI-1.
@@ -92,9 +100,13 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
     `zwallet status --json` has the same `expiresAt`; `zwallet list --json` still has `active:
     "b"`.
   - T2b (pty): `s` on `a`, confirm: `zwallet list --json` has `active: "a"`.
-  - (unit): `check_with_password` on a seeded whitelist (`common::seed_whitelist`,
-    tests/common/mod.rs:265) returns that list's entries, gen and the fingerprint of the files as
-    read; with a zwallet 0.1.0 anchor it returns `list --verify`'s message and no list.
+  - (unit): `open_with_password` then `check_list` on a seeded whitelist
+    (`common::seed_whitelist`, tests/common/mod.rs:265) returns that list's entries, gen and the
+    fingerprint of the files as read; with a zwallet 0.1.0 anchor `check_list` returns `list
+    --verify`'s message and no list. `open_with_password` reads no list file (the files are
+    removed before the call and it still succeeds).
+  - (`Msg` sequence): while the password check runs (in `spawn_blocking`), the pane shows
+    `checking...` and further frames are drawn; its result arrives as one `Msg`.
   - (`Msg` sequence): `prepare_unlock` runs before the field takes a key; the Enter that opens the
     field also switches the input thread to password mode, so keys typed right after it go into
     `PasswordBuf`, never into a `Msg::Key`; a `Trust::Unverified(Some(w))` status makes the bar
@@ -102,11 +114,18 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
     Linux)`.
 - **Counter-examples:**
   - A password in a frame: warm up with the password `pw-XYZ-0123456789`, typed and then pasted.
-    No frame of the sequence and no pty capture contains it or any 4-character piece of it; the
-    field shows as many `*` as characters typed; the `Debug` text of every `Msg` holds no part of
-    it; the paste event's string is all zero bytes after it is appended.
+    No frame of the sequence and no pty capture contains the whole password or the marked piece
+    `pw-XYZ` (shorter pieces are not searched: they collide with address hex); the field shows as
+    many `*` as characters typed; the `Debug` text of every `Msg` holds neither; the paste
+    event's string is all zero bytes after it is appended.
   - Pinning: after the warm-up, a process answering on `d.sock` gives another address for `a`:
     the pane stops with the mismatch error; the bar keeps the pinned address.
+  - The exact order: `wallet::unlock` starts the session, then the test edits wallet.json's cached
+    address for `a` (a process of this user racing the TUI), then the password check runs: the
+    pane shows the CLI's `VALIDATION_ERROR` naming `zwallet address --verify`; `zwallet status
+    --json` still has `locked: false`; there is no checked list (the picker offers nothing) and no
+    pinned address (the bar does not say `verified by password`). The same edit made before the
+    warm-up fails the warm-up itself (daemon/mod.rs:311): no session starts.
   - A process answers `address` with 600 `▀▄` characters: the pane shows the CLI's "not an
     address" error escaped; the bar never shows it as an address.
 
@@ -163,7 +182,8 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
     through a router contract (the transaction's `to` is the router; the USDC `Transfer` log pays
     the wallet): the detail shows the router as `to` and one movement with the USDC amount and
     the real recipient; a receipt with two movements: two lines; a reverted receipt: "no token
-    moved"; a pending transaction: "token movements unknown until it is mined".
+    moved"; a pending transaction: "token movements unknown until it is mined"; a USDC
+    `Transfer` log of amount 0 from a lookalike address: not shown, counted.
   - T6c (mock node): a journal row whose hash has no receipt while `eth_getTransactionCount` at
     `latest` is past its nonce: the detail's status is `dropped/replaced`.
   - T8 (`Msg` sequence): `c` then base: every pane reloads for base. (`TestBackend`): with
@@ -184,9 +204,11 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
 
 - **Closes:** T5, T6, T6b.
 - **Entry points added:** `wallet::review_transfer` (prepare as a dry-run, duplicates, the
-  whitelist check on disk; no lock, no signature; `Review` holds the exact intent),
+  whitelist verdict and fee cap on the checked list; no lock, no signature; `Review` holds the
+  exact intent),
   `wallet::send_transfer` (fingerprint check, lock, prepare again with the held payee address,
-  pending and duplicate guards again, `Review::matches` on the decoded transaction, then sign,
+  pending and duplicate guards again, `Review::matches` on the decoded transaction (`maxGasCost`
+  equal or lower, all else exactly equal), then sign,
   check the signer, journal, broadcast), `SendRecord::write` returning its line instead of
   printing it. The CLI's `transfer` calls the send path; `invoke` keeps the signing tail they are
   cut from (commands.rs:1530, :1421, :1631); both print the `broadcasting` line as before. Assets
@@ -203,8 +225,14 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
     entry nor an entry on base only; (`Msg` sequence): typed `0x...` characters in the picker
     change nothing.
   - (mock node): the fee rises between review and confirm: a new review, and zero `SignTx`
-    requests reached the daemon side.
+    requests reached the daemon side. The fee falls instead: confirm signs (one `SignTx`).
   - (`Msg` sequence): the polling bound turns the send's status into `unknown — run zwallet tx`.
+  - (`Msg` sequence): a `tx_state` result of `dropped/replaced` (TUI-4) on the send-status screen
+    renders `dropped/replaced` with the hash and the nonce.
+  - (unit): `wallet::review_transfer` takes the `CheckedList` and computes the verdict and the fee
+    cap on it: with both list files removed from the home after the check, it still reports
+    `alice` allowed under the checked list's cap (it reads no list file; the fingerprint check is
+    the TUI's own step before it).
   - (pty): no `broadcasting` line appears outside the frame; `zwallet transfer` still prints it
     (tests/cli.rs unchanged).
 - **Counter-examples:**
@@ -227,7 +255,7 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
   `wallet::whitelist_apply`, and `Change` made `pub` with `Change::add`, `Change::remove`,
   `Change::fee_cap`, `Change::reset`. The CLI's `whitelist` commands call them
   (commands/whitelist.rs:51) and keep their own prompt and printing. T7's verified state and `V`
-  use `wallet::check_with_password` (TUI-2).
+  use `wallet::open_with_password` and `wallet::check_list` (TUI-2).
 - **Files:** `src/wallet.rs`, `src/commands/whitelist.rs`, `src/tui/app.rs`, `ui.rs`,
   `tests/tui.rs`.
 - **Depends on:** TUI-5 (the end-to-end run goes through a send), TUI-2 (the password field).
@@ -279,3 +307,22 @@ decision, and where it now lives.
 | 13: U1–U6 clash with the epic's own units | renamed TUI-1 … TUI-6 | all four files |
 | 14: the start condition | TUI-1 starts once the agent-side v0.1 work is merged; G3 and G4 wait on owner actions only | loop.md §Start condition; 03-tui.md Status |
 | (rebalance) TUI-5 grew with B1 and B2 | T6c and `rpc::tx_state` move to TUI-4 (the detail's status needs them first); T5 moves to TUI-5 (assets open the transfer) | the unit table above; loop.md |
+
+## Review round 2 (2026-10-27)
+
+fable and grok-4.7 approved; gpt-6-astra rejected on one item. Each finding, the decision, and
+where it now lives.
+
+| Finding | Decision | Where |
+|---|---|---|
+| R2-1 (blocking): TUI-1's test said a crossterm backend's bytes hold no ESC, which no correct backend passes (it writes its own cursor and style sequences) | test the filter where it acts, on the cells a recording inner backend receives (five bad cells, `漢`'s continuation is a space, count 5); one real crossterm test asserts only that sequences from cell content (`ESC[31m`, `ESC]0;x BEL`) never reach the writer; rule 1 states the line between data and the backend's own control | 03-tui.md §Display integrity rule 1; flow.md §T9; TUI-1 |
+| 1: an exact fee match makes confirm fail on any fee drop | confirm signs when `maxGasCost` is equal or lower; all else exactly equal | 03-tui.md §Status of a send; flow.md §T6; TUI-5 |
+| 2: where the fingerprint is checked was named only for the review and confirm | pane open and refresh, picker open, before the review, at confirm | 03-tui.md §Password check; flow.md §Password check |
+| 3: no TUI-5 test renders `dropped/replaced` on the send-status screen | a `Msg`-sequence test reusing TUI-4's `tx_state` | TUI-5 |
+| 4: moving `address --verify` onto the check would make it read the list | two entry points, `open_with_password` and `check_list`; `address --verify` keeps its repairing path | 03-tui.md §Password check; flow.md §Password check; TUI-2, TUI-6 |
+| 5: a 0-amount movement in T4 | counted, not shown | 03-tui.md §History (T4 paragraph); flow.md §T4; TUI-4 |
+| 6: wrong text.rs reference | `escape` core/text.rs:40-50, `ascii_inert` :69; the other references touched in round 1 rechecked | 03-tui.md rule 4 |
+| 7: scrypt freezes the frame | `spawn_blocking` with a `checking...` state | 03-tui.md §Password check; flow.md §Password check; TUI-2 |
+| 8: the verdict could be computed on the file as it is at that moment | verdict and fee cap on the checked list only | 03-tui.md §Status of a send; flow.md §T6; TUI-5 |
+| 9: "any 4-character piece" of the password collides with address hex | search the whole password and the marked piece `pw-XYZ` | TUI-2 |
+| 10: the order "session starts, then the check finds a modified cache" had no test | a TUI-2 counter-example in that order; the same edit before the warm-up fails the warm-up (daemon/mod.rs:311) | TUI-2; 03-tui.md §Password check |

@@ -1,8 +1,8 @@
 # zwallet — TUI
 
 Status: **planned** (v0.2), revised 2026-10-20 after two spec reviews, revised 2026-10-27 against
-PRs #6–#12 (`origin/main` c7d3f13) and after review round 1 the same day. The signed whitelist
-shipped in v0.1 (WU1b, PR #4, [`04-whitelist.md`](04-whitelist.md)). TUI-1 starts once the
+PRs #6–#12 (`origin/main` c7d3f13) and after review rounds 1 and 2 the same day. The signed
+whitelist shipped in v0.1 (WU1b, PR #4, [`04-whitelist.md`](04-whitelist.md)). TUI-1 starts once the
 agent-side v0.1 work is merged; G3 and G4 wait on owner actions only and do not block TUI code
 ([`v0-2-tui/loop.md`](v0-2-tui/loop.md) §Start condition). Fixed user statement:
 [`v0-2-tui/ssot.md`](v0-2-tui/ssot.md). What the TUI would call today, function by function:
@@ -25,7 +25,7 @@ transaction in detail, transfer an asset to a whitelisted payee, and check the r
 - **T2 Warm-up.** Enter opens a key *in the TUI* (an internal `--key`, not a global switch). If the
   wallet is locked, it asks for the password and unlocks for **1h** through the staged unlock.
   `zwallet tui --warm <dur>` changes the 1h; `zwallet tui` and `--warm` are new (flow.md Fact 5).
-  With the same password the TUI also opens `wallet.json` itself, as `address --verify` and
+  With the same password the TUI also opens `wallet.json` itself, as `list --verify` and
   `whitelist list --verify` do: it derives the open key's address from the seed and verifies the
   whitelist (§Password check). Making the key globally active is a separate key press (`s`) with
   its own confirmation, because the active key is what the agent uses by default.
@@ -108,11 +108,19 @@ ASCII (`0x20`–`0x7E`) or `₮`: `TERMINAL_CHARS` (core/terminal.rs:20) without
 cell never holds, as `terminal_ok` (:24) tells. One `Backend` wrapper, `FilteredBackend` in
 `src/tui/term.rs`, is the only way the TUI writes to the terminal. Before each draw it replaces
 every cell whose symbol is not exactly one `terminal_ok` character with `?`, and counts the
-replacements. A cell is one column wide, so a replaced cell cannot carry an escape or a wide
-glyph. Tests draw through the same wrapper over ratatui's `TestBackend` and assert zero
-replacements on every frame: the wrapper is the last filter, as `write_human` is, and escaping
-where text comes in (rule 3) stays mandatory. The TUI's own chrome keeps to the set too: borders
-are `+`, `-` and `|`, the selection marker is `>`, and the password mask is `*`.
+replacements. A replaced cell is one column wide: a glyph two columns wide becomes `?`, and the
+wrapper itself writes a space into the column the glyph covered, so the result does not depend on
+whether ratatui's diff sends that column. Tests draw through the same wrapper over ratatui's
+`TestBackend` and assert zero replacements on every frame: the wrapper is the last filter, as
+`write_human` is, and escaping where text comes in (rule 3) stays mandatory. The TUI's own chrome
+keeps to the set too: borders are `+`, `-` and `|`, the selection marker is `>`, the password mask
+is `*`, and busy states end in `...` (`checking...`, never `…`).
+
+What rule 1 rules out is terminal control **from data**: no byte sequence that came from a cell's
+content (an ESC, a CSI or OSC sequence, a BEL) ever reaches the terminal. The backend's own
+control sequences, which move the cursor and set the styles of rule 2, do reach it: they come
+only from ratatui and crossterm, never from a cell's content, as the CLI's only unfiltered bytes
+are its own QR code's (core/terminal.rs:6-7).
 
 **2. Colour and style come from code only.** Every style the TUI uses is one of a few constants
 in `src/tui/style.rs`. No data chooses a colour, a reverse video or a background. A test asserts
@@ -150,10 +158,11 @@ that source's budget and appears only on the line or block of that source.
 
 **4. Placement.** In list panes and the status bar each outside value sits on one line, cut to
 the pane's width, never wrapped. Only the error detail view (Enter on an error line) wraps text:
-one source alone at a time, the text already escaped (`ascii_inert` turns an outside newline into
-`\u{a}`, core/text.rs:35-50, so a newline can never start a row of its own), at the pane's inner
-width of at least 78 (the size rule keeps the terminal at 80 columns or more). 512 characters then
-fill at most ⌈512 / 78⌉ = 7 rows. Two outside sources are never wrapped in one block.
+one source alone at a time, the text already escaped (`escape`, core/text.rs:40-50, which
+`ascii_inert`, :69, runs first, turns an outside newline into `\u{a}`, so a newline can never
+start a row of its own), at the pane's inner width of at least 78 (the size rule keeps the
+terminal at 80 columns or more). 512 characters then fill at most ⌈512 / 78⌉ = 7 rows. Two
+outside sources are never wrapped in one block.
 
 **5. Why no outside text can draw a code that holds an address.** A QR code can be drawn with
 ASCII characters or with background colours as modules, so excluding block glyphs (rule 1) is not
@@ -192,7 +201,7 @@ The TUI shows an address's trust as the CLI's `verified` and `verifiedBy` say it
 
 | Bar | When | Code |
 |---|---|---|
-| `verified by password` | the password check of this TUI session derived this key's address from the seed (§Password check) | `derive_checked` (commands.rs:647), as `address --verify` derives it |
+| `verified by password` | the password check of this TUI session derived this key's address from the seed (§Password check) | `derive_checked` (commands.rs:647), as `list --verify` derives it |
 | `verified by session` | unlocked, no password check yet, and every answer for the address came from this build's key daemon of this home (macOS only) | `Trust::Session` (commands.rs:555-566), `check_peer` (core/protocol.rs:1078) |
 | `not verified (locked)` | locked: the cache | `Trust::Locked` |
 | `not verified` | unlocked, but no check passed: a cached address, or Linux, where the daemon's executable is hidden and the session check never passes (core/protocol.rs:1170, :745-751). On Linux the bar adds `(no session check on Linux)` | `Trust::Unverified(None)` |
@@ -212,28 +221,41 @@ new address silently.
 ## Password check
 
 When the human types the password in this TUI session (the warm-up, a whitelist change, or `V`),
-the TUI also opens `wallet.json` with it, as `address --verify` and `whitelist list --verify` do
-in the CLI process (flow.md §Password check). One more scrypt run, the cost of `list --verify`:
+the TUI also opens `wallet.json` with it, as `list --verify` and `whitelist list --verify` do in
+the CLI process (flow.md §Password check). It costs one more scrypt run, the cost of `list
+--verify`, so it runs off the UI thread (`tokio::task::spawn_blocking`, which the `rt` feature
+the CLI already has provides, Cargo.toml:29); meanwhile the pane says `checking...` and the frame
+keeps drawing. Two entry points do it, in one blocking task:
 
-1. `store::unlock` (core/store.rs:643) decrypts the seed and checks every cached address against
-   it; a modified cache is the CLI's `VALIDATION_ERROR`, which says to run `zwallet address
-   --verify`. When that happens after a warm-up started its session, the session stays, the pane
-   shows the error, and no list is checked and no address is pinned.
-2. The open key's and the active key's addresses are derived from the seed (`derive_checked`,
-   commands.rs:647): `verified by password`, pinned (§Address trust). The seed is dropped right
-   after, as in `address --verify`.
-3. The sealed anchor (public key, generation, digest; `sealed_whitelist`, core/store.rs:255) is
-   read, and a zwallet 0.1.0 anchor without a salt gets `list --verify`'s message
-   (commands/whitelist.rs:1353-1360). Both list files are read once (`ListFiles::read`,
-   core/whitelist.rs:987) and the list the seal names is picked from those bytes
-   (`pick_base_from`, :1097, which verifies the signature, generation and digest, `verify`,
+1. `wallet::open_with_password(home, password, keys)`: `store::unlock` (core/store.rs:643)
+   decrypts the seed and checks every cached address against it; a modified cache is the CLI's
+   `VALIDATION_ERROR`, which says to run `zwallet address --verify`. Then the named keys' (the
+   open key's and the active key's) addresses are derived from the seed (`derive_checked`,
+   commands.rs:647): `verified by password`, pinned (§Address trust). The seed is dropped before
+   it returns. It also returns the sealed anchor (public key, generation, digest;
+   `sealed_whitelist`, core/store.rs:255), and nothing else.
+2. `wallet::check_list(home, sealed)`: a zwallet 0.1.0 anchor without a salt gets `list
+   --verify`'s message (commands/whitelist.rs:1353-1360). Both list files are read once
+   (`ListFiles::read`, core/whitelist.rs:987) and the list the seal names is picked from those
+   bytes (`pick_base_from`, :1097, which verifies the signature, generation and digest, `verify`,
    :766), as `verified_view` does (commands/whitelist.rs:1373-1403). Checking a signature needs
    only the sealed public key; the signing key is derived (password + sealed salt,
    core/whitelist.rs:727) only for an edit.
-4. The TUI keeps the result in memory for the TUI session as its **checked list**: the verified
-   entries (nickname, address, chains, kind), the policy, `gen`, the source file, and the
-   fingerprint of the bytes it verified (`ListFiles::fingerprint`, core/whitelist.rs:995: the
-   keccak-256 of each file's bytes, :970-975).
+3. The TUI keeps the result in memory for the TUI session as its **checked list**: the verified
+   entries (nickname, address, chains, kind), the policy, `gen`, the source file, the verified
+   list itself, and the fingerprint of the bytes it verified (`ListFiles::fingerprint`,
+   core/whitelist.rs:995: the keccak-256 of each file's bytes, :970-975).
+
+The CLI calls the same two: `list --verify` (commands.rs:827-829) calls `open_with_password` with
+every key, and `whitelist list --verify` (commands/whitelist.rs:1345-1362) calls both. `address
+--verify` does not move: it repairs a modified cache from the seed (`store::unlock_repairing`,
+commands.rs:956-957) where the password check refuses one, and it reads no list file, so it
+behaves exactly as today.
+
+A cache modified before the warm-up fails the warm-up itself: the daemon decrypts with
+`store::unlock` too (daemon/mod.rs:311), so no session starts. A cache modified after the session
+started and before the password check (a process of this user racing the TUI) is caught by step
+1: the session stays, the pane shows the error, and no list is checked and no address is pinned.
 
 What the checked list is used for, on macOS and Linux alike:
 - the payee picker offers its address entries that apply on this chain (`Entry::covers_chain`,
@@ -241,9 +263,11 @@ What the checked list is used for, on macOS and Linux alike:
 - T7's `verified` state is the checked list's;
 - T4 labels a from or to address with a nickname only from it.
 
-Before the review is shown, and again at confirm, the TUI checks that the list files are still
-the bytes it verified (`whitelist::check_unchanged`, core/whitelist.rs:1022). Any difference drops
-the checked list: the screen goes back to `not verified` and offers nothing.
+The TUI checks that the list files are still the bytes it verified (`whitelist::check_unchanged`,
+core/whitelist.rs:1022) at every point where it is about to use the checked list: when a pane that
+shows it opens or refreshes (T7, T4's labels), when the payee picker opens, before the review is
+shown, and at confirm. Any difference drops the checked list: the screen goes back to `not
+verified` and offers nothing.
 
 **Without a password in this session** (the TUI started while the wallet was already unlocked),
 the transfer screen and T7 show the list as `not verified` and offer one key press, `V`: type the
@@ -383,7 +407,8 @@ contract (a router, a batch distributor), where the transaction's own `to` is th
 detail shows the transaction's from and to on their own lines, then one line per movement (from,
 to, amount with the registry's symbol). A reverted transaction moved no token and says so. A
 pending one has no receipt: "token movements unknown until it is mined". A log of a contract
-outside the registry is counted, not shown.
+outside the registry, and a movement of amount 0 (the address-poisoning pattern §History drops
+too), are counted, not shown.
 
 ## Status of a send
 
@@ -398,16 +423,21 @@ use `record_receipt`, which reports a receipt that did not come in time as `pend
 recorded the send.
 
 **Review and confirm.** The review runs `prepare` as a dry-run, the duplicate check and the
-whitelist check on the list on disk; it takes no send lock and asks the daemon to sign nothing.
-The review holds the exact transaction it showed: chainId, from, the payee address (EIP-55, taken
-from the checked list), the asset (native, or the registry token's contract), the amount in base
-units, the calldata, and the nonce, the most the fee can cost (`maxGasCost`), `sufficientFunds`
-and the whitelist verdict. Confirm checks the list files against the checked list's fingerprint,
-takes the send lock (`SendLock`, chains/mod.rs:651), runs `prepare` again (fresh nonce and fees,
-the payee address held by the review, never looked up again by nickname), runs the pending and the
-duplicate guards again (with the override the human chose at the review, if any), and decodes the
-new unsigned transaction (`tx::decode_unsigned`, chains/evm/tx.rs:378: `chain_id`, `nonce`, `to`,
-`value`, `input`, `action`, :329-358). It signs only if every held field is equal. Otherwise it
+whitelist check; it takes no send lock and asks the daemon to sign nothing. The whitelist verdict
+and the fee cap, at the review and at confirm, are computed on the checked list (the same bytes
+its fingerprint holds): `policy::check_tx` (chains/evm/policy.rs:65) on `ListView::Usable` of the
+checked list (:41-55), never on whatever whitelist.json says at that moment (the CLI's
+`dry_run_check` reads the file, commands/whitelist.rs:980). The review holds the exact
+transaction it showed: chainId, from, the payee address (EIP-55, taken from the checked list), the
+asset (native, or the registry token's contract), the amount in base units, the calldata, and the
+nonce, the most the fee can cost (`maxGasCost`), `sufficientFunds` and the whitelist verdict.
+Confirm checks the list files against the checked list's fingerprint, takes the send lock
+(`SendLock`, chains/mod.rs:651), runs `prepare` again (fresh nonce and fees, the payee address
+held by the review, never looked up again by nickname), runs the pending and the duplicate guards
+again (with the override the human chose at the review, if any), and decodes the new unsigned
+transaction (`tx::decode_unsigned`, chains/evm/tx.rs:378: `chain_id`, `nonce`, `to`, `value`,
+`input`, `action`, :329-358). It signs only if `maxGasCost` is equal to or lower than the
+reviewed one and every other held field is exactly equal. A higher fee, or any other difference,
 signs nothing and shows the new review.
 
 ## Password handling
@@ -446,9 +476,10 @@ signs nothing and shows the new review.
   runs on the CLI's current-thread runtime (cli.rs:528). RPC, explorer and daemon calls run as
   tokio tasks and post `Msg`s back, so every pane has loading and error states.
 - Warm-up uses `wallet::prepare_unlock` then `wallet::unlock` (`protocol::start_daemon` inside),
-  then `wallet::check_with_password`. Sends use `wallet::review_transfer` then
-  `wallet::send_transfer`. The status display uses `rpc::tx_state`, the detail `rpc::tx_detail`.
-  The explorer client is `chains::evm::explorer`, the merge `history::merge`.
+  then `wallet::open_with_password` and `wallet::check_list` (one blocking task). Sends use
+  `wallet::review_transfer` then `wallet::send_transfer`. The status display uses
+  `rpc::tx_state`, the detail `rpc::tx_detail`. The explorer client is `chains::evm::explorer`,
+  the merge `history::merge`.
 
 ## Acceptance
 
@@ -491,7 +522,7 @@ binary's explorer URLs are fixed (§History); a live test (`cargo test -- --igno
 ## Changes on 2026-10-27
 
 Each fix below is something today's code (c7d3f13) contradicts, something that did not exist when
-the 2026-10-20 text was written, or a review round 1 decision (marked R1).
+the 2026-10-20 text was written, or a review round 1 or round 2 decision (marked R1, R2).
 
 1. Status: the whitelist shipped (PR #4). TUI-1 starts once the agent-side v0.1 work is merged;
    G3 and G4 (v0-1/loop.md:27-28) wait on owner actions only (R1).
@@ -548,3 +579,21 @@ the 2026-10-20 text was written, or a review round 1 decision (marked R1).
 26. Status of a send: the 90 s bound becomes `unknown` in the TUI's own state, since
     `record_receipt` reports `pending` (chains/mod.rs:1396-1399) (R1).
 27. Units renamed TUI-1 … TUI-6 (R1).
+28. Rule 1: the filter is tested where it acts (the cells the inner backend receives); a glyph
+    two columns wide becomes `?` and a space; terminal control from data is ruled out, the
+    backend's own cursor and style sequences are not (R2).
+29. Status of a send: confirm signs when the re-prepared most fee is equal to or lower than the
+    reviewed one; every other held field must be exactly equal (R2).
+30. Password check: the fingerprint is checked when a pane that shows the checked list opens or
+    refreshes, when the picker opens, before the review, and at confirm (R2).
+31. Password check: two entry points, `wallet::open_with_password` and `wallet::check_list`;
+    `address --verify` keeps its repairing path and reads no list file (R2).
+32. T4: a token movement of amount 0 is counted, not shown (R2).
+33. Rule 4: the escaping reference is `escape` (core/text.rs:40-50), run by `ascii_inert` (:69)
+    (R2).
+34. Password check: the scrypt run happens in `spawn_blocking` with a `checking...` state (R2).
+35. Status of a send: the whitelist verdict and the fee cap are computed on the checked list,
+    not on whitelist.json at that moment (R2).
+36. Password check: a cache modified before the warm-up fails the warm-up (daemon/mod.rs:311);
+    one modified between the session start and the check leaves the session and pins nothing
+    (R2).

@@ -58,7 +58,7 @@ end); the dispatcher's decision in review round 1 the same day.
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
 | T1 | key list, active marked, lock state in the bar only | no `zwallet tui`, no `wallet::keys` | TUI-1 | 🚪 |
-| T2 | warm-up ≈ 1h, open key verified by password, global active key unchanged | no `wallet::prepare_unlock` / `wallet::unlock` / `wallet::check_with_password`, no password field | TUI-2 | 🚪 |
+| T2 | warm-up ≈ 1h, open key verified by password, global active key unchanged | no `wallet::prepare_unlock` / `wallet::unlock` / `wallet::open_with_password` / `wallet::check_list`, no password field | TUI-2 | 🚪 |
 | T2b | `s` makes the key active | no `wallet::set_active` | TUI-2 | 🚪 |
 | T3 | 10 rows, merged, pending first, coverage note | no journal reader, explorer client or merge | TUI-3 | 🚪 |
 | T3b | explorer unavailable: journal only, note says so | no explorer client | TUI-3 | 🚪 |
