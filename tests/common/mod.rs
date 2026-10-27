@@ -366,24 +366,24 @@ pub fn ptrace_scope_is_open() -> bool {
 /// set to [`TEST_HOMES`], so a `lock` or a whitelist edit it runs stops only the daemons of test
 /// homes, never the user's own session. Every zwallet the tests start is built here, so a
 /// release-profile run (whose zwallet ignores the scope) fails here before any starts
-/// ([`refuse_a_build_without_the_test_scope`]).
+/// ([`zwallet_at_with`]).
 pub fn zwallet_at(exe: impl AsRef<OsStr>) -> Command {
-    refuse_a_build_without_the_test_scope(cfg!(debug_assertions));
-    let mut cmd = Command::new(exe);
-    cmd.env_clear().env(TEST_SCOPE_ENV, TEST_HOMES);
-    cmd
+    zwallet_at_with(exe, cfg!(debug_assertions))
 }
 
-/// Panics unless the build has `debug_assertions`. `CARGO_BIN_EXE_zwallet` is built with the
-/// same profile as these tests, and only a build with `debug_assertions` reads
-/// [`TEST_SCOPE_ENV`]: under `cargo test --release` every `lock` would stop the user's own
-/// session too.
-pub fn refuse_a_build_without_the_test_scope(debug_assertions: bool) {
+/// [`zwallet_at`] for a build with or without `debug_assertions`: without, it panics before it
+/// builds the command. `CARGO_BIN_EXE_zwallet` is built with the same profile as these tests,
+/// and only a build with `debug_assertions` reads [`TEST_SCOPE_ENV`]: under
+/// `cargo test --release` every `lock` would stop the user's own session too.
+pub fn zwallet_at_with(exe: impl AsRef<OsStr>, debug_assertions: bool) -> Command {
     assert!(
         debug_assertions,
         "a release zwallet ignores {TEST_SCOPE_ENV}, so a `lock` the tests run would stop the \
          user's own session: run the tests without --release"
     );
+    let mut cmd = Command::new(exe);
+    cmd.env_clear().env(TEST_SCOPE_ENV, TEST_HOMES);
+    cmd
 }
 
 /// The binary with `args`, an empty environment but `ZWALLET_HOME` and the test scope
