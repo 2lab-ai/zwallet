@@ -745,6 +745,97 @@ mod tests {
         assert!(holds(&bytes, b"\x1b[1;9H?"), "{bytes:?}");
     }
 
+    /// A [`TestBackend`] screen whose `size()` answers only while `answers` is set; otherwise it
+    /// fails, as crossterm's does with no terminal and no `TERM` (a Linux test run, or a terminal
+    /// that is gone). It counts every `size()` call.
+    struct Screen {
+        cells: TestBackend,
+        answers: std::cell::Cell<bool>,
+        asked: std::cell::Cell<usize>,
+    }
+
+    impl Backend for Screen {
+        type Error = std::io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            self.cells.draw(content).map_err(|e| match e {})
+        }
+
+        fn hide_cursor(&mut self) -> std::io::Result<()> {
+            self.cells.hide_cursor().map_err(|e| match e {})
+        }
+
+        fn show_cursor(&mut self) -> std::io::Result<()> {
+            self.cells.show_cursor().map_err(|e| match e {})
+        }
+
+        fn get_cursor_position(&mut self) -> std::io::Result<Position> {
+            self.cells.get_cursor_position().map_err(|e| match e {})
+        }
+
+        fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> std::io::Result<()> {
+            self.cells
+                .set_cursor_position(position)
+                .map_err(|e| match e {})
+        }
+
+        fn clear(&mut self) -> std::io::Result<()> {
+            self.cells.clear().map_err(|e| match e {})
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> std::io::Result<()> {
+            self.cells.clear_region(clear_type).map_err(|e| match e {})
+        }
+
+        fn size(&self) -> std::io::Result<Size> {
+            self.asked.set(self.asked.get() + 1);
+            if !self.answers.get() {
+                return Err(std::io::Error::other("no terminal"));
+            }
+            self.cells.size().map_err(|e| match e {})
+        }
+
+        fn window_size(&mut self) -> std::io::Result<WindowSize> {
+            self.cells.window_size().map_err(|e| match e {})
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.cells.flush().map_err(|e| match e {})
+        }
+    }
+
+    #[test]
+    fn a_draw_never_asks_the_terminal_for_its_size_and_clips_at_the_last_size_it_saw() {
+        let mut backend = FilteredBackend::new(Screen {
+            cells: TestBackend::new(12, 1),
+            answers: false.into(),
+            asked: 0.into(),
+        });
+        let xs: Vec<(u16, u16, &str)> = (0..12).map(|x| (x, 0, "X")).collect();
+        hand_over(&mut backend, &xs);
+        // No size has passed through the filter yet. The cell of the Linux failure (a control
+        // sequence ratatui counts wide) and a wide glyph each become `?`, and nothing is written
+        // after them: no column is known to be on the screen.
+        hand_over(&mut backend, &[(0, 0, "\u{1b}[31m"), (3, 0, "\u{6f22}")]);
+        assert_eq!(backend.replaced(), 2);
+        assert_eq!(row(backend.inner().cells.buffer(), 0), "?XX?XXXXXXXX");
+        // The size ratatui's `Terminal` reads before every frame passes through the filter once;
+        // then the terminal stops answering. The covered column is blanked, the one past the
+        // right edge is not written.
+        backend.inner().answers.set(true);
+        assert_eq!(backend.size().unwrap().width, 12);
+        backend.inner().answers.set(false);
+        hand_over(&mut backend, &xs);
+        hand_over(&mut backend, &[(3, 0, "\u{6f22}"), (11, 0, "\u{6f22}")]);
+        assert_eq!(backend.replaced(), 4);
+        assert_eq!(row(backend.inner().cells.buffer(), 0), "XXX? XXXXXX?");
+        // Asked once, by the test: never by a draw.
+        assert_eq!(backend.inner().asked.get(), 1);
+    }
+
     /// What crossterm writes to leave the alternate screen and to show the cursor.
     const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
     const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
