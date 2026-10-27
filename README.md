@@ -87,7 +87,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `--allow-ptrace-scope-0` (see **The whitelist**).
 - **Durations** are positional: an integer and one unit of `s m h d w y` (`1y` = 365d). `0`,
   negatives, fractions and unknown units are `VALIDATION_ERROR`.
-- **`tui`** (stdin and stdout on a terminal): the key list with the globally active key marked
+- **`tui`** (needs stdin on a terminal, the one it sets to raw mode, and stdout on one): the key list with the globally active key marked
   `*`, and a two-line status bar: chain, active key, its short address and how far it is
   verified; then `locked` or `signing open (agent too) until HH:MMZ` (UTC), and the RPC host.
   The lock state is read again every 5 s, so a `zwallet lock` from another shell shows. Keys:

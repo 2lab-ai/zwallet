@@ -37,7 +37,8 @@ const INPUT_POLL: Duration = Duration::from_millis(100);
 pub async fn run(home: PathBuf, net: Net, warm: Duration) -> Result<()> {
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return Err(WalletError::validation(
-            "zwallet tui needs a terminal: run it with stdin and stdout on one",
+            "zwallet tui needs a terminal: run it with stdin (which it sets to raw mode) and \
+             stdout on one",
         ));
     }
     let terminal_error = |e: std::io::Error| WalletError::validation(format!("terminal: {e}"));

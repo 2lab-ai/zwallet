@@ -94,6 +94,8 @@ Transfer and Whitelist, while the list is not checked: V = check it with the pas
   - the whitelist verdict, the pending guard and the duplicate guard (02 §Send safety).
   - A guard failure shows its message. An override (allow-pending or allow-duplicate) is a
     separate key press, with the warning on screen.
+- **Terminal:** `zwallet tui` needs stdin on a terminal (raw mode is set on stdin, and the panic
+  hook restores stdin's modes) and stdout on one; otherwise it refuses before taking either.
 - **Size:** below 80 columns or 24 rows the TUI draws one line, `terminal too small (80x24
   needed)`, and nothing else. At 80x24: a title line, the pane (bordered with `+ - |`, 78 columns
   inside), a key-hint line, and the two bar lines.
