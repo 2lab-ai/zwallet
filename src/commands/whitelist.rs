@@ -414,8 +414,24 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
         FileView::of(&next_read)
     };
     let fresh = Whitelist::empty(&WHITELIST_RULES);
-    // Every nickname and fee cap this summary shows from the files shares one budget.
+    // Every nickname and fee cap this summary shows from the files shares one budget. The
+    // change's caps are charged first: a reset sets them back, so they are the ones to set again,
+    // and no list of names may crowd them out. Then each file's names, once, for every line that
+    // names the file.
     let budget = FileTextBudget::new();
+    let fee_cap_was = match change {
+        Change::FeeCap { chain, .. } => {
+            old_values(&current, &next, &cap_text(&fresh, chain), |l| {
+                file_cap(l, chain, &budget).unwrap_or_else(|| "a cap not shown".to_string())
+            })
+        }
+        _ => String::new(),
+    };
+    let reset_caps = match change {
+        Change::Reset => reset_cap_lines(&current, &next, &fresh, &budget),
+        _ => Vec::new(),
+    };
+    let names = FileNames::of(&current, &next, &budget);
     let mut lines = vec!["The password authorizes this whitelist change:".to_string()];
     match change {
         Change::Add(e) => {
@@ -443,12 +459,8 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
             lines.push(format!("  remove {nickname}: {what}"));
         }
         Change::FeeCap { chain, wei } => {
-            // Two caps at most, the first text taken from the files: they always fit.
-            let old = old_values(&current, &next, &cap_text(&fresh, chain), |l| {
-                file_cap(l, chain, &budget).unwrap_or_else(|| "a cap not shown".to_string())
-            });
             lines.push(format!(
-                "  fee-cap {}: {old} -> {}",
+                "  fee-cap {}: {fee_cap_was} -> {}",
                 chain.key,
                 fee_text(chain, *wei)
             ));
@@ -467,15 +479,15 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
             &mut lines,
             &current,
             &next,
-            &fresh,
+            &names,
+            reset_caps,
             unlock.is_some(),
-            &budget,
         ),
     }
     match &current {
         FileView::List(l) => lines.push(format!(
             "  whitelist.json now: {}, not verified yet",
-            gen_entries(l, &budget)
+            gen_entries(l, names.current.as_deref().unwrap_or_default())
         )),
         FileView::Absent => lines.push("  whitelist.json: none yet".to_string()),
         FileView::Unreadable(why) => lines.push(unreadable_line(WHITELIST_FILE, why)),
@@ -483,7 +495,7 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
     match &next {
         FileView::List(l) => lines.push(format!(
             "  whitelist.next.json: {}, an unfinished edit, not verified yet",
-            gen_entries(l, &budget)
+            gen_entries(l, names.next.as_deref().unwrap_or_default())
         )),
         FileView::Absent if leftover => lines.push(
             "  whitelist.next.json: a copy of whitelist.json (e.g. left after a change)"
@@ -528,44 +540,92 @@ fn unreadable_line(name: &str, why: &str) -> String {
     )
 }
 
-/// The reset's own lines: what it drops, every fee cap it sets back (or leaves unset, for a
-/// chain with no built-in default), and what to try first.
+/// The list files a summary reads, by name: whitelist.json, then whitelist.next.json, each only
+/// when it is a list.
+fn list_files<'a>(
+    current: &FileView<'a>,
+    next: &FileView<'a>,
+) -> Vec<(&'static str, &'a Whitelist)> {
+    [(WHITELIST_FILE, current), (NEXT_FILE, next)]
+        .into_iter()
+        .filter_map(|(name, view)| view.list().map(|l| (name, l)))
+        .collect()
+}
+
+/// The reset's own lines: what it drops, every fee cap it sets back (`caps`, from
+/// [`reset_cap_lines`]), and what to try first. `names` are the files' names as the summary shows
+/// them.
 fn reset_lines(
     lines: &mut Vec<String>,
     current: &FileView,
     next: &FileView,
-    fresh: &Whitelist,
+    names: &FileNames,
+    caps: Vec<String>,
     unlocking: bool,
-    budget: &FileTextBudget,
 ) {
-    let names = |view: &FileView| {
-        view.list()
-            .map(|l| list_names(l, budget))
-            .filter(|n| !n.is_empty())
-    };
+    let listed = |names: &Option<String>| names.clone().filter(|n| !n.is_empty());
     let unknown =
         |name: &str| format!("{name} is there but cannot be read, so its entries are unknown");
-    let part = |view: &FileView, name: &str| match view {
+    let part = |view: &FileView, names: &Option<String>, name: &str| match view {
         FileView::Unreadable(_) => unknown(name),
-        _ => format!("{name}: {}", names(view).unwrap_or_else(|| "none".into())),
+        _ => format!("{name}: {}", listed(names).unwrap_or_else(|| "none".into())),
     };
     let dropped = match (current, next) {
         (FileView::Unreadable(_), FileView::Absent) => unknown(WHITELIST_FILE),
-        (_, FileView::Absent) => names(current).unwrap_or_else(|| "none".into()),
+        (_, FileView::Absent) => listed(&names.current).unwrap_or_else(|| "none".into()),
         _ => format!(
             "{}; {}",
-            part(current, WHITELIST_FILE),
-            part(next, NEXT_FILE)
+            part(current, &names.current, WHITELIST_FILE),
+            part(next, &names.next, NEXT_FILE)
         ),
     };
     lines.push(format!(
         "  reset: a new whitelist key and an empty list; every entry is dropped: {dropped}"
     ));
     lines.push("  fee caps after the reset, the built-in defaults:".to_string());
-    let shown: Vec<(&str, &Whitelist)> = [(WHITELIST_FILE, current), (NEXT_FILE, next)]
+    lines.extend(caps);
+    let signing_on: Vec<&str> = list_files(current, next)
         .into_iter()
-        .filter_map(|(name, view)| view.list().map(|l| (name, l)))
+        .filter(|(_, l)| l.policy.allow_message_signing)
+        .map(|(name, _)| name)
         .collect();
+    lines.push(if signing_on.is_empty() {
+        "  message signing after the reset: off".to_string()
+    } else {
+        format!(
+            "  message signing after the reset: off ({} says on, not verified)",
+            signing_on.join(" and ")
+        )
+    });
+    lines.push(if unlocking {
+        "  the reset allows nothing else (no payee, no contract), and with --unlock the new \
+         session signs under the default caps at once: to set yours first, run the reset \
+         without --unlock, then `zwallet whitelist fee-cap`"
+            .to_string()
+    } else {
+        "  the reset allows nothing else (no payee, no contract); set `zwallet whitelist \
+         fee-cap` again before `--unlock`"
+            .to_string()
+    });
+    // The one alternative to a reset; never an older whitelist.json, which would verify under a
+    // rolled-back seal and complete the rollback.
+    lines.push(
+        "  if wallet.json is an older copy, restore the current one instead if you have it \
+         (zwallet keeps no copy of it)"
+            .to_string(),
+    );
+}
+
+/// Every fee cap a reset sets back (or leaves unset, for a chain with no built-in default), one
+/// line per chain, out of `budget` before any name: they are the caps to set again.
+fn reset_cap_lines(
+    current: &FileView,
+    next: &FileView,
+    fresh: &Whitelist,
+    budget: &FileTextBudget,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let shown = list_files(current, next);
     // The chains with a cap in the defaults or either file, each once, by zwallet's own key for
     // it (a file's key is only ever looked up, never printed).
     let mut keys: Vec<&'static str> = fresh
@@ -620,36 +680,7 @@ fn reset_lines(
             if not_shown == 1 { "cap" } else { "caps" }
         ));
     }
-    let signing_on: Vec<&str> = shown
-        .iter()
-        .filter(|(_, l)| l.policy.allow_message_signing)
-        .map(|(name, _)| *name)
-        .collect();
-    lines.push(if signing_on.is_empty() {
-        "  message signing after the reset: off".to_string()
-    } else {
-        format!(
-            "  message signing after the reset: off ({} says on, not verified)",
-            signing_on.join(" and ")
-        )
-    });
-    lines.push(if unlocking {
-        "  the reset allows nothing else (no payee, no contract), and with --unlock the new \
-         session signs under the default caps at once: to set yours first, run the reset \
-         without --unlock, then `zwallet whitelist fee-cap`"
-            .to_string()
-    } else {
-        "  the reset allows nothing else (no payee, no contract); set `zwallet whitelist \
-         fee-cap` again before `--unlock`"
-            .to_string()
-    });
-    // The one alternative to a reset; never an older whitelist.json, which would verify under a
-    // rolled-back seal and complete the rollback.
-    lines.push(
-        "  if wallet.json is an older copy, restore the current one instead if you have it \
-         (zwallet keeps no copy of it)"
-            .to_string(),
-    );
+    lines
 }
 
 /// Every outcome that can still happen, decided once the password opens wallet.json.
@@ -731,14 +762,13 @@ fn headline(change: &Change) -> String {
     }
 }
 
-/// `gen G, n entries (names)` of a list read from a file, its names out of `budget`.
-fn gen_entries(list: &Whitelist, budget: &FileTextBudget) -> String {
+/// `gen G, n entries (names)` of a list read from a file, `names` as [`FileNames`] has them.
+fn gen_entries(list: &Whitelist, names: &str) -> String {
     let n = list.entries.len();
     format!(
-        "gen {}, {n} {} ({})",
+        "gen {}, {n} {} ({names})",
         list.generation,
         if n == 1 { "entry" } else { "entries" },
-        list_names(list, budget)
     )
 }
 
@@ -852,7 +882,8 @@ const NAMES_SHOWN: usize = 20;
 /// (anyone of this user's to write): every nickname it names and every fee cap it shows
 /// ([`file_cap`], the amount in the coin and in wei). A parsed list's values are in `add`'s
 /// shapes (a nickname `[a-z0-9_-]`, at most 32; a cap at most 78 digits), but 20 names per file in
-/// a column, or 16 caps of 157 digits, are a grid of their own.
+/// a column, or 16 caps of 157 digits, are a grid of their own. A file's names are charged once
+/// per command ([`FileNames`]), however many lines repeat them.
 struct FileTextBudget(std::cell::Cell<usize>);
 
 impl FileTextBudget {
@@ -887,6 +918,25 @@ fn list_names(list: &Whitelist, budget: &FileTextBudget) -> String {
         names.push(format!("and {} more", list.entries.len() - names.len()));
     }
     names.join(", ")
+}
+
+/// Each list file's names as one summary shows them ([`list_names`]): whitelist.json's, then
+/// whitelist.next.json's, charged to the summary's budget once, after its fee caps, and the same
+/// text on every line that names the file (`None` for a file that is not a list).
+struct FileNames {
+    current: Option<String>,
+    next: Option<String>,
+}
+
+impl FileNames {
+    fn of(current: &FileView, next: &FileView, budget: &FileTextBudget) -> Self {
+        let names = |view: &FileView| view.list().map(|l| list_names(l, budget));
+        let current = names(current);
+        Self {
+            current,
+            next: names(next),
+        }
+    }
 }
 
 /// What the dry-run's whitelist check found ([`dry_run_check`]).
@@ -2205,16 +2255,13 @@ mod tests {
         fresh.policy.max_fee_wei.remove("sepolia");
         let mut l = Whitelist::empty(&WHITELIST_RULES);
         l.policy.set_max_fee_wei("sepolia", U256::from(7u64));
-        let mut lines = vec![];
-        reset_lines(
-            &mut lines,
+        let text = reset_cap_lines(
             &FileView::List(&l),
             &FileView::Absent,
             &fresh,
-            false,
             &FileTextBudget::new(),
-        );
-        let text = lines.join("\n");
+        )
+        .join("\n");
         assert!(
             text.contains(
                 "    sepolia: no default: every send there is refused until `fee-cap` sets one \
@@ -2326,5 +2373,62 @@ mod tests {
                 c.key
             );
         }
+    }
+
+    #[test]
+    fn a_reset_summary_charges_the_caps_to_set_again_before_any_name() {
+        // A genuine unfinished edit: whitelist.json and whitelist.next.json each hold 20
+        // nicknames of 12 characters (240 per file) and their own caps on 4 chains (32
+        // characters each, 256 for both files). A reset sets those caps back to the defaults, so
+        // they are the ones to set again: they are charged before any name, and all 8 show. Each
+        // file's names are charged once, though the summary names them on two lines.
+        let tmp = tempfile::tempdir().unwrap();
+        let caps = [
+            ("arbitrum", 1u64),
+            ("base", 1),
+            ("ethereum", 4),
+            ("optimism", 1),
+        ];
+        let files = [
+            (WHITELIST_FILE, 3u64, "payee-num-", 0u64),
+            (NEXT_FILE, 4, "staged-nm-", 1),
+        ];
+        for (file, generation, prefix, more) in files {
+            let mut l = Whitelist::empty(&WHITELIST_RULES);
+            l.generation = generation;
+            for i in 0..20u64 {
+                l.add(Entry::new_address(
+                    &format!("{prefix}{i:02}"),
+                    &format!("0x{:040x}", generation * 100 + i + 1),
+                    &["base"],
+                ))
+                .unwrap();
+            }
+            for (chain, milli) in caps {
+                let wei = (milli + more) * 1_000_000_000_000_000;
+                l.policy.set_max_fee_wei(chain, U256::from(wei));
+            }
+            let signed = WhitelistKey::from_secret(&[6u8; 32]).sign(&l);
+            std::fs::write(tmp.path().join(file), signed.to_file_bytes().unwrap()).unwrap();
+        }
+        let text = summary(&ListFiles::read(tmp.path()), &Change::Reset, None);
+        // Each chain's own line names both files' caps (three chains share one value, so the
+        // line is what tells them apart).
+        for (chain, milli) in caps {
+            let line = text
+                .lines()
+                .find(|l| l.starts_with(&format!("    {chain}: back to the default ")))
+                .unwrap_or_else(|| panic!("{chain}: {text}"));
+            for (file, _, _, more) in files {
+                let m = milli + more;
+                let says = format!("{file} says 0.00{m} ETH ({m}000000000000000 wei)");
+                assert!(line.contains(&says), "{chain}: {says}: {text}");
+            }
+        }
+        assert!(!text.contains("more caps from the files"), "{text}");
+        // whitelist.json's names fit in what the caps left, and the same text names them on the
+        // line of what the reset drops and on the file's own line.
+        let names: Vec<String> = (0..20).map(|i| format!("payee-num-{i:02}")).collect();
+        assert_eq!(text.matches(&names.join(", ")).count(), 2, "{text}");
     }
 }
