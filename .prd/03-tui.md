@@ -483,7 +483,12 @@ it as well.
   restores the terminal's modes first (`tcsetattr` from the modes the guard recorded), then
   writes the screen's restore sequences on fd 1 and the line on fd 2, each only when `poll(2)`
   says the fd takes it within 100 ms: a full pipe or a stalled reader costs that output, never
-  the exit. A second panic meanwhile prints nothing and parks inside the hook; a parked thread
+  the exit. Right after the modes it arms `alarm(2)` with SIGALRM's default action, so a write
+  that blocks anyway (another writer filled the pipe after `poll`) ends with the process killed
+  within 2 s, the modes already restored. A panic on another thread while a guard is still
+  taking the terminal (between recording the modes and raw mode) waits for it, under the same
+  deadline, so the modes are never restored before raw mode is set. A second panic meanwhile
+  prints nothing and parks inside the hook; a parked thread
   keeps every lock it holds (std's stdout and stderr locks too), which is why the hook's path
   takes no lock and allocates nothing. `_exit` runs no destructors, so a `Zeroizing` buffer such
   as `PasswordBuf` is not cleared on that path: its memory goes with the process.
