@@ -10,8 +10,7 @@ use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::{Cell, CellDiffOption, CellWidth};
 use ratatui::layout::{Position, Size};
 use std::io::Write;
-use std::panic::PanicHookInfo;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// The one way the TUI writes cells to a terminal, as `write_human` is the CLI's: a cell whose
 /// symbol is not exactly one [`terminal_ok`] character other than the newline reaches the inner
@@ -141,8 +140,15 @@ pub const PANIC_LINE: &str = "zwallet tui stopped unexpectedly; the terminal was
 /// How a process ends after a panic while the TUI held the terminal (Rust's own panic code).
 const PANIC_EXIT: i32 = 101;
 
-/// Set while a [`Guard`] holds the terminal: one at a time, per process.
-static HOLDING: AtomicBool = AtomicBool::new(false);
+/// Who has the terminal, per process ([`STATE`]). A [`Guard`] takes it from `IDLE` only, and gives
+/// it back through `RELEASING` (while it restores, nobody else takes it). A panic while it is
+/// `HELD` or `RELEASING` makes it `FATAL` for good: the process is ending.
+const IDLE: u8 = 0;
+const HELD: u8 = 1;
+const RELEASING: u8 = 2;
+const FATAL: u8 = 3;
+
+static STATE: AtomicU8 = AtomicU8::new(IDLE);
 
 /// Gives the terminal back to the shell: leaves the alternate screen, shows the cursor, and ends
 /// raw mode (which a terminal that never entered it ignores). Errors are ignored: there is no
@@ -152,41 +158,66 @@ fn restore(out: &mut impl Write) {
     let _ = crossterm::terminal::disable_raw_mode();
 }
 
-/// The panic hook's decision. While `holding` (it is taken back here, so this runs once): the
-/// terminal is restored on `out`, [`PANIC_LINE`] written on `err` through the write point, and
-/// `true` returned, for the caller to end the process. Otherwise `before`, the hook that was
-/// there before, runs, and `false`.
-fn on_panic(
-    holding: &AtomicBool,
+/// What the panic hook decided ([`on_panic`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Panicked {
+    /// This panic took the terminal from its guard: restored, the fixed line written; the
+    /// process must end.
+    Fatal,
+    /// Another panic took it first and is ending the process; this one says nothing.
+    Suppressed,
+    /// No guard holds the terminal: the hook that was there before ran.
+    Delegated,
+}
+
+/// The panic hook's decision on `state`. The one panic that moves it from `HELD` or `RELEASING`
+/// to `FATAL` restores the terminal on `out` and writes [`PANIC_LINE`] on `err` through the write
+/// point. A panic that finds it `FATAL` writes nothing and never runs `before`, which would print
+/// its payload. Only while `IDLE` does `before`, the hook that was there before, get `info`.
+fn on_panic<I: ?Sized>(
+    state: &AtomicU8,
     out: &mut impl Write,
     err: &mut impl Write,
-    before: &dyn Fn(&PanicHookInfo<'_>),
-    info: &PanicHookInfo<'_>,
-) -> bool {
-    if holding.swap(false, Ordering::SeqCst) {
-        restore(out);
-        let _ = write_human(err, &format!("{PANIC_LINE}\n"));
-        true
-    } else {
-        before(info);
-        false
+    before: &dyn Fn(&I),
+    info: &I,
+) -> Panicked {
+    loop {
+        match state.load(Ordering::SeqCst) {
+            FATAL => return Panicked::Suppressed,
+            IDLE => {
+                before(info);
+                return Panicked::Delegated;
+            }
+            held => {
+                let taken = state.compare_exchange(held, FATAL, Ordering::SeqCst, Ordering::SeqCst);
+                if taken.is_ok() {
+                    restore(out);
+                    let _ = write_human(err, &format!("{PANIC_LINE}\n"));
+                    return Panicked::Fatal;
+                }
+            }
+        }
     }
 }
 
 /// Installs the panic hook once per process. A hook runs for every panic, also one tokio catches
 /// (a panicking `spawn_blocking` task is a `JoinError` to the TUI), so while a [`Guard`] holds
 /// the terminal no panic is survivable: [`on_panic`] gives the terminal back through stdout (a
-/// guard of the TUI always holds stdout) and the process ends with [`PANIC_EXIT`]. Without a
-/// guard the hook that was there before runs. It is never removed: a hook cannot be changed from
-/// a panicking thread.
+/// guard of the TUI always holds stdout) and the process ends with [`PANIC_EXIT`]. A panic on
+/// another thread meanwhile waits here for that end. Without a guard the hook that was there
+/// before runs. It is never removed: a hook cannot be changed from a panicking thread.
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let before = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
-            if on_panic(&HOLDING, &mut out, &mut err, &*before, info) {
-                std::process::exit(PANIC_EXIT);
+            match on_panic(&STATE, &mut out, &mut err, &*before, info) {
+                Panicked::Fatal => std::process::exit(PANIC_EXIT),
+                Panicked::Suppressed => loop {
+                    std::thread::park();
+                },
+                Panicked::Delegated => {}
             }
         }));
     });
@@ -194,19 +225,19 @@ fn install_panic_hook() {
 
 /// The terminal as the TUI holds it: raw mode (no echo), the alternate screen, the cursor hidden.
 /// One at a time per process. Dropping it, on return or on unwinding, gives the terminal back
-/// ([`restore`]) unless the panic hook already did, and ended the process.
+/// ([`restore`]) unless a panic took it, and ended the process.
 pub struct Guard<W: Write> {
     out: W,
 }
 
 impl<W: Write> Guard<W> {
     /// Takes the terminal `out` writes to (raw mode is set on the controlling terminal). Refused,
-    /// before anything is touched, while another guard holds it.
+    /// before anything is touched, unless the terminal is free.
     pub fn enter(out: W) -> std::io::Result<Self> {
         claim()?;
         install_panic_hook();
         if let Err(e) = crossterm::terminal::enable_raw_mode() {
-            HOLDING.store(false, Ordering::SeqCst);
+            let _ = STATE.compare_exchange(HELD, IDLE, Ordering::SeqCst, Ordering::SeqCst);
             return Err(e);
         }
         Self::begin(out)
@@ -227,18 +258,25 @@ impl<W: Write> Guard<W> {
     }
 }
 
-/// Takes [`HOLDING`], or refuses while a guard has it.
+/// Takes [`STATE`] from `IDLE` to `HELD`, or refuses: another guard holds the terminal, is giving
+/// it back, or a panic took it.
 fn claim() -> std::io::Result<()> {
-    HOLDING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+    STATE
+        .compare_exchange(IDLE, HELD, Ordering::SeqCst, Ordering::SeqCst)
         .map(|_| ())
         .map_err(|_| std::io::Error::other("another zwallet tui guard already holds the terminal"))
 }
 
 impl<W: Write> Drop for Guard<W> {
+    /// Gives the terminal back while still holding it (`RELEASING`), and frees it only after; a
+    /// panic meanwhile takes it from there ([`on_panic`]), and then it stays `FATAL`.
     fn drop(&mut self) {
-        if HOLDING.swap(false, Ordering::SeqCst) {
+        if STATE
+            .compare_exchange(HELD, RELEASING, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
             restore(&mut self.out);
+            let _ = STATE.compare_exchange(RELEASING, IDLE, Ordering::SeqCst, Ordering::SeqCst);
         }
     }
 }
@@ -250,7 +288,7 @@ mod tests {
     use ratatui::backend::{CrosstermBackend, TestBackend};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::process::{Command, Stdio};
-    use std::sync::atomic::AtomicU8;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Barrier, Mutex};
 
     /// A writer the test reads back after the code under test wrote to it.
@@ -442,7 +480,7 @@ mod tests {
     const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
     const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
 
-    /// Held by every test here that takes [`HOLDING`], which is one per process.
+    /// Held by every test here that takes [`STATE`], which is one per process.
     static HOLDING_TESTS: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -460,12 +498,13 @@ mod tests {
         let written = out.bytes();
         assert_eq!(count(&written, LEAVE_ALTERNATE_SCREEN), 1, "{written:?}");
         assert_eq!(count(&written, SHOW_CURSOR), 1, "{written:?}");
-        // A guard whose hold the panic hook took back restores nothing again.
+        // A guard whose terminal a panic took restores nothing again.
         let out = Shared::default();
         let guard = Guard::on(out.clone()).unwrap();
-        assert!(HOLDING.swap(false, Ordering::SeqCst));
+        assert_eq!(STATE.swap(FATAL, Ordering::SeqCst), HELD);
         drop(guard);
         assert!(!holds(&out.bytes(), LEAVE_ALTERNATE_SCREEN));
+        assert_eq!(STATE.swap(IDLE, Ordering::SeqCst), FATAL);
     }
 
     #[test]
