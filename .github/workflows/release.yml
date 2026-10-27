@@ -87,10 +87,18 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          if DYLD_INSERT_LIBRARIES=/nonexistent/x.dylib "target/$TARGET/release/zwallet" --version; then
+          # The run must fail, and because dyld could not load the inserted library (dyld4:
+          # "terminating because inserted dylib '…' could not be loaded"; dyld3: "could not load
+          # inserted library '…'"): any other failure proves nothing about dyld.
+          if err="$(DYLD_INSERT_LIBRARIES=/nonexistent/x.dylib "target/$TARGET/release/zwallet" --version 2>&1 >/dev/null)"; then
             echo "::error::dyld ignored DYLD_INSERT_LIBRARIES before signing; the hardened-runtime check would prove nothing"
             exit 1
           fi
+          if ! grep -Eq "inserted (dylib|library) '/nonexistent/x\.dylib'" <<<"$err"; then
+            echo "::error::the unsigned run failed, but not on the inserted library: $err"
+            exit 1
+          fi
+          head -n 1 <<<"$err"
 
       - name: Sign macOS binary (ad-hoc, hardened runtime)
         if: runner.os == 'macOS'

@@ -704,9 +704,10 @@ impl DaemonExe {
             #[cfg(target_os = "macos")]
             if own_cdhash().is_none() {
                 return Err(WalletError::validation(format!(
-                    "this zwallet build is not code-signed, so it cannot check that the key \
-                     daemon it would start runs its code; not asking for the password. {}",
-                    sign_this_build(&exe.display().to_string())
+                    "cannot read this zwallet build's code-signing identity, so it cannot check \
+                     that the key daemon it would start runs its code; not asking for the \
+                     password. {}",
+                    sign_this_build(&exe)
                 )));
             }
             Ok(Self {
@@ -745,26 +746,30 @@ impl DaemonExe {
 #[cfg(target_os = "macos")]
 fn check_started_code(child: &Child) -> Result<()> {
     let pid = child.id() as libc::pid_t;
-    started_code_verdict(pid, own_cdhash(), pid_cdhash(pid), pid_cs_valid(pid))
+    // This binary's path, for the message only (`DaemonExe::resolve` names the pinned one).
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("zwallet"));
+    started_code_verdict(pid, own_cdhash(), pid_cdhash(pid), pid_cs_valid(pid), &exe)
 }
 
 /// [`check_started_code`]'s decision on what the kernel said: `own` is this process's cdhash,
 /// `child` and `child_valid` the started daemon's (pid `pid`) cdhash and `CS_VALID`, each `None`
-/// when `csops` failed.
+/// when `csops` failed. `exe` (this binary) is only named in the message.
 #[cfg(target_os = "macos")]
 fn started_code_verdict(
     pid: libc::pid_t,
     own: Option<[u8; CDHASH_LEN]>,
     child: Option<[u8; CDHASH_LEN]>,
     child_valid: Option<bool>,
+    exe: &Path,
 ) -> Result<()> {
     let Some(own) = own else {
         // `DaemonExe::resolve` refuses such a build before the prompt; this is in case the read
         // fails only now. Nothing is accepted for want of a cdhash.
         return Err(WalletError::validation(format!(
-            "this zwallet build is not code-signed, so it cannot check that the key daemon it \
-             started (pid {pid}) runs its code: it was stopped and nothing was given to it. {}",
-            sign_this_build("<path to zwallet>")
+            "cannot read this zwallet build's code-signing identity, so it cannot check that the \
+             key daemon it started (pid {pid}) runs its code: it was stopped and nothing was \
+             given to it. {}",
+            sign_this_build(exe)
         )));
     };
     if child == Some(own) && child_valid == Some(true) {
@@ -778,14 +783,22 @@ fn started_code_verdict(
     )))
 }
 
-/// How to sign a zwallet build at `path` that has no code signature (an x86_64 macOS build from
-/// source: the linker signs only arm64 output).
+/// The fix when this build's own cdhash cannot be read because it is unsigned (an x86_64 build:
+/// the linker signs only arm64 output): the `codesign` line for the binary at `path`, quoted for
+/// the shell so it copies and runs as it is.
 #[cfg(target_os = "macos")]
-fn sign_this_build(path: &str) -> String {
+fn sign_this_build(path: &Path) -> String {
     format!(
-        "zwallet's release binaries are signed; sign this build with `codesign --force --sign - \
-         {path}`"
+        "If this is an unsigned build, sign it: `codesign --force --sign - {}` (zwallet's release \
+         binaries are signed)",
+        shell_quoted(&path.to_string_lossy())
     )
+}
+
+/// `s` as one single-quoted shell word: `'` becomes `'\''`.
+#[cfg(target_os = "macos")]
+fn shell_quoted(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 // ---- Who answered on `d.sock` ----
@@ -2891,7 +2904,8 @@ mod tests {
     #[test]
     fn the_started_code_verdict_needs_the_same_cdhash_and_cs_valid() {
         let (ours, other) = ([7u8; CDHASH_LEN], [8u8; CDHASH_LEN]);
-        assert!(started_code_verdict(9, Some(ours), Some(ours), Some(true)).is_ok());
+        let exe = Path::new("/z/zwallet");
+        assert!(started_code_verdict(9, Some(ours), Some(ours), Some(true), exe).is_ok());
         for (child, valid) in [
             (Some(ours), Some(false)),
             (Some(ours), None),
@@ -2899,7 +2913,7 @@ mod tests {
             (None, Some(true)),
             (None, None),
         ] {
-            let e = started_code_verdict(9, Some(ours), child, valid)
+            let e = started_code_verdict(9, Some(ours), child, valid, exe)
                 .expect_err(&format!("accepted child {child:?} valid {valid:?}"));
             assert_eq!(e.code, ErrorCode::ValidationError);
             assert!(
@@ -2910,19 +2924,22 @@ mod tests {
     }
 
     /// A build whose own cdhash cannot be read has nothing to compare the child with: it refuses
-    /// (fail closed), says the build is not code-signed, and how to sign it.
+    /// (fail closed), says the identity cannot be read, and gives the signing line as the fix for
+    /// an unsigned build, with the path quoted for the shell.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_started_code_verdict_refuses_when_this_build_has_no_cdhash() {
         let h = [7u8; CDHASH_LEN];
+        let exe = Path::new("/Applications/My Tools/zwallet");
         for (child, valid) in [(Some(h), Some(true)), (None, None)] {
-            let e = started_code_verdict(9, None, child, valid)
+            let e = started_code_verdict(9, None, child, valid, exe)
                 .expect_err("a build without a cdhash of its own accepted the started daemon");
             assert_eq!(e.code, ErrorCode::ValidationError);
             for part in [
-                "this zwallet build is not code-signed",
+                "cannot read this zwallet build's code-signing identity",
                 "nothing was given to it",
-                "codesign --force --sign -",
+                "If this is an unsigned build, sign it: `codesign --force --sign - \
+                 '/Applications/My Tools/zwallet'`",
                 "release binaries are signed",
             ] {
                 assert!(
@@ -2934,6 +2951,23 @@ mod tests {
         }
     }
 
+    /// The suggested `codesign` line names the binary as one shell word, whatever its path holds
+    /// (a space, a quote, a `$`): `sh` reads it back as the path itself.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_signing_line_quotes_the_path_for_the_shell() {
+        for path in ["/usr/local/bin/zwallet", "/a b/it's $HOME/zw`x`"] {
+            let word = shell_quoted(path);
+            let out = Command::new("/bin/sh")
+                .args(["-c", &format!("printf %s {word}")])
+                .env_clear()
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), path, "{word}");
+            assert!(sign_this_build(Path::new(path)).contains(&format!("--sign - {word}`")));
+        }
+    }
+
     /// The refusal says what this start did, not what state the wallet is in: `unlock` refuses
     /// before it stops a running session, and `whitelist ... --unlock` stopped every daemon
     /// before. A genuine child that exited after asking for input is refused the same way (its
@@ -2941,8 +2975,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_started_daemon_refusal_claims_no_lock_state() {
-        let e = started_code_verdict(42, Some([7; CDHASH_LEN]), Some([8; CDHASH_LEN]), Some(true))
-            .unwrap_err();
+        let e = started_code_verdict(
+            42,
+            Some([7; CDHASH_LEN]),
+            Some([8; CDHASH_LEN]),
+            Some(true),
+            Path::new("/z/zwallet"),
+        )
+        .unwrap_err();
         let m = &e.message;
         for part in [
             "the key daemon this command started (pid 42) does not run this zwallet build's code",
