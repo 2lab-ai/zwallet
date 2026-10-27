@@ -232,18 +232,23 @@ keeps drawing. Two entry points do it, in one blocking task:
    `VALIDATION_ERROR`, which says to run `zwallet address --verify`. Then the named keys' (the
    open key's and the active key's) addresses are derived from the seed (`derive_checked`,
    commands.rs:647): `verified by password`, pinned (§Address trust). The seed is dropped before
-   it returns. It also returns the sealed anchor (public key, generation, digest;
-   `sealed_whitelist`, core/store.rs:255), and nothing else.
-2. `wallet::check_list(home, sealed)`: a zwallet 0.1.0 anchor without a salt gets `list
-   --verify`'s message (commands/whitelist.rs:1353-1360). Both list files are read once
+   it returns. It returns `Opened { addresses, anchor, salted }` and nothing else: `anchor` is the
+   sealed `WhitelistAnchor` (public key, generation, digest; core/store.rs:419), read through
+   `sealed_whitelist` (:255), and `salted` says whether a salt is sealed with it. The salt itself
+   (the private field of `SealedWhitelist`, core/store.rs:461-467) never leaves the blocking task
+   and is never in the checked list.
+2. `wallet::check_list(home, anchor, salted)`: an anchor sealed without a salt (zwallet 0.1.0)
+   gets `list --verify`'s message (commands/whitelist.rs:1353-1360). Both list files are read once
    (`ListFiles::read`, core/whitelist.rs:987) and the list the seal names is picked from those
    bytes (`pick_base_from`, :1097, which verifies the signature, generation and digest, `verify`,
    :766), as `verified_view` does (commands/whitelist.rs:1373-1403). Checking a signature needs
    only the sealed public key; the signing key is derived (password + sealed salt,
    core/whitelist.rs:727) only for an edit.
 3. The TUI keeps the result in memory for the TUI session as its **checked list**: the verified
-   entries (nickname, address, chains, kind), the policy, `gen`, the source file, the verified
-   list itself, and the fingerprint of the bytes it verified (`ListFiles::fingerprint`,
+   entries (nickname, address, chains, kind), the list's own policy (`Whitelist.policy`,
+   core/whitelist.rs:226-231, `Policy` :158: the fee caps and the message-signing flag; not
+   `Unsealed.policy`, the wallet's sealed policy object, core/store.rs:241-244), `gen`, the source
+   file, the verified list itself, and the fingerprint of the bytes it verified (`ListFiles::fingerprint`,
    core/whitelist.rs:995: the keccak-256 of each file's bytes, :970-975).
 
 The CLI calls the same two: `list --verify` (commands.rs:827-829) calls `open_with_password` with
@@ -430,15 +435,25 @@ checked list (:41-55), never on whatever whitelist.json says at that moment (the
 `dry_run_check` reads the file, commands/whitelist.rs:980). The review holds the exact
 transaction it showed: chainId, from, the payee address (EIP-55, taken from the checked list), the
 asset (native, or the registry token's contract), the amount in base units, the calldata, and the
-nonce, the most the fee can cost (`maxGasCost`), `sufficientFunds` and the whitelist verdict.
+nonce, the most the fee can cost, `sufficientFunds` and the whitelist verdict. The most the fee
+can cost is the number the review showed: `max_gas_cost` plus `l1_fee` where the chain has one
+(base and optimism; `prepare`, chains/evm/rpc.rs:736-744), held as U256 integers. `prepare`'s
+output fields hold them only as formatted strings (`maxGasCost`, `l1Fee`, :797-804), so the
+entry point returns the integers too, and the comparison never reads a string.
 Confirm checks the list files against the checked list's fingerprint, takes the send lock
 (`SendLock`, chains/mod.rs:651), runs `prepare` again (fresh nonce and fees, the payee address
 held by the review, never looked up again by nickname), runs the pending and the duplicate guards
 again (with the override the human chose at the review, if any), and decodes the new unsigned
 transaction (`tx::decode_unsigned`, chains/evm/tx.rs:378: `chain_id`, `nonce`, `to`, `value`,
-`input`, `action`, :329-358). It signs only if `maxGasCost` is equal to or lower than the
-reviewed one and every other held field is exactly equal. A higher fee, or any other difference,
-signs nothing and shows the new review.
+`input`, `action`, :329-358). It signs only if the transfer intent (chainId, from, payee, asset,
+amount, calldata, nonce), `sufficientFunds` and the verdict are exactly equal, and the most the
+fee can cost is at most the reviewed one. A higher fee, or any other difference, signs nothing and
+shows the new review. The `l1_fee` part is set by the sequencer when the transaction is included,
+so the signature cannot bind it (04-whitelist.md:48: the L1 data fee is outside `gasLimit ×
+maxFee`): confirm compares the estimate it reads, and a rise after confirm is outside what
+zwallet signs. At confirm, a rise large enough to leave the balance short also flips
+`sufficientFunds` (which counts `l1_fee`, chains/evm/rpc.rs:742-744), and that exact match catches
+it as well.
 
 ## Password handling
 
@@ -522,7 +537,7 @@ binary's explorer URLs are fixed (§History); a live test (`cargo test -- --igno
 ## Changes on 2026-10-27
 
 Each fix below is something today's code (c7d3f13) contradicts, something that did not exist when
-the 2026-10-20 text was written, or a review round 1 or round 2 decision (marked R1, R2).
+the 2026-10-20 text was written, or a decision of review round 1, 2 or 3 (marked R1, R2, R3).
 
 1. Status: the whitelist shipped (PR #4). TUI-1 starts once the agent-side v0.1 work is merged;
    G3 and G4 (v0-1/loop.md:27-28) wait on owner actions only (R1).
@@ -539,9 +554,10 @@ the 2026-10-20 text was written, or a review round 1 or round 2 decision (marked
    the journal's own fields.
 7. T6: sends go through new entry points; today's `sign_and_send` is private, takes `&SendArgs`,
    and prints to stderr during the broadcast (commands.rs:1631, chains/mod.rs:1215).
-8. T6: the review takes no lock and no signature; confirm re-prepares under the lock and signs
-   only the exact transaction the review held, after the pending and duplicate guards run again
-   (R1, §Status of a send).
+8. T6: the review takes no lock and no signature; confirm re-prepares under the lock, runs the
+   pending and duplicate guards again, and signs only when the transfer intent is exactly equal
+   to the review's and the most the fee can cost is at most the reviewed one (R1, R2, §Status of
+   a send).
 9. T6, T7, T4: payee entries, T7's verified state and T4's nickname labels come only from the
    list the TUI checked with the password; the session's view (no peer check,
    core/protocol.rs:434-436) and the file alone are never trusted for them; a changed file drops
@@ -597,3 +613,8 @@ the 2026-10-20 text was written, or a review round 1 or round 2 decision (marked
 36. Password check: a cache modified before the warm-up fails the warm-up (daemon/mod.rs:311);
     one modified between the session start and the check leaves the session and pins nothing
     (R2).
+37. Status of a send: the fee compared at confirm is `max_gas_cost` plus `l1_fee` as U256
+    integers; the sequencer sets `l1_fee` at inclusion; a rise that leaves the balance short is
+    caught by `sufficientFunds` (R3).
+38. Password check: `open_with_password` returns the anchor and a `salted` flag, never the salt;
+    the checked list's policy is the list's own (R3).

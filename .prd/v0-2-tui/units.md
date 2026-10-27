@@ -87,7 +87,8 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
 - **Closes:** T2, T2b.
 - **Entry points added:** `wallet::prepare_unlock`, `wallet::unlock`, `wallet::address`,
   `wallet::set_active`, `wallet::open_with_password` (the named keys' addresses from the seed,
-  the sealed anchor) and `wallet::check_list` (the checked list with its fingerprint), 03-tui.md
+  the sealed anchor and a `salted` flag, never the salt) and `wallet::check_list` (the checked
+  list with its fingerprint and the list's own policy), 03-tui.md
   §Password check. The CLI's `unlock`, `change`, `list --verify` and `whitelist list --verify`
   call them (commands.rs:1912, :930, :825; commands/whitelist.rs:1343). `address --verify`
   (commands.rs:949-1022) does not move: it repairs the cache and reads no list file.
@@ -207,8 +208,9 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
   whitelist verdict and fee cap on the checked list; no lock, no signature; `Review` holds the
   exact intent),
   `wallet::send_transfer` (fingerprint check, lock, prepare again with the held payee address,
-  pending and duplicate guards again, `Review::matches` on the decoded transaction (`maxGasCost`
-  equal or lower, all else exactly equal), then sign,
+  pending and duplicate guards again, `Review::matches` on the decoded transaction (the transfer
+  intent exactly equal, the most the fee can cost, `max_gas_cost` + `l1_fee` as U256, at most the
+  reviewed one), then sign,
   check the signer, journal, broadcast), `SendRecord::write` returning its line instead of
   printing it. The CLI's `transfer` calls the send path; `invoke` keeps the signing tail they are
   cut from (commands.rs:1530, :1421, :1631); both print the `broadcasting` line as before. Assets
@@ -225,7 +227,13 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
     entry nor an entry on base only; (`Msg` sequence): typed `0x...` characters in the picker
     change nothing.
   - (mock node): the fee rises between review and confirm: a new review, and zero `SignTx`
-    requests reached the daemon side. The fee falls instead: confirm signs (one `SignTx`).
+    requests reached the daemon side. The fee falls instead: confirm signs (one `SignTx`), and
+    the test decodes the transaction in that request (`tx::decode_unsigned`,
+    chains/evm/tx.rs:378) and asserts its `chain_id`, `to`, `value`, `input` and `nonce` equal the
+    fields the review held. The same two cases on base (OP-stack): the fixture's
+    `GasPriceOracle` answer (`op_l1_fee`, chains/evm/rpc.rs:1040) moves `l1_fee` up, then down,
+    with `max_gas_cost` unchanged: up refuses (zero `SignTx`), down signs. The comparison reads
+    U256 integers, never the formatted fields.
   - (`Msg` sequence): the polling bound turns the send's status into `unknown — run zwallet tx`.
   - (`Msg` sequence): a `tx_state` result of `dropped/replaced` (TUI-4) on the send-status screen
     renders `dropped/replaced` with the hash and the nonce.
@@ -289,7 +297,7 @@ decision, and where it now lives.
 | Finding | Decision | Where |
 |---|---|---|
 | B1: the picker's gate (session `verified`, same gen, nickname) authenticates no address; the session view has no addresses and its `status` reply has no peer check, so a same-gen rewrite or a forged view puts a lookalike on the review screen; T7's verified state and T4's labels had the same hole | payees, T7's verified state and T4 labels come only from the list the TUI checked with the password typed in this session (warm-up, a change, or `V`); the session view is information only; the file is checked against the verified bytes before the review and at confirm | 03-tui.md §Password check, §Display integrity rule 7, T2/T4/T6/T7; flow.md §Password check, §T4, §T6, §T7; TUI-2, TUI-4, TUI-5, TUI-6 counter-examples |
-| B2: confirm compared nonce, fee, funds and verdict only, so a changed payee address could be signed | the review holds the exact intent (chainId, from, payee, asset, amount, calldata, and the four); confirm re-prepares under the lock with the held payee, runs both guards again, and signs only if all are equal; "nothing signed" counts `SignTx` requests | 03-tui.md §Status of a send; flow.md §T6 (`Review::matches`); TUI-5 |
+| B2: confirm compared nonce, fee, funds and verdict only, so a changed payee address could be signed | the review holds the transfer intent (chainId, from, payee, asset, amount, calldata, nonce), `sufficientFunds`, the verdict and the most the fee can cost; confirm re-prepares under the lock with the held payee, runs both guards again, and signs only when the transfer intent is exactly equal and the most the fee can cost is at most the reviewed one (the fee rule as amended in round 2); "nothing signed" counts `SignTx` requests | 03-tui.md §Status of a send; flow.md §T6 (`Review::matches`); TUI-5 |
 | B3: history keeps token movements the explorer reports, but T4 decoded only a direct `transfer` call | T4 decodes the selected transaction's receipt `Transfer` logs of registry tokens that involve the wallet (one receipt, no scan); outer from/to apart from each movement; several movements, reverted, pending | 03-tui.md T4, §History; flow.md §T4; TUI-4 fixtures |
 | B4: the cell rule was enforced only in tests | `FilteredBackend` is the one write point at run time; tests assert zero replacements | 03-tui.md §Display integrity rule 1; flow.md §T9; TUI-1 |
 | 1: rule 5's "no block glyph, so no QR" was wrong | the defence is styles, placement and budgets together, each tested | 03-tui.md rule 5 |
@@ -326,3 +334,15 @@ where it now lives.
 | 8: the verdict could be computed on the file as it is at that moment | verdict and fee cap on the checked list only | 03-tui.md §Status of a send; flow.md §T6; TUI-5 |
 | 9: "any 4-character piece" of the password collides with address hex | search the whole password and the marked piece `pw-XYZ` | TUI-2 |
 | 10: the order "session starts, then the check finds a modified cache" had no test | a TUI-2 counter-example in that order; the same edit before the warm-up fails the warm-up (daemon/mod.rs:311) | TUI-2; 03-tui.md §Password check |
+
+## Review round 3 (2026-10-27)
+
+Trinity primary panel (fable, grok-4.7, gpt-6-astra): round 1 0/3 approve, round 2 2:1, round 3
+unanimous APPROVE on e7d896d, no must-fix. Four non-blocking points were applied after consensus:
+
+| Point | Applied | Where |
+|---|---|---|
+| (fable) the fee compared at confirm is the number the review showed | `max_gas_cost` + `l1_fee` as U256 (chains/evm/rpc.rs:736-744), never formatted strings; `l1_fee` is set by the sequencer at inclusion and cannot be signed; a rise that leaves the balance short is caught by `sufficientFunds`; a base variant of the fee tests | 03-tui.md §Status of a send; flow.md §T6 (`Review::matches`); TUI-5 |
+| (fable) the salt does not travel in the snapshot | `Opened { addresses, anchor: Option<WhitelistAnchor>, salted: bool }` (core/store.rs:419), never `SealedWhitelist` with its salt (:461-467); `CheckedList.policy` is the list's own policy, not `Unsealed.policy` | 03-tui.md §Password check; flow.md §Password check; TUI-2 |
+| (grok) the "fee falls, so it signs once" test also checks the signed body | the `SignTx` request's transaction is decoded and its `chain_id`, `to`, `value`, `input`, `nonce` must equal the held fields | TUI-5 |
+| (gpt-6-astra) one wording for the confirm rule | "the transfer intent is exactly equal, and the most the fee can cost is at most the reviewed one" | 03-tui.md §Changes item 8; this file, Review round 1 row B2 |
