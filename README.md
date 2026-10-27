@@ -172,7 +172,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
     cannot read as a list quotes at most 80 characters of it; and `whitelist reset` shows the
     entries of the files it discards as found, at most 512 per file, on a line that holds nothing
     else from the file (`whitelist.json`'s below the line with its reason, which quotes at most
-    the parser's 80, and `whitelist.next.json`'s when it is not the sealed list).
+    the parser's 80, or the file's generation, and `whitelist.next.json`'s when it is not the
+    sealed list).
   - **Names and fee caps from those files** in one command: at most 512 characters in all, each
     name or cap whole, then how many more (the change summary before the password, with the old
     caps of a `fee-cap` and the caps a `reset` sets back, counted before any name; `whitelist
