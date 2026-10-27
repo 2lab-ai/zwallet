@@ -1,16 +1,17 @@
 //! `zwallet tui` (`.prd/03-tui.md`): its screens drawn on ratatui's `TestBackend` through
 //! `FilteredBackend`, the one write point, and its state machine driven by `Msg`s. Every frame a
 //! test draws goes through [`checked_frame`], which asserts the three display-integrity rules
-//! every later unit's frames keep too (03-tui.md §Display integrity rules 1-3).
+//! every later unit's frames keep too (03-tui.md §Display integrity rules 1-3). The binary itself
+//! runs on a pty ([`tui_on_a_pty`]) where the behaviour needs a real terminal or a real daemon.
 
 mod common;
 
-use common::Home;
+use common::{Frame, Home, PTY_SIZE, PtyChild};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, Cell};
 use serde_json::Value;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use zwallet::chains::{self, Net};
 use zwallet::core::error::{ErrorCode, WalletError};
 use zwallet::core::terminal::terminal_ok;
@@ -654,4 +655,147 @@ fn zwallet_tui_needs_a_terminal_and_has_no_json() {
         .run(&["tui", "--chain", "nope", "--json"])
         .err("CHAIN_UNSUPPORTED");
     assert!(msg.contains("unsupported chain"), "{msg}");
+}
+
+/// How long a pty test waits for a frame or an exit, on a loaded machine too. A bound the
+/// acceptance sets (T10's two refreshes) is asserted on its own.
+const PTY_WAIT: Duration = Duration::from_secs(60);
+
+/// The end of the bar's second line on every pty frame (the default RPC, the environment being
+/// empty): once it is drawn, the frame above it is too.
+const HOST: &str = " | ethereum-rpc.publicnode.com";
+
+/// `zwallet tui` for `home` on a pty of `size`, its controlling terminal, as a human starts it.
+fn tui_on_a_pty(home: &Home, size: (u16, u16)) -> PtyChild {
+    PtyChild::spawn_full_screen(home.command(&["tui"]), size)
+}
+
+/// The bar's two lines of a [`PTY_SIZE`] frame.
+fn bar(frame: &Frame) -> (&str, &str) {
+    let rows = usize::from(PTY_SIZE.1);
+    (&frame.rows[rows - 2], &frame.rows[rows - 1])
+}
+
+/// `q`, then the exit: status 0, nothing on stderr, and the pty back in canonical mode with echo.
+fn quit(tui: &mut PtyChild) {
+    tui.send(b"q");
+    let (status, stderr) = tui.wait_exit(PTY_WAIT);
+    assert!(status.success(), "{status}: {stderr}");
+    assert!(stderr.is_empty(), "{stderr:?}");
+    let modes = tui.local_modes();
+    assert_ne!(modes & libc::ICANON, 0, "canonical mode is off");
+    assert_ne!(modes & libc::ECHO, 0, "echo is off");
+}
+
+#[test]
+fn t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo() {
+    let home = Home::new();
+    home.create("main", &[]);
+    for size in [PTY_SIZE, (79, 24)] {
+        let mut tui = tui_on_a_pty(&home, size);
+        let frame = if size == PTY_SIZE {
+            let frame = tui.wait_frame(PTY_WAIT, |f| bar(f).1.contains(HOST));
+            assert!(frame.rows[0].starts_with("zwallet tui | keys"), "{frame}");
+            frame
+        } else {
+            let frame = tui.wait_frame(PTY_WAIT, |f| f.rows[0].trim_end() == ui::TOO_SMALL);
+            // The one line, nothing else on the screen. (The stream itself skips the spaces
+            // between the words: the diff moves the cursor over cells that stay blank.)
+            assert!(
+                frame.rows[1..].iter().all(|r| r.trim().is_empty()),
+                "{frame}"
+            );
+            frame
+        };
+        assert!(frame.stray.is_empty(), "{frame}");
+        // While the TUI holds the terminal: raw mode, no echo.
+        let modes = tui.local_modes();
+        assert_eq!(modes & (libc::ICANON | libc::ECHO), 0, "{size:?}: not raw");
+        quit(&mut tui);
+    }
+}
+
+#[test]
+fn t10_on_a_pty_zwallet_lock_elsewhere_shows_locked_within_two_refreshes() {
+    // `zwallet lock` stops every daemon of a test home.
+    let _serial = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    home.unlock("1h");
+    let mut tui = tui_on_a_pty(&home, PTY_SIZE);
+    let frame = tui.wait_frame(PTY_WAIT, |f| {
+        let (_, two) = bar(f);
+        two.starts_with("signing (agent too) until ") && two.contains(HOST)
+    });
+    if cfg!(target_os = "macos") {
+        // This build's daemon, checked from the zwallet binary (decision 3 of units.md).
+        assert!(
+            bar(&frame).0.trim_end().ends_with(" | verified by session"),
+            "{frame}"
+        );
+    }
+    home.run(&["lock", "--json"]).ok();
+    let locked = Instant::now();
+    let frame = tui.wait_frame(PTY_WAIT, |f| bar(f).1.starts_with("locked | "));
+    let took = locked.elapsed();
+    eprintln!("t10: the bar said locked {took:?} after zwallet lock returned");
+    assert!(
+        took <= 2 * zwallet::tui::REFRESH,
+        "locked shown {took:?} after the lock, over two refreshes"
+    );
+    assert!(frame.stray.is_empty(), "{frame}");
+    quit(&mut tui);
+}
+
+#[test]
+fn an_argv_listed_fake_daemon_s_expiry_reaches_the_terminal_escaped_and_cut() {
+    // A process started with the daemon's argv, so the process table lists it for this home and
+    // `status` takes its reply: unlocked, its own pid, an expiry of 600 characters of ESC and
+    // half blocks (JSON escapes, as the reply carries them).
+    let home = Home::new();
+    home.create("main", &[]);
+    // The cache holds the fake's address, so the status relays its session rather than stopping
+    // at a mismatch.
+    home.edit_wallet(|v| {
+        for (_, a) in v["keys"][0]["addresses"].as_object_mut().unwrap() {
+            *a = serde_json::json!(A);
+        }
+    });
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let expires = "\\u001b\\u2580\\u2584".repeat(200);
+    let fake = common::daemon_argv_impostor(&home, dir.path(), &[("ATTACKER_EXPIRES", &expires)]);
+    assert!(home.daemon_pids().contains(&(fake.0.id() as i32)));
+    let mut tui = tui_on_a_pty(&home, PTY_SIZE);
+    let frame = tui.wait_frame(PTY_WAIT, |f| {
+        let (one, two) = bar(f);
+        one.contains("NOT this build's key daemon: ") && two.contains(HOST)
+    });
+    // Line 2 shows the expiry escaped, cut within its budget, on that line alone.
+    let shown = bar(&frame)
+        .1
+        .trim_end()
+        .strip_prefix("signing (agent too) until ")
+        .and_then(|rest| rest.strip_suffix(HOST))
+        .unwrap_or_else(|| panic!("{frame}"));
+    assert!(shown.starts_with("\\u{1b}\\u{2580}"), "{shown:?}");
+    assert!(
+        shown.len() <= 64 && common::ascii_printable(shown),
+        "{shown:?}"
+    );
+    let rows = frame.rows.iter().filter(|r| r.contains("\\u{1b}")).count();
+    assert_eq!(rows, 1, "{frame}");
+    // No raw ESC from the value reached the terminal, and no half block.
+    assert!(frame.stray.is_empty(), "{frame}");
+    let output = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(!output.contains(['\u{2580}', '\u{2584}']), "{output:?}");
+    // The address is not marked verified anywhere.
+    assert!(
+        !frame.rows.iter().any(|r| r.contains("verified by")),
+        "{frame}"
+    );
+    quit(&mut tui);
+    drop(fake);
 }
