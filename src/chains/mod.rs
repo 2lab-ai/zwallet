@@ -687,8 +687,8 @@ pub struct SendJournal {
 /// How many journal entries an error message names at most (the newest).
 const JOURNAL_SHOWN: usize = 5;
 /// How many characters the send journal gives one message in all: every shown entry's hash,
-/// nonce, time, kind, amount and recipient together. Entries are shown whole, newest first, while
-/// they fit; the journal is a file any process of this user can write.
+/// nonce, time, kind, amount and recipient together. Entries are shown whole, newest first, each
+/// that still fits; the journal is a file any process of this user can write.
 const JOURNAL_TEXT_MAX: usize = crate::core::text::PROSE_MAX;
 /// The most digits before the point of a journal amount (a U256 has 78).
 const AMOUNT_DIGITS: usize = 78;
@@ -777,17 +777,19 @@ impl EntryText {
     }
 }
 
-/// The newest of `entries` (at most [`JOURNAL_SHOWN`]) that fit one [`JOURNAL_TEXT_MAX`] budget
-/// of journal text, as `text` renders each (it also says how much of the rendering is the
-/// journal's), shown oldest first, each whole, so a hash is never cut. Then `(and N more there)`
-/// for the entries not shown. The newest always fits: an entry is at most 452 characters.
+/// Of the newest [`JOURNAL_SHOWN`] of `entries`, newest first, each that still fits one
+/// [`JOURNAL_TEXT_MAX`] budget of journal text, as `text` renders each (it also says how many
+/// characters of the rendering are the journal's), shown oldest first, each whole, so a hash is
+/// never cut. An entry that does not fit is skipped, not a stop, so a large one cannot hide a
+/// smaller one behind it. Then `(and N more there)` for every entry not shown. The newest always
+/// fits: an entry is at most 452 characters.
 fn entries_shown(entries: &[Value], text: impl Fn(&EntryText) -> (String, usize)) -> String {
     let mut shown = Vec::new();
     let mut used = 0;
     for e in entries.iter().rev().take(JOURNAL_SHOWN) {
         let (line, len) = text(&EntryText::of(e));
         if used + len > JOURNAL_TEXT_MAX {
-            break;
+            continue;
         }
         used += len;
         shown.push(line);
@@ -808,9 +810,10 @@ fn describe_entry(e: &EntryText) -> (String, usize) {
         "{} (nonce {}, sent {}: {} {} to {})",
         e.hash, e.nonce, e.ts, e.kind, e.value, e.to
     );
+    // Characters, not bytes: a symbol's `₮` is one.
     let len = [&e.hash, &e.nonce, &e.ts, &e.kind, &e.value, &e.to]
         .iter()
-        .map(|s| s.len())
+        .map(|s| s.chars().count())
         .sum();
     (line, len)
 }
@@ -1097,9 +1100,10 @@ impl SendJournal {
             .collect())
     }
 
-    /// `entries` from this journal as a human sees them in one line: the newest that fit one
-    /// budget, each field in the shape zwallet writes it ([`describe_entry`]), then how to look a
-    /// hash up. For a field that lists journal entries in a command's human output.
+    /// `entries` from this journal as a human sees them in one line: of the newest, each that
+    /// still fits one budget ([`entries_shown`]), each field in the shape zwallet writes it
+    /// ([`describe_entry`]), then how to look a hash up. For a field that lists journal entries in
+    /// a command's human output.
     pub fn entries_text(&self, entries: &[Value]) -> String {
         format!(
             "{}; {}",
@@ -1113,7 +1117,11 @@ impl SendJournal {
     pub fn duplicate_error(&self, duplicates: Vec<Value>) -> WalletError {
         let shown = entries_shown(&duplicates, |e| {
             let line = format!("{} (nonce {}, sent {})", e.hash, e.nonce, e.ts);
-            (line, e.hash.len() + e.nonce.len() + e.ts.len())
+            let len = [&e.hash, &e.nonce, &e.ts]
+                .iter()
+                .map(|s| s.chars().count())
+                .sum();
+            (line, len)
         });
         WalletError::validation(format!(
             "this looks like a repeat of a recent send; look those hashes up first. If this \
@@ -2174,6 +2182,61 @@ mod tests {
         );
         let json = e.to_json().to_string();
         assert!(json.bytes().all(|b| (0x20..=0x7e).contains(&b)), "{json}");
+    }
+
+    #[test]
+    fn a_journal_entry_that_does_not_fit_is_skipped_not_a_stop() {
+        // A forged entry at the most every field allows, its symbol 32 `₮`: 452 characters (516
+        // bytes). As the newest, it is shown (the budget counts characters), and the genuine entry
+        // before it is counted. Between two genuine entries, it does not fit after the newer one,
+        // so it is counted and the older genuine one is still shown.
+        use crate::core::text::PROSE_MAX;
+        let home = temp_home();
+        let chain = find("ethereum").unwrap();
+        let h = |n: u8| format!("0x{n:064x}");
+        let to = "0x000000000000000000000000000000000000dEaD";
+        let value = format!(
+            "{}.{} {}",
+            "9".repeat(78),
+            "9".repeat(178),
+            "\u{20ae}".repeat(32)
+        );
+        let forged = |n: u8| {
+            json!({
+                "nonce": u64::MAX, "txHash": h(n), "ts": "2026-10-20T04:05:06Z",
+                "kind": "token-transfer", "value": value, "to": to,
+            })
+        };
+        let genuine = |n: u8| {
+            json!({
+                "nonce": u64::MAX, "txHash": h(n), "ts": "2026-10-20T04:05:06Z",
+                "kind": "transfer", "value": "0.01 ETH", "to": to,
+            })
+        };
+        // 452 characters, the most an entry can be; 516 bytes, more than the whole budget.
+        let one = 66 + 20 + 20 + "token-transfer".len() + value.chars().count() + 42;
+        let bytes = one - value.chars().count() + value.len();
+        assert_eq!((one, bytes), (452, 516));
+        assert!(one <= PROSE_MAX && bytes > PROSE_MAX);
+        let newest = SendJournal::new(home.path(), chain, "0xA11");
+        newest.append(&genuine(1)).unwrap();
+        newest.append(&forged(2)).unwrap();
+        let (text, _) = newest.pointer(u64::MAX..=u64::MAX, None);
+        assert!(text.contains(&format!("{} (nonce ", h(2))), "{text}");
+        assert!(!text.contains(&h(1)), "{text}");
+        assert!(text.contains(" (and 1 more there)"), "{text}");
+        let between = SendJournal::new(home.path(), chain, "0xB22");
+        for line in [genuine(3), forged(4), genuine(5)] {
+            between.append(&line).unwrap();
+        }
+        let (text, _) = between.pointer(u64::MAX..=u64::MAX, None);
+        assert!(
+            text.contains(&format!("{} (nonce ", h(3)))
+                && text.contains(&format!("{} (nonce ", h(5))),
+            "{text}"
+        );
+        assert!(!text.contains(&h(4)), "{text}");
+        assert!(text.contains(" (and 1 more there)"), "{text}");
     }
 
     #[test]

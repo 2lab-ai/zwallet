@@ -166,15 +166,20 @@ Commands that act on a key take `--key <name>` (default: the active key).
     only if every value in it is in the shape zwallet writes — a nickname of `a-z 0-9 _ -`, an
     address or selector of `0x` and hex digits, a chain `*` or a chain key's shape (`a-z 0-9 -`),
     a fee cap of decimal digits — else it is not a list, and the message names the field, never
-    its value; the daemon then trusts nothing. So every value from these files a human sees is
-    in that alphabet, or `<invalid>` (a chain zwallet does not know, a field of a file that is not
-    a list). Two exceptions, each bounded: the parser's message for a file JSON cannot read as a
-    list quotes at most 80 characters of it; and `whitelist reset` shows the entries of the files
-    it discards as found, one line of at most 512 per file (`whitelist.json`, and
-    `whitelist.next.json` when it is not the sealed list).
-  - **Names from those files** in one command: at most 512 characters in all, whole names, then
-    how many more (the change summary before the password, `whitelist list` and its fee caps for
-    a list that did not verify). A list the seal verified (`whitelist list --verify`) is the
+    its value; the daemon then trusts nothing from that file. So every value from these files a
+    human sees is in that alphabet, or `<invalid>` (a chain zwallet does not know, a field of a
+    file that is not a list). Two exceptions, each bounded: the parser's message for a file JSON
+    cannot read as a list quotes at most 80 characters of it; and `whitelist reset` shows the
+    entries of the files it discards as found, at most 512 per file, on a line that holds nothing
+    else from the file (`whitelist.json`'s below the line with its reason, which quotes at most
+    the parser's 80, or the file's generation, and `whitelist.next.json`'s when it is not the
+    sealed list).
+  - **Names and fee caps from those files** in one command: at most 512 characters in all, each
+    name or cap whole, then how many more (the change summary before the password, with the old
+    caps of a `fee-cap` and the caps a `reset` sets back, counted before any name; `whitelist
+    list` and its fee caps for a list that did not verify). Each file's names are shown once: a
+    `reset`'s summary names them where it says what it drops, and the file's own line gives its
+    generation and count only. A list the seal verified (`whitelist list --verify`) is the
     human's own, signed by the key only the password derives: up to 100 entries.
   - **The send journal:** at most 512 characters per message, each field in the shape zwallet
     writes it or `<invalid>` (see **The send journal**).
@@ -203,8 +208,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   Two places keep `₮`, the one non-ASCII character the write point lets through: a registry
   token whose `symbol()` is exactly the symbol the registry records shows it as is (USDT0's
   `USD₮0`; any other symbol, from that address or another, is escaped), and a send journal
-  amount whose symbol has it (zwallet journaled that symbol; in `--json` it is `\u{20ae}`, as
-  every non-ASCII character of a file value is). An error from the process on `d.sock` reads as its own:
+  amount whose symbol has it (the shape check lets `₮` into any journaled symbol, so a line
+  zwallet did not write can carry up to 32 of them too; in `--json` it is `\u{20ae}`, as every
+  non-ASCII character of a file value is). An error from the process on `d.sock` reads as its own:
   prefixed ``the process answering on the key daemon socket reported:`` unless it is this
   build's key daemon, or, from a process known to be another one, named, with its details
   dropped. A `WALLET_LOCKED` reply from any process running this build's code gets the neutral
@@ -344,10 +350,13 @@ Commands that act on a key take `--key <name>` (default: the active key).
     full address, payee or contract, the chains (`*` as "every chain", otherwise zwallet's key for
     each or `<invalid>`, at most 16), the selectors, a policy change's old and new value (from
     both files when an unfinished edit is in `whitelist.next.json`), what a `reset` drops and
-    every fee cap it sets back (by zwallet's key for each chain, once), both files as they are
-    (at most 20 names per file and 512 characters of names in all, then how many more; a file
-    that exists but cannot be read, or is not a list, is "there but cannot be read: its entries
-    are unknown, and a reset drops them", never "none"), every outcome
+    every fee cap it sets back (by zwallet's key for each chain, once; of the files' caps that
+    differ, each that still fits the budget is shown beside it, then "and N more caps from the
+    files, not shown"), both files as they are (at most 20 names per file, on a `reset` only
+    where it says what it drops; names and fee caps from the files share one budget of 512
+    characters, the caps first and each file's names once, then how many more; a file that
+    exists but cannot be read, or is not a list, is "there but cannot be read: its entries are
+    unknown, and a reset drops them", never "none"), every outcome
     that can still happen (for an edit: the change lands on `whitelist.json` if it is the sealed
     list, on the unfinished edit if that is, on a first list from the defaults if there is no
     list file and no whitelist yet, otherwise nothing changes; for a `reset`: the generation it
@@ -423,7 +432,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   runs out of time has `error` and `errorCode` (and no `native` or `tokens`); a token whose
   `balanceOf` does has them on its own row (and no `balance` or `raw`), and the rest of the
   network still shows. The command exits 0 when any network answered; when none did it fails with
-  their shared error code (else `RPC_ERROR`) and every network's error in the message. The
+  their shared error code (else `RPC_ERROR`) and every network's error in the message, each cut
+  short to 72 characters as its line shows it; `--json` adds `networks: [{ chain, error,
+  errorCode }]`, each error whole as a network's row has it (human output never shows it). The
   address is the same on every EVM chain; a row has its own `address` only where the cache
   differs. Human output: `key` and `address`, one line per network with its coin, indented under
   it each non-zero token and each failed token as `<SYMBOL> error: …`, a failed network as
@@ -513,8 +524,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   space, `₮` included: the chain's, a registry token's, `?` when `symbol()` failed, or an
   on-chain one as `erc20_meta` escaped and cut it; one with a space in it shows as `<invalid>`),
   and the hash only when it is a 32-byte hash (`?` else). The journal's text in one message is at
-  most 512 characters: the newest entries that fit, at most 5, shown whole and oldest first, then
-  "(and N more there)". The human `duplicateSends` line of a dry-run or an `--allow-duplicate`
+  most 512 characters (an entry is at most 452, so the newest always fits): of the 5 newest
+  entries, newest first, each that still fits, shown whole and oldest first (one that does not
+  fit is skipped, so it cannot hide a smaller one behind it), then "(and N more there)" for every
+  entry not shown. The human `duplicateSends` line of a dry-run or an `--allow-duplicate`
   send shows its entries the same way. The entries in `duplicateSends`, `pendingSends` and
   `journalEntries` (on the other messages that name the journal's entries) keep all their fields,
   every string escaped.

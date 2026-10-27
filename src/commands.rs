@@ -1138,7 +1138,8 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// The most characters of an error a network's line shows in `balance` without `--chain`
-/// (`--json` has the whole message).
+/// (`--json` has the whole message), and of each network's error in the message when none
+/// answered (`--json` has each whole in `networks`).
 const BRIEF_ERROR_CHARS: usize = 72;
 
 /// One network's balances for `balance` without `--chain`: the native coin and every registry
@@ -1150,8 +1151,9 @@ type NetworkBalances = Result<(chains::Balance, Vec<chains::TokenBalance>)>;
 /// `ZWALLET_RPC_<CHAIN>` or the default RPC. A network whose endpoint, chain id or native balance
 /// fails is a row with `error` and `errorCode` instead of `native` and `tokens`; a token whose
 /// read fails is a token row with them instead of `balance` and `raw`. Only when no network
-/// answers is it an error (their shared code, else `RPC_ERROR`). While unlocked the address is
-/// the daemon's derivation (once per chain family), checked against the cache before any RPC.
+/// answers is it an error (their shared code, else `RPC_ERROR`; each network's error cut short
+/// as its line shows it, and whole in the `networks` detail). While unlocked the address is the
+/// daemon's derivation (once per chain family), checked against the cache before any RPC.
 async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
     let key = file.key(k.key.as_deref())?;
@@ -1280,14 +1282,24 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
         } else {
             ErrorCode::RpcError
         };
+        // Each network's error cut short as its line shows it ([`brief`]): eight endpoints'
+        // texts of up to 512 each would be one line of about 4,000 characters from outside.
+        // `--json` keeps each whole, as a network's row does when another one answers, in
+        // `networks`, a detail a human is not shown.
         let why: Vec<String> = failed
             .iter()
-            .map(|(chain, e)| format!("{chain}: {}", e.message))
+            .map(|(chain, e)| format!("{chain}: {}", brief(&e.message)))
             .collect();
-        return Err(WalletError::new(
-            code,
-            format!("no network answered: {}", why.join("; ")),
-        ));
+        let networks: Vec<Value> = failed
+            .iter()
+            .map(|(chain, e)| {
+                json!({ "chain": chain, "error": e.message, "errorCode": e.code.as_str() })
+            })
+            .collect();
+        return Err(
+            WalletError::new(code, format!("no network answered: {}", why.join("; ")))
+                .with_detail("networks", networks),
+        );
     }
     let mut total = format!("{held} of {} networks have a balance", order.len());
     if !failed.is_empty() {

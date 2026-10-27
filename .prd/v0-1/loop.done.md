@@ -101,3 +101,26 @@ zwallet v0.1.0 is released; brew stable and preview install it; `xbrew install z
 
 - **WU5** (2026-10-21): tag `v0.1.0` on e17b2be (PR #4's merge; the user's request 2026-10-20 "brew에도 올리고 xbrew에도 올려줘"). Release, CI and Preview runs on e17b2be all green; the release's 4 assets match SHA256SUMS; the preview `preview-2026-10-20-2311-e17b2bebb0c8` is the same commit. Tap PR #10 (4682f6b) rendered `Formula/zwallet.rb` 0.1.0 and `zwallet-preview.rb` 2026.10.20.2311 by hand. On fable-m5max: `brew install 2lab-ai/tap/zwallet` → `zwallet 0.1.0 (release e17b2bebb0c8)`, `brew test` rc=0; `brew upgrade 2lab-ai/tap/zwallet-preview` → `zwallet 0.1.0 (preview e17b2bebb0c8)`, `brew test` rc=0; `bin/zwallet` links the preview.
 - **WU4** (2026-10-21): xbrew PR #4 (5978635) adds `recipes/zwallet.toml` (macOS `formula = "2lab-ai/tap/zwallet"`; Arch `[arch.binary]` pinned to the v0.1.0 linux assets) and `tests/zwallet_recipe_contract.rs` (RED 0/3 → GREEN 3/3; `just check` 76 tests; CI macOS + Ubuntu green; opus review APPROVE). With the xbrew preview build `preview-2026-10-20-2341-5978635097d6` (assets match SHA256SUMS): on fable-m5max, `xbrew uninstall zwallet` then `xbrew install zwallet` → brew formula, `zwallet 0.1.0 (release e17b2bebb0c8)`, tracked; on cachy-z13 (CachyOS x86_64), `xbrew install zwallet` → recipe-binary at `~/.xbrew/bin/zwallet`, `zwallet 0.1.0 (release e17b2bebb0c8)`, sha256 `131109e6…` = the pin. Stable xbrew (0.4.11) does not carry the recipe yet: G3 stays open on the owner's xbrew release.
+
+## R6 — closed (hardening after v0.1.0, PRs #6–#12)
+
+Seven PRs after the v0.1.0 release. The whitelist key comes from the password, a verified address shows a QR code, the session verifies addresses after unlock, and text from outside cannot make zwallet's output show a fundable address. Each code PR was followed by a preview the dispatcher installed and tested on fable-m5max.
+
+### Closed rows
+
+| WU | Repo · branch · worktree | Scope | Owner | State |
+|---|---|---|---|---|
+| H1 | zwallet · PR #6 | README: zwallet has no relation to twak | dispatcher | merged e5ae1d2 (2026-10-21) |
+| H2 | zwallet · PR #7 | `balance` without `--chain` reads every network | opus-coder | merged 436d5dc (2026-10-21); preview 2026.10.21.0656 (tap PR #11) |
+| H3 | zwallet · PR #8 | whitelist key derived from the password and a sealed salt; `whitelist.key` removed | opus-coder | merged fe03605 (2026-10-23) |
+| H4 | zwallet · PR #9 | a verified address prints as a QR code on a terminal | opus-coder | merged 4f3b484 (2026-10-23); preview 2026.10.23.0722 (tap PR #12) |
+| H5 | zwallet · PR #10 | after unlock, address views and `balance` are verified by the session (macOS peer cdhash) | opus-coder | merged 787a640 (2026-10-26); preview 2026.10.26.1119 (tap PR #13) |
+| H6 | zwallet · PR #11 | display integrity: one write-point filter, parse-time shape checks, a total budget per outside source | opus-coder | merged f4c88b3 (2026-10-27); preview 2026.10.27.0200 (tap PR #14) |
+| H7 | zwallet · PR #12 · `.worktrees/fix-display-budget-nits` | the display budgets left by #11's final review (N1–N5) and by its own review (B1, NB1–NB6) | opus-coder | merged with this ledger; its preview receipt goes in the next round |
+
+- **PR #7.** RED first: lib 216 → 220, evm_offline 54 → 59, live 10 → 11.
+- **PR #8.** scrypt over the password and a sealed salt (domain `zwallet/whitelist-key/v1\n`). A v0.1.0 anchor without a salt is refused, and the daemon signs nothing under it. Gate: lib 225, cli 63, evm_offline 60, whitelist 4+3, live 11/11.
+- **PR #9.** The QR code is shown only for a verified address (`unlock`, `create` of a further key, `address --verify`) and only on a terminal. Gate on 9cb9b9f: lib 224, cli 65 (65/65 on a pty), evm_offline 60, whitelist 4+3; live 11/11.
+- **PR #10.** The first version compared the executable by (dev, ino) plus `LOCAL_PEERUUID` and was bypassable (attacker code exec'd from a path later swapped for a symlink to zwallet, with a forged LC_UUID; test s7, RED at 3005dba). The peer is now identified by its kernel-validated cdhash (`LOCAL_PEERTOKEN` → `CS_OPS_CDHASH`) plus CS_VALID. Linux never session-verifies. Gate on f1d3c62: lib 233, cli 75 (75/75 on a pty), evm_offline 62, whitelist 4+3, live 11/11; Linux Docker lib 234, cli 76. Reviews: opus APPROVE, grok SAFE on the peer check.
+- **PR #11.** Three rounds of code-point blacklists each missed glyphs that can draw a QR code, so the escaping became an allowlist (printable ASCII and `₮`) applied at the write point. whitelist.json is shape-checked when parsed, and every outside source has one 512-character budget. Gate on 0e6fb86: lib 258, cli 108 (×3 on a pty), evm_offline 64, whitelist 5+3, live 11/11; Linux Docker lib 258, cli 109. Review: opus 8 rounds, then APPROVE; grok SAFE on the write point and the shape check.
+- **PR #12.** Gate on 9df65bb: lib 262, cli 108 (108/108 ×3 on a pty), evm_offline 65, whitelist 5+3, live 11/11; Linux Docker (rust 1.99.1, non-root) lib 262, cli 109, evm_offline 65, whitelist 5+3. Review: trinity (grok-4.7, gpt-6-astra, fable) R1 2 APPROVE + 1 REJECT on one test assertion that held only by where `brief()` cuts; fixed in 9df65bb; R2 unanimous APPROVE.
