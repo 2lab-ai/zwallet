@@ -351,8 +351,12 @@ RPC endpoint precedence: `--rpc` flag, then `ZWALLET_RPC_<KEY>` env, then the de
   `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, and
   `aarch64-unknown-linux-gnu` (on `ubuntu-24.04-arm`). Both macOS binaries are ad-hoc signed
   with the hardened runtime (`codesign --force --sign - --options runtime`, then `--verify
-  --strict`); the aarch64 job checks that dyld obeys `DYLD_INSERT_LIBRARIES` before signing and
-  ignores it after. Publishes bare binaries named `zwallet-<os>-<arch>` plus `SHA256SUMS`.
+  --strict`, and the `runtime` flag is required); the aarch64 job checks that dyld obeys
+  `DYLD_INSERT_LIBRARIES` before signing and, on a runner with System Integrity Protection on,
+  ignores it after. GitHub's macOS runners run with SIP off, which lifts that dyld restriction,
+  so there the step only leaves a notice; the post-deploy smoke on a SIP-enabled Mac checks it
+  for each preview. Publishes bare binaries named `zwallet-<os>-<arch>` plus
+  `SHA256SUMS`.
 - `preview.yml`: every push to `main` publishes the prerelease `preview-<YYYY-MM-DD-HHMM>-<sha12>`
   with the same assets.
 - Version line: `zwallet <ver> (<channel> <rev12>)`, built from `ZWALLET_BUILD_CHANNEL` and

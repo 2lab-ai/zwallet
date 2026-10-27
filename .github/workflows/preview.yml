@@ -100,7 +100,11 @@ jobs:
       # The linker signs only arm64 output, and `unlock` refuses a zwallet build that has no
       # code signature (src/core/protocol.rs check_started_code compares the daemon's cdhash
       # with its own). So every macOS binary is ad-hoc signed here, with the hardened runtime,
-      # under which dyld ignores DYLD_* variables such as DYLD_INSERT_LIBRARIES.
+      # under which dyld ignores DYLD_* variables such as DYLD_INSERT_LIBRARIES while System
+      # Integrity Protection is on. GitHub's macOS runners run with SIP off, which lifts that
+      # restriction, so the check after signing observes it only on a runner with SIP on and is
+      # otherwise a notice; the runtime flag itself is checked in the signing step on every
+      # runner, and the deploy smoke on a SIP-enabled Mac checks dyld for each preview.
       # First the control: unsigned for the runtime, the binary obeys DYLD_INSERT_LIBRARIES
       # (dyld aborts on the missing library), so the check after signing is not vacuous.
       - name: DYLD_INSERT_LIBRARIES reaches the binary before signing
@@ -141,7 +145,7 @@ jobs:
           fi
 
       # The x86_64 binary cannot run on this arm64 runner without Rosetta; its flags are checked
-      # in the signing step above.
+      # in the signing step above. Only observable with SIP on (see above).
       - name: Hardened runtime ignores DYLD_INSERT_LIBRARIES
         if: matrix.target == 'aarch64-apple-darwin'
         shell: bash
@@ -149,6 +153,12 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          sip="$(csrutil status 2>&1 || true)"
+          if ! grep -q 'status: enabled' <<<"$sip"; then
+            echo "::notice::System Integrity Protection is off on this runner, so dyld's DYLD_* restriction for hardened binaries cannot be observed here; the runtime flag was checked in the signing step"
+            echo "$sip"
+            exit 0
+          fi
           version="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
           commit="$(git rev-parse HEAD)"
           expected="zwallet $version (preview ${commit:0:12})"

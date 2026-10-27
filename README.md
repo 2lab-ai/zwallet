@@ -841,7 +841,8 @@ things a same-user process can still do, and what to do about them:
   swapped-in program can fork a process that keeps the channel, then exec this build, which
   passes, and that process can read the password. (It could also exec this build with
   `DYLD_INSERT_LIBRARIES`; the binaries zwallet ships carry the hardened runtime, under which dyld
-  ignores that variable, but a build from source does not.) A Homebrew-installed binary is
+  ignores that variable while System Integrity Protection is on, but a build from source does
+  not.) A Homebrew-installed binary is
   writable by the user, and so by the agent. For
   real protection install zwallet where the agent cannot write (e.g. a root-owned directory), or
   run the agent as a different OS user.
