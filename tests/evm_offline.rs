@@ -2045,8 +2045,10 @@ fn balance_without_chain_cuts_each_networks_error_short_when_none_answers() {
     let human = home.run_env(&["balance"], &env_refs(&env));
     assert_eq!(human.code, 1, "{}", human.stdout);
     assert!(human.stderr.contains(&msg), "{}", human.stderr);
+    // No `networks` detail for a human, wherever the cut above falls: a brief part holds at most
+    // 72 characters, so 400 `#` in a row can only come from a whole error.
     assert!(
-        !human.stderr.contains('#') && !human.stderr.contains("-32000"),
+        !human.stderr.contains(&whole) && !human.stderr.contains("networks"),
         "{}",
         human.stderr
     );
