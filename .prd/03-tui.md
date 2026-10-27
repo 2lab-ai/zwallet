@@ -477,6 +477,10 @@ it as well.
 - A panic hook and normal unwinding both restore the terminal. The panic hook then prints one
   fixed line through the write filter (`eprint_line`, core/terminal.rs:57), "zwallet tui stopped
   unexpectedly; the terminal was restored", never the panic's payload.
+- A panic while the TUI holds the terminal ends the process (`std::process::exit(101)`), also one
+  tokio would catch (`spawn_blocking`), so no TUI ever goes on after a panic; a second panic
+  meanwhile prints nothing (`src/tui/term.rs`). `exit` runs no destructors, so a `Zeroizing`
+  buffer such as `PasswordBuf` is not cleared on that path: its memory goes with the process.
 
 ## Architecture
 
