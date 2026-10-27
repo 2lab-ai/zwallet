@@ -9,7 +9,7 @@ use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::{Cell, CellDiffOption, CellWidth};
 use ratatui::layout::{Position, Size};
-use std::cell::UnsafeCell;
+use std::cell::{Cell as Flag, UnsafeCell};
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::os::fd::RawFd;
@@ -148,15 +148,50 @@ const PANIC_OUTPUT: &[u8] = b"zwallet tui stopped unexpectedly; the terminal was
 /// How a process ends after a panic while the TUI held the terminal (Rust's own panic code).
 const PANIC_EXIT: i32 = 101;
 
-/// Who has the terminal, per process ([`STATE`]). A [`Guard`] takes it from `IDLE` only, and gives
-/// it back through `RELEASING` (while it restores, nobody else takes it). A panic while it is
-/// `HELD` or `RELEASING` makes it `FATAL` for good: the process is ending.
+/// Who has the terminal, per process ([`STATE`]). A [`Guard`] takes it from `IDLE` only, through
+/// `ACQUIRING` (while it records the modes and sets raw mode) to `HELD`, and gives it back through
+/// `RELEASING` (while it restores, nobody else takes it). A panic while it is `HELD` or
+/// `RELEASING`, or `ACQUIRING` on the taking thread itself, makes it `FATAL` for good: the process
+/// is ending. A panic on another thread while it is `ACQUIRING` waits until it is not.
 const IDLE: u8 = 0;
 const HELD: u8 = 1;
 const RELEASING: u8 = 2;
 const FATAL: u8 = 3;
+const ACQUIRING: u8 = 4;
 
 static STATE: AtomicU8 = AtomicU8::new(IDLE);
+
+thread_local! {
+    /// This thread is the one taking the terminal (`ACQUIRING`).
+    static ENTERING: Flag<bool> = const { Flag::new(false) };
+}
+
+/// Whether this thread is the one taking the terminal; false where thread-locals are gone.
+fn entering() -> bool {
+    ENTERING.try_with(Flag::get).unwrap_or(false)
+}
+
+/// The hard deadline of a panic while the TUI holds the terminal: past it, SIGALRM's default
+/// action ends the process, whatever the hook is waiting on (a write that blocks after `poll`
+/// said the fd takes one, the thread taking the terminal). The modes are restored before.
+const DEADLINE_SECS: u32 = 2;
+
+/// `alarm(secs)` with SIGALRM's default action (ending the process) and SIGALRM unblocked on this
+/// thread, so it is delivered; `alarm(0)` cancels. Async-signal-safe calls only.
+fn alarm(secs: u32) {
+    // SAFETY: signal, sigemptyset, sigaddset, pthread_sigmask and alarm on a set this frame
+    // owns; all are async-signal-safe.
+    unsafe {
+        if secs > 0 {
+            libc::signal(libc::SIGALRM, libc::SIG_DFL);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGALRM);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        }
+        libc::alarm(secs);
+    }
+}
 
 /// Gives the terminal back to the shell: leaves the alternate screen, shows the cursor, and ends
 /// raw mode (which a terminal that never entered it ignores). Errors are ignored: there is no
@@ -267,30 +302,51 @@ enum Panicked {
     Delegated,
 }
 
-/// The panic hook's decision on `state`. The one panic that moves it from `HELD` or `RELEASING`
-/// to `FATAL` gives the terminal back, the modes first ([`restore_modes`]: they need no output),
-/// then [`RESTORE_SCREEN`] on `out`, then [`PANIC_OUTPUT`] on `err`; each write is best effort,
-/// and nothing here locks or allocates besides what `out` and `err` do. A panic that finds it
-/// `FATAL` writes nothing and never runs `before`, which would print its payload. Only while
-/// `IDLE` does `before`, the hook that was there before, get `info`.
+/// The panic hook's decision on `state`. The one panic that moves it from `HELD`, `RELEASING`,
+/// or (on the thread taking the terminal, `entering`) `ACQUIRING` to `FATAL` gives the terminal
+/// back: the modes first ([`restore_modes`]: they need no output), then the deadline (`alarm`,
+/// [`DEADLINE_SECS`]), then [`RESTORE_SCREEN`] on `out` and [`PANIC_OUTPUT`] on `err`, each best
+/// effort; nothing here locks or allocates besides what `out` and `err` do. A panic on another
+/// thread while `ACQUIRING` arms the deadline and waits until the taking thread is done. A panic
+/// that finds it `FATAL` writes nothing and never runs `before`, which would print its payload.
+/// Only while `IDLE` does `before`, the hook that was there before, get `info` (and a deadline
+/// armed while waiting is cancelled first).
 fn on_panic<I: ?Sized>(
     state: &AtomicU8,
     out: &mut impl Write,
     err: &mut impl Write,
+    alarm: &dyn Fn(u32),
+    entering: bool,
     before: &dyn Fn(&I),
     info: &I,
 ) -> Panicked {
+    let mut armed = false;
     loop {
         match state.load(Ordering::SeqCst) {
             FATAL => return Panicked::Suppressed,
             IDLE => {
+                if armed {
+                    alarm(0);
+                }
                 before(info);
                 return Panicked::Delegated;
+            }
+            ACQUIRING if !entering => {
+                if !armed {
+                    alarm(DEADLINE_SECS);
+                    armed = true;
+                }
+                #[cfg(test)]
+                seam::waiting_for_acquiring();
+                std::thread::yield_now();
             }
             held => {
                 let taken = state.compare_exchange(held, FATAL, Ordering::SeqCst, Ordering::SeqCst);
                 if taken.is_ok() {
                     restore_modes();
+                    if !armed {
+                        alarm(DEADLINE_SECS);
+                    }
                     #[cfg(test)]
                     seam::after_restore_modes();
                     let _ = out.write_all(RESTORE_SCREEN);
@@ -311,10 +367,20 @@ fn emergency<I: ?Sized>(
     state: &AtomicU8,
     out: RawFd,
     err: RawFd,
+    alarm: &dyn Fn(u32),
+    entering: bool,
     before: &dyn Fn(&I),
     info: &I,
 ) -> Panicked {
-    on_panic(state, &mut Fd(out), &mut Fd(err), before, info)
+    on_panic(
+        state,
+        &mut Fd(out),
+        &mut Fd(err),
+        alarm,
+        entering,
+        before,
+        info,
+    )
 }
 
 /// Installs the panic hook once per process. A hook runs for every panic, also one tokio catches
@@ -322,15 +388,16 @@ fn emergency<I: ?Sized>(
 /// the terminal no panic is survivable: [`emergency`] gives the terminal back (its modes, then
 /// the screen through fd 1: a guard of the TUI always holds stdout) and writes the fixed line on
 /// fd 2, and the process ends at once with [`PANIC_EXIT`] (`_exit`: no destructor, no atexit, no
-/// flush that could wait on a lock). A panic on another thread meanwhile waits here for that end. Without a guard the hook
-/// that was there before runs. It is never removed: a hook cannot be changed from a panicking
-/// thread.
+/// flush that could wait on a lock), or by SIGALRM at the deadline ([`DEADLINE_SECS`]) if a write
+/// never returns. A panic on another thread meanwhile waits here for that end. Without a guard
+/// the hook that was there before runs. It is never removed: a hook cannot be changed from a
+/// panicking thread.
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let before = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            match emergency(&STATE, 1, 2, &*before, info) {
+            match emergency(&STATE, 1, 2, &alarm, entering(), &*before, info) {
                 // SAFETY: _exit ends the process; nothing after it runs.
                 Panicked::Fatal => unsafe { libc::_exit(PANIC_EXIT) },
                 Panicked::Suppressed => loop {
@@ -354,17 +421,13 @@ impl<W: Write> Guard<W> {
     /// writes to. Refused, before anything is touched, unless the terminal is free.
     pub fn enter(out: W) -> std::io::Result<Self> {
         claim()?;
-        let taken = Self::take_modes();
-        if let Err(e) = taken {
-            MODES_SET.store(false, Ordering::Release);
-            let _ = STATE.compare_exchange(HELD, IDLE, Ordering::SeqCst, Ordering::SeqCst);
-            return Err(e);
-        }
-        Self::begin(out)
+        let guard = Self::take_modes().and_then(|()| Self::begin(out));
+        acquired(guard.is_ok());
+        guard
     }
 
     /// Records stdin's modes for the panic hook ([`MODES`]), installs the hook, then sets raw
-    /// mode. Called only by the thread that has just taken the terminal ([`claim`]).
+    /// mode. Called only by the thread taking the terminal ([`claim`], `ACQUIRING`).
     fn take_modes() -> std::io::Result<()> {
         // SAFETY: this thread owns the terminal and `MODES_SET` is false, so nothing reads
         // `MODES` ([`Modes`]); tcgetattr fills it, or fails.
@@ -385,10 +448,13 @@ impl<W: Write> Guard<W> {
     #[cfg(test)]
     fn on(out: W) -> std::io::Result<Self> {
         claim()?;
-        Self::begin(out)
+        let guard = Self::begin(out);
+        acquired(guard.is_ok());
+        guard
     }
 
-    /// The alternate screen and a hidden cursor on `out`, for a guard that holds the terminal.
+    /// The alternate screen and a hidden cursor on `out`, for the thread taking the terminal. If
+    /// that fails the guard drops here, and gives the terminal back.
     fn begin(out: W) -> std::io::Result<Self> {
         let mut guard = Self { out };
         execute!(guard.out, EnterAlternateScreen, Hide)?;
@@ -396,23 +462,43 @@ impl<W: Write> Guard<W> {
     }
 }
 
-/// Takes [`STATE`] from `IDLE` to `HELD`, or refuses: another guard holds the terminal, is giving
-/// it back, or a panic took it.
+/// Takes [`STATE`] from `IDLE` to `ACQUIRING` for this thread, or refuses: another guard holds
+/// the terminal, is taking it or giving it back, or a panic took it.
 fn claim() -> std::io::Result<()> {
     STATE
-        .compare_exchange(IDLE, HELD, Ordering::SeqCst, Ordering::SeqCst)
-        .map(|_| ())
-        .map_err(|_| std::io::Error::other("another zwallet tui guard already holds the terminal"))
+        .compare_exchange(IDLE, ACQUIRING, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| {
+            std::io::Error::other("another zwallet tui guard already holds the terminal")
+        })?;
+    let _ = ENTERING.try_with(|e| e.set(true));
+    Ok(())
+}
+
+/// Ends this thread's `ACQUIRING`: `HELD` when the guard was made, else back to `IDLE` (with no
+/// modes recorded) unless a failed guard already gave it back. Only this thread moves the state
+/// out of `ACQUIRING` (a panic on it included), so a state still `ACQUIRING` is still its own.
+fn acquired(made: bool) {
+    if STATE.load(Ordering::SeqCst) == ACQUIRING {
+        if made {
+            STATE.store(HELD, Ordering::SeqCst);
+        } else {
+            MODES_SET.store(false, Ordering::Release);
+            STATE.store(IDLE, Ordering::SeqCst);
+        }
+    }
+    let _ = ENTERING.try_with(|e| e.set(false));
 }
 
 impl<W: Write> Drop for Guard<W> {
     /// Gives the terminal back while still holding it (`RELEASING`), and frees it only after; a
     /// panic meanwhile takes it from there ([`on_panic`]), and then it stays `FATAL`.
     fn drop(&mut self) {
-        if STATE
-            .compare_exchange(HELD, RELEASING, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
+        let release = |from| {
+            STATE
+                .compare_exchange(from, RELEASING, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        };
+        if release(HELD) || release(ACQUIRING) {
             restore(&mut self.out);
             MODES_SET.store(false, Ordering::Release);
             let _ = STATE.compare_exchange(RELEASING, IDLE, Ordering::SeqCst, Ordering::SeqCst);
@@ -444,6 +530,13 @@ mod seam {
             loop {
                 std::thread::park();
             }
+        }
+    }
+
+    /// In a panic waiting for another thread to finish taking the terminal: lets it go on.
+    pub(super) fn waiting_for_acquiring() {
+        if PAUSE_ENTERING.load(Ordering::SeqCst) {
+            GO.store(true, Ordering::SeqCst);
         }
     }
 
