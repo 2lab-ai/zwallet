@@ -837,7 +837,9 @@ fn c14_unlock_durations_set_expires_at() {
         let after = now_secs();
         let expires = v["expiresAt"].as_str().unwrap().to_string();
         // Both sides floor to whole seconds, so only a wall-clock step back makes the daemon's
-        // expiry earlier than `before + secs`: up to 2 s of one is tolerated.
+        // expiry earlier than `before + secs`: up to 2 s of one is tolerated. Seen once, on
+        // 2026-10-28 under load: 2026-10-28T15:09:12Z against an expected 15:09:13Z. The
+        // duration arithmetic itself is exact (`parses_all_units`, src/core/time.rs).
         let lo = zwallet::core::time::rfc3339_utc(before + secs - 2);
         let hi = zwallet::core::time::rfc3339_utc(after + secs + 1);
         assert!(
