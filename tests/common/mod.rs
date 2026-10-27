@@ -1,16 +1,19 @@
 //! Helpers for driving the real binary. Every test gets its own short temp home under /tmp
-//! (the daemon socket path must fit `sun_path`), an empty environment except `ZWALLET_HOME`,
-//! and a guard that stops any daemon serving that home.
+//! (the daemon socket path must fit `sun_path`), an empty environment except `ZWALLET_HOME` and
+//! the test scope, and a guard that stops any daemon serving that home.
 //!
-//! `zwallet lock` stops every zwallet daemon of this user, so a test that runs it would end the
-//! daemons of tests running alongside. Every [`Home`] therefore holds a shared flock on a
-//! per-user file, and a test that runs `zwallet lock` takes it exclusively first ([`exclusive`]).
-//! The lock is cross-process, so concurrent `cargo test` runs on this machine take turns too.
+//! `zwallet lock` stops every zwallet daemon of this user. Every zwallet the tests start carries
+//! the debug-only test scope ([`zwallet_at`]), so there it stops the daemons of the test homes
+//! only, never the user's own session; but that still ends the daemons of tests running
+//! alongside. Every [`Home`] therefore holds a shared flock on a per-user file, and a test that
+//! runs `zwallet lock` takes it exclusively first ([`exclusive`]). The lock is cross-process, so
+//! concurrent `cargo test` runs on this machine take turns too.
 
 #![allow(dead_code)]
 
 use serde_json::Value;
 use std::cell::Cell;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd};
@@ -23,9 +26,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use zwallet::chains::evm::registry::WHITELIST_RULES;
+use zwallet::core::protocol::TEST_SCOPE_ENV;
 use zwallet::core::whitelist::{self, Entry, Whitelist};
 
 pub const PW: &str = "correct horse battery staple";
+
+/// The start of every test home's path: each [`Home`] (and every other temp dir a test makes for
+/// a home or a binary) is a `zwt-` temp dir in /tmp.
+pub const TEST_HOMES: &str = "/tmp/zwt-";
 
 pub struct Run {
     pub code: i32,
@@ -81,7 +89,7 @@ thread_local! {
     static SHARED: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Held by a test that runs `zwallet lock` (which stops every daemon of this user): no other
+/// Held by a test that runs `zwallet lock` (which stops every daemon of a test home): no other
 /// test with a [`Home`] runs meanwhile, in this process or another. Take it before creating any
 /// `Home`.
 pub struct Exclusive {
@@ -172,7 +180,8 @@ impl Home {
         run_in(self.path(), args, None, env)
     }
 
-    /// The bare command (empty env except `ZWALLET_HOME`) for tests that wire stdio themselves.
+    /// The bare command (empty env except `ZWALLET_HOME` and the test scope, see [`zwallet_at`])
+    /// for tests that wire stdio themselves.
     pub fn command(&self, args: &[&str]) -> Command {
         command_in(self.path(), args)
     }
@@ -239,9 +248,9 @@ impl Home {
 
     /// Ends this home's session the way `unlock` stops old daemons (only this home's), for tests
     /// that need the wallet locked but do not test `zwallet lock` itself (which stops every
-    /// daemon of this user, see [`exclusive`]).
+    /// daemon of a test home, see [`exclusive`]).
     pub fn stop_daemons(&self) {
-        zwallet::core::protocol::stop_daemons(self.path(), None).expect("stop this home's daemons");
+        stop_daemons(self.path()).expect("stop this home's daemons");
     }
 
     /// Rewrites `wallet.json` through a JSON edit (metadata only unless the edit says otherwise).
@@ -313,7 +322,7 @@ impl Drop for Home {
     fn drop(&mut self) {
         // Only this home's daemons, by the process table: `zwallet lock` would also stop the
         // daemons of tests running alongside.
-        let _ = zwallet::core::protocol::stop_daemons(self.path(), None);
+        let _ = stop_daemons(self.path());
         for pid in self.daemon_pids() {
             // Never 0 or 1: kill(0) would hit this whole process group.
             if pid > 1 && pid_alive(pid) {
@@ -353,13 +362,37 @@ pub fn ptrace_scope_is_open() -> bool {
             .is_none_or(|scope| scope == 0)
 }
 
-/// The binary with `args`, an empty environment but `ZWALLET_HOME`, and, where the host's
-/// ptrace policy makes `unlock` refuse ([`ptrace_scope_is_open`]), `--allow-ptrace-scope-0` on
-/// every command that starts a daemon. `r1_unlock_refuses_ptrace_scope_0_without_the_flag`
-/// builds its command without this helper.
+/// The zwallet binary at `exe` with an empty environment but the test scope: [`TEST_SCOPE_ENV`]
+/// set to [`TEST_HOMES`], so a `lock` or a whitelist edit it runs stops only the daemons of test
+/// homes, never the user's own session. Every zwallet the tests start is built here, so a
+/// release-profile run (whose zwallet ignores the scope) fails here before any starts
+/// ([`zwallet_at_with`]).
+pub fn zwallet_at(exe: impl AsRef<OsStr>) -> Command {
+    zwallet_at_with(exe, cfg!(debug_assertions))
+}
+
+/// [`zwallet_at`] for a build with or without `debug_assertions`: without, it panics before it
+/// builds the command. `CARGO_BIN_EXE_zwallet` is built with the same profile as these tests,
+/// and only a build with `debug_assertions` reads [`TEST_SCOPE_ENV`]: under
+/// `cargo test --release` every `lock` would stop the user's own session too.
+pub fn zwallet_at_with(exe: impl AsRef<OsStr>, debug_assertions: bool) -> Command {
+    assert!(
+        debug_assertions,
+        "a release zwallet ignores {TEST_SCOPE_ENV}, so a `lock` the tests run would stop the \
+         user's own session: run the tests without --release"
+    );
+    let mut cmd = Command::new(exe);
+    cmd.env_clear().env(TEST_SCOPE_ENV, TEST_HOMES);
+    cmd
+}
+
+/// The binary with `args`, an empty environment but `ZWALLET_HOME` and the test scope
+/// ([`zwallet_at`]), and, where the host's ptrace policy makes `unlock` refuse
+/// ([`ptrace_scope_is_open`]), `--allow-ptrace-scope-0` on every command that starts a daemon.
+/// `r1_unlock_refuses_ptrace_scope_0_without_the_flag` builds its command without this helper.
 pub fn command_in(home: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_zwallet"));
-    cmd.env_clear().env("ZWALLET_HOME", home).args(args);
+    let mut cmd = zwallet_at(env!("CARGO_BIN_EXE_zwallet"));
+    cmd.env("ZWALLET_HOME", home).args(args);
     if ptrace_scope_is_open() && args.iter().any(|a| *a == "unlock" || *a == "--unlock") {
         cmd.arg("--allow-ptrace-scope-0");
     }
@@ -374,10 +407,11 @@ pub fn run_in(home: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &st
     run_command(cmd, stdin)
 }
 
-/// The binary with `args` and an empty environment: no `ZWALLET_HOME`, no `HOME`.
+/// The binary with `args` and an empty environment but the test scope ([`zwallet_at`]): no
+/// `ZWALLET_HOME`, no `HOME`.
 pub fn command_without_home(args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_zwallet"));
-    cmd.env_clear().args(args);
+    let mut cmd = zwallet_at(env!("CARGO_BIN_EXE_zwallet"));
+    cmd.args(args);
     cmd
 }
 
@@ -408,14 +442,23 @@ pub fn run_command(mut cmd: Command, stdin: Option<&str>) -> Run {
 /// Pids of the zwallet daemons for `home` (other than this process), found by argv
 /// (`zwallet daemon --home <home>`) in the OS process table: the same lookup `unlock` and
 /// `status` use, which also sees a non-dumpable daemon on Linux whose /proc fd directory is
-/// unreadable.
+/// unreadable. Only among the daemons of test homes: [`TEST_HOMES`] is given here, so a
+/// [`TEST_SCOPE_ENV`] exported in the shell changes nothing.
 pub fn daemon_pids(home: &Path) -> Vec<i32> {
-    zwallet::core::protocol::daemon_pids(home, None).expect("process table")
+    zwallet::core::protocol::home_daemon_pids_under(Path::new(TEST_HOMES), home)
+        .expect("process table")
 }
 
-/// Pids of every zwallet daemon of this user, whatever its home: what `zwallet lock` stops.
+/// Stops the daemons of `home` (only this home's) among those of test homes, as [`daemon_pids`]
+/// finds them.
+pub fn stop_daemons(home: &Path) -> zwallet::core::error::Result<Vec<i32>> {
+    zwallet::core::protocol::stop_daemons_under(Path::new(TEST_HOMES), home)
+}
+
+/// Pids of every zwallet daemon of a test home, whatever the home: what `zwallet lock` stops when
+/// a test runs it. This process carries no test scope, so [`TEST_HOMES`] is given here.
 pub fn all_daemon_pids() -> Vec<i32> {
-    zwallet::core::protocol::all_daemon_pids().expect("process table")
+    zwallet::core::protocol::daemon_pids_under(Path::new(TEST_HOMES)).expect("process table")
 }
 
 /// A `zwallet daemon --home <canonical home>` child started the way `unlock` starts it (fds 0

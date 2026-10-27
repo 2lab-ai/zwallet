@@ -1015,9 +1015,8 @@ fn k5_binary_swapped_during_the_prompt_never_gets_the_password() {
     let exe = home.path().join("zwallet");
     fs::copy(env!("CARGO_BIN_EXE_zwallet"), &exe).unwrap();
     let captured = home.path().join("captured");
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.env_clear()
-        .env("ZWALLET_HOME", home.path())
+    let mut cmd = common::zwallet_at(&exe);
+    cmd.env("ZWALLET_HOME", home.path())
         .args(["unlock", "30s", "--json"]);
     if common::ptrace_scope_is_open() {
         cmd.arg("--allow-ptrace-scope-0");
@@ -1450,9 +1449,8 @@ fn r1_daemon_refuses_a_pipe_for_its_channel() {
 fn r1_unlock_refuses_ptrace_scope_0_without_the_flag() {
     // Built without `command_in`, which adds --allow-ptrace-scope-0 where the host needs it.
     let raw = |home: &Home, args: &[&str]| {
-        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_zwallet"));
-        cmd.env_clear()
-            .env("ZWALLET_HOME", home.path())
+        let mut cmd = common::zwallet_at(env!("CARGO_BIN_EXE_zwallet"));
+        cmd.env("ZWALLET_HOME", home.path())
             .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1555,7 +1553,7 @@ fn r2_lock_stops_a_daemon_behind_a_repointed_symlink() {
     assert_eq!(
         common::all_daemon_pids(),
         Vec::<i32>::new(),
-        "a zwallet daemon of this user survived lock"
+        "a zwallet daemon of a test home survived lock"
     );
 }
 
@@ -1924,6 +1922,114 @@ fn r4c3_status_lists_the_daemons_of_other_homes() {
     let (s, pids) = others(&a);
     assert_eq!(s["locked"], true, "{s}");
     assert!(pids.contains(&json!(pb)), "{s}");
+}
+
+/// A wallet home outside the suite's test homes (`/tmp/zwx-*`, not `/tmp/zwt-*`), standing for
+/// the user's real one. Its own commands are scoped to the outside homes: one scoped to the test
+/// homes cannot see this home's daemon, and `unlock` checks that it can. Its daemons are stopped
+/// when it drops, this home's only.
+struct Outside(tempfile::TempDir);
+
+const OUTSIDE_HOMES: &str = "/tmp/zwx-";
+
+impl Outside {
+    fn new() -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("zwx-")
+            .tempdir_in("/tmp")
+            .expect("outside home");
+        Self(dir)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+
+    fn run_stdin(&self, args: &[&str]) -> common::Run {
+        run_in(
+            self.path(),
+            args,
+            Some(&format!("{PW}\n")),
+            &[(zwallet::core::protocol::TEST_SCOPE_ENV, OUTSIDE_HOMES)],
+        )
+    }
+
+    /// Unlocks it for 30 s and returns its daemon's pid.
+    fn unlock(&self) -> i32 {
+        self.run_stdin(&["unlock", "30s", "--password-stdin", "--json"])
+            .ok()["daemonPid"]
+            .as_i64()
+            .unwrap() as i32
+    }
+
+    /// Its daemons, by the process table, among those of the outside homes.
+    fn daemon_pids(&self) -> Vec<i32> {
+        zwallet::core::protocol::home_daemon_pids_under(
+            std::path::Path::new(OUTSIDE_HOMES),
+            self.path(),
+        )
+        .expect("process table")
+    }
+}
+
+impl Drop for Outside {
+    fn drop(&mut self) {
+        let _ = zwallet::core::protocol::stop_daemons_under(
+            std::path::Path::new(OUTSIDE_HOMES),
+            self.path(),
+        );
+    }
+}
+
+#[test]
+fn the_suite_stops_no_daemon_outside_its_test_homes() {
+    // `lock` and a whitelist edit stop every daemon in their reach. Run by the suite, that is the
+    // daemons of its test homes, never the user's own session.
+    let _alone = common::exclusive();
+    let outside = Outside::new();
+    outside
+        .run_stdin(&["create", "main", "--password-stdin", "--json"])
+        .ok();
+    let home = Home::new();
+    home.create("main", &[]);
+    let mut failures = Vec::new();
+    for what in ["lock", "whitelist add"] {
+        let kept = outside.unlock();
+        let ended = home.unlock("30s")["daemonPid"].as_i64().unwrap() as i32;
+        let (r, field) = match what {
+            "lock" => (home.run(&["lock", "--json"]), "stopped"),
+            _ => (
+                whitelist_edit(&home, &["add", "alice", PAYEE]),
+                "stoppedDaemons",
+            ),
+        };
+        let v: serde_json::Value = serde_json::from_str(&r.stdout).unwrap_or_default();
+        let stopped = |pid: i32| v[field].as_array().is_some_and(|s| s.contains(&json!(pid)));
+        if r.code != 0 || !stopped(ended) || !wait_dead(ended, Duration::from_secs(3)) {
+            failures.push(format!(
+                "{what} did not stop the daemon {ended} of its test home: {:?} / {:?}",
+                r.stdout.trim(),
+                r.stderr.trim()
+            ));
+        }
+        if stopped(kept) || !pid_alive(kept) || !outside.daemon_pids().contains(&kept) {
+            failures.push(format!(
+                "{what} stopped the daemon {kept} of {}, outside the test homes",
+                outside.path().display()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+#[should_panic(expected = "a release zwallet ignores ZWALLET_TEST_DAEMON_SCOPE")]
+fn a_release_profile_run_starts_no_zwallet() {
+    // `common::zwallet_at` builds every zwallet the tests start, through this launcher with
+    // `cfg!(debug_assertions)`: under `cargo test --release` that is false, and it panics before
+    // it builds the command. Nothing here spawns it: a launcher that returned fails this test
+    // with nothing started.
+    let _unspawned = common::zwallet_at_with(env!("CARGO_BIN_EXE_zwallet"), false);
 }
 
 // The whitelist CLI (`.prd/04-whitelist.md`): `zwallet whitelist …` and `@nickname` recipients.
@@ -3630,13 +3736,9 @@ fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
 
 /// Unlocks `home` with a daemon started from the binary at `exe` (a copy), and returns its pids.
 fn unlock_from(home: &Home, exe: &std::path::Path) {
-    let mut cmd = std::process::Command::new(exe);
-    cmd.env_clear().env("ZWALLET_HOME", home.path()).args([
-        "unlock",
-        "10m",
-        "--password-stdin",
-        "--json",
-    ]);
+    let mut cmd = common::zwallet_at(exe);
+    cmd.env("ZWALLET_HOME", home.path())
+        .args(["unlock", "10m", "--password-stdin", "--json"]);
     if common::ptrace_scope_is_open() {
         cmd.arg("--allow-ptrace-scope-0");
     }
