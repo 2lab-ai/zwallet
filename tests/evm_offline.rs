@@ -2000,6 +2000,7 @@ fn balance_without_chain_cuts_each_networks_error_short_when_none_answers() {
     // Every network's endpoint answers every call with a JSON-RPC error of 600 `#` (cut to 512
     // where the error is built). The message that names all eight shows each one cut short, as a
     // network's own line does when another network answers: not eight times 512 on one line.
+    // `--json` keeps each network's whole error under `networks`; a human never sees it.
     const BRIEF: usize = 72; // commands.rs BRIEF_ERROR_CHARS
     let home = Home::new();
     home.create("t", &[]);
@@ -2009,9 +2010,8 @@ fn balance_without_chain_cuts_each_networks_error_short_when_none_answers() {
         .iter()
         .map(|c| (c.rpc_env_var(), node.clone()))
         .collect();
-    let msg = home
-        .run_env(&["balance", "--json"], &env_refs(&env))
-        .err("RPC_ERROR");
+    let run = home.run_env(&["balance", "--json"], &env_refs(&env));
+    let msg = run.err("RPC_ERROR");
     let why = msg
         .strip_prefix("no network answered: ")
         .unwrap_or_else(|| panic!("{msg}"));
@@ -2024,9 +2024,32 @@ fn balance_without_chain_cuts_each_networks_error_short_when_none_answers() {
         let n = text.chars().count();
         assert!(n <= BRIEF, "{key}: {n} characters: {text}");
     }
+    let v = run.json();
+    let networks = v["networks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no networks: {v}"));
+    assert_eq!(networks.len(), ALL_CHAINS_ORDER.len(), "{v}");
+    let whole = "#".repeat(400);
+    for (n, key) in networks.iter().zip(ALL_CHAINS_ORDER) {
+        assert_eq!(
+            (&n["chain"], &n["errorCode"]),
+            (&json!(key), &json!("RPC_ERROR")),
+            "{n}"
+        );
+        let error = n["error"].as_str().unwrap_or_else(|| panic!("{n}"));
+        assert!(
+            error.contains("error code -32000: ") && error.contains(&whole),
+            "{key}: {error}"
+        );
+    }
     let human = home.run_env(&["balance"], &env_refs(&env));
     assert_eq!(human.code, 1, "{}", human.stdout);
     assert!(human.stderr.contains(&msg), "{}", human.stderr);
+    assert!(
+        !human.stderr.contains('#') && !human.stderr.contains("-32000"),
+        "{}",
+        human.stderr
+    );
 }
 
 #[test]

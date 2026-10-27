@@ -431,9 +431,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `balanceOf` does has them on its own row (and no `balance` or `raw`), and the rest of the
   network still shows. The command exits 0 when any network answered; when none did it fails with
   their shared error code (else `RPC_ERROR`) and every network's error in the message, each cut
-  short to 72 characters as its line shows it (the same message in `--json`). The address is the
-  same on every EVM chain; a row has its own `address` only where the cache differs. Human
-  output: `key` and `address`, one line per network with its coin, indented under
+  short to 72 characters as its line shows it; `--json` adds `networks: [{ chain, error,
+  errorCode }]`, each error whole as a network's row has it (human output never shows it). The
+  address is the same on every EVM chain; a row has its own `address` only where the cache
+  differs. Human output: `key` and `address`, one line per network with its coin, indented under
   it each non-zero token and each failed token as `<SYMBOL> error: …`, a failed network as
   `error: <message, cut short> [<CODE>]`, and a last line `<n> of <all> networks have a balance`
   (`; <m> did not answer`, `; <k> token reads failed` when some failed).
