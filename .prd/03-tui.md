@@ -110,11 +110,15 @@ cell never holds, as `terminal_ok` (:24) tells. One `Backend` wrapper, `Filtered
 every cell whose symbol is not exactly one `terminal_ok` character with `?`, and counts the
 replacements. A replaced cell is one column wide: a glyph two columns wide becomes `?`, and the
 wrapper itself writes a space into the column the glyph covered, so the result does not depend on
-whether ratatui's diff sends that column. Tests draw through the same wrapper over ratatui's
-`TestBackend` and assert zero replacements on every frame: the wrapper is the last filter, as
-`write_human` is, and escaping where text comes in (rule 3) stays mandatory. The TUI's own chrome
-keeps to the set too: borders are `+`, `-` and `|`, the selection marker is `>`, the password mask
-is `*`, and busy states end in `...` (`checking...`, never `…`).
+whether ratatui's diff sends that column. Those spaces stop at the screen's width from the last
+size read through the wrapper (ratatui's `Terminal` reads one when it is made and before every
+frame); a draw never asks the terminal, which fails the frame where none answers (no tty, no
+`TERM`). Before any size has been read it writes no space: no column is known to be on the
+screen, and one past the right edge would land on the last column. Tests draw through the same
+wrapper over ratatui's `TestBackend` and assert zero replacements on every frame: the wrapper is
+the last filter, as `write_human` is, and escaping where text comes in (rule 3) stays mandatory.
+The TUI's own chrome keeps to the set too: borders are `+`, `-` and `|`, the selection marker is
+`>`, the password mask is `*`, and busy states end in `...` (`checking...`, never `…`).
 
 What rule 1 rules out is terminal control **from data**: no byte sequence that came from a cell's
 content (an ESC, a CSI or OSC sequence, a BEL) ever reaches the terminal. The backend's own
