@@ -1,6 +1,6 @@
 # zwallet — TUI screens (v2 mockups)
 
-Status: **planned**, 2026-10-28, regenerated after review round 1 the same day. ASCII mockups for
+Status: **planned**, 2026-10-28, regenerated after review rounds 1 and 2 the same day. ASCII mockups for
 [`03-tui.md`](03-tui.md) §Screens and keys: one per screen at 80x24 (the smallest size the TUI
 draws), and the home screen at 120x40 too. They are generated with exact widths; every cell is
 printable ASCII, as rule 1 asks, and the generator checks the hint rule on every frame (a frame
@@ -467,7 +467,7 @@ signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 
 ## 3 send: `x` cancel, review
 
-A cancel is 0 of the coin to the key's own pinned address at nonce N, under the checked list's fee cap; the review says it races the original (03-tui.md §Status of a send, Replacements). Confirm by typing `cancel`. T28.
+A cancel is 0 of the coin to the key's own pinned address at nonce N, under the checked list's fee cap, offered under the one intent rule; the review says it races the original (03-tui.md §Status of a send, Replacements). `b` sets the bump and runs the review again. Confirm by typing `cancel`. T28.
 
 ```text
 zwallet  1 keys  2 wallet [3 send] 4 receive  5 whitelist  6 tools  7 session
@@ -761,7 +761,7 @@ signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 
 ## 6 tools: invoke review
 
-`invoke`: the contract is picked from the checked list's contract entries on this chain, the selector from that entry's selectors; the signature (or raw calldata) must match a listed selector. The review shows zwallet's own decode; confirm by typing the contract's nickname (T34, T35).
+`invoke`: the contract is picked from the checked list's contract entries on this chain, the selector from that entry's selectors; the signature (or raw calldata) must match a listed selector. The review shows zwallet's own decode; confirm by typing the contract's nickname (T34, T35). Here the pending guard fails, so the hint offers `p` (`--allow-pending`); `d` appears when the repeat guard fails. A speed-up or retry of an invoke is judged by the same checks (03-tui.md §Status of a send, Replacements).
 
 ```text
 zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist [6 tools] 7 session
@@ -775,7 +775,8 @@ zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist [6 tools] 7 session
 |nonce       13                                                                |
 |fee         at most 0.00094 ETH (cap 0.003 ETH, gen 4)                        |
 |whitelist   allowed: router lists 0x414bf389 on ethereum                      |
-|                                                                              |
+|pending     nonce 12 is pending (0x3f1c...e2a0, journal 13:58Z)               |
+|            p sends anyway: only for a different call                         |
 |a listed contract may forward value or act on its arguments                   |
 |                                                                              |
 |                                                                              |
@@ -783,9 +784,8 @@ zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist [6 tools] 7 session
 |                                                                              |
 |                                                                              |
 |                                                                              |
-|                                                                              |
 +------------------------------------------------------------------------------+
-Enter confirm (type router)  g fee ceiling  Esc back  ? actions
+Enter confirm (type router)  p pending ok  g fee ceiling  Esc back  ? actions
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
@@ -823,7 +823,7 @@ signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 
 ## 7 session
 
-`status` in full (T16), `u` to unlock for a typed duration (T14), `P` to accept `ptrace_scope` 0 for this TUI's sessions on Linux (T20), `L` to lock, the chains.
+`status` in full (T16), `u` to unlock for a typed duration (T14), `L` to lock, the chains. The `ptrace` line appears only when `zwallet tui --allow-ptrace-scope-0` started the TUI on Linux: no key sets it (03-tui.md §Coverage matrix row 8, T20).
 
 ```text
 zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools [7 session]
@@ -833,7 +833,7 @@ zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools [7 session]
 |other homes 1 daemon (pid 4411); L stops it too                               |
 |whitelist   the running session reports gen 4, 3 entries (not checked here)   |
 |home        /Users/z/.zwallet                                                 |
-|ptrace      Linux only: P accepts ptrace_scope 0 for this TUI's sessions      |
+|ptrace      ptrace_scope 0 accepted (started with --allow-ptrace-scope-0)     |
 |version     zwallet 0.2.0 (preview 24f4b5b0c1d2)                              |
 |                                                                              |
 |chains      ethereum base arbitrum optimism polygon bsc avalanche sepolia     |
@@ -847,14 +847,14 @@ zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools [7 session]
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
-u unlock for...  P ptrace_scope 0  L lock every daemon  c chain  ? actions
+u unlock for...  L lock every zwallet daemon  c chain  ? actions
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
 ## 7 session: `u` unlock for a duration (popup)
 
-`unlock <dur>`: the duration, then the password (the TUI-2 password field).
+`unlock <dur>`: the duration, then the password (the TUI-2 password field). The `ptrace_scope 0 accepted` line appears only under the start flag, as in the warm-up's password popup (T20).
 
 ```text
 zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools [7 session]
@@ -863,13 +863,13 @@ zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools [7 session]
 |daemon      none for this home                                                |
 |                                                                              |
 |                                                                              |
-|         + unlock (signing opens for the agent too) ----------------+         |
-|         |for       > 24h_          (s m h d w y; 1y = 365d)        |         |
-|         |password  >                                               |         |
-|         |                                                          |         |
-|         |Enter unlocks; Esc cancels                                |         |
-|         +----------------------------------------------------------+         |
-|                                                                              |
+|      + unlock (signing opens for the agent too) ----------------------+      |
+|      |for       > 24h_          (s m h d w y; 1y = 365d)              |      |
+|      |password  >                                                     |      |
+|      |                                                                |      |
+|      |ptrace_scope 0 accepted (started with --allow-ptrace-scope-0)   |      |
+|      |Enter unlocks; Esc cancels                                      |      |
+|      +----------------------------------------------------------------+      |
 |                                                                              |
 |                                                                              |
 |                                                                              |
@@ -885,7 +885,7 @@ locked | ethereum-rpc.publicnode.com
 
 ## `?` or `:` action menu
 
-One row per §Coverage matrix row 1–52, so `actions (52)`: its key, what it does, its alias token (the matrix's Alias column) and its tab, or why it cannot run now (`needs: Linux` on macOS, `CLI pointer` for B1). Typing filters, Enter runs (T12). The navigation keys and the version are on its last lines and are not counted.
+One row per §Coverage matrix row 1–52, so `actions (52)`: its key, what it does, its alias token (the matrix's Alias column) and its tab, or why it cannot run now (`start flag` for row 8, whose Enter only explains it; `CLI pointer` for B1). Typing filters, Enter runs (T12). The navigation keys and the version are on its last lines and are not counted.
 
 ```text
 zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
@@ -899,7 +899,7 @@ zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
 | |  n     new key, then unlock  create --unlock                1            | |
 | |  s     make the key active   change                         1            | |
 | |  Enter warm up / unlock      unlock                         1; 7 u       | |
-| |  P     accept ptrace_scope 0 unlock --allow-ptrace-scope-0  needs: Linux | |
+| |  -     ptrace_scope 0: why   unlock --allow-ptrace-scope-0  start flag   | |
 | |  L     lock every daemon     lock                           any tab      | |
 | |  7     the session           status                         7            | |
 | |  B     recovery phrase       backup                         CLI pointer  | |
