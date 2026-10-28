@@ -77,10 +77,11 @@ end); the dispatcher's decision in review round 1 the same day.
 
 ## Open for TUI-2
 
-From TUI-1c's review rounds 1 and 2 (2026-10-28), for the first unit whose pty runs start a
-daemon, resize or print after the TUI:
-- `PtyChild::stderr()` (tests/common/mod.rs:1171) joins the stderr thread with no deadline; TUI-2's
-  warm-up starts a daemon, which could inherit that pipe and hold the join.
+From TUI-1c's review rounds 1 and 2 (2026-10-28), for the first unit whose pty runs resize or
+print after the TUI. (Round 4 closed a third line, the stderr join in `PtyChild::stderr()`: a daemon
+the warm-up starts inherits neither that pipe nor the pty slave, since `spawn_daemon` gives it
+`Stdio::null()` for stderr and marks every fd from 3 up close-on-exec, src/core/protocol.rs:1354,
+:1363.)
 - T9 shrinks a running terminal (120x40 to 79x24) and sees the warning alone, but does not tell
   whether SIGWINCH's `Msg::Resize` (src/tui/app.rs:160) or the next refresh tick redrew it (a
   probe on 2026-10-28 saw the redraw 5 ms after the resize), and no test grows the window back.
