@@ -348,10 +348,14 @@ signed against a Nile block are valid only on Nile, and the CLI checks the genes
   only semantic change narrows (`*`). They have no `tron` fee cap, so a first Tron send needs two
   password edits, each named by the refusal: `whitelist add <nick> T… --chains tron`, then
   `whitelist fee-cap tron 30`. New lists (first `add`, `reset`) get the default cap.
-- **Older zwallet binaries** reading a list with a `tron` entry: `check_shapes` checks a chain
-  key's shape, not membership (`src/core/whitelist.rs:681-688`), so the list still verifies and
-  signs EVM as before. Their edits refuse it ("unknown chain", `validate`,
-  `src/core/whitelist.rs:294-324`). After the first Tron entry, edit with a Tron-aware zwallet.
+- **Older zwallet binaries** reading a list with a `tron` entry or a `tron` fee cap: `check_shapes`
+  checks a chain key's shape, not membership (`src/core/whitelist.rs:681-688`), and `verify`
+  checks the format only, never `validate`'s chain rules (`src/core/whitelist.rs:763-768`), so
+  the list still verifies and their daemon signs EVM as before. Their edits refuse it ("unknown
+  chain", `validate`, `src/core/whitelist.rs:294-324`, called only by edits, `:1437`). That
+  happens after the first Tron entry, and also after any first `add` or `reset` on a Tron-aware
+  build, since the new list's default caps include `tron`. From then on, edit with a Tron-aware
+  zwallet.
 - **`@nick`** (`transfer --chain tron --to @bob`) resolves a `tron` entry to its `T…`; an entry
   that does not name `tron` is `VALIDATION_ERROR` naming its chains.
 

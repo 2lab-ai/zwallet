@@ -60,7 +60,9 @@ TRON-2, TRON-3 and TRON-4 depend only on TRON-1 and can run in parallel.
   - `address --chain tron`, the `tron` row of `addresses` and its own QR with the Tron caption;
     `balance --chain tron` (TRX), the `every_balance` row (TRX, `tokens: []`).
   - `("tron", "30000000")` in `DEFAULT_FEE_CAPS_WEI` (`src/chains/evm/registry.rs:123-140`; its
-    test at `:447` requires one cap per chain).
+    test at `:447` requires one cap per chain). From this unit on, a first `add` or a `reset`
+    writes a `tron` cap, so an older zwallet's edits refuse that list (its signing does not;
+    05 §The whitelist); the README upgrade note says so.
   - A guard: `whitelist add … --chains tron` is `VALIDATION_ERROR` until TRON-3 (a `0x` payee on
     `tron` would otherwise be signable later).
   - `Cargo.toml`: `bs58 = { version = "=0.5.1", features = ["check"] }`, `sha2 = "=0.10.9"` (both
