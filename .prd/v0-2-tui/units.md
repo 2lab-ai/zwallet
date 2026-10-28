@@ -181,7 +181,7 @@ Decisions (the dispatcher's, 2026-10-28):
   conditions).
 - **RED tests:**
   - Explorer fixture: a local HTTP server in the test, built like `tiny_rpc_reply`
-    (tests/common/mod.rs:1523), serving single-line Blockscout bodies cut from the 2026-10-27
+    (tests/common/mod.rs:1550), serving single-line Blockscout bodies cut from the 2026-10-27
     captures to the kept fields plus a few dropped ones.
   - T3 (`TestBackend`, the `App` built with the fixture explorer and a fixture journal file): 14
     transactions, one hash in both the journal and the explorer, 2 pending: exactly 10 rows,
