@@ -201,8 +201,10 @@ impl App {
                 self.reload()
             }
             Msg::Activated(Ok(_)) => self.reload(),
+            // A cache the daemon's answer contradicts names an address not to fund: the whole
+            // error stops the pane (wrapped there), never a line cut before its warning.
             Msg::Activated(Err(e)) => {
-                self.notice = Some(Outside::error(&e));
+                self.keys = Pane::Failed(Outside::error(&e));
                 Vec::new()
             }
         }
