@@ -759,8 +759,8 @@ mod tests {
     }
 
     /// A [`TestBackend`] screen whose `size()` answers only while `answers` is set; otherwise it
-    /// fails, as crossterm's does with no terminal and no `TERM` (a Linux test run, or a terminal
-    /// that is gone). It counts every `size()` call.
+    /// fails, as crossterm's does with no terminal and no `TERM` (a test run with no tty and `TERM`
+    /// unset, on Linux or macOS alike, or a terminal that is gone). It counts every `size()` call.
     struct Screen {
         cells: TestBackend,
         answers: std::cell::Cell<bool>,
@@ -829,7 +829,7 @@ mod tests {
         });
         let xs: Vec<(u16, u16, &str)> = (0..12).map(|x| (x, 0, "X")).collect();
         hand_over(&mut backend, &xs);
-        // No size has passed through the filter yet. The cell of the Linux failure (a control
+        // No size has passed through the filter yet. The cell the no-tty gate failed on (a control
         // sequence ratatui counts wide) and a wide glyph each become `?`, and nothing is written
         // after them: no column is known to be on the screen.
         hand_over(&mut backend, &[(0, 0, "\u{1b}[31m"), (3, 0, "\u{6f22}")]);
@@ -847,6 +847,26 @@ mod tests {
         assert_eq!(row(backend.inner().cells.buffer(), 0), "XXX? XXXXXX?");
         // Asked once, by the test: never by a draw.
         assert_eq!(backend.inner().asked.get(), 1);
+        // The screen shrinks to 8 columns and the next size passes through: the blank columns
+        // stop at the new width (a write at column 8 would panic in `TestBackend`).
+        backend.inner.cells.resize(8, 1);
+        backend.inner().answers.set(true);
+        assert_eq!(backend.size().unwrap().width, 8);
+        let xs: Vec<(u16, u16, &str)> = (0..8).map(|x| (x, 0, "X")).collect();
+        hand_over(&mut backend, &xs);
+        hand_over(&mut backend, &[(7, 0, "\u{6f22}")]);
+        assert_eq!(backend.replaced(), 5);
+        assert_eq!(row(backend.inner().cells.buffer(), 0), "XXXXXXX?");
+        // A failed size() keeps the last width: the covered column is still blanked, and the one
+        // past the right edge still not written.
+        backend.inner().answers.set(false);
+        assert!(backend.size().is_err());
+        assert_eq!(backend.width.load(Ordering::Relaxed), 8);
+        hand_over(&mut backend, &xs);
+        hand_over(&mut backend, &[(3, 0, "\u{6f22}"), (7, 0, "\u{6f22}")]);
+        assert_eq!(backend.replaced(), 7);
+        assert_eq!(row(backend.inner().cells.buffer(), 0), "XXX? XX?");
+        assert_eq!(backend.inner().asked.get(), 3);
     }
 
     /// What crossterm writes to leave the alternate screen and to show the cursor.
