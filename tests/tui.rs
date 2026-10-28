@@ -1153,3 +1153,49 @@ fn a_key_the_bar_shows_verified_by_session_is_never_asked_to_be_verified() {
         assert!(rows.iter().any(|r| r.contains(note)), "{rows:#?}");
     }
 }
+
+/// [`keys_ab`] read, and the wallet locked.
+fn locked_ab() -> App {
+    let mut app = app();
+    app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+    app.update(Msg::Status(app.generation(), Ok(locked_status())));
+    app
+}
+
+#[test]
+fn s_on_a_key_another_process_contradicts_stops_the_pane_and_makes_nothing_active() {
+    // A process listed by argv answers `address` with its own address for every key, which
+    // contradicts wallet.json's cache of `a`.
+    let home = Home::new();
+    home.create("a", &[]);
+    home.create("b", &[]);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let fake = common::daemon_argv_impostor(&home, dir.path(), &[]);
+    let mut app = locked_ab();
+    app.update(Msg::Key(Key::Char('s')));
+    let work = app.update(Msg::Key(Key::Char('y')));
+    assert_eq!(work, vec![Effect::SetActive("a".into())]);
+    // The work that effect runs, through that process: refused before anything is switched.
+    app.update(Msg::Activated(block_on(wallet::set_active(
+        home.path(),
+        "a",
+    ))));
+    let (_, placed) = checked_frame(&mut screen(80, 24), &app);
+    let error = placed
+        .iter()
+        .find(|p| p.outside.source() == Source::Error)
+        .expect("the refusal is drawn");
+    // The whole error, wrapped in the pane: the address that process gave is never on a line of
+    // its own without the warning.
+    let text = error.outside.text();
+    assert!(
+        text.contains(A) && text.contains("Do not send funds to either address"),
+        "{text}"
+    );
+    assert!(error.area.height > 1, "{:?}", error.area);
+    drop(fake);
+    assert_eq!(home.run(&["list", "--json"]).ok()["active"], "b");
+}
