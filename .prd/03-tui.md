@@ -111,8 +111,9 @@ every cell whose symbol is not exactly one `terminal_ok` character with `?`, and
 replacements. A replaced cell is one column wide: a glyph two columns wide becomes `?`, and the
 wrapper itself writes a space into the column the glyph covered, so the result does not depend on
 whether ratatui's diff sends that column. Those spaces stop at the screen's width from the last
-size read through the wrapper (ratatui's `Terminal` reads one when it is made and before every
-frame); a draw never asks the terminal, which fails the frame where none answers (no tty, no
+size read through the wrapper (with a fullscreen or inline viewport, ratatui's `Terminal` reads one
+when it is made and before every frame; a fixed viewport reads neither, and the TUI's is
+fullscreen); a draw never asks the terminal, which fails the frame where none answers (no tty, no
 `TERM`). Before any size has been read it writes no space: no column is known to be on the
 screen, and one past the right edge would land on the last column. Tests draw through the same
 wrapper over ratatui's `TestBackend` and assert zero replacements on every frame: the wrapper is
