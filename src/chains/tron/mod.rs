@@ -3,15 +3,18 @@
 //! nothing (`.prd/05-tron.md`).
 
 pub mod address;
+pub mod rpc;
 
 use crate::chains::evm::policy::ListView;
-use crate::chains::{Chain, FamilyKeys};
+use crate::chains::{Balance, Chain, Family, FamilyKeys, Net};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
 use crate::core::store::KEY_INDEX_LIMIT;
+use alloy::primitives::U256;
 use alloy::signers::local::coins_bip39::English;
 use alloy::signers::local::{MnemonicBuilder, PrivateKeySigner};
 use serde_json::Value;
+use std::time::Duration;
 
 /// Tron-specific registry configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +105,85 @@ impl FamilyKeys for Tron {
         // (`.prd/v0-3-tron/units.md` TRON-4, TRON-5); until then the daemon signs nothing here.
         Err(unsupported("signing transactions in this version"))
     }
+}
+
+/// `chain`'s Tron configuration; `VALIDATION_ERROR` for a chain of another family.
+pub fn config(chain: &Chain) -> Result<&TronChain> {
+    match &chain.family {
+        Family::Tron(c) => Ok(c),
+        other => Err(WalletError::validation(format!(
+            "{} is not a Tron chain ({} family)",
+            chain.key,
+            other.name()
+        ))),
+    }
+}
+
+/// A token row of `balance --chain tron --token`: its contract, and whether its symbol is the
+/// registry's or the contract's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenShown {
+    pub address: String,
+    pub from_registry: bool,
+}
+
+/// What `balance --chain tron [--token …]` shows besides the address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OneBalance {
+    pub balance: Balance,
+    pub activated: bool,
+    pub warning: Option<String>,
+    pub token: Option<TokenShown>,
+}
+
+/// TRX in sun as a [`Balance`] of `chain`'s native coin.
+fn trx(chain: &Chain, sun: u64) -> Balance {
+    Balance {
+        symbol: chain.symbol.to_string(),
+        decimals: chain.decimals,
+        raw: U256::from(sun),
+    }
+}
+
+/// `balance --chain tron`: the account of `owner` (a `T…` address) at `net`, after the chain
+/// identity check; with `token`, that token's balance instead of TRX.
+pub async fn balance(net: &Net, owner: &str, token: Option<&str>) -> Result<OneBalance> {
+    address::parse(owner)?;
+    let c = rpc::connect(net).await?;
+    if token.is_some() {
+        return Err(WalletError::validation(
+            "--token on tron needs the Tron token registry",
+        ));
+    }
+    let account = rpc::account(&c, owner).await?;
+    Ok(OneBalance {
+        balance: trx(net.chain, account.balance),
+        activated: account.activated,
+        warning: account.warning,
+        token: None,
+    })
+}
+
+/// `balance` without `--chain` on Tron: TRX and every Tron registry token, all within `limit`.
+/// A token read that fails or is late is that token's error; the call fails only when the
+/// endpoint, its genesis check or the account does.
+pub async fn wallet_balances(net: &Net, owner: &str, limit: Duration) -> Result<rpc::Read> {
+    let deadline = tokio::time::Instant::now() + limit;
+    let late =
+        move |what: &str| WalletError::rpc(format!("{what} timed out after {}s", limit.as_secs()));
+    address::parse(owner)?;
+    let c = tokio::time::timeout_at(deadline, rpc::connect(net))
+        .await
+        .map_err(|_| late("the genesis block check"))??;
+    let account = tokio::time::timeout_at(deadline, rpc::account(&c, owner))
+        .await
+        .map_err(|_| late("/wallet/getaccount"))??;
+    Ok(rpc::Read {
+        native: trx(net.chain, account.balance),
+        tokens: Vec::new(),
+        activated: account.activated,
+        warning: account.warning,
+    })
 }
 
 #[cfg(test)]

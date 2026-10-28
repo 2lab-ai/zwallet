@@ -312,7 +312,10 @@ fn check_fee(
 
 /// The action table (`.prd/04-whitelist.md` §Daemon enforcement).
 fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Result<(), Denial> {
-    let chain_id = config(chain).chain_id;
+    let chain_id = match config(chain) {
+        Ok(c) => c.chain_id,
+        Err(e) => return Err(Denial::never(&target(action), e.message)),
+    };
     match action {
         Action::NativeTransfer { to, .. } => payee(list, chain, to),
         Action::TransferCall { token, to, .. } => {
@@ -526,7 +529,9 @@ mod tests {
         gas: u64,
         max_fee: u64,
     ) -> DecodedUnsigned {
-        let chain_id = crate::chains::evm::config(find(chain).unwrap()).chain_id;
+        let chain_id = crate::chains::evm::config(find(chain).unwrap())
+            .unwrap()
+            .chain_id;
         let t = UnsignedEvmTx {
             chain_id,
             nonce: 3,
@@ -644,7 +649,9 @@ mod tests {
     /// A legacy (EIP-155) transaction on `chain`.
     fn legacy(chain: &str, to: &str, value: u64, gas: u64, price: u64) -> DecodedUnsigned {
         let t = UnsignedEvmTx {
-            chain_id: crate::chains::evm::config(find(chain).unwrap()).chain_id,
+            chain_id: crate::chains::evm::config(find(chain).unwrap())
+                .unwrap()
+                .chain_id,
             nonce: 0,
             gas_limit: gas,
             fees: EvmFees::Legacy {
@@ -777,6 +784,13 @@ mod tests {
     }
 
     /// A chain zwallet has no built-in fee cap for (every real chain has one).
+    /// The EVM chains among [`crate::chains::CHAINS`]: what this policy decides.
+    fn evm_chains() -> impl Iterator<Item = &'static Chain> {
+        crate::chains::CHAINS
+            .iter()
+            .filter(|c| crate::chains::evm::config(c).is_ok())
+    }
+
     const NO_DEFAULT: Chain = Chain {
         key: "nodefault",
         name: "No default",
@@ -793,7 +807,7 @@ mod tests {
     #[test]
     fn self_transfers_are_always_under_a_fee_cap() {
         // No list yet: the compiled-in default cap applies to the key's own address.
-        for c in crate::chains::CHAINS {
+        for c in evm_chains() {
             let gas = 100_000;
             let at = default_cap(c.key) / gas;
             let v = ListView::NoList;
@@ -887,12 +901,12 @@ mod tests {
         verified.validate(&registry::WHITELIST_RULES).unwrap();
         let untrusted = ListView::Unusable("whitelist.json: does not verify".into());
         let (mut cases, mut allowed, mut fee_refused, mut fee_refused_to_others) = (0, 0, 0, 0);
-        let mut chains: Vec<&Chain> = crate::chains::CHAINS.iter().collect();
+        let mut chains: Vec<&Chain> = evm_chains().collect();
         chains.push(&NO_DEFAULT);
         for c in chains {
             let gas = 100_000;
             let cap = default_fee_cap(c.key).map_or(GWEI, |d| d.to::<u64>() / gas);
-            let id = crate::chains::evm::config(c).chain_id;
+            let id = crate::chains::evm::config(c).unwrap().chain_id;
             let mut targets = vec![SIGNER, BOB, ROUTER, USDC_ETH, WETH_BASE];
             targets.extend(
                 registry::TOKENS

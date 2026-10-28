@@ -49,7 +49,9 @@ fn tr5_a_node_whose_block_0_is_nile_is_refused_before_any_read() {
     });
     for args in [
         &["balance", "--chain", "tron", "--rpc", &nile.url, "--json"][..],
-        &["balance", "--chain", "tron", "--token", "usdt", "--rpc", &nile.url, "--json"],
+        &[
+            "balance", "--chain", "tron", "--token", "usdt", "--rpc", &nile.url, "--json",
+        ],
     ] {
         let msg = home.run(args).err("RPC_ERROR");
         assert!(msg.contains("block 0"), "{msg}");
@@ -173,19 +175,35 @@ fn a_gateway_error_names_the_origin_only_and_a_non_json_answer_its_position() {
         .run(&["balance", "--chain", "tron", "--rpc", &url, "--json"])
         .err("RPC_ERROR");
     assert!(msg.contains("HTTP 429 from http://127.0.0.1:"), "{msg}");
-    assert!(!msg.contains("SECRETKEY99") && !msg.contains("rate limited"), "{msg}");
+    assert!(
+        !msg.contains("SECRETKEY99") && !msg.contains("rate limited"),
+        "{msg}"
+    );
     // The key in the path still reached the node: the URL is used as given.
-    assert!(gateway.paths()[0].starts_with("/v1/SECRETKEY99/wallet/"), "{:?}", gateway.paths());
+    assert!(
+        gateway.paths()[0].starts_with("/v1/SECRETKEY99/wallet/"),
+        "{:?}",
+        gateway.paths()
+    );
     let garbage = MockTron::start(|_, _| Reply::Raw("{\"blockID\": \"\u{1b}[2J SECRET".into()));
     let msg = home
-        .run(&["balance", "--chain", "tron", "--rpc", &garbage.url, "--json"])
+        .run(&[
+            "balance",
+            "--chain",
+            "tron",
+            "--rpc",
+            &garbage.url,
+            "--json",
+        ])
         .err("RPC_ERROR");
     assert!(msg.contains("not JSON"), "{msg}");
-    assert!(!msg.contains("SECRET") && common::ascii_printable(&msg), "{msg:?}");
+    assert!(
+        !msg.contains("SECRET") && common::ascii_printable(&msg),
+        "{msg:?}"
+    );
     // A block 0 id that is not the genesis, with an escape: shown escaped and cut.
-    let evil = MockTron::start(|_, _| {
-        Reply::Json(tron::block0(&format!("\u{1b}[2J{}", "f".repeat(600))))
-    });
+    let evil =
+        MockTron::start(|_, _| Reply::Json(tron::block0(&format!("\u{1b}[2J{}", "f".repeat(600)))));
     let msg = home
         .run(&["balance", "--chain", "tron", "--rpc", &evil.url, "--json"])
         .err("RPC_ERROR");

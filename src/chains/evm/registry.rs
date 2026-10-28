@@ -183,7 +183,9 @@ mod tests {
             assert_eq!(t.decimals, expected, "{t:?}");
             // Every row's chain is one zwallet supports.
             assert!(
-                CHAINS.iter().any(|c| evm::config(c).chain_id == t.chain_id),
+                CHAINS
+                    .iter()
+                    .any(|c| evm::config(c).is_ok_and(|e| e.chain_id == t.chain_id)),
                 "{t:?}"
             );
         }
@@ -432,8 +434,10 @@ mod tests {
         assert!(err.message.contains("registry token"), "{}", err.message);
     }
 
+    /// One built-in cap per EVM chain. Tron has none until its signer comes
+    /// (`.prd/v0-3-tron/units.md` TRON-1; B2 gives it one with the signer).
     #[test]
-    fn default_fee_caps_match_the_spec_for_every_chain() {
+    fn default_fee_caps_match_the_spec_for_every_evm_chain() {
         let spec = [
             ("ethereum", "0.003"),
             ("base", "0.0005"),
@@ -444,8 +448,10 @@ mod tests {
             ("avalanche", "0.05"),
             ("sepolia", "0.01"),
         ];
-        assert_eq!(DEFAULT_FEE_CAPS_WEI.len(), CHAINS.len());
-        for c in CHAINS {
+        let evm: Vec<_> = CHAINS.iter().filter(|c| evm::config(c).is_ok()).collect();
+        assert_eq!(DEFAULT_FEE_CAPS_WEI.len(), evm.len());
+        assert!(!DEFAULT_FEE_CAPS_WEI.iter().any(|(k, _)| *k == "tron"));
+        for c in evm {
             let (_, human) = spec.iter().find(|(k, _)| *k == c.key).unwrap();
             let (_, wei) = DEFAULT_FEE_CAPS_WEI
                 .iter()

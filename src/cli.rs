@@ -447,9 +447,17 @@ pub enum Toggle {
 pub struct Out {
     pub value: Value,
     pub text: Option<String>,
-    /// zwallet's own QR code of a verified address, printed after `text` as it is (block glyphs
-    /// and colour codes); never part of `text`, which the write point filters.
-    pub qr: Option<String>,
+    /// zwallet's own QR codes of verified addresses, printed after `text` in order, each under
+    /// its caption.
+    pub qr: Vec<Qr>,
+}
+
+/// One QR code of a verified address: `caption` (zwallet's lines, printed through the write
+/// point like `text`), then `code` printed as it is (block glyphs and colour codes), never
+/// filtered and never part of `text`.
+pub struct Qr {
+    pub caption: String,
+    pub code: String,
 }
 
 impl Out {
@@ -457,7 +465,7 @@ impl Out {
         Self {
             value,
             text: None,
-            qr: None,
+            qr: Vec::new(),
         }
     }
 
@@ -465,7 +473,7 @@ impl Out {
         Self {
             value,
             text: Some(text),
-            qr: None,
+            qr: Vec::new(),
         }
     }
 
@@ -473,7 +481,7 @@ impl Out {
         Self {
             value: Value::Null,
             text: Some(String::new()),
-            qr: None,
+            qr: Vec::new(),
         }
     }
 }
@@ -621,7 +629,7 @@ fn human_error(e: &WalletError) -> String {
 
 /// Every result zwallet prints, through the write point ([`crate::core::terminal`]): `--json` as
 /// printable ASCII, the human text filtered, then the QR code (zwallet's own rendering of a
-/// verified address, the one thing printed as it is).
+/// verified address under its caption, the one thing printed as it is).
 fn print_out(json: bool, out: &Out) {
     use crate::core::terminal::{print_json, print_line};
     if json {
@@ -635,9 +643,10 @@ fn print_out(json: bool, out: &Out) {
         Some(t) => print_line(t),
         None => print_line(&render_human(&out.value)),
     }
-    if let Some(qr) = &out.qr {
+    for qr in &out.qr {
         use std::io::Write;
-        let _ = writeln!(std::io::stdout().lock(), "{qr}");
+        print_line(&qr.caption);
+        let _ = writeln!(std::io::stdout().lock(), "{}", qr.code);
     }
 }
 

@@ -700,8 +700,25 @@ pub struct CacheRepair {
     pub now: String,
 }
 
-/// Every cached address in `file` that is not the one `seed` derives for its key and chain.
-/// Chain keys this build derives nothing for are left alone.
+/// Whether a cached address is the one derived. An address the deriver writes as `0x` and hex
+/// digits names its bytes in either case (an EVM address, EIP-55 or not), so it compares
+/// case-insensitively; any other text (Tron's base58check `T…`, where the case is part of the
+/// value and a case variant is another string) compares byte for byte. Core knows the encoding,
+/// not the chain.
+fn same_cached(derived: &str, cached: &str) -> bool {
+    let hex = |s: &str| {
+        s.strip_prefix("0x")
+            .is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    if hex(derived) {
+        derived.eq_ignore_ascii_case(cached)
+    } else {
+        derived == cached
+    }
+}
+
+/// Every cached address in `file` that is not the one `seed` derives for its key and chain
+/// ([`same_cached`]). Chain keys this build derives nothing for are left alone.
 fn cache_repairs(
     file: &WalletFile,
     seed: &Seed,
@@ -712,7 +729,7 @@ fn cache_repairs(
         let derived = derive(seed, key.index)?;
         for (chain, cached) in &key.addresses {
             if let Some(actual) = derived.get(chain)
-                && !actual.eq_ignore_ascii_case(cached)
+                && !same_cached(actual, cached)
             {
                 repairs.push(CacheRepair {
                     key: key.name.clone(),
@@ -763,10 +780,7 @@ fn moved_index(
                 std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::btree_map::Entry::Vacant(e) => e.insert(derive(seed, j)?),
             };
-            if !at_j
-                .get(&r.chain)
-                .is_some_and(|a| a.eq_ignore_ascii_case(&r.was))
-            {
+            if !at_j.get(&r.chain).is_some_and(|a| same_cached(a, &r.was)) {
                 continue;
             }
             // `r.key`'s cache holds index `j`'s address. If a key legitimately sits at `j` with a
@@ -775,10 +789,9 @@ fn moved_index(
             // caches the wrong address (two indices swapped), is this a move, and refused.
             let owner = file.keys.iter().find(|k| k.index == j);
             let owner_correct = owner.is_some_and(|k| {
-                k.addresses.get(&r.chain).is_some_and(|c| {
-                    at_j.get(&r.chain)
-                        .is_some_and(|a| a.eq_ignore_ascii_case(c))
-                })
+                k.addresses
+                    .get(&r.chain)
+                    .is_some_and(|c| at_j.get(&r.chain).is_some_and(|a| same_cached(a, c)))
             });
             if owner_correct {
                 continue;
@@ -1941,8 +1954,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         create_master(tmp.path(), PW, "a", fast(), &two_encodings).unwrap();
         let path = tmp.path().join(WALLET_FILE);
+        // `nextIndex` 2: index 1, which no key owns, is among the indices a mismatch is checked
+        // against for a moved index.
         let edit = |hex: &str, b58: &str| {
             let mut file: WalletFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            file.next_index = 2;
             file.keys[0].addresses.insert("hex".into(), hex.into());
             file.keys[0].addresses.insert("b58".into(), b58.into());
             fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
@@ -1982,7 +1998,9 @@ mod tests {
             "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
             "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
         );
-        let e = unlock_repairing(tmp.path(), PW, &two_encodings).err().unwrap();
+        let e = unlock_repairing(tmp.path(), PW, &two_encodings)
+            .err()
+            .unwrap();
         assert!(e.message.contains("indices were changed"), "{}", e.message);
     }
 

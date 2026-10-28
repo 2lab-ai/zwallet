@@ -3699,6 +3699,7 @@ fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
         .as_str()
         .unwrap()
         .to_string();
+    let tron = derived_tron(&home);
     home.unlock("10m");
     let label = format!("scan to send to {addr}\n{EVERY_NETWORK}\n");
     for args in [
@@ -3708,6 +3709,13 @@ fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
         &["status"],
         &["change", "main"],
     ] {
+        // `addresses` draws a second code after the EVM one: the Tron address (05-tron.md §CLI
+        // surface).
+        let codes: Vec<&str> = if args[0] == "addresses" {
+            vec![&addr, &tron]
+        } else {
+            vec![&addr]
+        };
         let shown = home.run_on_terminal(args, &[], &[]);
         // --no-qr is taken everywhere a code may show; then the terminal gets the pipe's text.
         let mut quiet = args.to_vec();
@@ -3724,19 +3732,19 @@ fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
             assert!(!shown.contains("scan to send") && common::scan_qr(&shown).is_empty());
             continue;
         }
-        // The fields, then the two lines and the code, last: one code, also for `addresses`
-        // (the same address on every EVM chain).
+        // The fields, then the two lines and the code: one code for the address on every EVM
+        // chain, last but for `addresses`' Tron one.
         let at = shown
             .find(&label)
             .unwrap_or_else(|| panic!("{args:?}: {shown:?}"));
         if args[0] != "addresses" {
             assert!(shown[..at].contains("verifiedBy: session\n"), "{shown:?}");
         }
-        assert_eq!(common::scan_qr(&shown), [addr.as_str()], "{args:?}");
+        assert_eq!(common::scan_qr(&shown), codes, "{args:?}");
         assert!(!shown.contains("not verified"), "{shown:?}");
         let plain = home.run_on_terminal(args, &[], &[("NO_COLOR", "1")]);
         assert!(!plain.contains('\x1b'), "{plain:?}");
-        assert_eq!(common::scan_qr(&plain), [addr.as_str()], "{args:?}");
+        assert_eq!(common::scan_qr(&plain), codes, "{args:?}");
         // --json: the JSON only.
         let mut json = args.to_vec();
         json.push("--json");
@@ -6098,7 +6106,14 @@ fn tr2_create_caches_the_tron_address_and_a_session_verifies_it_without_a_prompt
     // With the password: verified, and the code on a terminal.
     let v = home
         .run_stdin(
-            &["address", "--chain", "tron", "--verify", "--password-stdin", "--json"],
+            &[
+                "address",
+                "--chain",
+                "tron",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
             &format!("{PW}\n"),
         )
         .ok();
@@ -6119,6 +6134,7 @@ fn tr2_create_caches_the_tron_address_and_a_session_verifies_it_without_a_prompt
 fn tr4_a_tampered_tron_cache_is_refused_and_shown_escaped() {
     let home = Home::new();
     home.create("main", &[]);
+    let tron = derived_tron(&home);
     let tampered = [
         // TWer2... with its first letter's case flipped: 34 base58 characters, checksum fails.
         "tWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
@@ -6147,9 +6163,11 @@ fn tr4_a_tampered_tron_cache_is_refused_and_shown_escaped() {
         assert!(inert_output(&human.stderr), "{:?}", human.stderr);
         assert_eq!(human.stderr.lines().count(), 1, "{:?}", human.stderr);
     }
-    // A valid address that is not this key's: the daemon's derivation contradicts it.
-    home.edit_wallet(|v| v["keys"][0]["addresses"]["tron"] = json!(TRON_POISON));
+    // A valid address that is not this key's: the daemon's derivation contradicts it (planted
+    // after the unlock, which refuses a cache the seed contradicts).
+    home.edit_wallet(|v| v["keys"][0]["addresses"]["tron"] = json!(tron));
     home.unlock("10m");
+    home.edit_wallet(|v| v["keys"][0]["addresses"]["tron"] = json!(TRON_POISON));
     let msg = home
         .run(&["address", "--chain", "tron", "--json"])
         .err("VALIDATION_ERROR");
@@ -6177,7 +6195,9 @@ fn a_daemon_answering_an_evm_address_for_tron_is_never_shown_as_one() {
     let out = home.run(&["address", "--chain", "tron", "--json"]);
     let msg = out.err("VALIDATION_ERROR");
     assert!(
-        msg.contains(&format!("returned {POISON} as a tron address, which is not an address")),
+        msg.contains(&format!(
+            "returned {POISON} as a tron address, which is not an address"
+        )),
         "{msg}"
     );
     assert!(out.json().get("address").is_none(), "{}", out.stdout);
@@ -6195,13 +6215,19 @@ fn tr24_sign_message_call_and_invoke_on_tron_are_unsupported_and_so_for_now_are_
     let txid = "21b776c7957ba1213b8616414912c9e81643e15e3e55b59fe143b991fa35a690";
     let rpc = "http://127.0.0.1:1";
     for args in [
-        &["sign-message", "--chain", "tron", "--message", "hi", "--json"][..],
+        &[
+            "sign-message",
+            "--chain",
+            "tron",
+            "--message",
+            "hi",
+            "--json",
+        ][..],
         &[
             "call", "--chain", "tron", "--to", tron_payee, "--sig", "f()", "--rpc", rpc, "--json",
         ],
         &[
-            "invoke", "--chain", "tron", "--to", tron_payee, "--sig", "f()", "--rpc", rpc,
-            "--json",
+            "invoke", "--chain", "tron", "--to", tron_payee, "--sig", "f()", "--rpc", rpc, "--json",
         ],
         &[
             "transfer", "--chain", "tron", "--to", tron_payee, "--amount", "1", "--rpc", rpc,
@@ -6225,8 +6251,20 @@ fn whitelist_entries_and_fee_caps_for_tron_wait_for_the_tron_signer() {
     home.create("main", &[]);
     let pw = format!("{PW}\n");
     for args in [
-        &["whitelist", "add", "bob", "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C", "--chains", "tron"][..],
-        &["whitelist", "add", "bob", "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C"],
+        &[
+            "whitelist",
+            "add",
+            "bob",
+            "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+            "--chains",
+            "tron",
+        ][..],
+        &[
+            "whitelist",
+            "add",
+            "bob",
+            "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+        ],
         &["whitelist", "add", "bob", BOB, "--chains", "tron"],
         &["whitelist", "add", "bob", BOB, "--chains", "base,tron"],
         &["whitelist", "fee-cap", "tron", "30"],

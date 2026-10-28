@@ -47,6 +47,10 @@ const FIRST_ADD: &str = "`zwallet whitelist add <nick> <addr> --chains <chain>` 
 const RESIDUAL: &str = "a listed contract may forward value or act on its arguments";
 const VERIFY_NOTE: &str =
     "not verified: run `zwallet whitelist list --verify` to check the signature";
+/// Why a Tron payee or fee cap is refused in this version: nothing signs on Tron yet, and a list
+/// holding either would stop older builds from editing it (`.prd/05-tron.md` §The whitelist).
+const TRON_LATER: &str = "Tron payees and fee caps come with the Tron signer, in a later zwallet \
+                          version; nothing is signed on tron yet";
 
 pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
     match cmd {
@@ -61,6 +65,9 @@ pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
         }
         WhitelistCommand::FeeCap(a) => {
             let chain = chains::find(&a.chain)?;
+            if let Family::Tron(_) = chain.family {
+                return Err(WalletError::validation(TRON_LATER));
+            }
             let bad = |why: String| WalletError::validation(format!("fee cap: {why}"));
             let wei = parse_units(&a.amount, chain.decimals).map_err(|e| bad(e.message))?;
             if wei.is_zero() {
@@ -151,6 +158,14 @@ impl Change {
 /// stopped. `--chains` defaults to the default chain ([`PRIMARY_CHAIN`]); `"*"` only when given.
 fn add_change(a: &WhitelistAddArgs) -> Result<Change> {
     whitelist::validate_nickname(&a.nickname)?;
+    // No Tron payee yet, by its T... address or by `--chains tron`.
+    let tron_chain = a
+        .chains
+        .iter()
+        .any(|c| chains::find(c.trim()).is_ok_and(|chain| matches!(chain.family, Family::Tron(_))));
+    if tron_chain || chains::tron::address::is_address(a.address.trim()) {
+        return Err(WalletError::validation(TRON_LATER));
+    }
     let address = format!("0x{}", hex::encode(evm::parse_address(&a.address)?));
     let keys: Vec<String> = if a.chains.is_empty() {
         vec![PRIMARY_CHAIN.to_string()]
@@ -976,6 +991,7 @@ pub(super) fn dry_run_check(
 ) -> Result<DryRunCheck> {
     match &chain.family {
         Family::Evm(_) => {}
+        Family::Tron(_) => return Err(WalletError::validation(TRON_LATER)),
     }
     let read = whitelist::read_list(&home.join(WHITELIST_FILE));
     let view = match &read {
@@ -2378,12 +2394,18 @@ mod tests {
             "{shown} characters from the files: {text}"
         );
         assert!(text.contains(" more caps from the files"), "{text}");
+        // Tron has no built-in cap yet (`.prd/v0-3-tron/units.md` TRON-1): its line says so.
         for c in chains::CHAINS {
-            assert!(
-                text.contains(&format!("    {}: back to the default ", c.key)),
-                "{}: {text}",
-                c.key
-            );
+            let line = if WHITELIST_RULES
+                .default_fee_caps_wei
+                .iter()
+                .any(|(k, _)| *k == c.key)
+            {
+                format!("    {}: back to the default ", c.key)
+            } else {
+                format!("    {}: no default: every send there is refused", c.key)
+            };
+            assert!(text.contains(&line), "{}: {text}", c.key);
         }
     }
 

@@ -37,9 +37,16 @@ pub struct EvmChain {
 /// The EVM family implementation.
 pub struct Evm;
 
-pub fn config(chain: &Chain) -> &EvmChain {
+/// `chain`'s EVM configuration; `VALIDATION_ERROR` for a chain of another family, so no EVM path
+/// ever runs on one (and nothing panics on a non-EVM chain in the daemon).
+pub fn config(chain: &Chain) -> Result<&EvmChain> {
     match &chain.family {
-        Family::Evm(c) => c,
+        Family::Evm(c) => Ok(c),
+        other => Err(WalletError::validation(format!(
+            "{} is not an EVM chain ({} family)",
+            chain.key,
+            other.name()
+        ))),
     }
 }
 
@@ -166,7 +173,7 @@ impl FamilyKeys for Evm {
                 WalletError::validation("sign_tx expects the 0x-hex unsigned signing payload")
             })?;
         let decoded = tx::decode_unsigned(&payload)?;
-        let want = config(chain).chain_id;
+        let want = config(chain)?.chain_id;
         if decoded.chain_id() != want {
             return Err(WalletError::validation(format!(
                 "refusing to sign: tx chainId {} is not {} ({want})",
@@ -216,7 +223,7 @@ impl ChainFamily for Evm {
         let raw = hex::decode(raw_hex.trim_start_matches("0x"))
             .map_err(|_| WalletError::validation("signer returned malformed rawTx"))?;
         let decoded = tx::decode_signed(&raw)?;
-        if decoded.chain_id != Some(config(chain).chain_id) {
+        if decoded.chain_id != Some(config(chain)?.chain_id) {
             return Err(WalletError::validation(format!(
                 "signed tx is for chainId {:?}, not {}",
                 decoded.chain_id, chain.key
@@ -272,7 +279,7 @@ impl ChainFamily for Evm {
             .map_err(|_| late("the chain id check"))??;
         let p = std::sync::Arc::new(p);
         // Every token at once, each until the deadline, so one that hangs delays no other.
-        let chain_id = config(net.chain).chain_id;
+        let chain_id = config(net.chain)?.chain_id;
         let reads: Vec<_> = registry::TOKENS
             .iter()
             .filter(|t| t.chain_id == chain_id)

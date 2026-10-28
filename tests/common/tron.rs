@@ -185,7 +185,7 @@ pub fn constant(hex: &str) -> Value {
 pub fn abi_string(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut padded = alloy::hex::encode(bytes);
-    while padded.len() % 64 != 0 || padded.is_empty() {
+    while !padded.len().is_multiple_of(64) || padded.is_empty() {
         padded.push('0');
     }
     format!("{}{}{padded}", word(32), word(bytes.len() as u128))
@@ -194,10 +194,7 @@ pub fn abi_string(s: &str) -> String {
 /// A mainnet node: block 0 is mainnet's, `getaccount` answers `account` for every address,
 /// and every TRC20 contract answers `balanceOf` = `usdt` (in its base units), `decimals()` = 6
 /// and `symbol()` = `USDT`.
-pub fn node(
-    account: Value,
-    usdt: u128,
-) -> impl Fn(&str, &Value) -> Reply + Send + Sync + 'static {
+pub fn node(account: Value, usdt: u128) -> impl Fn(&str, &Value) -> Reply + Send + Sync + 'static {
     move |path, body| match path {
         "/wallet/getblockbynum" => Reply::Json(block0(MAINNET_GENESIS)),
         "/wallet/getaccount" => Reply::Json(account.clone()),

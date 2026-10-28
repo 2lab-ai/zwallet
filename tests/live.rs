@@ -25,8 +25,13 @@ async fn every_default_rpc_serves_its_chain_id() {
             chain,
             rpc_url: chain.default_rpc().to_string(),
         };
-        match evm::rpc::connect(&net).await {
-            Ok(_) => println!("ok   {:<10} {}", chain.key, net.rpc_url),
+        // Tron's identity check is its genesis block id (`.prd/05-tron.md` §Network access).
+        let checked = match chain.family {
+            chains::Family::Evm(_) => evm::rpc::connect(&net).await.map(drop),
+            chains::Family::Tron(_) => chains::tron::rpc::connect(&net).await.map(drop),
+        };
+        match checked {
+            Ok(()) => println!("ok   {:<10} {}", chain.key, net.rpc_url),
             Err(e) => {
                 println!("FAIL {:<10} {} {}", chain.key, net.rpc_url, e.message);
                 failures.push(chain.key);
@@ -456,7 +461,7 @@ async fn every_registry_token_answers_its_symbol_and_decimals() {
     for t in evm::registry::TOKENS {
         let chain = chains::CHAINS
             .iter()
-            .find(|c| evm::config(c).chain_id == t.chain_id)
+            .find(|c| evm::config(c).is_ok_and(|e| e.chain_id == t.chain_id))
             .unwrap();
         let net = Net {
             chain,
@@ -494,11 +499,14 @@ fn balance_without_chain_reads_every_network() {
     let home = Home::new();
     home.create("live", &[]);
     // A known address in place of the fresh key's (an edit of the cache, which `balance`
-    // reads): Hardhat's account #0, public test key, dust on many networks.
+    // reads): Hardhat's account #0, public test key, dust on many networks; on Tron the same
+    // mnemonic's key 0, TWer2... (05-tron.md M7).
     const HARDHAT_0: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+    const TWER: &str = "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6";
     home.edit_wallet(|v| {
-        for (_, a) in v["keys"][0]["addresses"].as_object_mut().unwrap() {
-            *a = serde_json::json!(HARDHAT_0);
+        for (chain, a) in v["keys"][0]["addresses"].as_object_mut().unwrap() {
+            let known = if chain == "tron" { TWER } else { HARDHAT_0 };
+            *a = serde_json::json!(known);
         }
     });
     let v = home.run(&["balance", "--json"]).ok();
@@ -517,6 +525,7 @@ fn balance_without_chain_reads_every_network() {
             "polygon",
             "bsc",
             "avalanche",
+            "tron",
             "sepolia"
         ]
     );
