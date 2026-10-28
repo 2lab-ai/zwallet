@@ -22,8 +22,16 @@ pub struct Token {
     pub source: &'static str,
 }
 
-/// Every Tron registry token.
-pub const TOKENS: &[Token] = &[];
+/// Every Tron registry token (1 row, fixed 2026-10-28).
+pub const TOKENS: &[Token] = &[Token {
+    symbol: "USDT",
+    onchain_symbol: "USDT",
+    // "The integration path is the same as any TRC20 compatible token"; `decimals()` = 6 and
+    // `symbol()` = USDT on both measured endpoints (05 M2).
+    address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+    decimals: 6,
+    source: "https://tether.to/en/supported-protocols",
+}];
 
 /// The registry token whose contract payload is `payload` (`0x41 ‖ body`), if there is one.
 pub fn lookup(payload: &[u8; 21]) -> Option<&'static Token> {

@@ -168,8 +168,9 @@ async fn key_address(home: &Path, key: &KeyEntry, chain: &Chain) -> Result<Strin
             ErrorCode::WalletLocked,
             format!(
                 "key '{}' has no cached {} address yet; unlock once (`zwallet unlock 24h`) to \
-                 derive it",
-                key.name, chain.key
+                 derive it, or run `zwallet address --chain {} --verify` (with the password) to \
+                 add it",
+                key.name, chain.key, chain.key
             ),
         )
     })?;
@@ -1010,7 +1011,7 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         // repaired, loudly, instead of refused.
         store::read_wallet_file(home)?;
         let pw = read_password(a.verify.password_stdin, "Wallet password: ", false)?;
-        let (unsealed, file, repairs) =
+        let (unsealed, file, repairs, added) =
             store::unlock_repairing(home, &pw, &chains::derive_addresses)?;
         drop(pw);
         let seed = unsealed.seed;
@@ -1024,6 +1025,16 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
             "verified": true,
             "verifiedBy": BY_PASSWORD,
         });
+        // Chains this build derives that the cache lacked (added to zwallet after the key was
+        // made): filled in from the seed, which is no sign of tampering.
+        if !added.is_empty() {
+            out["added"] = json!(
+                added
+                    .iter()
+                    .map(|a| json!({ "key": a.key, "chain": a.chain, "now": a.now }))
+                    .collect::<Vec<_>>()
+            );
+        }
         let mut warnings: Vec<String> = Vec::new();
         if !repairs.is_empty() {
             out["repaired"] = json!(
@@ -1059,6 +1070,7 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         let mut shown_out = out.clone();
         if let Some(o) = shown_out.as_object_mut() {
             o.remove("repaired");
+            o.remove("added");
         }
         let mut text = render_human(&shown_out);
         for r in &repairs {
@@ -1069,6 +1081,9 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
                 shown(&r.was),
                 r.now
             ));
+        }
+        for a in &added {
+            text.push_str(&format!("\nadded: key '{}' {}: {}", a.key, a.chain, a.now));
         }
         return Ok(with_qr(
             Out::with_text(out, text),
@@ -1108,7 +1123,23 @@ async fn addresses(home: &Path, a: AddressesArgs) -> Result<Out> {
         if !derived.contains_key(family) {
             derived.insert(family, daemon.derive(key.index, chain).await?);
         }
-        let address = daemon.checked(key, chain, derived[family].as_ref()).await?;
+        let address = match daemon.checked(key, chain, derived[family].as_ref()).await {
+            Ok(a) => a,
+            // A key made before this build knew the chain, while locked: no address to show
+            // there yet, which is no reason to hide every other chain's. Anything else (a cache
+            // that is no address, one the daemon contradicts) still aborts.
+            Err(e)
+                if e.code == ErrorCode::WalletLocked && !key.addresses.contains_key(chain.key) =>
+            {
+                rows.push(json!({
+                    "chainId": chain.key,
+                    "error": e.message,
+                    "errorCode": e.code.as_str(),
+                }));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         if !codes.iter().any(|(c, _)| c.family.name() == family) {
             codes.push((chain, address.clone()));
         }
@@ -1118,11 +1149,15 @@ async fn addresses(home: &Path, a: AddressesArgs) -> Result<Out> {
     let mut text = rows
         .iter()
         .map(|r| {
-            format!(
-                "{:<10} {}",
-                r["chainId"].as_str().unwrap_or(""),
-                r["address"].as_str().unwrap_or("")
-            )
+            let shown = match r["address"].as_str() {
+                Some(a) => a.to_string(),
+                None => format!(
+                    "error: {} [{}]",
+                    brief(r["error"].as_str().unwrap_or("")),
+                    r["errorCode"].as_str().unwrap_or("")
+                ),
+            };
+            format!("{:<10} {shown}", r["chainId"].as_str().unwrap_or(""))
         })
         .collect::<Vec<_>>()
         .join("\n");

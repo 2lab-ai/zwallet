@@ -448,7 +448,7 @@ fn a_balance_of_that_is_not_one_word_or_that_failed_is_rpc_error_escaped_and_bou
     let home = Home::new();
     home.create("main", &[]);
     let me = cached_tron(&home);
-    let revert = format!("{}", "\u{1b}".repeat(600));
+    let revert = "\u{1b}".repeat(600);
     let cases: Vec<Value> = vec![
         // 33 bytes.
         tron::constant(&format!("{}00", tron::word(5))),

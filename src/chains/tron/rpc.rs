@@ -7,11 +7,14 @@
 //! shows is escaped and cut where it comes in ([`crate::core::text`]): at most 512 characters per
 //! source, as every RPC endpoint's error text.
 
-use super::{address, config};
+use super::{address, config, registry};
+use crate::chains::evm::tx::IERC20;
 use crate::chains::{Balance, Net, TokenBalance, redact_url, url_origin};
 use crate::core::error::{Result, WalletError};
 use crate::core::text::{PROSE_MAX, ascii_inert};
-use alloy::primitives::U256;
+use alloy::hex;
+use alloy::primitives::{Address, U256};
+use alloy::sol_types::SolCall;
 use alloy::transports::http::reqwest::{self, Url};
 use serde_json::{Map, Value, json};
 use std::time::Duration;
@@ -21,6 +24,8 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 pub const USER_AGENT: &str = concat!("zwallet/", env!("CARGO_PKG_VERSION"));
 /// The most bytes of one reply read; a larger one is an error, never parsed.
 const REPLY_MAX: usize = 1 << 20;
+/// The most characters of a token's `symbol()` that output shows (as on EVM).
+const SYMBOL_SHOWN: usize = 32;
 /// The most characters of one value from a reply (an id, a key, a number) that a message shows.
 const VALUE_SHOWN: usize = 64;
 /// Sun (the smallest TRX unit) a balance may hold: java-tron keeps it in a signed 64-bit long.
@@ -186,7 +191,7 @@ pub struct Account {
     /// TRX in sun.
     pub balance: u64,
     /// Why this wallet's key may not control the account, when the owner permission is not this
-    /// address alone at threshold 1.
+    /// address alone at threshold 1 ([`owner_warning`]).
     pub warning: Option<String>,
 }
 
@@ -226,21 +231,141 @@ pub async fn account(c: &TronClient, owner: &str) -> Result<Account> {
     Ok(Account {
         activated: true,
         balance,
-        warning: None,
+        warning: owner_warning(a.get("owner_permission"), owner),
     })
 }
 
 /// The warning for an account whose owner permission is not `{threshold: 1, keys: [this
-/// address, weight 1]}`.
+/// address, weight 1]}`: another key can then move everything, and change the permission again
+/// (05-tron.md §CLI surface). An account without `owner_permission` has the default one, this
+/// address alone. The keys and the threshold come from the node: each escaped and cut, all of
+/// them within one 512-character budget, then how many more.
 pub fn owner_warning(permission: Option<&Value>, owner: &str) -> Option<String> {
-    let _ = (permission, owner);
-    None
+    let p = permission?;
+    let threshold = p.get("threshold");
+    let keys = p.get("keys").and_then(Value::as_array);
+    let alone = threshold.and_then(Value::as_u64) == Some(1)
+        && keys.is_some_and(|k| {
+            k.len() == 1
+                && k[0]
+                    .get("address")
+                    .and_then(Value::as_str)
+                    .is_some_and(|a| address::same(a, owner))
+                && k[0].get("weight").and_then(Value::as_u64) == Some(1)
+        });
+    if alone {
+        return None;
+    }
+    let mut shown_keys = Vec::new();
+    let mut used = 0;
+    let all = keys.map_or(&[][..], Vec::as_slice);
+    for key in all {
+        let one = format!(
+            "{} weight {}",
+            key.get("address")
+                .map_or_else(|| "<none>".to_string(), shown),
+            key.get("weight")
+                .map_or_else(|| "<none>".to_string(), shown)
+        );
+        if used + one.len() > PROSE_MAX {
+            break;
+        }
+        used += one.len();
+        shown_keys.push(one);
+    }
+    let more = all.len() - shown_keys.len();
+    let mut list = if keys.is_none() {
+        "none readable".to_string()
+    } else {
+        shown_keys.join(", ")
+    };
+    if more > 0 {
+        list.push_str(&format!(" and {more} more"));
+    }
+    Some(format!(
+        "this Tron account's owner permission is not this wallet's key alone (threshold {}; \
+         keys: {list}): funds here may not be controlled by this wallet's key; do not fund it",
+        threshold.map_or_else(|| "<none>".to_string(), shown)
+    ))
 }
 
-/// `balanceOf(owner)` of the TRC20 `token`.
+/// One read-only call of `contract` (`triggerconstantcontract`, from `owner`): the bytes it
+/// returned. A call the node reports as failed, or one whose `result.result` is not `true`, is
+/// `RPC_ERROR` with the node's message (hex-decoded when it is hex), escaped and cut.
+async fn constant_call(
+    c: &TronClient,
+    owner: &str,
+    contract: &str,
+    selector: &str,
+    parameter: &[u8],
+) -> Result<Vec<u8>> {
+    let r = c
+        .post(
+            "triggerconstantcontract",
+            &json!({
+                "owner_address": owner,
+                "contract_address": contract,
+                "function_selector": selector,
+                "parameter": hex::encode(parameter),
+                "visible": true,
+            }),
+        )
+        .await?;
+    let ok = r.get("result").and_then(|x| x.get("result")) == Some(&Value::Bool(true));
+    let failed = r
+        .get("transaction")
+        .and_then(|t| t.pointer("/ret/0/ret"))
+        .and_then(Value::as_str)
+        == Some("FAILED");
+    if !ok || failed {
+        let why = r
+            .get("result")
+            .and_then(|x| x.get("message"))
+            .map(|m| {
+                let text = text_of(m);
+                hex::decode(&text)
+                    .ok()
+                    .map_or(text, |b| String::from_utf8_lossy(&b).into_owned())
+            })
+            .unwrap_or_else(|| "no message".to_string());
+        return Err(WalletError::rpc(format!(
+            "{selector} on {contract} failed: {}",
+            ascii_inert(&c.net.redact(&why), PROSE_MAX)
+        )));
+    }
+    let word = r
+        .get("constant_result")
+        .and_then(|x| x.get(0))
+        .and_then(Value::as_str)
+        .and_then(|h| hex::decode(h).ok())
+        .ok_or_else(|| {
+            WalletError::rpc(format!(
+                "{selector} on {contract} returned no hex constant_result"
+            ))
+        })?;
+    Ok(word)
+}
+
+/// The 32-byte ABI word of a Tron address: 12 zero bytes, then its 20-byte body.
+fn address_word(t: &str) -> Result<Vec<u8>> {
+    let payload = address::parse(t)?;
+    Ok(IERC20::balanceOfCall {
+        owner: Address::from_slice(&payload[1..]),
+    }
+    .abi_encode()[4..]
+        .to_vec())
+}
+
+/// `balanceOf(owner)` of the TRC20 `token`: exactly one 32-byte word, else `RPC_ERROR`.
 pub async fn trc20_balance(c: &TronClient, token: &str, owner: &str) -> Result<U256> {
-    let _ = (c, token, owner);
-    Err(WalletError::rpc("not yet"))
+    let raw = constant_call(c, owner, token, "balanceOf(address)", &address_word(owner)?).await?;
+    if raw.len() != 32 {
+        return Err(WalletError::rpc(format!(
+            "balanceOf(address) on {token} returned {} bytes, not one 32-byte word",
+            raw.len()
+        )));
+    }
+    Ok(U256::from_be_slice(&raw))
 }
 
 /// A token's symbol and decimals as shown, and whose the symbol is.
@@ -248,13 +373,57 @@ pub async fn trc20_balance(c: &TronClient, token: &str, owner: &str) -> Result<U
 pub struct TokenMeta {
     pub symbol: String,
     pub decimals: u8,
+    /// The registry's symbol (a registry contract that answered its recorded `symbol()`), or the
+    /// contract's own, escaped and cut.
     pub from_registry: bool,
 }
 
-/// `decimals()` and `symbol()` of `token`, read from the chain.
+/// `decimals()` and `symbol()` of `token`, read from the chain, as EVM's `erc20_meta` does: the
+/// symbol is whatever the contract returns, escaped and cut, unless `token` is a registry row
+/// whose `symbol()` is exactly the one the registry records.
 pub async fn trc20_meta(c: &TronClient, token: &str, owner: &str) -> Result<TokenMeta> {
-    let _ = (c, token, owner);
-    Err(WalletError::rpc("not yet"))
+    let not_token = || {
+        WalletError::invalid_address(format!(
+            "{token} is not a TRC20 contract on tron (decimals() returned no usable data)"
+        ))
+    };
+    let raw = constant_call(c, owner, token, "decimals()", &[])
+        .await
+        .map_err(|_| not_token())?;
+    let decimals = (raw.len() == 32)
+        .then(|| U256::from_be_slice(&raw))
+        .and_then(|d| u8::try_from(d).ok())
+        .ok_or_else(not_token)?;
+    let raw = constant_call(c, owner, token, "symbol()", &[])
+        .await
+        .unwrap_or_default();
+    let symbol = IERC20::symbolCall::abi_decode_returns(&raw)
+        .ok()
+        .or_else(|| {
+            (raw.len() == 32).then(|| {
+                String::from_utf8_lossy(&raw)
+                    .trim_end_matches('\0')
+                    .to_string()
+            })
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "?".to_string());
+    let registry = address::parse(token)
+        .ok()
+        .and_then(|p| registry::lookup(&p))
+        .filter(|t| t.onchain_symbol == symbol);
+    Ok(match registry {
+        Some(t) => TokenMeta {
+            symbol: t.onchain_symbol.to_string(),
+            decimals,
+            from_registry: true,
+        },
+        None => TokenMeta {
+            symbol: ascii_inert(&symbol, SYMBOL_SHOWN),
+            decimals,
+            from_registry: false,
+        },
+    })
 }
 
 /// Everything `balance` shows for one Tron account.

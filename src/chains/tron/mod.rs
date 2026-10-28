@@ -7,7 +7,7 @@ pub mod registry;
 pub mod rpc;
 
 use crate::chains::evm::policy::ListView;
-use crate::chains::{Balance, Chain, Family, FamilyKeys, Net};
+use crate::chains::{Balance, Chain, Family, FamilyKeys, Net, TokenBalance};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
 use crate::core::store::KEY_INDEX_LIMIT;
@@ -146,28 +146,76 @@ fn trx(chain: &Chain, sun: u64) -> Balance {
     }
 }
 
+/// What `--token` names on Tron: a registry row by its symbol, or a contract by its `T…` address.
+enum TokenArg {
+    Registry(&'static registry::Token),
+    Contract(String),
+}
+
+/// `--token` on Tron, checked before any request: `usdt` (in any case) or a `T…` address.
+fn token_arg(input: &str) -> Result<TokenArg> {
+    if let Some(t) = registry::by_symbol(input) {
+        return Ok(TokenArg::Registry(t));
+    }
+    let payload = address::parse(input.trim()).map_err(|e| {
+        WalletError::invalid_address(format!(
+            "--token on tron is `usdt` or a TRC20 contract's T... address: {}",
+            e.message
+        ))
+    })?;
+    Ok(TokenArg::Contract(address::encode(&payload)))
+}
+
 /// `balance --chain tron`: the account of `owner` (a `T…` address) at `net`, after the chain
-/// identity check; with `token`, that token's balance instead of TRX.
+/// identity check: TRX, or with `token` that token. `usdt` is the registry row (its symbol and
+/// decimals, one `balanceOf`); a `T…` contract answers its own `decimals()` and `symbol()`, as
+/// EVM `--token` does. The account is read either way, for `activated` and the owner-permission
+/// warning.
 pub async fn balance(net: &Net, owner: &str, token: Option<&str>) -> Result<OneBalance> {
     address::parse(owner)?;
+    let token = token.map(token_arg).transpose()?;
     let c = rpc::connect(net).await?;
-    if token.is_some() {
-        return Err(WalletError::validation(
-            "--token on tron needs the Tron token registry",
-        ));
-    }
     let account = rpc::account(&c, owner).await?;
+    let (balance, token) = match token {
+        None => (trx(net.chain, account.balance), None),
+        Some(TokenArg::Registry(t)) => (
+            Balance {
+                symbol: t.symbol.to_string(),
+                decimals: t.decimals,
+                raw: rpc::trc20_balance(&c, t.address, owner).await?,
+            },
+            Some(TokenShown {
+                address: t.address.to_string(),
+                from_registry: true,
+            }),
+        ),
+        Some(TokenArg::Contract(contract)) => {
+            let meta = rpc::trc20_meta(&c, &contract, owner).await?;
+            let raw = rpc::trc20_balance(&c, &contract, owner).await?;
+            (
+                Balance {
+                    symbol: meta.symbol,
+                    decimals: meta.decimals,
+                    raw,
+                },
+                Some(TokenShown {
+                    address: contract,
+                    from_registry: meta.from_registry,
+                }),
+            )
+        }
+    };
     Ok(OneBalance {
-        balance: trx(net.chain, account.balance),
+        balance,
         activated: account.activated,
         warning: account.warning,
-        token: None,
+        token,
     })
 }
 
-/// `balance` without `--chain` on Tron: TRX and every Tron registry token, all within `limit`.
-/// A token read that fails or is late is that token's error; the call fails only when the
-/// endpoint, its genesis check or the account does.
+/// `balance` without `--chain` on Tron: TRX and every Tron registry token (symbol and decimals
+/// the registry's), all within `limit`. A token read that fails or is late is that token's
+/// error; the call fails only when the endpoint, its genesis check or the account does.
 pub async fn wallet_balances(net: &Net, owner: &str, limit: Duration) -> Result<rpc::Read> {
     let deadline = tokio::time::Instant::now() + limit;
     let late =
@@ -176,12 +224,37 @@ pub async fn wallet_balances(net: &Net, owner: &str, limit: Duration) -> Result<
     let c = tokio::time::timeout_at(deadline, rpc::connect(net))
         .await
         .map_err(|_| late("the genesis block check"))??;
+    let c = std::sync::Arc::new(c);
+    // Every token at once, each until the deadline, so one that hangs delays no other.
+    let reads: Vec<_> = registry::TOKENS
+        .iter()
+        .map(|t| {
+            let (c, owner) = (c.clone(), owner.to_string());
+            let read = tokio::spawn(async move {
+                tokio::time::timeout_at(deadline, rpc::trc20_balance(&c, t.address, &owner))
+                    .await
+                    .map_err(|_| late("balanceOf"))?
+            });
+            (t, read)
+        })
+        .collect();
     let account = tokio::time::timeout_at(deadline, rpc::account(&c, owner))
         .await
         .map_err(|_| late("/wallet/getaccount"))??;
+    let mut tokens = Vec::with_capacity(reads.len());
+    for (t, read) in reads {
+        tokens.push(TokenBalance {
+            address: t.address.to_string(),
+            symbol: t.symbol.to_string(),
+            decimals: t.decimals,
+            raw: read
+                .await
+                .unwrap_or_else(|_| Err(WalletError::rpc("balanceOf stopped unexpectedly"))),
+        });
+    }
     Ok(rpc::Read {
         native: trx(net.chain, account.balance),
-        tokens: Vec::new(),
+        tokens,
         activated: account.activated,
         warning: account.warning,
     })

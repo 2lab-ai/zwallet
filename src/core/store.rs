@@ -700,6 +700,38 @@ pub struct CacheRepair {
     pub now: String,
 }
 
+/// A chain the seed derives an address for that a key's cache lacks (a chain added after the
+/// key was made): what [`unlock_repairing`] adds. Nothing was tampered with, so it carries no
+/// old value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheAddition {
+    pub key: String,
+    pub chain: String,
+    /// The seed's address.
+    pub now: String,
+}
+
+/// Every chain `derive` gives an address for that some key's cache lacks.
+fn cache_additions(
+    file: &WalletFile,
+    seed: &Seed,
+    derive: AddressDeriver<'_>,
+) -> Result<Vec<CacheAddition>> {
+    let mut added = Vec::new();
+    for key in &file.keys {
+        for (chain, now) in derive(seed, key.index)? {
+            if !key.addresses.contains_key(&chain) {
+                added.push(CacheAddition {
+                    key: key.name.clone(),
+                    chain,
+                    now,
+                });
+            }
+        }
+    }
+    Ok(added)
+}
+
 /// Whether a cached address is the one derived. An address the deriver writes as `0x` and hex
 /// digits names its bytes in either case (an EVM address, EIP-55 or not), so it compares
 /// case-insensitively; any other text (Tron's base58check `T…`, where the case is part of the
@@ -814,27 +846,30 @@ fn moved_index(
 
 /// [`unlock`], but cached addresses that differ from the seed are repaired instead of refused:
 /// with the password the seed is authoritative and the cache is only metadata. Every other check
-/// (distinct names and indices) still refuses. The repair is written under the writer lock, only
-/// while wallet.json's crypto envelope is still the one the password opened, through the same
-/// atomic replace as every metadata write; the encrypted master is never touched. Returns the
-/// repairs made (none when the cache was right, and then nothing is written).
+/// (distinct names and indices) still refuses. Chains the seed derives that a key's cache lacks
+/// (added to zwallet after the key was made) are added the same way. The write is done under
+/// the writer lock, only while wallet.json's crypto envelope is still the one the password
+/// opened, through the same atomic replace as every metadata write; the encrypted master is never
+/// touched. Returns the repairs and the additions made (none when the cache was right and whole,
+/// and then nothing is written).
 pub fn unlock_repairing(
     home: &Path,
     password: &str,
     derive: AddressDeriver<'_>,
-) -> Result<(Unsealed, WalletFile, Vec<CacheRepair>)> {
+) -> Result<(Unsealed, WalletFile, Vec<CacheRepair>, Vec<CacheAddition>)> {
     let file = read_wallet_file(home)?;
     let unsealed = decrypt(&file.crypto, password)?;
     verify_key_list(&file)?;
     let repairs = cache_repairs(&file, &unsealed.seed, derive)?;
-    if repairs.is_empty() {
+    if repairs.is_empty() && cache_additions(&file, &unsealed.seed, derive)?.is_empty() {
         verify_key_cache(&file, &unsealed.seed, derive)?;
-        return Ok((unsealed, file, Vec::new()));
+        return Ok((unsealed, file, Vec::new(), Vec::new()));
     }
     moved_index(&file, &unsealed.seed, derive, &repairs)?;
     let lock = MetaLock::acquire(home)?;
-    let (repaired, repairs) = repair_under_lock(&lock, &file.crypto, &unsealed.seed, derive)?;
-    Ok((unsealed, repaired, repairs))
+    let (repaired, repairs, added) =
+        repair_under_lock(&lock, &file.crypto, &unsealed.seed, derive)?;
+    Ok((unsealed, repaired, repairs, added))
 }
 
 /// [`repair_under_lock`] with no test hook.
@@ -843,14 +878,14 @@ fn repair_under_lock(
     opened: &CryptoBox,
     seed: &Seed,
     derive: AddressDeriver<'_>,
-) -> Result<(WalletFile, Vec<CacheRepair>)> {
+) -> Result<(WalletFile, Vec<CacheRepair>, Vec<CacheAddition>)> {
     repair_under_lock_hooked(lock, opened, seed, derive, || {})
 }
 
 /// The write of [`unlock_repairing`], under `lock`: only while wallet.json's crypto envelope is
 /// still `opened` (the one the password decrypted); the key list checked again and the repairs
-/// computed again as the file is now, and nothing written when there are none (another process
-/// repaired first). The envelope is then **read back from disk** and must still be `opened`, so a
+/// and additions computed again as the file is now, and nothing written when there are none
+/// (another process repaired first). The envelope is then **read back from disk** and must still be `opened`, so a
 /// same-user process that swapped the file around the write (`after_write`, a test seam) is
 /// caught: the repair writes only cached addresses and must never be the path that lets a
 /// different master through.
@@ -860,9 +895,10 @@ fn repair_under_lock_hooked(
     seed: &Seed,
     derive: AddressDeriver<'_>,
     after_write: impl FnOnce(),
-) -> Result<(WalletFile, Vec<CacheRepair>)> {
+) -> Result<(WalletFile, Vec<CacheRepair>, Vec<CacheAddition>)> {
     let opened = serde_json::to_value(opened).ok();
     let mut repairs = Vec::new();
+    let mut added = Vec::new();
     lock.update_if(|current| {
         if serde_json::to_value(&current.crypto).ok() != opened {
             return Err(WalletError::validation(
@@ -872,12 +908,17 @@ fn repair_under_lock_hooked(
         verify_key_list(current)?;
         repairs = cache_repairs(current, seed, derive)?;
         moved_index(current, seed, derive, &repairs)?;
-        for r in &repairs {
-            if let Some(key) = current.keys.iter_mut().find(|k| k.name == r.key) {
-                key.addresses.insert(r.chain.clone(), r.now.clone());
+        added = cache_additions(current, seed, derive)?;
+        let writes = repairs
+            .iter()
+            .map(|r| (&r.key, &r.chain, &r.now))
+            .chain(added.iter().map(|a| (&a.key, &a.chain, &a.now)));
+        for (name, chain, now) in writes {
+            if let Some(key) = current.keys.iter_mut().find(|k| k.name == *name) {
+                key.addresses.insert(chain.clone(), now.clone());
             }
         }
-        Ok(!repairs.is_empty())
+        Ok(!repairs.is_empty() || !added.is_empty())
     })?;
     after_write();
     let on_disk = read_wallet_file(lock.home())?;
@@ -888,7 +929,7 @@ fn repair_under_lock_hooked(
         ));
     }
     verify_key_cache(&on_disk, seed, derive)?;
-    Ok((on_disk, repairs))
+    Ok((on_disk, repairs, added))
 }
 
 /// Options for creating the master seed.
@@ -1915,7 +1956,7 @@ mod tests {
             "{}",
             err.message
         );
-        let (_, file, repairs) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
+        let (_, file, repairs, _) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
         assert_eq!(repairs.len(), 1, "{repairs:?}");
         assert_eq!(
             (repairs[0].key.as_str(), repairs[0].was.as_str()),
@@ -1925,7 +1966,7 @@ mod tests {
         unlock(tmp.path(), PW, &fake_derive).unwrap();
         // Nothing left to repair: nothing is written.
         let before = fs::read(tmp.path().join(WALLET_FILE)).unwrap();
-        let (_, _, again) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
+        let (_, _, again, _) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
         assert!(again.is_empty());
         assert_eq!(fs::read(tmp.path().join(WALLET_FILE)).unwrap(), before);
     }
@@ -1975,7 +2016,7 @@ mod tests {
             "tWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
         );
         assert!(unlock(tmp.path(), PW, &two_encodings).is_err());
-        let (_, file, repairs) = unlock_repairing(tmp.path(), PW, &two_encodings).unwrap();
+        let (_, file, repairs, _) = unlock_repairing(tmp.path(), PW, &two_encodings).unwrap();
         assert_eq!(repairs.len(), 1, "{repairs:?}");
         assert_eq!(
             (repairs[0].chain.as_str(), repairs[0].was.as_str()),
@@ -1991,7 +2032,7 @@ mod tests {
             "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
             "tPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
         );
-        let (_, _, repairs) = unlock_repairing(tmp.path(), PW, &two_encodings).unwrap();
+        let (_, _, repairs, _) = unlock_repairing(tmp.path(), PW, &two_encodings).unwrap();
         assert_eq!(repairs.len(), 1, "{repairs:?}");
         // Index 1's address itself, with no key at index 1: a moved index, refused.
         edit(
@@ -2121,7 +2162,7 @@ mod tests {
             let b_addr = f.keys[1].addresses["alpha"].clone();
             f.keys[0].addresses.insert("alpha".into(), b_addr);
         });
-        let (unsealed, file, repairs) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
+        let (unsealed, file, repairs, _) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
         let want0 = fake_derive(&unsealed.seed, 0).unwrap()["alpha"].clone();
         let want1 = fake_derive(&unsealed.seed, 1).unwrap()["alpha"].clone();
         assert_eq!(repairs.len(), 1, "{repairs:?}");
@@ -2143,7 +2184,7 @@ mod tests {
         let seed = decrypt(&file.crypto, PW).unwrap().seed;
         let before = fs::read(tmp.path().join(WALLET_FILE)).unwrap();
         let lock = MetaLock::acquire(tmp.path()).unwrap();
-        let (_, repairs) = repair_under_lock(&lock, &file.crypto, &seed, &fake_derive).unwrap();
+        let (_, repairs, _) = repair_under_lock(&lock, &file.crypto, &seed, &fake_derive).unwrap();
         assert!(repairs.is_empty(), "{repairs:?}");
         drop(lock);
         assert_eq!(
