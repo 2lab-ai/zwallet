@@ -63,3 +63,12 @@ cap, each PR reviewable as one argument). Worktrees at `.worktrees/<branch with 
 
 Dispatch A with RED tests first, the gate above, an outside review, merge, preview. Then B1, B2
 and C in that order; Q3 closes before C (units.md §Before C starts).
+
+The spec passed the three-engine review in round 3 (2026-10-28: grok-4.7, gpt-6-astra and fable all
+APPROVE; rounds 1 and 2 are summarised in 05-tron.md). Two non-blocking remarks from fable's round 3,
+for C:
+- §Fees names the `fees` fields `activationSun` and `bandwidthSun` but not their values in each
+  branch (05-tron.md:465-466); define them in one line, so the TUI's "activation fee" and "bandwidth
+  burn" rows are fixed.
+- Whether java-tron refuses a TRX `TransferContract` to a contract account (`TransferActuator.validate`)
+  is unverified; read it while building C and note it at TR17's contract case (no change to the numbers).
