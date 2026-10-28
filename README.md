@@ -231,7 +231,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
     bytes as hex (512) on its own line (`--json` keeps the result and the hex whole).
 
   A QR code holding an Ethereum address needs at least version 2: a block of 25 × 25 = 625
-  modules without a quiet zone, 25 rows of 25 cells from one source at one character per module.
+  modules without a quiet zone, 25 rows of 25 cells from one source at one character per module
+  (a Tron address, 34 bytes, needs version 3: 29 × 29 = 841).
   A source bounded to 512 characters cannot fill one. The exceptions above are not shown unable
   to: their parts sit on separate labelled lines, or are hex only. What a bounded source can
   still do is pad to the terminal's width so that its text starts a visual row at column 0 (soft
