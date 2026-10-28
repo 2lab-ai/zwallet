@@ -1917,6 +1917,75 @@ mod tests {
         assert_eq!(fs::read(tmp.path().join(WALLET_FILE)).unwrap(), before);
     }
 
+    /// A deriver with two address encodings: `hex` gives `0x` and hex digits in mixed case (the
+    /// EVM form), `b58` a base58check string (the Tron form), both from the index.
+    fn two_encodings(_: &Seed, index: u32) -> Result<BTreeMap<String, String>> {
+        let (hex, b58) = match index {
+            0 => (
+                "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
+            ),
+            _ => (
+                "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+            ),
+        };
+        Ok(BTreeMap::from([
+            ("hex".to_string(), hex.to_string()),
+            ("b58".to_string(), b58.to_string()),
+        ]))
+    }
+
+    #[test]
+    fn hex_caches_compare_in_any_case_and_every_other_text_byte_for_byte() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_master(tmp.path(), PW, "a", fast(), &two_encodings).unwrap();
+        let path = tmp.path().join(WALLET_FILE);
+        let edit = |hex: &str, b58: &str| {
+            let mut file: WalletFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            file.keys[0].addresses.insert("hex".into(), hex.into());
+            file.keys[0].addresses.insert("b58".into(), b58.into());
+            fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        };
+        // The hex address in lower case is the same 20 bytes: no repair.
+        edit(
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
+        );
+        unlock(tmp.path(), PW, &two_encodings).unwrap();
+        // A base58 address with one letter's case flipped is another string: repaired.
+        edit(
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "tWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
+        );
+        assert!(unlock(tmp.path(), PW, &two_encodings).is_err());
+        let (_, file, repairs) = unlock_repairing(tmp.path(), PW, &two_encodings).unwrap();
+        assert_eq!(repairs.len(), 1, "{repairs:?}");
+        assert_eq!(
+            (repairs[0].chain.as_str(), repairs[0].was.as_str()),
+            ("b58", "tWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6")
+        );
+        assert_eq!(
+            file.keys[0].addresses["b58"],
+            "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6"
+        );
+        // A case variant of index 1's base58 address is not index 1's address: a repair, not a
+        // moved index (which the exact compare alone tells apart).
+        edit(
+            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+            "tPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+        );
+        let (_, _, repairs) = unlock_repairing(tmp.path(), PW, &two_encodings).unwrap();
+        assert_eq!(repairs.len(), 1, "{repairs:?}");
+        // Index 1's address itself, with no key at index 1: a moved index, refused.
+        edit(
+            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+            "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+        );
+        let e = unlock_repairing(tmp.path(), PW, &two_encodings).err().unwrap();
+        assert!(e.message.contains("indices were changed"), "{}", e.message);
+    }
+
     #[test]
     fn a_changed_index_is_refused_not_repaired() {
         // `b`'s index changed from 1 to 5: its cache still holds index 1's address. Repairing

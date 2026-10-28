@@ -2121,6 +2121,31 @@ mod tests {
     }
 
     #[test]
+    fn the_cache_compares_tron_addresses_byte_for_byte_and_evm_ones_in_any_case() {
+        const TWER: &str = "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6";
+        const EVM: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+        let mut k = key("main", 0);
+        k.addresses.insert("tron".into(), TWER.into());
+        k.addresses.insert("ethereum".into(), EVM.to_ascii_lowercase());
+        assert_eq!(cache_mismatch(&k, "tron", TWER).unwrap(), None);
+        // The comparison is `tron::address::same`: a case variant of the derived address is
+        // another address (it never gets this far: the shape check refuses it first).
+        assert!(!crate::chains::tron::address::same(TWER, &TWER.to_ascii_lowercase()));
+        assert_eq!(
+            cache_mismatch(&k, "tron", "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C").unwrap(),
+            Some(TWER.to_string())
+        );
+        // EVM hex is the same address in either case.
+        assert_eq!(cache_mismatch(&k, "ethereum", EVM).unwrap(), None);
+        // A Tron address is never the shape of an EVM one, nor the other way round.
+        let tron = chains::find("tron").unwrap();
+        let eth = chains::find("ethereum").unwrap();
+        assert!(address_shaped(tron, TWER) && !address_shaped(eth, TWER));
+        assert!(address_shaped(eth, EVM) && !address_shaped(tron, EVM));
+        assert!(!address_shaped(tron, "tWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6"));
+    }
+
+    #[test]
     fn index_warning_flags_indices_past_next_index_and_gaps() {
         let plain = file(2, vec![key("a", 0), key("b", 1)]);
         let all: Vec<&KeyEntry> = plain.keys.iter().collect();
