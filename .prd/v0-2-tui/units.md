@@ -1,18 +1,23 @@
 # v0.2 TUI — units and order
 
 Status: **planned**, 2026-10-27, revised after review rounds 1 and 2 the same day; TUI-1 split
-into three PRs on 2026-10-28 (§TUI-1 split). Six units, TUI-1 … TUI-6, each one PR (TUI-1 three:
-TUI-1a, TUI-1b, TUI-1c), in dependency order. Each closes the acceptance IDs of
-[`../03-tui.md`](../03-tui.md) §Acceptance listed for it; every ID T1–T11 (15 with T2b, T3b, T6b,
-T6c) is closed by exactly one unit. The library entry points are the ones [`flow.md`](flow.md)
-names in its "Split" column.
+into three PRs on 2026-10-28 (§TUI-1 split); rewritten on 2026-10-28 (v2) for every CLI function
+([`../03-tui.md`](../03-tui.md) §Coverage matrix, §Changes on 2026-10-28, v2). Fourteen units,
+TUI-1a … TUI-12, each one PR, ordered by what the owner can do once it is merged. Each closes the
+acceptance IDs of [`../03-tui.md`](../03-tui.md) §Acceptance listed for it; every ID T1–T41 (45
+with T2b, T3b, T6b, T6c) is closed by exactly one unit. The library entry points are the ones
+[`flow.md`](flow.md) names in its "Split" column and, for the functions added on 2026-10-28, its
+§Functions added on 2026-10-28.
 
 **Counting rule.** "Est. lines" is the changed lines of the PR (insertions plus deletions in
 `git diff --stat`), tests included, with two exceptions: `Cargo.lock` is not counted (it is
 generated; TUI-1's dependency change adds a few hundred lines there), and a block moved unchanged
 from `src/commands.rs` into `src/wallet.rs` counts once (`git diff --color-moved` shows it as a
 move). Test fixtures are single-line JSON files under `tests/fixtures/` and are counted. The cap
-is about 800; TUI-1b, TUI-3, TUI-4 and TUI-5 are estimated at it.
+is about 800; TUI-1b, TUI-3, TUI-5, TUI-6, TUI-7 and TUI-11 are estimated at it. Every estimate
+of a unit not yet started is an estimate, not a measurement. Line references in text moved from
+2026-10-27 are to c7d3f13, as [`flow.md`](flow.md)'s are; those written on 2026-10-28 are to
+24f4b5b.
 
 **Every unit:**
 - RED first: each test below is written and seen failing before the code it checks.
@@ -29,17 +34,39 @@ is about 800; TUI-1b, TUI-3, TUI-4 and TUI-5 are estimated at it.
   `common::exclusive()` (tests/common/mod.rs:91), as the CLI's do (v0-1/loop.md:15).
 - No library entry point prints; the CLI command that used the code calls the new function and
   prints what it returns, so `tests/cli.rs` stays green unchanged.
+- From TUI-3 on: every action the unit adds is a row of `src/tui/actions.rs` (03-tui.md
+  §Architecture), so T12's test fails until its alias is in the menu; an action of a later unit
+  is listed as `in a later version`.
+- Every unit leaves the preview able to do something new end to end (the second column below);
+  the dispatcher checks it on the merged preview with tmux frames at 120x40 and 80x24.
 
-| Unit | Scope | Closes | Depends on | Est. lines |
-|---|---|---|---|---|
-| TUI-1a | ratatui and crossterm, `FilteredBackend` and the terminal guard (`src/tui/term.rs`), `wallet::keys`, `wallet::status`, `wallet::net`, `list` and `status` on them | none | the agent-side v0.1 work merged (loop.md §Start condition) | 610 (measured) |
-| TUI-1b | `zwallet tui`, the screens (keys list, status bar, size rule), the cell/style/budget helpers | T1 | TUI-1a | 800 |
-| TUI-1c | the pty runs (restore after `q`, `locked` within two refreshes), the argv-listed fake, the pty helpers | T9, T10 | TUI-1b | 350 |
-| TUI-2 | warm-up, password field, the password check (checked list, pinned addresses), make active, address trust | T2, T2b | TUI-1 | 750 |
-| TUI-3 | home: balance, send journal rows, explorer client, merge | T3, T3b | TUI-2; the explorer re-measure (loop.md §Entry conditions) | 800 |
-| TUI-4 | tx detail with receipt token movements, `dropped/replaced`, chain switch | T4, T6c, T8 | TUI-3 | 800 |
-| TUI-5 | assets, transfer: picker from the checked list, amount, review, exact-intent confirm, send status | T5, T6, T6b | TUI-4 | 800 |
-| TUI-6 | whitelist screens and edits; the pty run across T2, T6 and T7 | T7, T11 | TUI-5 | 750 |
+| Unit | The owner can, once it is merged | Scope | Closes | Depends on | Est. lines |
+|---|---|---|---|---|---|
+| TUI-1a | (nothing new on screen) | ratatui and crossterm, `FilteredBackend` and the terminal guard (`src/tui/term.rs`), `wallet::keys`, `wallet::status`, `wallet::net`, `list` and `status` on them | none | the agent-side v0.1 work merged (loop.md §Start condition) | 610 (measured) |
+| TUI-1b | see the keys and the lock state; lock | `zwallet tui`, the screens (keys list, status bar, size rule), the cell/style/budget helpers | T1 | TUI-1a | 800 |
+| TUI-1c | (the same, proven on a pty) | the pty runs (restore after `q`, `locked` within two refreshes), the argv-listed fake, the pty helpers | T9, T10 | TUI-1b | 350 |
+| TUI-2 | unlock from the TUI, see the open key verified, make a key active | warm-up, password field, the password check (checked list, pinned addresses), make active, address trust | T2, T2b | TUI-1 | 750 |
+| TUI-3 | see the balance on any chain and on every network; find every function from `?` | tab line, action menu, hint lines, popups and fields; 2 wallet balances, every network, the chain picker | T5, T8, T12, T13, T15 | TUI-2 | 800 |
+| TUI-4 | receive: the address and its trust (and the QR, trade-off Q); verify and repair every key's address; unlock for a chosen time; see the session | 4 receive, `V` on every key, `A`, 7 session, `u`, `--allow-ptrace-scope-0` | T14, T16, T17, T18, T19, T20 | TUI-3 | 750 (+250 with Q3) |
+| TUI-5 | send the coin or a registry token to a listed payee and see it mined | 3 send: asset, payee, amount, review with the overrides and the fee ceiling, exact-intent confirm, status | T6, T6b, T21, T22 | TUI-3 | 800 |
+| TUI-6 | curate the whitelist: payees, contracts, fee caps, message signing, reset | 5 whitelist: view, `V`, every change; the pty run across T2, T6 and T7 | T7, T11, T23, T24, T25 | TUI-5 | 800 |
+| TUI-7 | see the last 10 transactions, incoming ones included where an explorer answers | history: journal rows, explorer client, merge | T3, T3b | TUI-3; the explorer re-measure (loop.md §Entry conditions) | 800 |
+| TUI-8 | open any transaction (a row, a send, a typed hash) with its fee and token movements | transaction detail, `dropped/replaced`, `/` lookup | T4, T6c, T26 | TUI-7 | 750 |
+| TUI-9 | speed up or cancel a stuck send; retry an uncertain broadcast safely | replacements at nonce N | T27, T28, T29 | TUI-8 (and TUI-5) | 500 |
+| TUI-10 | make the wallet or a new key without the shell (and see the phrase, trade-off B) | `n`, the first-run create, `B` | T30, T31, T32 | TUI-3 | 600 (+200 with B2) |
+| TUI-11 | read and call contracts, sign a message, read any token | 6 tools: call, invoke, sign, token | T33, T34, T35, T36, T37 | TUI-5 | 800 |
+| TUI-12 | everything above on Tron | the Tron rows of 03-tui.md §Coverage matrix | T38, T39, T40, T41 | TUI-5; 05-tron.md and its library units | per 05-tron.md |
+
+**Old and new names.** Units TUI-3 … TUI-6 of 2026-10-27 never started; their text moved, with
+its RED tests and counter-examples (reviewed in rounds 1–3 below), as follows. The review-round
+tables below keep the old names.
+
+| Old (2026-10-27) | New (2026-10-28, v2) | What moved |
+|---|---|---|
+| TUI-3 home: balance, journal, explorer, merge | TUI-7 (history) and TUI-3 (balance) | the history whole; the balance pane to TUI-3 |
+| TUI-4 tx detail, `dropped/replaced`, chain switch | TUI-8 and TUI-3 | the detail and `tx_state` to TUI-8; the chain switch (T8) to TUI-3 |
+| TUI-5 assets and transfer | TUI-5 and TUI-3 | the transfer stays; assets (T5) to TUI-3; the `dropped/replaced` rendering on the send status to TUI-8 |
+| TUI-6 whitelist and the pty run | TUI-6 | all of it, plus T23–T25 |
 
 ## TUI-1 — `zwallet tui`, terminal setup, write point, keys, status bar, lock detection
 
@@ -164,18 +191,222 @@ Decisions (the dispatcher's, 2026-10-28):
   - A process answers `address` with 600 `▀▄` characters: the pane shows the CLI's "not an
     address" error escaped; the bar never shows it as an address.
 
-## TUI-3 — home: balance, journal rows, explorer, merge
+## TUI-3 — navigation, balances, every network, chain switch
+
+- **Closes:** T5, T8, T12, T13, T15.
+- **The owner can afterwards:** see the open key's balance on any chain (`c`) and on every
+  network at once (`a`), and find every function of the TUI from `?` or `:`, including the ones
+  a later unit brings (listed `in a later version`).
+- **Entry points added:** `wallet::balances(home, key, chain) -> ChainBalances` (the native coin
+  and every registry token, `Evm.wallet_balances`, chains/evm/mod.rs:259, with the owner's
+  `Trust`) and `wallet::every_balance(home, key)`, moved from `every_balance` and `read_network`
+  (commands.rs:1173-1350); `wallet::brief` made `pub` (commands.rs:1371). `balance` with and
+  without `--chain` calls them. The chain switch uses `wallet::net` (wallet.rs:155).
+- **Files:** `src/wallet.rs`, `src/commands.rs`, `src/tui/actions.rs` (new: the action table),
+  `src/tui/form.rs` (new: the text field with its alphabet, the popup), `src/tui/app.rs`, `ui.rs`,
+  `tests/tui.rs`.
+- **Depends on:** TUI-2 (the open key).
+- **RED tests:**
+  - T12 (`TestBackend` and `Msg` sequence): `?`, then `whitelist add` typed: one row, key `a`,
+    tab 5. The test holds the CLI column of 03-tui.md §Coverage matrix rows 1–52 as a list and
+    asserts that the menu's aliases are exactly that list; Enter on an action that cannot run
+    shows its reason and starts no `Effect`.
+  - T13 (`Msg` sequence and `TestBackend`): `1` … `7`, `[` and `]` reach each tab; every frame's
+    hint line ends in `? actions`; Esc closes a popup, then returns a sub-screen to its tab; in a
+    text field `q`, `?` and `1` are typed, not acted on; every tab fits 80x24.
+  - T5 (`TestBackend`): native and USDC non-zero, DAI zero: native and USDC rows only.
+  - T15 (`TestBackend`, two mock nodes through `ZWALLET_RPC_<CHAIN>` and one that refuses): one
+    line per network, the testnet last; the failed one's error cut to 72 (`brief`); `2 of 3
+    networks have a balance; 1 did not answer`.
+  - T8 (`Msg` sequence): `c` then base: every pane reloads for base, and a reply for ethereum that
+    lands after the switch is dropped. (`TestBackend`): with `ZWALLET_RPC_BASE` set to a URL with
+    a key in its path and in a host label, the bar shows the host with the label `<redacted>`
+    and nothing of the path (rule 3's RPC host row).
+- **Counter-examples:**
+  - A token whose `balanceOf` fails with an error of 600 characters of ESC and `█`: its row says
+    `<SYMBOL> error: …` within 72, zero replaced cells, and the other rows still show.
+  - A network whose RPC error quotes the URL's key: the line shows `<redacted>` (`Net::redact`,
+    chains/mod.rs:282).
+  - The menu filter typed with ESC and `█`: neither reaches the field (its alphabet is printable
+    ASCII), the filter is unchanged.
+
+## TUI-4 — receive, verify and repair every key, the session, unlock for a duration
+
+- **Closes:** T14, T16, T17, T18, T19, T20.
+- **The owner can afterwards:** receive (the full address and its trust, every family named),
+  check every key's address with the password and repair a modified cache, unlock for a duration
+  he types, and read the session in full.
+- **Entry points added:** `wallet::addresses(home, key)` from `addresses` (commands.rs:1054);
+  `wallet::repair(home, password) -> Repaired`, the `address --verify` path
+  (`store::unlock_repairing`, commands.rs:965-1052, :973), returning the `repaired` list; `V` on
+  1 keys calls TUI-2's `wallet::open_with_password` with every key, as `list --verify` does
+  (commands.rs:846-908). `Command::Tui` gains `--allow-ptrace-scope-0` (cli.rs:83-93), passed to
+  TUI-2's `wallet::prepare_unlock`. The session tab reads `wallet::status` (wallet.rs:103).
+  Trade-off Q: Q1 is a line of text; Q3 adds `QR_DARK` and `QR_LIGHT` to `src/tui/style.rs` and a
+  QR widget over `qrcode` (src/qr.rs:3), which the CLI already depends on.
+- **Files:** `src/cli.rs`, `src/wallet.rs`, `src/commands.rs`, `src/tui/actions.rs`, `app.rs`,
+  `ui.rs`, `style.rs` (Q3), `tests/tui.rs`.
+- **Depends on:** TUI-3.
+- **RED tests:**
+  - T14 (pty): 7 session, `u`, `10m`, the password: the bar's expiry ≈ now+10m; `zwallet status
+    --json` has the same `expiresAt`.
+  - T16 (`TestBackend`, `StatusView` fixtures as TUI-1b's decision 3): this home's daemon, two of
+    other homes, the session's whitelist view: each on its labelled line; the view as `reports
+    gen N, M entries (not checked here)`.
+  - T17 (`TestBackend`): warm: the full EIP-55 address and `verified by password`; locked:
+    `not verified` and the `V` hint; every chain of `zwallet chains` named.
+  - T18 (`TestBackend`): Q1: `Q` draws the one line naming `zwallet address`. Q3 (only if picked):
+    at 120x40 the overlay's `QR_DARK` cells decode with `rqrr` (as src/qr.rs's tests decode) to
+    the address; at 80x24 the size line; for `not verified` and for an impostor's trust no code
+    and the reason; no cell outside the overlay has a QR style.
+  - T19 (pty): `V` on 1 keys: every row `verified`; the test edits `beta`'s cached address, `V`
+    shows the CLI's `VALIDATION_ERROR` naming `A`; `A` and the password: the `repaired` list and
+    every row `verified`; `zwallet list --verify --password-stdin` agrees.
+  - T20 (unit, `ptrace_scope_check` on a fixture file, core/protocol.rs:464): the TUI's
+    `prepare_unlock` refuses scope 0 and names `zwallet tui --allow-ptrace-scope-0`; with the
+    flag it passes. (pty, Linux, where `common::ptrace_scope_is_open`, tests/cli.rs:1025): the
+    warm-up without the flag stops before the password field.
+- **Counter-examples:**
+  - wallet.json's cache for `beta` is `"\u{1b}[2J"` and 600 `█`: `A` shows `was` escaped and cut
+    at 64; no row shows it as an address.
+  - A `StatusView` with 300 pids of other homes: 8 shown, then `292 more`; a home path holding ESC:
+    escaped, at most 64.
+  - A process answering `address` for the open key with another address after the password check:
+    4 receive stops with the mismatch error and the bar keeps the pinned address (TUI-2's pinning).
+
+## TUI-5 — transfer
+
+- **Closes:** T6, T6b, T21, T22.
+- **The owner can afterwards:** send the coin or a registry token to a listed payee, override
+  the pending and repeat guards knowingly, set a fee ceiling, and follow the send to mined. The
+  status shows pending, mined (success or reverted) and `unknown`; `dropped/replaced` comes with
+  TUI-8.
+- **Moved from the old TUI-5 (2026-10-27)**, unchanged except: T5 and its test went to TUI-3; the
+  `Msg`-sequence test of `dropped/replaced` on the send-status screen went to TUI-8, which adds
+  `rpc::tx_state`; `Depends on` is TUI-3 (tabs, forms, assets) and TUI-2 (the checked list, a
+  warm session). Added:
+  - `wallet::review_transfer` takes the overrides (`allow_pending`, `allow_duplicate`) and a fee
+    ceiling (`max_fee_wei`, as `max_fee_wei` reads `--max-fee-gwei`, commands.rs:1532); the review
+    holds them, and confirm uses exactly those.
+  - T21 (mock node): a pending nonce: the review shows it and `p`; confirm without `p` makes zero
+    `SignTx`, with `p` one. A journal entry from 5 minutes ago with the same chain, kind, `to` and
+    `amountRaw`: the same with `d`.
+  - T22 (mock node): `g` and `5`: the review runs again with a 5 gwei ceiling; a node fee above
+    the automatic ceiling shows the CLI's `VALIDATION_ERROR` until `g` raises it.
+  - Counter-example: `g` with `0`, `0.5.1` or 30 digits: the field refuses the keys outside its
+    alphabet and the CLI's parse refuses the rest; the review is unchanged.
+
+The moved text follows.
+
+- **Entry points added:** `wallet::review_transfer` (prepare as a dry-run, duplicates, the
+  whitelist verdict and fee cap on the checked list; no lock, no signature; `Review` holds the
+  exact intent),
+  `wallet::send_transfer` (fingerprint check, lock, prepare again with the held payee address,
+  pending and duplicate guards again, `Review::matches` on the decoded transaction (the transfer
+  intent exactly equal, the most the fee can cost, `max_gas_cost` + `l1_fee` as U256, at most the
+  reviewed one), then sign,
+  check the signer, journal, broadcast), `SendRecord::write` returning its line instead of
+  printing it. The CLI's `transfer` calls the send path; `invoke` keeps the signing tail they are
+  cut from (commands.rs:1530, :1421, :1631); both print the `broadcasting` line as before. Assets
+  use `wallet::balances` (TUI-3).
+- **Files:** `src/wallet.rs`, `src/commands.rs`, `src/chains/mod.rs`, `src/chains/evm/mod.rs`,
+  `src/tui/app.rs`, `ui.rs`, `tests/evm_offline.rs`, `tests/tui.rs`.
+- **Depends on:** TUI-3, TUI-2 (the checked list, a warm session).
+- **RED tests:**
+  - T6 (pty, mock node through `ZWALLET_RPC_ETHEREUM`): asset → `alice` → amount → review → type
+    `alice`: the hash is in the next frame; the status reaches mined; the journal file has the
+    line.
+  - T6b (`TestBackend`): the picker lists `alice` (address entry on ethereum) and not a contract
+    entry nor an entry on base only; (`Msg` sequence): typed `0x...` characters in the picker
+    change nothing.
+  - (mock node): the fee rises between review and confirm: a new review, and zero `SignTx`
+    requests reached the daemon side. The fee falls instead: confirm signs (one `SignTx`), and
+    the test decodes the transaction in that request (`tx::decode_unsigned`,
+    chains/evm/tx.rs:378) and asserts its `chain_id`, `to`, `value`, `input` and `nonce` equal the
+    fields the review held. The same two cases on base (OP-stack): the fixture's
+    `GasPriceOracle` answer (`op_l1_fee`, chains/evm/rpc.rs:1040) moves `l1_fee` up, then down,
+    with `max_gas_cost` unchanged: up refuses (zero `SignTx`), down signs. The comparison reads
+    U256 integers, never the formatted fields.
+  - (`Msg` sequence): the polling bound turns the send's status into `unknown — run zwallet tx`.
+  - (unit): `wallet::review_transfer` takes the `CheckedList` and computes the verdict and the fee
+    cap on it: with both list files removed from the home after the check, it still reports
+    `alice` allowed under the checked list's cap (it reads no list file; the fingerprint check is
+    the TUI's own step before it).
+  - (pty): no `broadcasting` line appears outside the frame; `zwallet transfer` still prints it
+    (tests/cli.rs unchanged).
+- **Counter-examples:**
+  - whitelist.json rewritten at the same gen with `alice` at a lookalike address, nickname and
+    everything else unchanged, while the TUI holds a checked list: the picker drops the checked
+    list and offers nothing; started without a password check, the picker offers nothing either.
+  - A process listed by argv answers `status` with `whitelist: { gen: N+1, verified: true,
+    entries: ["alice"] }` (a forged session view): nothing is offered and nothing is labelled
+    verified.
+  - The list is re-signed with the password from another shell after the review, `alice` now at
+    another address, nonce, fee, funds and verdict unchanged: confirm finds the files changed,
+    signs nothing (zero `SignTx`), and shows `not verified`.
+  - A journal line whose `to` is 600 characters with ESC and `█`: the duplicate guard shows
+    `<invalid>` for it, within 512.
+
+## TUI-6 — whitelist screens and edits; the pty run across T2, T6 and T7
+
+- **Closes:** T7, T11, T23, T24, T25.
+- **The owner can afterwards:** curate the whitelist from the TUI: payees, contracts with their
+  selectors, fee caps, message signing, reset, each with its summary and the password.
+- **Entry points added:** `wallet::whitelist_view`, `wallet::whitelist_plan`,
+  `wallet::whitelist_apply`, and `Change` made `pub` with `Change::add`, `Change::remove`,
+  `Change::fee_cap`, `Change::message_signing` (`Change::MessageSigning`, commands/whitelist.rs:112;
+  added 2026-10-28), `Change::reset`. The CLI's `whitelist` commands call them
+  (commands/whitelist.rs:51) and keep their own prompt and printing. T7's verified state and `V`
+  use `wallet::open_with_password` and `wallet::check_list` (TUI-2).
+- **Files:** `src/wallet.rs`, `src/commands/whitelist.rs`, `src/tui/app.rs`, `ui.rs`,
+  `tests/tui.rs`.
+- **Depends on:** TUI-5 (the end-to-end run goes through a send), TUI-3 (forms), TUI-2 (the
+  password field).
+- **RED tests:**
+  - T7 (pty, `common::exclusive()`): warm, then `5`, `a`, `bob` and an address, no duration: the
+    frame shows the summary above the password field; after the password, `zwallet whitelist list
+    --verify --password-stdin` shows `bob` at gen+1, `zwallet status --json` has `locked: true`,
+    and T7 shows the new list as verified (the password check ran again). The same with a
+    duration of 10m: unlocked until about now+10m.
+  - (pty): started warm with no password typed, T7 shows `not verified`; `V` and the password
+    show it verified; `zwallet status --json` and the list files are the same before and after
+    `V`.
+  - T11 (pty, the run of 03-tui.md §Tests: T2 → T6 → T7): no echo; the password is in no captured
+    frame; Esc in the middle of the password, then a retry, works.
+  - T23 (pty, `common::exclusive()`): `d` on `bob`, `f` base `0.001`, `R`: each shows its
+    summary above the password (the reset's cost as `whitelist reset` spells it, README.md:404-408);
+    after each, `whitelist list --verify --password-stdin` agrees; locked afterwards.
+  - T24 (pty): `a`, kind contract, `router`, ethereum, `0x414bf389`: the outcome has the CLI's
+    contract warning (README.md:281-282); `whitelist list --verify` shows the entry and its
+    selector. A registry token's address as a contract: the CLI's refusal, nothing stopped.
+  - T25 (pty): `m`: the summary shows the old and the new value; `whitelist list --verify` has
+    `allowMessageSigning: true`.
+- **Counter-examples:**
+  - `whitelist.json` with a 600-character nickname, or a nickname of `▀▄█`, or one holding ESC:
+    not a list at parse (`check_shapes`, core/whitelist.rs:689); T7 shows the "cannot be read"
+    line with the parser's message cut at 80; zero replaced cells.
+  - A forged session view (as in TUI-5) says `verified: true` at gen N+1: T7 shows "the running
+    session reports gen N+1, 1 entry; this TUI did not check it", draws no entry name from it,
+    and draws no "verified".
+  - The file changes after the password check: T7 drops the checked list and shows `not
+    verified`.
+  - The password in a frame, as in TUI-2, across the edit's summary, password and outcome frames.
+
+## TUI-7 — history: journal rows, explorer, merge (the old TUI-3)
 
 - **Closes:** T3, T3b.
-- **Entry points added:** `wallet::balances`, `wallet::brief` (made `pub`),
-  `SendJournal::recent` with `JournalRow` (the checks of `EntryText::of`, chains/mod.rs:756),
+- **The owner can afterwards:** see the last 10 transactions on the wallet tab, this machine's
+  sends and, on ethereum, optimism and sepolia, incoming ones from the explorer, with the
+  coverage note.
+- **Moved from the old TUI-3**, except the balance pane (`wallet::balances`, `wallet::brief`),
+  which TUI-3 adds.
+- **Entry points added:** `SendJournal::recent` with `JournalRow` (the checks of `EntryText::of`, chains/mod.rs:756),
   `chains::evm::explorer::fetch` (new module, the shape check of 03-tui.md §History),
   `chains::EXPLORERS`, `history::merge` (new module).
 - **Files:** `src/chains/mod.rs`, `src/chains/evm/mod.rs`, `src/chains/evm/explorer.rs` (new),
   `src/history.rs` (new), `src/lib.rs`, `src/wallet.rs`, `src/tui/app.rs`, `ui.rs`,
   `tests/fixtures/explorer/*.json` (new, single-line), `tests/tui.rs`.
-- **Depends on:** TUI-2 (Home opens after the warm-up); the explorer re-measure (loop.md §Entry
-  conditions).
+- **Depends on:** TUI-3 (the wallet tab); the explorer re-measure (loop.md §Entry conditions).
 - **RED tests:**
   - Explorer fixture: a local HTTP server in the test, built like `tiny_rpc_reply`
     (tests/common/mod.rs:926), serving single-line Blockscout bodies cut from the 2026-10-27
@@ -199,17 +430,22 @@ Decisions (the dispatcher's, 2026-10-28):
   characters with ESC and `█`, an item about another address, and a 403 body made of `▀▄`. None
   of their text is in any cell; the note counts the dropped items; zero replaced cells.
 
-## TUI-4 — tx detail, `dropped/replaced`, chain switch
+## TUI-8 — transaction detail, `dropped/replaced`, lookup by hash (the old TUI-4)
 
-- **Closes:** T4, T6c, T8.
+- **Closes:** T4, T6c, T26.
+- **The owner can afterwards:** open any transaction (a history row, his own send, or a hash
+  typed with `/`) with its fee, confirmations and token movements, and see a send that another
+  transaction replaced.
+- **Moved from the old TUI-4**, except the chain switch (T8), which TUI-3 adds.
 - **Entry points added:** `rpc::tx_detail` (`effectiveGasPrice`, the receipt's `l1Fee` on base and
   optimism, `eth_blockNumber` for confirmations, and the receipt's registry-token `Transfer` logs
   that involve the wallet, 03-tui.md §History), `rpc::tx_state` (`dropped/replaced`: the account's
   `latest` nonce past the transaction's, no receipt). The detail's status uses `tx_state`; TUI-5's
-  send-status screen reuses it. The chain switch uses `wallet::net` (TUI-1).
+  send-status screen uses it from this unit on. `/` reads a hash in a field (`0x` and 64 hex
+  digits) and opens the detail, as `tx` looks one up (commands.rs:1783).
 - **Files:** `src/chains/evm/rpc.rs`, `src/chains/evm/mod.rs`, `src/tui/app.rs`, `ui.rs`,
   `tests/evm_offline.rs`, `tests/tui.rs`.
-- **Depends on:** TUI-3.
+- **Depends on:** TUI-7 (the rows), TUI-5 (the send-status screen).
 - **RED tests:**
   - T4 (mock node, `MockRpc`, tests/evm_offline.rs:40): a fixture transaction and receipt with
     `gasUsed`, `effectiveGasPrice` and, on base, `l1Fee`, and a fixture head block: every detail
@@ -221,9 +457,10 @@ Decisions (the dispatcher's, 2026-10-28):
     `Transfer` log of amount 0 from a lookalike address: not shown, counted.
   - T6c (mock node): a journal row whose hash has no receipt while `eth_getTransactionCount` at
     `latest` is past its nonce: the detail's status is `dropped/replaced`.
-  - T8 (`Msg` sequence): `c` then base: every pane reloads for base. (`TestBackend`): with
-    `ZWALLET_RPC_BASE` set to a URL with a key in its path, the bar shows
-    `https://host/<redacted>`.
+  - T26 (mock node): `/` and a fixture hash: the detail; a hash the node does not know: `not
+    found` with the CLI's hint (README.md:507-522); 63 hex digits cannot be entered.
+  - (`Msg` sequence): a `tx_state` result of `dropped/replaced` on the send-status screen renders
+    `dropped/replaced` with the hash and the nonce (moved from the old TUI-5).
 - **Counter-examples:**
   - The mock node answers `eth_getTransactionReceipt` with an error of 600 characters of ESC and
     `█`: one error line within the pane's width; the detail view shows at most 512 escaped
@@ -235,93 +472,123 @@ Decisions (the dispatcher's, 2026-10-28):
     check, a whitelist.json rewritten at the same gen with `alice` moved to a lookalike address
     drops the checked list, and the lookalike gets no nickname.
 
-## TUI-5 — assets and transfer
+## TUI-9 — speed up, cancel, retry at the same nonce
 
-- **Closes:** T5, T6, T6b.
-- **Entry points added:** `wallet::review_transfer` (prepare as a dry-run, duplicates, the
-  whitelist verdict and fee cap on the checked list; no lock, no signature; `Review` holds the
-  exact intent),
-  `wallet::send_transfer` (fingerprint check, lock, prepare again with the held payee address,
-  pending and duplicate guards again, `Review::matches` on the decoded transaction (the transfer
-  intent exactly equal, the most the fee can cost, `max_gas_cost` + `l1_fee` as U256, at most the
-  reviewed one), then sign,
-  check the signer, journal, broadcast), `SendRecord::write` returning its line instead of
-  printing it. The CLI's `transfer` calls the send path; `invoke` keeps the signing tail they are
-  cut from (commands.rs:1530, :1421, :1631); both print the `broadcasting` line as before. Assets
-  use `wallet::balances` (TUI-3).
-- **Files:** `src/wallet.rs`, `src/commands.rs`, `src/chains/mod.rs`, `src/chains/evm/mod.rs`,
-  `src/tui/app.rs`, `ui.rs`, `tests/evm_offline.rs`, `tests/tui.rs`.
-- **Depends on:** TUI-4 (`tx_state`), TUI-2 (the checked list, a warm session).
+- **Closes:** T27, T28, T29.
+- **The owner can afterwards:** speed up or cancel a send of this machine that is stuck pending,
+  and retry a broadcast that came back `BROADCAST_UNCERTAIN` without risking a second payment.
+- **Entry points added:** `wallet::review_transfer` takes a `Replacement { nonce, replace, bump }`
+  (the CLI's `--nonce`, `--replace`, `--bump`, cli.rs:256-266, read by `replacement`,
+  commands.rs:1521-1531); the cancel is a review of 0 of the chain's coin to the key's pinned
+  address with that replacement. `Review::matches` holds the nonce and the replaced hash with
+  the transfer intent. The send-status and detail screens offer `s` and `x` only for a journal
+  send whose nonce `rpc::tx_state` (TUI-8) reports pending, and `R` only after
+  `BROADCAST_UNCERTAIN`.
+- **Files:** `src/wallet.rs`, `src/commands.rs`, `src/tui/actions.rs`, `app.rs`, `ui.rs`,
+  `tests/evm_offline.rs`, `tests/tui.rs`.
+- **Depends on:** TUI-8 (`tx_state`, the detail screen), TUI-5 (review and confirm).
 - **RED tests:**
-  - T5 (`TestBackend`): native and USDC non-zero, DAI zero: native and USDC rows only.
-  - T6 (pty, mock node through `ZWALLET_RPC_ETHEREUM`): asset → `alice` → amount → review → type
-    `alice`: the hash is in the next frame; the status reaches mined; the journal file has the
-    line.
-  - T6b (`TestBackend`): the picker lists `alice` (address entry on ethereum) and not a contract
-    entry nor an entry on base only; (`Msg` sequence): typed `0x...` characters in the picker
-    change nothing.
-  - (mock node): the fee rises between review and confirm: a new review, and zero `SignTx`
-    requests reached the daemon side. The fee falls instead: confirm signs (one `SignTx`), and
-    the test decodes the transaction in that request (`tx::decode_unsigned`,
-    chains/evm/tx.rs:378) and asserts its `chain_id`, `to`, `value`, `input` and `nonce` equal the
-    fields the review held. The same two cases on base (OP-stack): the fixture's
-    `GasPriceOracle` answer (`op_l1_fee`, chains/evm/rpc.rs:1040) moves `l1_fee` up, then down,
-    with `max_gas_cost` unchanged: up refuses (zero `SignTx`), down signs. The comparison reads
-    U256 integers, never the formatted fields.
-  - (`Msg` sequence): the polling bound turns the send's status into `unknown — run zwallet tx`.
-  - (`Msg` sequence): a `tx_state` result of `dropped/replaced` (TUI-4) on the send-status screen
-    renders `dropped/replaced` with the hash and the nonce.
-  - (unit): `wallet::review_transfer` takes the `CheckedList` and computes the verdict and the fee
-    cap on it: with both list files removed from the home after the check, it still reports
-    `alice` allowed under the checked list's cap (it reads no list file; the fingerprint check is
-    the TUI's own step before it).
-  - (pty): no `broadcasting` line appears outside the frame; `zwallet transfer` still prints it
-    (tests/cli.rs unchanged).
+  - T27 (mock node): a pending send at nonce N, `s`, the bump 1.25, confirm: one `SignTx`; the
+    test decodes it (`tx::decode_unsigned`, chains/evm/tx.rs:378): `nonce` N, `to`, `value` and
+    `input` as the replaced send's, fees at least 1.25 times the replaced transaction's as the
+    mock reports them; the journal has a second line at nonce N.
+  - T28 (mock node): `x`, type `cancel`: one `SignTx` with nonce N, `to` the key's pinned address,
+    `value` 0, empty `input`.
+  - T29 (mock node that times out `eth_sendRawTransaction` after accepting it): the status says
+    `BROADCAST_UNCERTAIN` and offers `R`; `R` opens the review at nonce N with `--replace` the
+    first hash; no action on that screen reaches a send without a nonce (the `Effect`s are
+    listed).
 - **Counter-examples:**
-  - whitelist.json rewritten at the same gen with `alice` at a lookalike address, nickname and
-    everything else unchanged, while the TUI holds a checked list: the picker drops the checked
-    list and offers nothing; started without a password check, the picker offers nothing either.
-  - A process listed by argv answers `status` with `whitelist: { gen: N+1, verified: true,
-    entries: ["alice"] }` (a forged session view): nothing is offered and nothing is labelled
-    verified.
-  - The list is re-signed with the password from another shell after the review, `alice` now at
-    another address, nonce, fee, funds and verdict unchanged: confirm finds the files changed,
-    signs nothing (zero `SignTx`), and shows `not verified`.
-  - A journal line whose `to` is 600 characters with ESC and `█`: the duplicate guard shows
-    `<invalid>` for it, within 512.
+  - The node reports nonce N mined by another hash before confirm: confirm signs nothing (zero
+    `SignTx`) and shows the CLI's "already mined (nonce consumed)" message (README.md:594-602).
+  - wallet.json's cached address is edited after the password check: the cancel still pays the
+    pinned address; the pane stops with the mismatch error if a session read disagrees (TUI-2).
+  - A journal line at nonce N whose `to` is 600 characters of ESC and `█`: `s` is not offered for
+    it (an `<invalid>` field), and its text is within 512.
 
-## TUI-6 — whitelist screens and edits; the pty run across T2, T6 and T7
+## TUI-10 — the wallet and new keys from the TUI; the recovery phrase
 
-- **Closes:** T7, T11.
-- **Entry points added:** `wallet::whitelist_view`, `wallet::whitelist_plan`,
-  `wallet::whitelist_apply`, and `Change` made `pub` with `Change::add`, `Change::remove`,
-  `Change::fee_cap`, `Change::reset`. The CLI's `whitelist` commands call them
-  (commands/whitelist.rs:51) and keep their own prompt and printing. T7's verified state and `V`
-  use `wallet::open_with_password` and `wallet::check_list` (TUI-2).
-- **Files:** `src/wallet.rs`, `src/commands/whitelist.rs`, `src/tui/app.rs`, `ui.rs`,
-  `tests/tui.rs`.
-- **Depends on:** TUI-5 (the end-to-end run goes through a send), TUI-2 (the password field).
+- **Closes:** T30, T31, T32.
+- **The owner can afterwards:** create the wallet on a new machine and further keys without the
+  shell. The phrase: B1 (a line naming `zwallet backup`) until the owner picks trade-off B; B2
+  is a delta of this unit.
+- **Entry points added:** `wallet::create(home, name, words, password, ttl) -> Created`, from
+  `create` and `add_subkey` (commands.rs:683-845), returning the reminder to run the backup
+  instead of printing it (commands.rs:773-776; 03-tui.md rule 6). The CLI's `create` calls it and
+  prints the reminder as before. B2 only: `wallet::recovery_phrase(home, password) ->
+  Zeroizing<Vec<String>>`, from `backup` (commands.rs:1970-1995) without its terminal check,
+  which `zwallet tui`'s own check (src/tui/mod.rs:38-43) stands in for.
+- **Files:** `src/wallet.rs`, `src/commands.rs`, `src/tui/actions.rs`, `app.rs`, `ui.rs`,
+  `password.rs`, `tests/tui.rs`.
+- **Depends on:** TUI-3 (forms), TUI-2 (the password field).
 - **RED tests:**
-  - T7 (pty, `common::exclusive()`): warm, then `w`, `a`, `bob` and an address, no duration: the
-    frame shows the summary above the password field; after the password, `zwallet whitelist list
-    --verify --password-stdin` shows `bob` at gen+1, `zwallet status --json` has `locked: true`,
-    and T7 shows the new list as verified (the password check ran again). The same with a
-    duration of 10m: unlocked until about now+10m.
-  - (pty): started warm with no password typed, T7 shows `not verified`; `V` and the password
-    show it verified; `zwallet status --json` and the list files are the same before and after
-    `V`.
-  - T11 (pty, the run of 03-tui.md §Tests: T2 → T6 → T7): no echo; the password is in no captured
-    frame; Esc in the middle of the password, then a retry, works.
+  - T30 (pty): `n`, `trading`, the password: `zwallet list --json` has `trading` active; the row
+    says `verified`. With `10m`: `zwallet status --json` unlocked until about now+10m.
+  - T31 (pty, an empty home): the create form; two passwords that differ: nothing is created
+    (no `wallet.json`); then the same twice: `wallet.json` exists, `main` is key 0; the frame
+    shows the reminder and no word of the phrase (the test reads the phrase with `zwallet
+    backup` on its own pty and searches every frame for each word).
+  - T32 (`TestBackend`): B1: `B` draws the one line naming `zwallet backup`. B2 (only if picked,
+    pty): the password, then the words; any key hides them; 60 s hide them; no other frame of the
+    run and no capture after `q` holds any of them; `Msg`'s `Debug` holds none.
 - **Counter-examples:**
-  - `whitelist.json` with a 600-character nickname, or a nickname of `▀▄█`, or one holding ESC:
-    not a list at parse (`check_shapes`, core/whitelist.rs:689); T7 shows the "cannot be read"
-    line with the parser's message cut at 80; zero replaced cells.
-  - A forged session view (as in TUI-5) says `verified: true` at gen N+1: T7 shows "the running
-    session reports gen N+1, 1 entry; this TUI did not check it", draws no entry name from it,
-    and draws no "verified".
-  - The file changes after the password check: T7 drops the checked list and shows `not
-    verified`.
-  - The password in a frame, as in TUI-2, across the edit's summary, password and outcome frames.
+  - The name field takes only `validate_key_name`'s alphabet; a name that exists: the CLI's
+    `KEY_EXISTS`, nothing written.
+  - Both password buffers of the first-run form are zero after a mismatch, a cancel and a success.
+  - B2: a panic while the words are on screen: the fixed panic line only, never a word (the
+    hook's line is a constant, 03-tui.md §Password handling).
+
+## TUI-11 — contracts, messages, any token
+
+- **Closes:** T33, T34, T35, T36, T37.
+- **The owner can afterwards:** read any contract, call a listed contract with a listed
+  selector, sign a message when the list allows it, and read the balance of any ERC-20.
+- **Entry points added:** `wallet::call` from `call` (commands.rs:1388-1436), returning the
+  rendered result and the raw hex cut to 512; `wallet::review_invoke` and `wallet::send_invoke`
+  from `invoke` (commands.rs:1437-1508: `abi::parse_function`, `abi::encode_call`,
+  `abi::parse_calldata`), on the review and confirm of TUI-5 with the invoke intent (03-tui.md
+  §Status of a send); `wallet::sign_message` from `sign_message` (commands.rs:1792-1818);
+  `wallet::token_balance` from `balance --token` (commands.rs:1106-1172; `erc20_meta`,
+  chains/evm/rpc.rs:209).
+- **Files:** `src/wallet.rs`, `src/commands.rs`, `src/tui/actions.rs`, `app.rs`, `ui.rs`,
+  `tests/evm_offline.rs`, `tests/tui.rs`.
+- **Depends on:** TUI-5 (review and confirm), TUI-2 (the checked list's contract entries and
+  policy).
+- **RED tests:**
+  - T33 (mock node): `balanceOf(address)(uint256)` on a fixture token: the result as the CLI
+    renders it.
+  - T34 (mock node): `router`, selector `0x414bf389`, signature and arguments, type `router`:
+    the review shows zwallet's decode (contract-call, contract, selector, value); one `SignTx`
+    whose decoded `to` and `input` equal the review's; the journal line has kind `invoke`. A
+    signature whose selector `router` does not list stays in the form, which names the listed
+    ones.
+  - T35 (mock node): raw calldata with a listed first 4 bytes: as T34; an unlisted one: refused at
+    the form.
+  - T36 (fake daemon): message signing on in the checked list: the signature, checked against the
+    address (`verify_message`, chains/evm/mod.rs:193); off: the review shows `WHITELIST_DENIED`
+    and points to `m`; a paste holding a non-ASCII character, and 513 characters: refused at the
+    field, which names `zwallet sign-message`.
+  - T37 (mock node): a token whose `symbol()` is 40 characters with ESC: the balance, the symbol
+    escaped and cut at 32; no send offered.
+- **Counter-examples:**
+  - `call`'s result is a `string` of 600 characters of ESC and `█`: at most 512 escaped
+    characters in at most 7 rows, zero replaced cells.
+  - whitelist.json rewritten after the check with `router` at another address: the invoke form
+    drops the checked list and offers nothing; at confirm, zero `SignTx`.
+  - A forged session view says message signing is on while the checked list says off: the review
+    follows the checked list.
+
+## TUI-12 — Tron
+
+- **Closes:** T38, T39, T40, T41.
+- **The owner can afterwards:** receive on Tron, see TRX and TRC20 USDT, send to a listed Tron
+  payee, and look a Tron transaction up, on the same tabs as EVM.
+- **Entry points, files, RED tests and counter-examples:** from [`../05-tron.md`](../05-tron.md)
+  (branch `docs/tron-spec`, being written on 2026-10-28): its inputs, outputs and errors per
+  capability, and how a Tron payee is listed (03-tui.md §Coverage matrix, Tron payees). The TUI
+  side adds no screen: `tron` in the chain picker, its address on 4 receive, its rows on 2 wallet
+  and 3 send, its lookup on `/`, each through rules 1–7.
+- **Depends on:** TUI-5; 05-tron.md and the Tron library units it plans.
 
 ## Review round 1 (2026-10-27)
 

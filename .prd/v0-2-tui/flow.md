@@ -3,8 +3,8 @@
 Status: **in-progress**, 2026-10-27, read from `origin/main` c7d3f13 (PR #12), revised after
 review rounds 1 and 2 the same day. For every TUI behaviour in [`../03-tui.md`](../03-tui.md)
 this page names the code that does it today, with `file:line`, what it returns, and whether the TUI can
-call it as it is. Every line reference is to that commit. The units TUI-1 … TUI-6 in
-[`units.md`](units.md) close the gaps named here.
+call it as it is. Every line reference is to that commit, except §Functions added on 2026-10-28
+(24f4b5b). The units TUI-1 … TUI-12 in [`units.md`](units.md) close the gaps named here.
 
 ## Labels
 
@@ -194,3 +194,28 @@ it keeps its own path.
 | Panic hook's line | `eprint_line` (core/terminal.rs:57) writes through the filter | | exists | the hook prints one fixed line with it, never the payload |
 | Password buffer: fixed capacity, wiped | `MAX_SECRET` = 1024 bytes (core/password.rs:13); `into_password` (:97) and `Zeroizing` buffers | | exists for the limit; the TUI's own buffer is **missing** | `src/tui/password.rs` |
 | No core dump while the password is held | `disable_core_dumps` runs first in every command (cli.rs:473, core/password.rs:23) | | exists | none (`zwallet tui` is a command like the others) |
+
+## Functions added on 2026-10-28
+
+For the rows of [`../03-tui.md`](../03-tui.md) §Coverage matrix that the 2026-10-20 plan did not
+have. Read from `origin/main` 24f4b5b (TUI-1a and TUI-1b merged); `wallet.rs` now exists with
+`keys`, `status` and `net` (wallet.rs:40, :103, :155).
+
+| Behaviour | Code today | Status | Split | Unit |
+|---|---|---|---|---|
+| Every network's balances | `every_balance` and `read_network` (commands.rs:1173-1350) | exists, needs a library entry point | `wallet::every_balance(home, key)` | TUI-3 |
+| Every family's address | `addresses` (commands.rs:1054) | exists, needs a library entry point | `wallet::addresses(home, key)` | TUI-4 |
+| Repair a modified cache from the seed | `address --verify`: `store::unlock_repairing` (commands.rs:965-1052, :973) | exists, needs a library entry point (reads the password, :971) | `wallet::repair(home, password) -> Repaired` | TUI-4 |
+| Every key's address from the seed | `list --verify` (commands.rs:846-908) through `open_with_password` (:660) | exists, needs a library entry point | TUI-2's `wallet::open_with_password` with every key | TUI-4 |
+| `--allow-ptrace-scope-0` for the TUI's sessions | `check_ptrace_scope` (core/protocol.rs:452) takes the flag; `Command::Tui` has no such flag (cli.rs:83-93) | **missing** in the TUI | a flag on `Command::Tui`, passed to `wallet::prepare_unlock` | TUI-4 |
+| Overrides and a fee ceiling on the review | `SendArgs` (cli.rs:242-280); `max_fee_wei` (commands.rs:1532) | exists, needs a library entry point | parameters of `wallet::review_transfer` | TUI-5 |
+| Message-signing flag change | `Change::MessageSigning` (commands/whitelist.rs:112) | exists, needs a library entry point | `Change::message_signing` | TUI-6 |
+| Lookup by a typed hash | `tx` (commands.rs:1783) → `lookup_tx` (chains/evm/rpc.rs:1290) | exists | none (the detail is `rpc::tx_detail`, TUI-8) | TUI-8 |
+| Replacement at nonce N | `replacement` (commands.rs:1521-1531) reads `--nonce`, `--replace`, `--bump`; `transfer_with` (:1554) | exists, needs a library entry point | `Replacement` in `wallet::review_transfer` | TUI-9 |
+| Create the master seed or a key | `create` and `add_subkey` (commands.rs:683-845); the backup reminder printed (:773-776) | exists, needs a library entry point (reads the password, prints) | `wallet::create(...) -> Created` with the reminder as text | TUI-10 |
+| The recovery phrase | `backup` (commands.rs:1970-1995) | exists; a TUI entry point only if trade-off B picks B2 | `wallet::recovery_phrase(home, password)` | TUI-10 |
+| `call` | `call` (commands.rs:1388-1436) | exists, needs a library entry point | `wallet::call` | TUI-11 |
+| `invoke` | `invoke` (commands.rs:1437-1508) and `sign_and_send` (:1647) | exists, needs a library entry point | `wallet::review_invoke`, `wallet::send_invoke` | TUI-11 |
+| `sign-message` | `sign_message` (commands.rs:1792-1818) | exists, needs a library entry point | `wallet::sign_message` | TUI-11 |
+| A token by contract | `balance --token` (commands.rs:1106-1172), `erc20_meta` (chains/evm/rpc.rs:209) | exists, needs a library entry point | `wallet::token_balance` | TUI-11 |
+| Tron | none on main; 05-tron.md is being written (branch `docs/tron-spec`) | **missing** | per 05-tron.md | TUI-12 |
