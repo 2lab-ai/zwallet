@@ -47,7 +47,8 @@ no account, no API key, no telemetry and no OS keychain.
   `1y` = 365d), and `zwallet lock`. A daemon holds **only the key** for that duration. Everything
   else runs in a one-shot CLI process.
 - **G6 Chain families.** EVM is implemented. Solana and TON slot in later behind the same family
-  boundary without changing the wallet file or the daemon protocol.
+  boundary without changing the wallet file or the daemon protocol. Tron (TRX, TRC20 USDT) is the
+  first such family, planned for v0.3: [`05-tron.md`](05-tron.md).
 - **G8 Signed whitelist (v0.1, WU1b).** Funds leave only to entries of a list signed with a key
   separate from the seed, enforced by the daemon. Approvals are revoke-only, there is a per-chain
   fee cap, and `sign-message` is gated ([`04-whitelist.md`](04-whitelist.md)).
