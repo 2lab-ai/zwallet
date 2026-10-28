@@ -1,7 +1,8 @@
 # zwallet — TUI
 
 Status: **planned** (v0.2), revised 2026-10-20 after two spec reviews, revised 2026-10-27 against
-PRs #6–#12 (`origin/main` c7d3f13) and after review rounds 1 and 2 the same day. The signed
+PRs #6–#12 (`origin/main` c7d3f13) and after review rounds 1 and 2 the same day, and on
+2026-10-28 for TUI-1b (§Changes on 2026-10-28). The signed
 whitelist shipped in v0.1 (WU1b, PR #4, [`04-whitelist.md`](04-whitelist.md)). TUI-1 starts once the
 agent-side v0.1 work is merged; G3 and G4 wait on owner actions only and do not block TUI code
 ([`v0-2-tui/loop.md`](v0-2-tui/loop.md) §Start condition). Fixed user statement:
@@ -80,18 +81,38 @@ Global: ↑/↓ j/k · Enter · Esc back · r refresh · L lock (all daemons) ·
 Transfer and Whitelist, while the list is not checked: V = check it with the password (nothing else)
 ```
 
-- **Status bar:** chain · key · short address · address trust (§Address trust) ·
-  **`signing open (agent too) until 14:32`** or `locked` · RPC host (redacted). The warm-up opens
-  signing for every client of the daemon, including the agent, and the bar says so. The lock
-  state is read again every 5 s and on `r`.
+- **Status bar:** two lines at the bottom. Line 1: chain · key · short address · address trust
+  (§Address trust). Line 2: **`signing (agent too) until 14:32Z`** or `locked` · RPC host
+  (rule 3). The expiry is drawn by zwallet from the RFC 3339 time the daemon reports
+  (`core::time::parse_rfc3339_utc`), in UTC, with the date in front when it is a day or more
+  away (`2027-10-28 14:32Z`); one that does not parse is shown as it came (escaped, at most 64),
+  cut to 17 with `...` in the bar. The warm-up opens signing for every client of the daemon,
+  including the agent, and the bar says so. The lock state is read again every 5 s and on `r`,
+  and is said once, on line 2. After `L` the bar says `checking...` until a fresh status lands;
+  a key or status read started before the lock finished is dropped. Each line fits its width
+  with every value whole or cut with `...`, never at the edge. On line 1 the trust words of the
+  state come first and the key name gives way: it is cut with `...` to what the chain, the short
+  address and those words leave, at most 32 and at least 8 (5 characters and `...`). An
+  impostor's `NOT this build's key daemon: ` keeps room for 16 characters of its warning before
+  the name gets more; the rest of the warning is cut with `...`. Only words that cannot fit beside
+  the narrowest name are cut, with `...` too; at 80 columns none are (the longest, the 40 of
+  `not verified (no session check on Linux)`, fit beside 8 with the widest chain). In the key
+  list the name is cut to 27, or less when the index is wider than three digits, so the address
+  after it is whole; on line 2 the expiry is cut to 17 and a status error to 37, and the RPC host
+  is at most 32. `q` while
+  `L` is stopping daemons waits for it (`locking... (quits when done)`); a stop that failed is
+  printed after the terminal is given back.
 - **Review screen:**
   - payee nickname and full address, asset and amount;
   - the fee estimate and the fee cap;
   - the whitelist verdict, the pending guard and the duplicate guard (02 §Send safety).
   - A guard failure shows its message. An override (allow-pending or allow-duplicate) is a
     separate key press, with the warning on screen.
+- **Terminal:** `zwallet tui` needs stdin on a terminal (raw mode is set on stdin, and the panic
+  hook restores stdin's modes) and stdout on one; otherwise it refuses before taking either.
 - **Size:** below 80 columns or 24 rows the TUI draws one line, `terminal too small (80x24
-  needed)`, and nothing else.
+  needed)`, and nothing else. At 80x24: a title line, the pane (bordered with `+ - |`, 78 columns
+  inside), a key-hint line, and the two bar lines.
 
 ## Display integrity in the TUI
 
@@ -147,7 +168,7 @@ environment, and what the human types.
 | `whitelist.json`, `whitelist.next.json` | T6 picker, T7, T4 nicknames | shape-checked at parse (`check_shapes`, core/whitelist.rs:689: nickname `a-z 0-9 _ -`, `0x` hex address and selectors, chain-key shape, decimal caps), else not a list; the parser's message quotes at most 80 (`clip`, :450); names and fee caps from an unchecked file share one 512 budget (`FileTextBudget`, commands/whitelist.rs:899); one field at most 64 (`SHOWN_CHARS`, :1236); a password-checked list up to 100 entries, an unchecked one within one 512 budget (`list_text`, :1459-1520); chains or selectors at most 16 per entry (`ITEMS_SHOWN`, :1244). An address or a nickname that a payee picker, a review or a T4 label shows comes only from the password check |
 | the send journal | T3 rows, T4 local record, T6 guards | each field in the shape zwallet writes it, else `<invalid>` (`EntryText::of`, chains/mod.rs:756); at most 512 per message (`JOURNAL_TEXT_MAX`, :692) |
 | an RPC endpoint's error | T3 network line, T4, T6 | scrubbed of the URL's key (`Net::redact`, chains/mod.rs:282), escaped and cut to 512 where the error is built (`failed`, chains/evm/rpc.rs:109-140); a network's line cut to 72 (`brief`, commands.rs:1143, :1355) |
-| `ZWALLET_RPC_<CHAIN>` (the environment) | the status bar's RPC host | `redact_url` (chains/mod.rs:490-512): the origin only, anything after it `/<redacted>`, a value that is not a URL with a host `<redacted>` whole |
+| `ZWALLET_RPC_<CHAIN>` (the environment) | the status bar's RPC host | the host (and port) of the origin `redact_url` keeps (`url_origin`, chains/mod.rs:476: key-like host labels redacted), without the scheme and without anything after the origin; at most 32, cut with `...`; a value that is not a URL with a host `<redacted>` |
 | the explorer | T3 rows | the shape check in §History; no free text from it is ever shown |
 | what the human types | input fields | each field takes only its own alphabet at the key event: an amount `0-9` and one `.`; a nickname `a-z 0-9 _ -`, at most 32 (`validate_nickname`, core/whitelist.rs:455); an address `0x` then `0-9 a-f A-F`, at most 42; a duration `0-9` and one of `s m h d w y`; the password any byte, shown only as `*`. Any other key changes nothing and nothing else is echoed |
 
@@ -162,7 +183,9 @@ the function of its source above, and the tests assert, per source, that the dra
 that source's budget and appears only on the line or block of that source.
 
 **4. Placement.** In list panes and the status bar each outside value sits on one line, cut to
-the pane's width, never wrapped. Only the error detail view (Enter on an error line) wraps text:
+the pane's width, never wrapped. Only an error view wraps text: the error detail view (Enter on
+an error line), or a pane whose whole content is one error (the keys pane when the key list
+cannot be read):
 one source alone at a time, the text already escaped (`escape`, core/text.rs:40-50, which
 `ascii_inert`, :69, runs first, turns an outside newline into `\u{a}`, so a newline can never
 start a row of its own), at the pane's inner width of at least 78 (the size rule keeps the
@@ -208,7 +231,7 @@ The TUI shows an address's trust as the CLI's `verified` and `verifiedBy` say it
 |---|---|---|
 | `verified by password` | the password check of this TUI session derived this key's address from the seed (§Password check) | `derive_checked` (commands.rs:647), as `list --verify` derives it |
 | `verified by session` | unlocked, no password check yet, and every answer for the address came from this build's key daemon of this home (macOS only) | `Trust::Session` (commands.rs:555-566), `check_peer` (core/protocol.rs:1078) |
-| `not verified (locked)` | locked: the cache | `Trust::Locked` |
+| `not verified` | locked: the cache (line 2 says `locked`; the lock state is said once, T1) | `Trust::Locked` |
 | `not verified` | unlocked, but no check passed: a cached address, or Linux, where the daemon's executable is hidden and the session check never passes (core/protocol.rs:1170, :745-751). On Linux the bar adds `(no session check on Linux)` | `Trust::Unverified(None)` |
 | `NOT this build's key daemon: pid N ...; run zwallet lock and unlock again` | another process answered on `d.sock` | `Trust::Unverified(Some(warning))`, `PeerCheck::warning` (core/protocol.rs:1042) |
 
@@ -538,7 +561,7 @@ binary's explorer URLs are fixed (§History); a live test (`cargo test -- --igno
 | ID | Run | Observe |
 |---|---|---|
 | T1 | 2 keys, `b` globally active | both listed, `b` marked; lock state only in the status bar |
-| T2 | Enter on `a` (locked), type the password | bar shows `signing open (agent too) until` ≈ now+1h and `verified by password` for `a`; `zwallet status` agrees; the global active key is still `b` |
+| T2 | Enter on `a` (locked), type the password | bar shows `signing (agent too) until` ≈ now+1h and `verified by password` for `a`; `zwallet status` agrees; the global active key is still `b` |
 | T2b | `s` on `a`, confirm | `zwallet list` shows `a` active |
 | T3 | fixture: 14 txs, the same hash in the journal and in Blockscout, 2 pending | exactly 10 rows; pending rows first; that hash appears once with both sources; coverage note shown |
 | T3b | explorer unavailable (fixture 403) | journal rows only; the note says so; no error banner covering the list |
@@ -561,6 +584,27 @@ binary's explorer URLs are fixed (§History); a live test (`cargo test -- --igno
 - At least one counter-example per unit ([`v0-2-tui/units.md`](v0-2-tui/units.md)): an outside
   string with a control character or a QR glyph, a 600-character name, a forged explorer row, a
   rewritten whitelist.json, a forged session view, a password in a frame.
+
+## Changes on 2026-10-28
+
+Decisions of the dispatcher when TUI-1 was split into three PRs
+([`v0-2-tui/units.md`](v0-2-tui/units.md) §TUI-1 split), applied in TUI-1b:
+
+1. Status bar: two lines (§Screens and keys); the expiry in UTC, `HH:MMZ`, with the date in front
+   a day or more away (the date is TUI-1b's addition: a year-long session must not read as
+   ending today).
+2. Rule 3: the RPC host is the origin's host (and port), at most 32 characters, cut with `...`.
+3. Rule 4: a pane whose whole content is one error is an error view and wraps it.
+4. §Address trust: locked, line 1 says `not verified`; `locked` is said once, on line 2 (T1).
+5. Status bar, after TUI-1b's review round 1: line 2 says `signing (agent too) until`, not
+   `signing open (agent too) until`, and drops `rpc `, so the date form (17), the words (26), a
+   separator and a 32-character host fit 78 columns; every value is whole or cut with `...`;
+   `q` waits for a running `L`; a status read from before the lock is dropped.
+6. After TUI-1b's review round 2: key reads carry the generation too; after a lock the bar
+   says `checking...` until a fresh status lands; the key list narrows the name for an index of
+   four digits or more.
+7. After TUI-1b's review round 3: line 1's key name is sized from the trust words drawn in each
+   state (at least 8), so an impostor's warning words are never lost to a long name.
 
 ## Changes on 2026-10-27
 

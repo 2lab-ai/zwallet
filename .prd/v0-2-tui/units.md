@@ -95,7 +95,7 @@ each lands in the PR named below.
 | PR | Branch | Scope | Closes | State |
 |---|---|---|---|---|
 | TUI-1a | `feat/tui-1-shell` | `Cargo.toml`/`Cargo.lock` (ratatui 0.30.2, crossterm 0.29.0; kasuari 0.4.12 and num_threads 0.1.7 pinned to releases at least two weeks old); `src/tui/term.rs`: `FilteredBackend` and `Guard` with the panic hook (one guard per process; a panic while it holds the terminal restores it, writes the fixed line and ends the process with 101), with their RED tests, one of them a child process that panics inside `spawn_blocking`; `src/wallet.rs`: `keys`, `status`, `net`; `list` and `status` call them (no `list` or `status` assertion in `tests/cli.rs` changed; c14's lower bound tolerates a 2 s clock step, 5119e36). `Trust` is `pub`, re-exported as `wallet::Trust`; `Daemon` and its helpers stay in `src/commands.rs` as `pub(crate)` | none | in review |
-| TUI-1b | at dispatch | `Command::Tui { warm, chain }` and its dispatch; `src/tui/mod.rs`, `app.rs`, `ui.rs`, `text.rs`, `style.rs`; `tests/tui.rs` with the cell, style and budget helpers, T1, the T9 frames and the `q` `Msg` test, the T10 `Msg` test, the cached-address counter-example; the README `zwallet tui` section; 03-tui.md §Status bar, the 80x24 layout and rule 3's RPC host row (decisions 2 and 4) | T1 | planned |
+| TUI-1b | `feat/tui-1b-screens` | `Command::Tui { warm, chain }` and its dispatch; `src/tui/mod.rs`, `app.rs`, `ui.rs`, `text.rs`, `style.rs`; `tests/tui.rs` with the cell, style and budget helpers, T1, the T9 frames and the `q` `Msg` test, the T10 `Msg` test, the cached-address counter-example; the README `zwallet tui` section; 03-tui.md §Status bar, the 80x24 layout and rule 3's RPC host row (decisions 2 and 4), rule 4's error view (decision 1) and the locked trust wording (§Changes on 2026-10-28); after review rounds 1 to 5, `q` waits for `L`, reads carry a generation, the bar and the key rows keep every value whole or `...`-cut at 80x24, and `assert_placed` finds any stray copy of a shown value | T1 | approved after review round 5, 2026-10-28 |
 | TUI-1c | at dispatch | the T9 pty test (`q`, then canonical mode with echo), the T10 pty test (`zwallet lock` from a second process, `locked` within two refreshes), the argv-listed fake counter-example, the attacker moved into `tests/common`, the pty helpers (decision 5) | T9, T10 | planned |
 
 Decisions (the dispatcher's, 2026-10-28):
@@ -103,7 +103,7 @@ Decisions (the dispatcher's, 2026-10-28):
    `VALIDATION_ERROR`, its value escaped and cut at 64 as the CLI does, then wrapped inside the
    pane.
 2. The status bar is two lines at the bottom: line 1 chain · key · short address · trust; line 2
-   `locked` or `signing open (agent too) until HH:MMZ` (UTC, through
+   `locked` or `signing (agent too) until HH:MMZ` (UTC, through
    `core::time::parse_rfc3339_utc`) · RPC host. TUI-1b updates 03-tui.md §Status bar and the
    80x24 layout.
 3. `TestBackend` tests build `StatusView` fixtures; behaviour against a real daemon is covered by
@@ -131,7 +131,7 @@ Decisions (the dispatcher's, 2026-10-28):
 - **Depends on:** TUI-1.
 - **RED tests:**
   - T2 (pty): keys `a` and `b`, `b` active, locked. Enter on `a`, type the password: the frame's
-    bar shows `signing open (agent too) until` ≈ now+1h and `verified by password` for `a`;
+    bar shows `signing (agent too) until` ≈ now+1h and `verified by password` for `a`;
     `zwallet status --json` has the same `expiresAt`; `zwallet list --json` still has `active:
     "b"`.
   - T2b (pty): `s` on `a`, confirm: `zwallet list --json` has `active: "a"`.
