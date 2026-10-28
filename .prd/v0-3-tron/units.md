@@ -178,9 +178,9 @@ excluded. The EVM modules these mirror measure, code + tests (`src/chains/evm/`,
     "base", true)` the entry; `check_shapes` of a list with a `tron` entry passes.
   - TR11 (unit, EVM twin): with a verified list whose `bob` is `chains: ["tron"]`, the EVM
     `check_tx` refuses a native transfer and a registry `transfer` on `base` to `0x<bob's body>`
-    with `WHITELIST_DENIED` and no `command`. Its `payee` path is `covers_chain`, unchanged from
-    `main`, so this also pins what an older build does with such a list. TRON-5 repeats it
-    through the daemon's `sign_tx`.
+    with `WHITELIST_DENIED` and no `command`. This is a new-build regression of the old meaning,
+    not a run of an old binary: its `payee` path is `covers_chain`, as on `main`. TRON-5 repeats
+    it through the daemon's `sign_tx`.
 - **Counter-examples:**
   - A hand-edited `whitelist.json` adds a `tron` entry: the list does not verify, every
     signature is `WHITELIST_INVALID` (as W4), and `list` shows the entry's `T…` as unverified.
@@ -241,8 +241,10 @@ excluded. The EVM modules these mirror measure, code + tests (`src/chains/evm/`,
 - **Scope:** `tron::rpc`: `getblock`, `getaccountresource`, `getchainparameters`, the simulation;
   `prepare_transfer` (reference block, `timestamp` = its timestamp, `expiration` = `timestamp` +
   60,000 ms, `fee_limit` = ceil(`energy_used` × `getEnergyFee` × 1.2) and at least 1 TRX; the
-  preflight with `estimatedCostSun`, `maxCostSun` and `pricesAtBlock`; `INSUFFICIENT_FUNDS`
-  against `maxCostSun`; the owner-permission refusal); `inspect_signed` (`txHash` =
+  preflight with `estimatedCostSun`, `maxCostSun` and `pricesAtBlock`, every price from this
+  preflight's `getchainparameters` (P_tx, P_e, P_sys, P_ca, R), never M5's constants, and for a
+  new payee the larger of the two bandwidth branches, as 05 §Fees gives it;
+  `INSUFFICIENT_FUNDS` against `maxCostSun`; the owner-permission refusal); `inspect_signed` (`txHash` =
   sha256(`rawData`), `rawData` = the bytes sent, the signer recovered); `dry_run_check`'s Tron arm
   (`src/commands/whitelist.rs:971-1000`); `--nonce`, `--replace`, `--bump`, `--allow-pending`,
   `--max-fee-gwei` refused on `tron`; `--token` other than `usdt` refused on `tron`.
@@ -254,14 +256,25 @@ excluded. The EVM modules these mirror measure, code + tests (`src/chains/evm/`,
   - TR17 (mock): dry-run to `@bob` → `fees`, `feeLimit`, `whitelist: {allowed: true}`, `txHash`,
     `recoveredFrom`, no raw bytes in the output; to an unlisted `T…` → `whitelist: {allowed:
     false, …}`, zero `SignTx`.
+  - TR17 (mock, activation at read prices): TRX to a payee that does not exist while the mock's
+    `getchainparameters` says P_sys = 2,000,000, P_ca = 300,000, P_tx = 2,000 (none of them M5's):
+    `maxCostSun` = amount + max(2,300,000, `bytes` × 2,000), `estimatedCostSun` = amount +
+    2,300,000; a balance between M5's figure (amount + 1,100,000) and that maximum is
+    `INSUFFICIENT_FUNDS`.
+  - TR17 (mock, staked bandwidth gone): the same payee with staked bandwidth that covers `bytes` ×
+    R at the preflight: `estimatedCostSun` = amount + 2,000,000 (no P_ca), `maxCostSun` unchanged
+    (it still holds P_ca). TR20 then lets the receipt burn P_ca and checks it fits.
+  - TR17 (mock, contract payee): TRX to a payee whose `getaccount` says `type: "Contract"`:
+    `maxCostSun` = amount + max(P_sys + P_ca, `bytes` × P_tx), since it can self-destruct before
+    the block.
   - TR18 (mock): the five cases → `INSUFFICIENT_FUNDS` ×4 and `RPC_ERROR`, zero `SignTx`; the
     case with a balance above `estimatedCostSun` and below `maxCostSun` names `maxCostSun` and the
     `shortfall` against it.
   - TR19 (cli): the five flags, and `--token <T…>` → `VALIDATION_ERROR`, the mock saw no request.
   - (unit) the built `raw_data` has `timestamp` = the reference block's and `expiration` =
-    `timestamp` + 60,000; `fees.maxCostSun` = amount + `fee_limit` + bytes × price (+ activation
-    for a new payee), whatever staked or free resources the account has. The golden vectors do not
-    test this: the node built them with its own clock.
+    `timestamp` + 60,000; `fees.maxCostSun` follows 05 §Fees for each of TRX to an existing payee,
+    TRX to a new payee and USDT, whatever staked or free resources the account has. The golden
+    vectors do not test this: the node built them with its own clock.
 - **Counter-examples:**
   - The mock answers `getEnergyFee` 10^15: the computed `fee_limit` is above the cap, and the
     dry-run reports the `FEE_CAP_EXCEEDED` refusal before asking the daemon.
@@ -280,8 +293,12 @@ excluded. The EVM modules these mirror measure, code + tests (`src/chains/evm/`,
   the node's head block as the clock, a node more than 60 s behind the local clock never gives
   `expired-unseen`, an id outside the journal is `not found`; the returned `raw_data` hashed and
   compared); the duplicate and `BROADCAST_UNCERTAIN` messages with the second-payment sentence; a
-  wording test that scans `src/` and `.prd/05-tron.md`, README for text calling a resend safe (as
-  04's round-8 test does for restore hints); explorer URLs (close Q1 with one live Tronscan page
+  wording test that refuses, case-insensitive, in `src/` and `README.md`, the phrases 05 §Send
+  safety lists ("cannot double-pay", "can't double-pay", "no double payment", "cannot be paid
+  twice", "safe to send again", "safe to resend", "safe to retry", "you can resend", "until then do
+  not send", "after that, send", "can never be included", "was never included", "was not paid",
+  "definitively"), as 04's round-8 test does for restore hints; it skips `.prd/05-tron.md`, which
+  quotes them; explorer URLs (close Q1 with one live Tronscan page
   read); README §The send journal and `tx`; one line in `02-architecture.md` §Send safety pointing
   to 05.
 - **Files:** `src/chains/mod.rs`, `src/chains/tron/{mod,rpc}.rs`, `src/commands.rs`,
@@ -291,6 +308,8 @@ excluded. The EVM modules these mirror measure, code + tests (`src/chains/evm/`,
     transaction; txHash = sha256(raw_data); one journal line with `expiresAt`; the USDT receipt
     `SUCCESS` with 32 zero bytes of `contractResult` → `success: true`; `REVERT` → `success:
     false`.
+  - TR20 (mock): a TRX send to a new payee whose receipt burns P_ca, though staked bandwidth
+    covered it at the preflight: `feeSun` within `maxCostSun`.
   - TR20 (mock): a USDT receipt with energy above the simulation and within `fee_limit` →
     `success: true`, `feeSun` above `estimatedCostSun`, within `maxCostSun`; `OUT_OF_ENERGY` →
     `success: false` with `feeSun` and the burned-fee message.
@@ -318,9 +337,11 @@ excluded. The EVM modules these mirror measure, code + tests (`src/chains/evm/`,
 
 ## Before C starts: Q3
 
-One `POST /wallet/broadcasthex` to each of `tron-rpc.publicnode.com` and `api.trongrid.io`,
-carrying an **unsigned** transaction (an `encode_raw` output with no signature; no node can
-include it, java-tron refuses it, `TransactionCapsule.java:654-656` "miss sig or contract"). A
-`SIGERROR` reply shows a keyless POST reaches validation, which closes Q3. A 401 or 403 from the
-default means C changes the default endpoint first. Not done while writing the spec: its brief
-allowed read-only calls only.
+The dispatcher sends one `POST /wallet/broadcasthex` to each of `tron-rpc.publicnode.com` and
+`api.trongrid.io`. Its `transaction` is the hex of a serialized `Transaction {raw_data: 1}` with
+no `signature` field: the envelope, not the bare `encode_raw` output, which would fail as a parse
+error and test nothing. No node can include it (java-tron refuses it,
+`TransactionCapsule.java:654-656` "miss sig or contract"), so the call cannot move funds. A
+`SIGERROR` reply shows a keyless POST reaches validation, which closes Q3; it is not evidence that
+a signed broadcast succeeds (that is TR23). A 401 or 403 from the default means C changes the
+default endpoint first. Not done while writing the spec: its brief allowed read-only calls only.
