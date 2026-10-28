@@ -268,7 +268,9 @@ registry is refused there); every other selector is a `contract-call`.
 **Edits.** `whitelist add | remove | fee-cap | allow-message-signing on|off | reset`. Each runs
 only with a typed password (terminal prompt or `--password-stdin`), in this order:
 0. Before the prompt: the arguments are checked as the list will check them (nickname, address,
-   EIP-55 checksum, chains, selectors, no registry token as a contract, fee amount). With
+   EIP-55 checksum, chains, selectors, no registry token as a contract, fee amount; planned
+   2026-10-28 for TUI-6: no entry at the zero address, refused here and not at parse,
+   [`03-tui.md`](03-tui.md) §Whitelist edits step 0). With
    `--unlock <duration>`, `unlock`'s own start-up checks run too (the duration, Linux
    `ptrace_scope` (`--allow-ptrace-scope-0` accepts it), `/proc` hidepid) and the binary is
    pinned as `unlock` pins it. Then `whitelist.json` and `whitelist.next.json` are **read once**
