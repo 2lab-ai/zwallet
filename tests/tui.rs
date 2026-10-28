@@ -1199,3 +1199,15 @@ fn s_on_a_key_another_process_contradicts_stops_the_pane_and_makes_nothing_activ
     drop(fake);
     assert_eq!(home.run(&["list", "--json"]).ok()["active"], "b");
 }
+
+#[test]
+fn while_s_asks_any_key_but_y_says_no_and_ctrl_c_still_quits() {
+    for (key, quits) in [(Key::Char('q'), false), (Key::Interrupt, true)] {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('s')));
+        assert!(app.confirming().is_some());
+        assert_eq!(app.update(Msg::Key(key)), vec![]);
+        assert!(app.confirming().is_none(), "{key:?}");
+        assert_eq!(app.quitting(), quits, "{key:?}");
+    }
+}
