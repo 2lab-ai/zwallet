@@ -26,8 +26,10 @@ The same day, for every feature (owned by the TUI task, which rewrites `03-tui.m
 ## Fixed scope
 
 **What "the same seed" means.** The key's existing BIP39 seed, no new secret. Key index `i` gets
-the Tron address at `m/44'/195'/0'/0/i`. The first key's address equals TronWeb's default for
-the same mnemonic, so the owner's other Tron wallet shows it.
+the Tron address at `m/44'/195'/0'/0/i`. Key 0's address equals TronWeb's default
+(`m/44'/195'/0'/0/0`) for the same mnemonic, so a wallet that uses that default path shows it.
+Whether another wallet lists later keys in the same order is not claimed
+([`../05-tron.md`](../05-tron.md) Q2).
 
 **What ships:**
 1. `zwallet address --chain tron` (and the `tron` row of `addresses`), verified by the session
@@ -35,8 +37,9 @@ the same mnemonic, so the owner's other Tron wallet shows it.
 2. `zwallet balance` with Tron in it, and `zwallet balance --chain tron [--token usdt]`: TRX and
    USDT (TRC20, contract `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t`, 6 decimals).
 3. `zwallet transfer --chain tron --to <@nick|T…> --amount <dec> [--token usdt] [--dry-run]
-   [--wait]`, TRX and USDT, only to whitelist payees listed for `tron`, with the fee and the cost
-   in TRX shown before sending, and a send refused before signing when the TRX balance cannot pay.
+   [--wait]`, TRX and USDT, only to whitelist payees listed for `tron`, with the estimated and the
+   maximum cost in TRX shown before sending, and a send refused before signing when the TRX
+   balance is below the maximum.
 4. `zwallet whitelist add <nick> <T…> --chains tron`, signed as every edit is.
 5. `zwallet tx --chain tron <txid>`.
 6. For the TUI task: the inputs, outputs, confirmations and errors of each of the above

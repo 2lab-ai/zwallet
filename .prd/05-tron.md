@@ -25,8 +25,9 @@ protocol". Tron is that first test. It differs from EVM in four ways that matter
 
 ## Goals
 
-- **TG1 Address.** The same BIP39 seed gives each key a Tron address. Other Tron wallets restore it
-  from the same mnemonic.
+- **TG1 Address.** The same BIP39 seed gives each key a Tron address. Key 0's address is the one
+  TronWeb derives by default from the same mnemonic; later keys follow zwallet's own index order,
+  which other wallets may not share (Q2).
 - **TG2 Balance.** TRX and USDT (TRC20) for the key, read-only, while locked or unlocked.
   `balance` without `--chain` includes Tron.
 - **TG3 Transfer.** TRX and USDT to a whitelisted Tron payee, with `--dry-run` and `--wait`.
@@ -81,9 +82,9 @@ protocol". Tron is that first test. It differs from EVM in four ways that matter
   and refuses any path outside `m/44'/195'` (`src/utils/constants.ts:6-7`,
   `src/utils/accounts.ts:40-50`, E2). Ledger's Tron app allows only `44'/195'` (`Makefile:43`,
   E3). The layout is the one zwallet's EVM path uses (`m/44'/60'/0'/0/i`,
-  `src/chains/evm/mod.rs:48-50`): the last level counts keys. Key 0 is TronWeb's default, so the
-  first key restores in any wallet that uses it. Which level other wallets count for their second
-  account is not checked ([unverified], Q2).
+  `src/chains/evm/mod.rs:48-50`): the last level counts keys. The claim is key 0 only: its path is
+  TronWeb's default, so a wallet that derives TronWeb's default path shows key 0's address. Which
+  level other wallets count for their second account is not checked ([unverified], Q2).
 - **Address.** `0x41 ‖ keccak256(uncompressed public key without the 0x04 byte)[12..32]`, then
   base58check (4-byte checksum = first 4 bytes of `sha256(sha256(payload))`). 34 characters,
   first character `T`.
@@ -104,7 +105,8 @@ protocol". Tron is that first test. It differs from EVM in four ways that matter
   TWer2… returned balance 8,000,010 sun and an `owner_permission` whose only key is
   `TDRqzjYye3bGaBtg1bAPw5F4duDchNSbtk`, not TWer2… itself (M7). Someone who had the mnemonic gave
   the account to another key. Funds sent there belong to that key. This is the drain that type 46
-  enables (§Daemon), and TR6 uses it as a live fixture.
+  enables (§Daemon). TRON-2 records that `getaccount` answer as a mock fixture for the warning;
+  the live test (TR6) pins neither the balance nor the key, which can change.
 - **Implementation.** The existing `MnemonicBuilder` path (`src/chains/evm/mod.rs:52-65`, alloy's
   `coins-bip32`) with the Tron path; `alloy::primitives::keccak256`; `bs58` 0.5.1 with feature
   `check`; `sha2` 0.10.9. `bs58` 0.5.1 and `sha2` 0.10.9 are already in `Cargo.lock` through
@@ -158,7 +160,8 @@ The calls, all measured 200 on both endpoints except where noted:
 `/wallet/estimateenergy` answered `"this node does not support estimate energy"` on both endpoints
 (M3), so the estimate comes from `triggerconstantcontract`. `broadcasthex` was not called with a
 payload. A payload-free `GET` returned 405 there and 404 for an unknown path, on both endpoints, so
-the servlet is mounted (M9). Whether a `POST` needs a key is open (Q3).
+the servlet is mounted (M9). Whether a `POST` needs a key is open (Q3); PR C closes it before it
+starts (§Open questions).
 
 ### The registry — decided: USDT only
 
@@ -215,7 +218,9 @@ Never written: `ref_block_num` (3), `auths` (9), `data` (10), `scripts` (12).
   USDT 345 for 211; 1+2+133+1+1+65+64 = 267 and 1+2+211+1+1+65+64 = 345.
 
 **Golden vectors** (node-built, unsigned, 2026-10-28 03:15Z, M10). A ~20-line Python encoder of the
-table above reproduced both byte-for-byte, and `sha256` equals each `txID`:
+table above reproduced both byte-for-byte, and `sha256` equals each `txID`. They pin the codec
+only: the node set `timestamp` to its own clock and `expiration` 58,474 ms later, not
+zwallet's "reference block timestamp + 60,000 ms". TRON-6 tests that rule on its own:
 
 ```text
 TransferContract  TYUqBpE3Xxo3UWQAKVvwTfzYMdTm57x1C2 -> TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C, 1 sun
@@ -249,17 +254,22 @@ and `signature` into a fixture.
 `tx` = the 0x-hex `raw_data` bytes. The daemon never receives a txID, an amount, a recipient or a
 fee from the CLI. `FamilyKeys::sign_tx` for Tron, in order:
 
-1. **Decode whole** (`tron::tx::decode_raw`), else `VALIDATION_ERROR` "refusing to sign: …":
-   - at most 1 KiB; fields only from {1, 4, 8, 11, 14, 18}, each at most once, in ascending
-     order, lengths exact (field 1: 2 bytes, field 4: 8 bytes, addresses 21 bytes starting `0x41`);
-     no trailing bytes; varints minimal;
+1. **Decode whole** (`tron::tx::decode_raw`), else `VALIDATION_ERROR` "refusing to sign: …". The
+   same strictness holds at every level: `raw_data`, the `Contract` inside it, the `Any` inside
+   that (`type_url` = 1, `value` = 2, nothing else) and the `TransferContract` or
+   `TriggerSmartContract` inside that. At each level a field outside the table, a field twice, a
+   field out of order, a wrong wire type, a non-minimal varint or a length past the end refuses.
+   - at most 1 KiB; `raw_data` fields only from {1, 4, 8, 11, 14, 18}, lengths exact (field 1:
+     2 bytes, field 4: 8 bytes, addresses 21 bytes starting `0x41`); no trailing bytes;
    - exactly one contract; type 1 or 31 only. Any other type is named in the refusal; type 46
      says "it hands this account to other keys";
    - `type_url` exactly the one for that type; no `provider`, `ContractName`, `Permission_id`
      (absent = 0 = owner; the node picks the permission by this id,
      `TransactionCapsule.java:468-492`);
-   - TransferContract: `amount` > 0 and below 2^63; no `fee_limit`;
-   - TriggerSmartContract: no `call_value`, `call_token_value`, `token_id`; `data` present;
+   - TransferContract: fields 1–3 only; `amount` > 0 and below 2^63; no `fee_limit` in
+     `raw_data`;
+   - TriggerSmartContract: fields 1, 2 and 4 only, so no `call_value` (its field 3),
+     `call_token_value` (5) or `token_id` (6); `data` present;
    - re-encoding the decoded fields gives the input bytes.
 2. **Owner = this key.** `owner_address` must equal `0x41 ‖` this key's 20-byte address, else
    `VALIDATION_ERROR`.
@@ -335,11 +345,18 @@ signed against a Nile block are valid only on Nile, and the CLI checks the genes
     addresses);
   - a bad checksum, a length other than 34, a first byte other than `0x41`;
   - `--contract` with `tron`.
+- **`validate` gains two rules**, so a list that breaks them is never signed, whoever wrote it
+  (today it checks only that each chain is known and that no contract entry sits at a registry
+  token, `src/core/whitelist.rs:294-318`): an entry naming `tron` names no other chain, and an
+  entry naming `tron` is an address entry. `ChainRules` gains `family_of(chain) -> &str`, so core
+  stays chain-agnostic. `check_shapes` (the read side) is unchanged.
 - **`*` means every EVM chain.** Lists signed before this version said `*` when "every chain" was
   the EVM set. If `*` covered `tron`, a signed list would start paying the Tron address that shares
   a body with an EVM payee, which for an exchange deposit address or a Safe is nobody's key.
   `Whitelist::payee` gains a `wildcard: bool`; the EVM policy passes `true`, the Tron policy
-  `false`. README's "`'*'` for every chain" becomes "every EVM chain".
+  `false`. README's "`'*'` for every chain" becomes "every EVM chain", and the release note of the
+  version that adds the Tron signer says: "`*` in a whitelist now means every EVM chain; it never
+  covers `tron`. A Tron payee is added with `whitelist add <nick> T… --chains tron`".
 - **One known collision.** "Each address appears under one nickname" compares stored bodies, so an
   EVM entry and a Tron entry with the same 20 bytes cannot both exist. That happens only when one
   private key is used on both chains. Accepted: the second `add` is refused with a message, nothing
@@ -353,8 +370,9 @@ signed against a Nile block are valid only on Nile, and the CLI checks the genes
   checks the format only, never `validate`'s chain rules (`src/core/whitelist.rs:763-768`), so
   the list still verifies and their daemon signs EVM as before. Their edits refuse it ("unknown
   chain", `validate`, `src/core/whitelist.rs:294-324`, called only by edits, `:1437`). That
-  happens after the first Tron entry, and also after any first `add` or `reset` on a Tron-aware
-  build, since the new list's default caps include `tron`. From then on, edit with a Tron-aware
+  happens after the first Tron entry, and also after any first `add` or `reset` on a build with
+  the Tron signer (PR B2, which adds the `tron` default cap), since the new list's default caps
+  then include `tron`. From then on, edit with a Tron-aware
   zwallet.
 - **`@nick`** (`transfer --chain tron --to @bob`) resolves a `tron` entry to its `T…`; an entry
   that does not name `tron` is `VALIDATION_ERROR` naming its chains.
@@ -394,19 +412,39 @@ Decisions:
   1,000,000 sun. `energy_used` comes from simulating this very transfer
   (`triggerconstantcontract`); a simulation whose `result.result` is not `true` is `RPC_ERROR`
   before signing, naming the revert.
-- **Preflight, before signing**, from `getaccount`, `getaccountresource`, `getchainparameters` and
-  `getaccount(to)` for TRX:
-  - `bandwidthSun` = 0 if staked or free bandwidth covers the bytes, else bytes × price;
-  - `activationSun` (TRX to an account that does not exist) = 1,000,000 + (0 if staked bandwidth
-    covers it, else 100,000);
-  - `energySun` (USDT) = max(0, `energy_used` − (`EnergyLimit` − `EnergyUsed`)) × price;
-  - `maxCostSun` = TRX amount + bandwidth + activation + energy.
-  `INSUFFICIENT_FUNDS` before signing when the TRX balance is below `maxCostSun`, when the USDT
-  balance is below the amount, or when the sender's account is not activated (`getaccount` = `{}`:
-  "this Tron address holds no TRX yet; send it TRX first, for bandwidth and energy").
+- **Preflight, before signing**, from `getaccount`, `getaccountresource`, `getchainparameters` and,
+  for TRX, `getaccount(to)`. Two totals in sun, both at the prices read now:
+  - **`estimatedCostSun`**, what the send is expected to burn: the TRX amount (type 1); bandwidth,
+    0 if staked or free bandwidth covers the bytes, else bytes × `getTransactionFee`; activation
+    (TRX to an account that does not exist), 1,000,000 + (0 if staked bandwidth covers it, else
+    100,000); energy (type 31), max(0, `energy_used` − (`EnergyLimit` − `EnergyUsed`)) ×
+    `getEnergyFee`.
+  - **`maxCostSun`**, the most the signed transaction can burn: the TRX amount (type 1); the
+    signed `fee_limit` (type 31: the node burns at most this for energy, whatever energy the call
+    really uses, `VMActuator.java:583-621` and `ReceiptCapsule.java:275-302`, §Open questions;
+    it is 1.2 × the simulated cost or more); bandwidth as if no staked or free
+    bandwidth were left, bytes × `getTransactionFee` (another transaction can use them first);
+    activation as above when the payee does not exist at the preflight (an account is never
+    removed, so a payee that exists stays free).
+  - **What no field bounds:** a change of `getTransactionFee`, `getEnergyFee` (it changes how much
+    energy `fee_limit` buys, not the TRX it caps), `getCreateAccountFee` or
+    `getCreateNewAccountFeeInSystemContract` by a governance proposal between the preflight and
+    the block. `maxCostSun` is at the preflight's prices, and `fees.pricesAtBlock` names the
+    block they were read at.
+- **The balance check uses `maxCostSun`.** `INSUFFICIENT_FUNDS` before signing when the TRX balance
+  is below `maxCostSun` (`shortfall` = `maxCostSun` − balance), even when it covers
+  `estimatedCostSun`; when the USDT balance is below the amount; or when the sender's account is
+  not activated (`getaccount` = `{}`: "this Tron address holds no TRX yet; send it TRX first, for
+  bandwidth and energy").
 - **Shown before sending**: dry-run and live output carry `fees: {bandwidthBytes, bandwidthSource:
-  "staked"|"free"|"burn", bandwidthSun, activationSun, energy, energySun, feeLimit, maxCostSun,
-  maxCost}` (`maxCost` in TRX).
+  "staked"|"free"|"burn", bandwidthSun, activationSun, energy, energySun, feeLimit,
+  estimatedCostSun, maxCostSun, estimatedCost, maxCost, pricesAtBlock}` (`estimatedCost` and
+  `maxCost` in TRX). "TRX left" anywhere (`nativeBalance` − cost, the TUI review) is balance −
+  `maxCostSun`, labelled "at least".
+- **After the send**, `--wait` adds `feeSun`, what the receipt says was burned. It can exceed
+  `estimatedCostSun` (energy above the simulation) and stays within `maxCostSun` at unchanged
+  prices. A call that runs out of energy is `success: false` (`OUT_OF_ENERGY`) with up to
+  `fee_limit` burned, and the output says so.
 
 ### Send safety without a nonce
 
@@ -421,11 +459,28 @@ so:
   `nonce`; `txHash` is the txID as Tron writes it, 64 lower-case hex digits without `0x`; `to` is
   `T…`. The journal's shape checks (`is_address`, `entry_hash`, `src/chains/mod.rs:708-724`) get a
   Tron arm, so these lines are not shown as `<invalid>`.
-- **Expiration decides.** A transaction not in a block by its `expiration` can never be included.
-  `tx --chain tron <txid>` and `--wait` report `status: "expired"` when the transaction is neither
-  mined nor pending and the clock is past `expiresAt` + 60 s. That is definitive, unlike EVM's
-  "not found". The duplicate-guard message names `expiresAt`, so a human knows when a repeat
-  cannot double-pay.
+- **Expiration is an observation, never proof that nothing was paid.** A transaction past its
+  `expiration` cannot enter a later block. But a node that has no record of it may lag or not
+  index it, so its absence does not show the transaction was never included. zwallet therefore:
+  - takes time only from the node it asks: that node's head block (`getblock`, read in the same
+    lookup), never this machine's clock;
+  - reports `status: "expired-unseen"` only when all of these hold: the expiration is known (the
+    txID is in this key's send journal, which records `expiresAt`); that node's head block
+    timestamp is past `expiresAt` + 60 s; that node has the txID neither mined
+    (`gettransactioninfobyid`, `gettransactionbyid`) nor pending (`gettransactionfrompending`);
+    and that node's head is no more than 60 s behind this machine's clock. The output carries
+    `asOf: {block, blockTime, host}` and says "not included as of block N on <host>; another node
+    may have it. Sending this payment again is a second payment if this one was included";
+  - when that node's head is more than 60 s behind this machine's clock: `status: "not found"`
+    with `nodeBehindSecs` and "this node is <n> s behind; ask another node with `--rpc`", never
+    `expired-unseen`;
+  - a txID that is not found and not in the journal has no known expiration: `status: "not
+    found"`.
+  No message says or implies that sending again is safe. A repeat within 10 minutes still needs
+  `--allow-duplicate`, and the duplicate refusal names the earlier txID and its `expiresAt` with
+  "if it was included, this is a second payment; look it up first (`zwallet tx --chain tron
+  <txid>`)". A wording test scans the code and these docs for text that calls a resend safe, as
+  04's round 8 test does for restore hints.
 - **Broadcast outcomes** (`Wallet.java:507-630`, E6), the request carrying the exact signed bytes:
   - `result: true` → sent. A `txid` in the reply other than the computed one →
     `broadcastWarning`, then the computed one is looked up.
@@ -437,13 +492,15 @@ so:
   - `NOT_ENOUGH_EFFECTIVE_CONNECTION`, `SERVER_BUSY`, `NO_CONNECTION`, `BLOCK_UNSOLIDIFIED`,
     `OTHER_ERROR`, a timeout or an HTTP error → the computed txID is looked up (mined, then
     pending); found = success with `broadcastWarning`; else `BROADCAST_UNCERTAIN` with
-    `expiresAt`: "look it up after <expiresAt + 60 s>; until then do not send it again".
+    `expiresAt`: "look it up with `zwallet tx --chain tron <txid>`; it can still be included
+    until <expiresAt>. Sending this payment again is a second payment if this one was included".
     `NOT_ENOUGH_EFFECTIVE_CONNECTION` can come after the node already holds it (`Wallet.java:578-580`).
 - **`--wait`** polls `gettransactioninfobyid` until `blockNumber` appears (`--wait-timeout`, 90 s
   default). Type 31: `success` = `receipt.result == "SUCCESS"`; any other value (`REVERT`,
   `OUT_OF_ENERGY`, …) is `success: false`. Type 1 has no `receipt.result` (M4): `success` =
   `gettransactionbyid` `ret[0].contractRet == "SUCCESS"`. Output adds `blockNumber`, `energyUsed`,
-  `netUsage`, `feeSun`.
+  `netUsage`, `feeSun`. A wait that ends unmined reports `pending`, `not found` or
+  `expired-unseen` by the rules above.
 - **Lookup answers about another transaction** → `RPC_ERROR`: zwallet hashes the returned
   `raw_data_hex` and compares it with the txID asked for.
 
@@ -456,8 +513,8 @@ so:
 | `addresses` | a `tron` row with `T…`; two QR codes when verified, the EVM one then the Tron one, each captioned |
 | `balance --chain tron [--token usdt\|<T…>] [--rpc <url>]` | `{chain, key, address, symbol, decimals, balance, raw, activated, verified, verifiedBy?, warning?, token?}`; `--token usdt` takes the registry row (symbol and decimals from the registry); `--token <T…>` asks the contract, as EVM `--token` does |
 | `balance` | a `tron` row among the mainnets: native TRX and the USDT token row, `address` on the row (it differs from the EVM address), the row's own `warning`; the QR after the networks stays the EVM one (`balance --chain tron` shows the Tron one) |
-| `transfer --chain tron --to <@nick\|T…> --amount <dec> [--token usdt\|<T…>] [--dry-run] [--wait [--wait-timeout <dur>]] [--allow-duplicate] [--force] [--rpc <url>]` | output below |
-| `tx --chain tron <txid>` | `{chain, txHash, found, status: "mined"\|"pending"\|"not found"\|"expired", from, to, value, valueRaw, symbol, token?, explorerUrl, blockNumber?, success?, feeSun?, expiresAt?, hint?}`; accepts the id with or without `0x` |
+| `transfer --chain tron --to <@nick\|T…> --amount <dec> [--token usdt] [--dry-run] [--wait [--wait-timeout <dur>]] [--allow-duplicate] [--force] [--rpc <url>]` | output below. `--token` takes only `usdt` on Tron; any other value, a `T…` included, is `VALIDATION_ERROR` "only registry tokens are sent on Tron: --token usdt" before any RPC. A `T…` token is for `balance` only |
+| `tx --chain tron <txid>` | `{chain, txHash, found, status: "mined"\|"pending"\|"not found"\|"expired-unseen", from, to, value, valueRaw, symbol, token?, explorerUrl, blockNumber?, success?, feeSun?, expiresAt?, asOf?, nodeBehindSecs?, hint?}` (§Send safety for `expired-unseen`); accepts the id with or without `0x` |
 | `sign-message --chain tron`, `call`/`invoke --chain tron` | `CAPABILITY_UNSUPPORTED` |
 
 `transfer --chain tron` output: dry-run `{dryRun: true, chain, key, from, to, toNickname?, amount,
@@ -509,7 +566,7 @@ For the `03-tui.md` coverage matrix (owned by the parallel TUI task; this spec d
 |---|---|---|---|---|
 | Tron address | key; chain `tron` in the chain picker | `T…`, trust level (session / locked / unverified) | none | `WALLET_LOCKED` for an old key with no cached Tron address (with the `--verify` command); `VALIDATION_ERROR` for a tampered cache |
 | Balance | key | TRX; USDT; `not activated`; the owner-permission warning | none | `RPC_ERROR` (chain identity, 429 from a TronGrid `--rpc`); a USDT row error |
-| Transfer TRX / USDT | payee from the checked list's address entries naming `tron` only (never `*`); asset TRX or USDT; amount (6 decimals) | review: from, `T…` and nickname, amount and symbol, bandwidth source and burn, activation fee, energy and burn, `feeLimit`, max cost in TRX, TRX left, `expiresAt`; then the txID (64 hex) and status pending → mined / success / failed / expired | the exact-intent confirm EVM uses | `WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED` (with the `fee-cap tron` command), `INSUFFICIENT_FUNDS` (TRX for fees, not activated), duplicate and send-lock `VALIDATION_ERROR`, owner-permission refusal, `RPC_ERROR` (simulation revert, node rejection), `BROADCAST_UNCERTAIN` (with `expiresAt`) |
+| Transfer TRX / USDT | payee from the checked list's address entries naming `tron` only (never `*`); asset TRX or USDT; amount (6 decimals) | review: from, `T…` and nickname, amount and symbol, bandwidth source and burn, activation fee, energy and burn, `feeLimit`, estimated and maximum cost in TRX (`estimatedCostSun`, `maxCostSun`), TRX left = balance − `maxCostSun` ("at least"), `expiresAt`; then the txID (64 hex) and status pending → mined / success / failed, or `expired-unseen` with its "as of block N on <host>" wording and no resend offer | the exact-intent confirm EVM uses | `WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED` (with the `fee-cap tron` command), `INSUFFICIENT_FUNDS` (TRX for fees, not activated), duplicate and send-lock `VALIDATION_ERROR`, owner-permission refusal, `RPC_ERROR` (simulation revert, node rejection), `BROADCAST_UNCERTAIN` (with `expiresAt`) |
 | Tx detail | txID | status, from, to, amount, token, block, success, energy, bandwidth, fee burned, `expiresAt` | none | `RPC_ERROR` when the node answers about another transaction |
 | History | key | the send journal's Tron rows (with `expiresAt`) | none | a note that Tron history is the journal only (no Tron explorer client is specified) |
 | Whitelist | nickname, `T…` (chain fixed to `tron`); `fee-cap tron` amount in TRX | the summary with `T…` and its stored 0x body | the password, as for every edit | the parse-time refusals of §The whitelist |
@@ -519,9 +576,14 @@ For the `03-tui.md` coverage matrix (owned by the parallel TUI task; this spec d
 | ID | Question | Why it is open | Closed by |
 |---|---|---|---|
 | Q1 | Tronscan's URL form `https://tronscan.org/#/transaction/<id>`, `/#/address/<T…>` | Tronscan is a script-rendered page; not fetched | TRON-7 opens one live URL and reads the page |
-| Q2 | Which level other wallets (TronLink, Ledger Live) count for their second account | Not published in a source read here; key 0 matches TronWeb's default | TR23: the owner imports the mnemonic in their Tron wallet and compares |
-| Q3 | Does `POST /wallet/broadcasthex` work without a key on PublicNode and TronGrid? | Not called with a payload (nothing broadcast); GET → 405 shows the servlet is there (M9) | TR23 |
-| Q4 | Does the node spend staked energy before burning TRX up to `fee_limit`? | Seen once (M4: 130,285 energy from staked, `fee` absent), java-tron's energy code not read | TRON-6 reads `EnergyProcessor` before the preflight lands |
+| Q2 | Which level other wallets (TronLink, Ledger Live) count for their second account | Not published in a source read here; the spec claims key 0 only (TronWeb's default path) | TR23: the owner imports the mnemonic in their Tron wallet and compares key 0 |
+| Q3 | Does `POST /wallet/broadcasthex` work without a key on PublicNode and TronGrid? | Not called with a payload: this spec's brief allowed read-only calls only. GET → 405 shows the servlet is there (M9) | Before PR C starts: one `POST /wallet/broadcasthex` per endpoint carrying an **unsigned** transaction (no signature, so no node can include it; java-tron refuses it, `TransactionCapsule.java:654-656` "miss sig or contract"). A `SIGERROR` reply means the keyless POST reaches validation; a 401/403 means PR C needs another default |
+
+Closed while writing: staked energy is spent before any TRX is burned
+(`ReceiptCapsule.java:275-302`), and the energy a call may use is min(staked + balance ÷ price,
+`fee_limit` ÷ price) (`VMActuator.java:583-621`). So `fee_limit` bounds the call's whole energy,
+staked included, and the TRX it burns for energy is at most `fee_limit`. The CLI's `fee_limit`
+therefore covers `energy_used` × price even when staked energy will pay.
 
 ## Acceptance
 
@@ -530,27 +592,47 @@ For the `03-tui.md` coverage matrix (owned by the parallel TUI task; this spec d
 | TR1 | derive from the A1 mnemonic | i=0 `TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6`, i=1 `TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C` (`m/44'/195'/0'/0/i`) |
 | TR2 | `create a`, then `address --chain tron` locked and unlocked | `addresses.tron` cached; locked `verified: false`; unlocked (signed macOS build) `verifiedBy: "session"` with no prompt; a QR only when verified |
 | TR3 | a wallet whose key has no `addresses.tron`: `address --chain tron`, then `address --chain tron --verify` | locked: `WALLET_LOCKED` naming unlock and `--verify`; `--verify`: `added: [{key, chain: "tron", now}]`, no tamper warning; then cached |
-| TR4 | cache `addresses.tron` with one letter's case flipped; with a bad checksum; with a `0x` value | each `VALIDATION_ERROR`, the value escaped, never compared case-insensitively or shown as an address |
+| TR4 | cache `addresses.tron` with one letter's case flipped; with a bad checksum; with a `0x` value; and compare two addresses that differ only in case | each cache `VALIDATION_ERROR`, the value escaped, never shown as an address; all 28 single-letter case flips of `TWer2…` fail base58check (checked 2026-10-28, M11); the comparison is byte equality, false for the case variant without parsing |
 | TR5 | `balance --chain tron --rpc <mock whose block 0 is Nile's>` | `RPC_ERROR` naming the genesis mismatch; no balance read |
-| TR6 | live: cache `addresses.tron` = `TWer2…`; `balance --chain tron --json` | `raw` equals `getaccount.balance` on the same node; `warning` names the owner permission (`TDRqzjYye3bGaBtg1bAPw5F4duDchNSbtk` on 2026-10-28) |
+| TR6 | mock: the M7 `getaccount` answer recorded as a fixture; live (`--ignored`): cache `addresses.tron` = `TWer2…`, `balance --chain tron --json` | mock: `warning` names `TDRqzjYye3bGaBtg1bAPw5F4duDchNSbtk`. Live: `raw` equals the same node's `getaccount.balance` read in the test; `warning` is present exactly when that live `owner_permission` is not this address alone with threshold 1. Neither the balance nor the key is pinned |
 | TR7 | live and mock: `balance --chain tron --token usdt`; a mock `balanceOf` error | USDT, decimals 6 from the registry, `raw` = `balanceOf`; the mock error is the token row's error, TRX still shown |
 | TR8 | `balance` (every network) | a `tron` row among the mainnets with TRX and USDT; Sepolia still last; the row has its own `address` |
 | TR9 | `whitelist add bob <T…>` (password) | summary shows `T…` and its stored `0x` body, chains `tron`; `whitelist.json` stores `0x…` with `["tron"]`; `list --json` shows `address: "T…", family: "tron"`; `--verify` gives `verified: true` |
-| TR10 | `add` with `T…` and `--chains base`; `0x…` and `--chains tron`; `--chains tron,base`; a bad checksum; `--contract` on `tron` | each `VALIDATION_ERROR` before the password, nothing written |
-| TR11 | a list signed before this version (gen ≥ 1, EVM entries, one `*` entry) | verifies, unchanged bytes; the golden-bytes test passes untouched; the `*` entry is no payee on `tron` (`payee` with `wildcard: false`) and still one on every EVM chain; an older build's `check_shapes` accepts a list with a `tron` entry |
+| TR10 | `add` with `T…` and `--chains base`; `T…` and `--chains '*'`; `0x…` and `--chains tron`; `--chains tron,base`; a bad checksum; `--contract` on `tron`; and `validate` on a hand-built list with `chains: ["tron", "base"]` or a contract entry on `tron` | each `VALIDATION_ERROR` before the password, nothing written; `validate` refuses both lists |
+| TR11 | a list signed before this version (gen ≥ 1, EVM entries, one `*` entry) | verifies, unchanged bytes; the golden-bytes test passes untouched; the `*` entry is no payee on `tron` (`payee` with `wildcard: false`) and still one on every EVM chain; an older build's `check_shapes` accepts a list with a `tron` entry; the EVM `check_tx` (whose `payee` path is unchanged from `main`, `covers_chain`) refuses a native transfer and a registry `transfer` on `base` to the EVM twin `0x<body>` of a `chains: ["tron"]` entry with `WHITELIST_DENIED` and no `command`, and so does the daemon's `sign_tx` |
 | TR12 | decode the golden vectors; sign one with the test key | fields as §The transaction; re-encode is byte-equal; txID = sha256; the signature recovers to the key; `v` ∈ {0, 1}; low `s`; both mainnet signatures recover to their owners |
-| TR13 | `tron::tx::decode_raw` on bytes with field 10 (memo), 9, 12 or 3; a field twice or out of order; trailing bytes; two contracts; type 46, 2, 30, 54; `Permission_id` 2; `provider`; a wrong `type_url`; a non-minimal varint | each `VALIDATION_ERROR` "refusing to sign"; type 46's message says it hands the account to other keys |
+| TR13 | `tron::tx::decode_raw` on bytes with `raw_data` field 10 (memo), 9, 12 or 3 (`ref_block_num`); a field twice or out of order; trailing bytes; two contracts; type 46, 2, 30, 54; `Contract` field 3, 4 or 5 (`Permission_id` 2); an `Any` field 3; a wrong `type_url`; `TransferContract` field 4; `TriggerSmartContract` `call_value` (its field 3), `call_token_value` (5), `token_id` (6) or field 7; a wrong wire type; a non-minimal varint | each `VALIDATION_ERROR` "refusing to sign"; type 46's message says it hands the account to other keys |
 | TR14 | daemon `sign_tx` with a verified list: TRX and USDT to `bob` (tron); TRX to an unlisted `T…`; to an entry for `base` only; to a `*` entry's body; to self; USDT to the USDT contract; a non-registry TRC20 `transfer`; `approve`; owner = another key; `NoList`; `Unusable`; and every TR13 input through `sign_tx` | the first two signed; then `WHITELIST_DENIED` with `whitelist add <nick> T… --chains tron`; `WHITELIST_DENIED` without `command` ×6; `VALIDATION_ERROR`; `WHITELIST_INVALID` (with the add command); `WHITELIST_INVALID` (no command); `VALIDATION_ERROR`; zero signatures for every refusal (daemon-side count) |
 | TR15 | `fee_limit` above the cap; a list with no `tron` cap (a TRX send, then a USDT send); `fee_limit` on type 1; expiration > now + 5 min; expiration ≤ timestamp | `FEE_CAP_EXCEEDED` with `fee-cap tron <fee_limit in TRX>`, `feeWei`, `capWei`; `FEE_CAP_EXCEEDED` with `fee-cap tron 30` (TRX), then `fee-cap tron <max(fee_limit, 30)>`; `VALIDATION_ERROR` ×3 |
 | TR16 | a fake daemon replies with a `txHash` ≠ sha256(`rawData`), with `rawData` ≠ the bytes sent, or with a signature from another key | `VALIDATION_ERROR`, nothing broadcast, no journal line |
 | TR17 | mock: `transfer --chain tron --to @bob --amount 1 --dry-run`; and to an unlisted `T…` | `fees`, `feeLimit`, `whitelist: {allowed: true}`, `txHash`, `recoveredFrom`, no raw bytes, no broadcast; the unlisted one: `whitelist: {allowed: false, …}` and no signature request |
-| TR18 | mock: TRX balance below amount + bandwidth + activation; USDT with too little TRX for energy; an unactivated sender; a simulation that reverts | `INSUFFICIENT_FUNDS` ×3 and `RPC_ERROR`, each before signing (zero `SignTx`) |
+| TR18 | mock: TRX balance below amount + bandwidth + activation; USDT with too little TRX for energy; a TRX balance above `estimatedCostSun` but below `maxCostSun` (no staked energy, `fee_limit` = 1.2 × the estimate); an unactivated sender; a simulation that reverts | `INSUFFICIENT_FUNDS` ×4 (the third names `maxCostSun` and `shortfall` against it) and `RPC_ERROR`, each before signing (zero `SignTx`) |
 | TR19 | `transfer --chain tron` with `--nonce`, `--replace`, `--bump`, `--allow-pending`, `--max-fee-gwei` | `VALIDATION_ERROR` before any RPC |
-| TR20 | mock: TRX and USDT to `@bob` with `--wait` | `broadcasthex` bytes decode to the signed transaction; txHash = sha256(raw_data); one journal line with `expiresAt`; USDT receipt `SUCCESS` with all-zero `contractResult` → `success: true`; a `REVERT` receipt → `success: false` |
-| TR21 | mock: `DUP_TRANSACTION_ERROR`; `CONTRACT_VALIDATE_ERROR`; a reply with another `txid`; a timeout; then `tx --chain tron <id>` past `expiresAt` + 60 s; a lookup answer whose `raw_data` hashes to another id; a repeat within 10 min | success with `broadcastWarning`; `RPC_ERROR` nothing broadcast; `broadcastWarning` and the computed txID looked up; `BROADCAST_UNCERTAIN` with `expiresAt`; `status: "expired"`; `RPC_ERROR`; the duplicate refusal naming `expiresAt` |
+| TR20 | mock: TRX and USDT to `@bob` with `--wait`; a USDT receipt whose energy is above the simulation but within `fee_limit`; one with `OUT_OF_ENERGY` | `broadcasthex` bytes decode to the signed transaction; txHash = sha256(raw_data); one journal line with `expiresAt`; USDT receipt `SUCCESS` with all-zero `contractResult` → `success: true`; a `REVERT` receipt → `success: false`; the higher-energy receipt → `success: true`, `feeSun` above `estimatedCostSun` and within `maxCostSun`; `OUT_OF_ENERGY` → `success: false` with `feeSun` and a message that the fee was burned |
+| TR21 | mock: `DUP_TRANSACTION_ERROR`; `CONTRACT_VALIDATE_ERROR`; a reply with another `txid`; a timeout; a lookup answer whose `raw_data` hashes to another id; a repeat within 10 min | success with `broadcastWarning`; `RPC_ERROR` nothing broadcast; `broadcastWarning` and the computed txID looked up; `BROADCAST_UNCERTAIN` with `expiresAt` and the second-payment sentence; `RPC_ERROR`; the duplicate refusal naming the earlier txID, its `expiresAt` and the second-payment sentence |
+| TR25 | mock, `tx --chain tron <id>` and `--wait`: (a) the tx was included before its expiration but the node answers `{}` while its head is before `expiresAt` + 60 s; (b) the node's head is 90 s behind this machine's clock and past `expiresAt` + 60 s per the local clock only; (c) this machine's clock is past `expiresAt` + 60 s, the node's head is not; (d) a journal txID, the node's head 2 min past `expiresAt` and within 60 s of the local clock, nothing mined or pending; (e) an id not in the journal, nothing found | (a) `not found`; (b) `not found` with `nodeBehindSecs`; (c) `not found`; (d) `expired-unseen` with `asOf: {block, blockTime, host}` and "a second payment if this one was included"; (e) `not found`. Never `expired-unseen` in (a)–(c) or (e). A wording test over the code and the docs finds no text that calls a resend safe |
 | TR22 | the TUI coverage matrix | every row of §TUI is a row there (closed by the TUI task) |
-| TR23 | **owner-gated.** The owner funds the key's Tron address with a little TRX and USDT, adds a payee, and decides to send. Then `transfer --chain tron --to @<nick> --amount <small> --wait`, TRX then USDT | both `success: true`; Tronscan shows both; the owner's own Tron wallet shows the same address from the mnemonic (Q2); `broadcasthex` worked (Q3) |
+| TR23 | **owner-gated.** The owner funds the key's Tron address with a little TRX and USDT, adds a payee, and decides to send. Then `transfer --chain tron --to @<nick> --amount <small> --wait`, TRX then USDT | both `success: true`; Tronscan shows both; the owner's own Tron wallet shows key 0's address from the mnemonic (Q2); `broadcasthex` carried both sends |
 | TR24 | `sign-message --chain tron`; `call --chain tron …`; `invoke --chain tron …` | `CAPABILITY_UNSUPPORTED` |
+
+## Review round 1 (2026-10-28): what changed
+
+Three-engine review: grok-4.7 APPROVE, gpt-6-astra REJECT, fable REJECT.
+1. `expired` was a proof of non-payment taken from the local clock. Now `expired-unseen`, decided
+   by the queried node's head block, worded as an observation, never offered as a reason to send
+   again (§Send safety, TR25).
+2. `maxCostSun` showed the simulated cost. Now `estimatedCostSun` and `maxCostSun` (the signed
+   `fee_limit` plus worst-case bandwidth and activation) are separate, and the balance check uses
+   the maximum (§Fees, TR18, TR20).
+3. The case-variant brute force is gone: the checksum and the exact comparison are tested apart
+   on fixed inputs (TR4, M11).
+4. Also: TR10 adds `T…` with `*`; `validate` refuses mixed-family and Tron contract entries
+   (§The whitelist); EVM twin regression (TR11); nested strict decode and inner `call_value`
+   (§The daemon's judgement, TR13); golden vectors pin the codec only; `transfer --token` is
+   `usdt` only on Tron; TR6 pins nothing live; README and release note say `*` no longer covers
+   `tron`; Q2 claims key 0 only; Q3 closes before PR C; Q4 closed from java-tron's energy code.
+5. PRs: A (see it), B1 (codec), B2 (guard), C (send it), no line cap
+   ([`v0-3-tron/units.md`](v0-3-tron/units.md)).
 
 ## Evidence
 
@@ -561,7 +643,7 @@ For the `03-tui.md` coverage matrix (owned by the parallel TUI task; this spec d
 | E3 | Ledger Tron app, LedgerHQ/app-tron@a0f3aebf51202e8587668d317c887b6f26838d1c, `Makefile:43` `PATH_APP_LOAD_PARAMS = "44'/195'"` |
 | E4 | `node vec-tronweb.cjs` and `node vec-scure.cjs` (scratch), 2026-10-28: both print the TR1 table |
 | E5 | tronprotocol/protocol@8432beca98c52ba04c82aea0b48ae9f9f882c82a: `core/Tron.proto:336-384` (Contract), `:431-445` (raw); `core/contract/balance_contract.proto:32-36`; `core/contract/smart_contract.proto:74-81`; `api/api.proto:653-675` (Return codes) |
-| E6 | java-tron, tronprotocol/java-tron@b33eed89a6a424c498d4fb1b03ca2c86eddf4840: `chainbase/.../TransactionCapsule.java:468-492, 519-526, 584-587, 721-725`; `crypto/.../Rsv.java:17-24`; `crypto/.../ECKey.java:923-941, 978-986`; `framework/.../db/Manager.java:798-822, 853`; `common/.../Constant.java:19, 29`; `actuator/.../TransferActuator.java:111-131`; `chainbase/.../db/BandwidthProcessor.java:116-128, 160-170, 192-262`; `framework/.../Wallet.java:507-630, 1855-1870`; `framework/.../http/BroadcastHexServlet.java:23-43`; `framework/.../http/FullNodeHttpApiService.java:464, 495`; `framework/.../jsonrpc/TronJsonRpcImpl.java:426-427, 1369-1371` |
+| E6 | java-tron, tronprotocol/java-tron@b33eed89a6a424c498d4fb1b03ca2c86eddf4840: `chainbase/.../TransactionCapsule.java:468-492, 519-526, 584-587, 654-656, 721-725`; `chainbase/.../ReceiptCapsule.java:275-302`; `actuator/.../VMActuator.java:583-621`; `crypto/.../Rsv.java:17-24`; `crypto/.../ECKey.java:923-941, 978-986`; `framework/.../db/Manager.java:798-822, 853`; `common/.../Constant.java:19, 29`; `actuator/.../TransferActuator.java:111-131`; `chainbase/.../db/BandwidthProcessor.java:116-128, 160-170, 192-262`; `framework/.../Wallet.java:507-630, 1855-1870`; `framework/.../http/BroadcastHexServlet.java:23-43`; `framework/.../http/FullNodeHttpApiService.java:464, 495`; `framework/.../jsonrpc/TronJsonRpcImpl.java:426-427, 1369-1371` |
 | E7 | tokio-rs/prost@79ed991edf4f8451c57b89c68b5bce8e53cde367 `prost-derive/src/lib.rs:191`; crates.io: prost 0.14.4 (2026-06-07) |
 | E8 | https://tether.to/en/supported-protocols, fetched 2026-10-28 |
 | E9 | https://www.circle.com/blog/circle-is-discontinuing-support-for-usdc-on-the-tron-blockchain (2024-02-21) and https://developers.circle.com/stablecoins/usdc-contract-addresses, fetched 2026-10-28 |
@@ -590,3 +672,6 @@ Measurements (2026-10-28, `curl`, both endpoints unless noted):
 - **M10** 03:15:25Z `createtransaction` and `triggersmartcontract` (unsigned, not broadcast): the
   golden vectors; `encode_raw.py` prints `mine == node raw_data_hex: True | sha256 == txID: True`
   for both.
+- **M11** 2026-10-28, `caseflip.cjs` (scratch, `@scure/base` 1.2.6): every single-letter case
+  flip inside the base58 alphabet, 28 for `TWer2…` and 25 for `TPjjv…`, decodes as base58 and
+  fails the checksum.
