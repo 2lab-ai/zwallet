@@ -64,7 +64,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `list [--verify [--password-stdin]]` | `{ active, keys: [{ name, index, address, active }], verified, verifiedBy?, warning? }` | works |
 | `change <name> [--no-qr]` | `{ active, address, verified, verifiedBy?, warning? }` | works |
 | `address [--chain <key>] [--verify [--password-stdin]] [--no-qr]` | `{ chain, key, address, verified, verifiedBy?, warning? }` (EIP-55; on `tron` the base58check `T…`; `--verify` adds `index`, and `added?`/`repaired?` when it fills or repairs the cache) | works |
-| `addresses [--no-qr]` | `{ key, addresses: [{ chainId: <key>, address }], verified, verifiedBy?, warning? }` | works |
+| `addresses [--no-qr]` | `{ key, addresses: [{ chainId: <key>, address }], verified, verifiedBy?, warning? }` (a row with no cached address while locked, such as `tron` for a key made before this version, has `error` and `errorCode` instead of `address`) | works |
 | `status [--no-qr]` | `{ wallet, locked, home, daemonPids?, otherDaemonPids, daemonPid?, expiresAt?, whitelist?, active?, address?, verified?, verifiedBy?, warning? }` | works |
 | `balance [--no-qr]` | `{ key, address, verified, verifiedBy?, warning?, chains: [{ chain, chainId, native: { symbol, decimals, balance, raw }, tokens: [{ symbol, address, decimals, balance, raw }] }] }`; a network that failed has `{ chain, chainId, error, errorCode }` instead, a token whose read failed `{ symbol, address, decimals, error, errorCode }` (see below) | works |
 | `balance --chain <key> [--token <erc20>] [--rpc <url>] [--no-qr]` | `{ chain, key, address, symbol, decimals, balance, raw, verified, verifiedBy?, warning?, token? }` (on `tron` also `activated`, and `--token usdt\|<T…>` adds `symbolSource`) | works |
