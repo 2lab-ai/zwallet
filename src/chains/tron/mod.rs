@@ -8,7 +8,9 @@ use crate::chains::evm::policy::ListView;
 use crate::chains::{Chain, FamilyKeys};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
-use alloy::signers::local::PrivateKeySigner;
+use crate::core::store::KEY_INDEX_LIMIT;
+use alloy::signers::local::coins_bip39::English;
+use alloy::signers::local::{MnemonicBuilder, PrivateKeySigner};
 use serde_json::Value;
 
 /// Tron-specific registry configuration.
@@ -26,7 +28,8 @@ impl TronChain {
     /// genesis block id (`TronJsonRpcImpl.java:426-427`). zwallet uses it for `chains` and file
     /// names only; a Tron transaction carries none.
     pub fn chain_id(&self) -> u64 {
-        0
+        let tail = &self.genesis[self.genesis.len().saturating_sub(8)..];
+        u64::from_str_radix(tail, 16).unwrap_or(0)
     }
 }
 
@@ -39,14 +42,31 @@ pub struct Tron;
 
 /// `m/44'/195'/0'/0/{index}`: SLIP-44 coin type 195, TronWeb's default for index 0.
 pub fn derivation_path(index: u32) -> String {
-    let _ = index;
-    String::new()
+    format!("m/44'/195'/0'/0/{index}")
 }
 
 /// The secp256k1 key of wallet key `index` on Tron.
 pub fn signer_at(seed: &Seed, index: u32) -> Result<PrivateKeySigner> {
-    let _ = (seed, index);
-    Err(WalletError::validation("not yet"))
+    // The last step of the path is non-hardened; from 2^31 up it would be a hardened child.
+    if index >= KEY_INDEX_LIMIT {
+        return Err(WalletError::validation(format!(
+            "cannot derive Tron key at index {index}: key indices stay below 2^31, where BIP32's \
+             hardened range starts"
+        )));
+    }
+    MnemonicBuilder::<English>::default()
+        .phrase(seed.phrase())
+        .derivation_path(derivation_path(index))
+        .and_then(|b| b.build())
+        .map_err(|_| WalletError::validation(format!("cannot derive Tron key at index {index}")))
+}
+
+/// `CAPABILITY_UNSUPPORTED` for what no Tron key does in this version.
+fn unsupported(what: &str) -> WalletError {
+    WalletError::new(
+        ErrorCode::CapabilityUnsupported,
+        format!("tron (tron family) does not support {what}"),
+    )
 }
 
 impl FamilyKeys for Tron {
@@ -67,7 +87,7 @@ impl FamilyKeys for Tron {
         _message: &[u8],
         _list: &ListView<'_>,
     ) -> Result<Value> {
-        Err(WalletError::validation("not yet"))
+        Err(unsupported("message signing"))
     }
 
     fn sign_tx(
@@ -78,7 +98,9 @@ impl FamilyKeys for Tron {
         _unsigned: &Value,
         _list: &ListView<'_>,
     ) -> Result<Value> {
-        Err(WalletError::new(ErrorCode::ValidationError, "not yet"))
+        // The Tron signer, with its decoder and policy, comes with a later version
+        // (`.prd/v0-3-tron/units.md` TRON-4, TRON-5); until then the daemon signs nothing here.
+        Err(unsupported("signing transactions in this version"))
     }
 }
 

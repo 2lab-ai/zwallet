@@ -14,18 +14,46 @@ pub const PREFIX: u8 = 0x41;
 /// Characters in a Tron address (`T…`).
 pub const LEN: usize = 34;
 
+/// The most characters of a refused input an error shows, escaped.
+const SHOWN: usize = 64;
+
 /// The 21-byte payload (`0x41 ‖ body`) of the Tron address `input`: 34 characters of the base58
 /// alphabet whose checksum holds and whose first byte is `0x41`; else `INVALID_ADDRESS`, the
 /// input shown escaped.
 pub fn parse(input: &str) -> Result<[u8; 21]> {
-    let _ = input;
-    Err(WalletError::invalid_address("not yet"))
+    let refused = |why: &str| {
+        WalletError::invalid_address(format!(
+            "{} is not a Tron address: {why}",
+            crate::core::text::shown(input, SHOWN)
+        ))
+    };
+    if input.chars().count() != LEN {
+        return Err(refused("a Tron address has 34 characters"));
+    }
+    let payload = bs58::decode(input).with_check(None).into_vec().map_err(|e| {
+        refused(match e {
+            bs58::decode::Error::InvalidChecksum { .. } => {
+                "its base58check checksum does not match (a letter in the wrong case, or a typo)"
+            }
+            bs58::decode::Error::InvalidCharacter { .. }
+            | bs58::decode::Error::NonAsciiCharacter { .. } => {
+                "it has a character outside the base58 alphabet"
+            }
+            _ => "it does not decode as base58check",
+        })
+    })?;
+    let payload: [u8; 21] = payload
+        .try_into()
+        .map_err(|_| refused("its payload is not 21 bytes"))?;
+    if payload[0] != PREFIX {
+        return Err(refused("its first byte is not 0x41 (Tron mainnet)"));
+    }
+    Ok(payload)
 }
 
 /// The `T…` form of a 21-byte payload.
 pub fn encode(payload: &[u8; 21]) -> String {
-    let _ = payload;
-    String::new()
+    bs58::encode(payload).with_check().into_string()
 }
 
 /// The `T…` address whose payload is `0x41 ‖ body`.
@@ -48,7 +76,7 @@ pub fn is_address(value: &str) -> bool {
 
 /// Whether `a` and `b` are the same address text: byte equality, without parsing either.
 pub fn same(a: &str, b: &str) -> bool {
-    a.eq_ignore_ascii_case(b)
+    a.as_bytes() == b.as_bytes()
 }
 
 #[cfg(test)]
@@ -164,7 +192,10 @@ mod tests {
             (&TWER[..33], "34 characters"),
             (&format!("{TWER}1"), "34 characters"),
             (prefix_42.as_str(), "0x41"),
-            ("0xe2e1a54926527fbb4e4420de4c6bab82beaee24d", "34 characters"),
+            (
+                "0xe2e1a54926527fbb4e4420de4c6bab82beaee24d",
+                "34 characters",
+            ),
             ("0x41e2e1a54926527fbb4e4420de4c6bab82be", "34 characters"),
             // 34 characters, one outside the alphabet (`0`).
             ("TWer2Ygk5TEheHp3TPuYeqxmB6SsGZma06", "base58"),
