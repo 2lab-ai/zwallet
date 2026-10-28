@@ -695,9 +695,12 @@ The moved text follows.
     - (real daemon, pty) a 512-character message: the review shows it whole, 7 rows of the message
       block at 80x24; the signature checks against the address (`verify_message`,
       chains/evm/mod.rs:193) and the returned digest is EIP-191's of the bytes the review held.
-    - (`FakeDaemon`) the same message: the one `SignMessage` request's `message_hex` decodes to
-      exactly those bytes. Two messages that differ only in the last character: each review shows
-      its own last character, and each request carries its own bytes.
+    - (library call, `FakeDaemon` bound at `d.sock`) `wallet::sign_message` called directly with
+      the review's held bytes (the TUI's warm-session gate reads the process table, so a bare
+      `FakeDaemon` would not open the TUI's path): the one `SignMessage` request's `message_hex`
+      decodes to exactly those bytes. Two messages that differ only in the last character: each
+      review shows its own last character (`TestBackend`), and each call's request carries its
+      own bytes.
     - (`TestBackend`) a message with 2 leading spaces and 1 trailing space: the spaces stand inside
       the brackets and the line says `leading spaces 2, trailing spaces 1`.
     - (`Msg` sequence) `e` after the review: the review and its bytes are dropped; Enter signs
