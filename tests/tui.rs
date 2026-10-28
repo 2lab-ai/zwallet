@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{Frame, Home, PTY_SIZE, PtyChild};
+use common::{Frame, Home, PTY_SIZE, PW, PtyChild};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, Cell};
@@ -15,8 +15,10 @@ use serde_json::Value;
 use std::time::{Duration, Instant, SystemTime};
 use zwallet::chains::{self, Net};
 use zwallet::core::error::{ErrorCode, WalletError};
+use zwallet::core::store;
 use zwallet::core::terminal::terminal_ok;
 use zwallet::core::time::{parse_rfc3339_utc, rfc3339_utc, unix_secs};
+use zwallet::core::whitelist::ListFiles;
 use zwallet::tui::app::{App, Effect, Key, Msg};
 use zwallet::tui::style;
 use zwallet::tui::term::FilteredBackend;
@@ -216,7 +218,7 @@ fn keys_ab() -> Keys {
     Keys {
         active: "b".into(),
         rows: vec![row("a", 0, A), row("b", 1, B)],
-        warning: None,
+        trust: Trust::Locked,
     }
 }
 
@@ -1030,4 +1032,124 @@ fn an_argv_listed_fake_daemon_s_expiry_reaches_the_terminal_escaped_and_cut() {
         "{frame}"
     );
     drop(fake);
+}
+
+#[test]
+fn the_password_check_derives_the_named_keys_and_checks_the_list_it_reads_once() {
+    let home = Home::new();
+    home.create("a", &[]);
+    home.create("b", &[]);
+    let listed = home.allow("alice", B, &["ethereum"]);
+    let files = ListFiles::read(home.path()).fingerprint();
+    let opened = wallet::open_with_password(home.path(), PW, Some(&["a"])).unwrap();
+    // The named key's address from the seed, as `list --verify` derives it.
+    let stdin = format!("{PW}\n");
+    let verify = ["list", "--verify", "--password-stdin", "--json"];
+    let verify = home.run_stdin(&verify, &stdin).ok();
+    assert_eq!(opened.keys.len(), 1);
+    assert_eq!(opened.keys[0].name, "a");
+    assert_eq!(
+        opened.keys[0].address.as_deref(),
+        verify["keys"][0]["address"].as_str()
+    );
+    assert_eq!((opened.active.as_str(), opened.salted), ("b", true));
+    // The list the seal names, with the fingerprint of the bytes it verified.
+    let checked = wallet::check_list(home.path(), &opened.anchor).unwrap();
+    assert_eq!(checked.list, listed);
+    assert_eq!(checked.list.entries[0].nickname, "alice");
+    assert_eq!(checked.fingerprint, files);
+    // `open_with_password` reads no list file: with both removed it still opens.
+    for file in ["whitelist.json", "whitelist.next.json"] {
+        let _ = std::fs::remove_file(home.path().join(file));
+    }
+    let opened = wallet::open_with_password(home.path(), PW, Some(&[])).unwrap();
+    assert!(opened.keys.is_empty() && matches!(opened.anchor, Ok(Some(_))));
+    assert!(wallet::check_list(home.path(), &opened.anchor).is_err());
+    // A whitelist zwallet 0.1.0 sealed (no salt): `list --verify`'s message, and no list.
+    let lock = store::MetaLock::acquire(home.path()).unwrap();
+    let sealed = lock.open(PW).unwrap();
+    let mut policy = sealed.unsealed().policy.clone();
+    policy.as_object_mut().unwrap().remove("whitelistSalt");
+    lock.reseal(&sealed, &policy).unwrap();
+    drop(lock);
+    let opened = wallet::open_with_password(home.path(), PW, Some(&[])).unwrap();
+    assert!(!opened.salted);
+    let reason = wallet::check_list(home.path(), &opened.anchor).unwrap_err();
+    assert!(reason.contains("made by zwallet 0.1.0"), "{reason}");
+    let verify = [
+        "whitelist",
+        "list",
+        "--verify",
+        "--password-stdin",
+        "--json",
+    ];
+    let cli = home.run_stdin(&verify, &stdin).ok();
+    assert_eq!(cli["reason"].as_str(), Some(reason.as_str()), "{cli}");
+}
+
+#[test]
+fn t2b_on_a_pty_s_then_y_makes_the_selected_key_active() {
+    let home = Home::new();
+    home.create("a", &[]);
+    home.create("b", &[]);
+    let mut tui = tui_on_a_pty(&home, PTY_SIZE);
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("* b ")) && bar(f).1.starts_with("locked | ")
+    });
+    // `s` on `a` (the first row) asks first; `y` confirms.
+    tui.send(b"s");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("make a the active key"))
+    });
+    assert_eq!(home.run(&["list", "--json"]).ok()["active"], "b");
+    tui.send(b"y");
+    tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains("* a ")));
+    assert_eq!(home.run(&["list", "--json"]).ok()["active"], "a");
+    quit(&mut tui);
+}
+
+#[test]
+fn a_key_the_bar_shows_verified_by_session_is_never_asked_to_be_verified() {
+    // One key, verified by session: no row asks for a verify command.
+    let mut keys = keys_ab();
+    keys.rows.remove(0);
+    let mut app = app();
+    app.update(Msg::Keys(app.generation(), Ok(keys)));
+    app.update(Msg::Status(app.generation(), Ok(open_status(now() + 3600))));
+    let mut screen = screen(80, 24);
+    let (rows, _) = checked_frame(&mut screen, &app);
+    assert!(!rows.iter().any(|r| r.contains("--verify")), "{rows:#?}");
+    assert!(
+        rows[22].trim_end().ends_with(" | verified by session"),
+        "{rows:#?}"
+    );
+    // Two keys: the other one stays flagged, with what checks it; the active one is not asked.
+    app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+    let (rows, _) = checked_frame(&mut screen, &app);
+    let note = rows
+        .iter()
+        .find(|r| r.contains("not verified:"))
+        .expect("the other key is flagged");
+    assert!(
+        note.contains("other key") && note.contains("`zwallet list --verify`"),
+        "{note:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("address --verify")),
+        "{rows:#?}"
+    );
+    // Locked, or unverified (Linux, another process answering): the note stays as it was.
+    let other = Some("pid 7 runs other code".to_string());
+    for trust in [
+        Trust::Locked,
+        Trust::Unverified(None),
+        Trust::Unverified(other),
+    ] {
+        let mut status = open_status(now() + 3600);
+        status.address = Some((Some(B.into()), trust));
+        app.update(Msg::Status(app.generation(), Ok(status)));
+        let (rows, _) = checked_frame(&mut screen, &app);
+        let note = "not verified: run `zwallet address --verify` before funding";
+        assert!(rows.iter().any(|r| r.contains(note)), "{rows:#?}");
+    }
 }

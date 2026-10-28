@@ -3787,6 +3787,37 @@ fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
     drop(fake);
 }
 
+/// After `unlock`, `list` does not ask to verify the active key, which this build's session
+/// verifies (`status` and `address` say so); the other keys stay flagged, with what checks them.
+#[cfg(target_os = "macos")]
+#[test]
+fn list_while_this_build_serves_the_session_does_not_ask_to_verify_the_active_key() {
+    let home = Home::new();
+    home.create("a", &[]);
+    home.create("b", &[]);
+    // Locked: the note as before, last.
+    let locked = home.run(&["list"]);
+    assert!(
+        locked.stdout.trim_end().ends_with(NOT_VERIFIED),
+        "{}",
+        locked.stdout
+    );
+    home.unlock("10m");
+    let human = home.run(&["list"]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        !human.stdout.contains("address --verify"),
+        "{}",
+        human.stdout
+    );
+    assert!(
+        human.stdout.contains("other keys") && human.stdout.contains("`zwallet list --verify`"),
+        "{}",
+        human.stdout
+    );
+    assert_eq!(home.run(&["list", "--json"]).ok()["verified"], false);
+}
+
 #[test]
 fn list_names_a_listener_whose_answers_match_an_edited_cache() {
     // `list` without --verify asks d.sock for each key's address too. A listener that answers
