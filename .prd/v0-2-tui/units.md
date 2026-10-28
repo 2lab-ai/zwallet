@@ -3,7 +3,7 @@
 Status: **planned**, 2026-10-27, revised after review rounds 1 and 2 the same day; TUI-1 split
 into three PRs on 2026-10-28 (§TUI-1 split); rewritten on 2026-10-28 (v2) for every CLI function
 ([`../03-tui.md`](../03-tui.md) §Coverage matrix, §Changes on 2026-10-28, v2), and after review
-rounds 1 and 2 the same day (§Review round 1 of v2, §Review round 2 of v2). Fourteen units, TUI-1a … TUI-12, ordered by what the
+rounds 1 to 3 the same day (§Review round 1 of v2, §Review round 2 of v2, §Review round 3 of v2). Fourteen units, TUI-1a … TUI-12, ordered by what the
 owner can do once they are merged; units are the spec's grouping, and §PRs and previews says which
 units share a PR and which merges become a preview. Each unit closes the acceptance IDs of
 [`../03-tui.md`](../03-tui.md) §Acceptance listed for it; every ID T1–T44 (48 with T2b, T3b, T6b,
@@ -59,7 +59,7 @@ once. Every estimate of a unit not yet started is an estimate, not a measurement
 | TUI-4 | receive: the address and its trust (Q1's pointer to the QR); verify and repair every key's address; unlock for a chosen time; see the session | 4 receive, `V` on every key, `A`, 7 session, `u`, the start flag `--allow-ptrace-scope-0` | T14, T16, T17, T18, T19, T20 | TUI-3 | 800 (+250 if the owner picks Q3) |
 | TUI-5 | send the coin or a registry token to a listed payee and see it mined, waiting as long as he likes | 3 send: asset, payee, amount, review with the overrides and the fee ceiling, exact-intent confirm, status, `w` | T6, T6b, T21, T22, T43 | TUI-3 | 850 |
 | TUI-6 | curate the whitelist: payees, contracts, fee caps, message signing, reset; never list the zero address | 5 whitelist: view, `V`, every change, the zero-address refusal at add (CLI and TUI); the pty run across T2, T6 and T7 | T7, T11, T23, T24, T25, T44 | TUI-5 | 850 |
-| TUI-7 | see the last 10 transactions, incoming ones included where an explorer answers | history: journal rows, explorer client, merge | T3, T3b | TUI-3; the explorer re-measure (loop.md §Entry conditions) | 800 |
+| TUI-7 | see the last 10 transactions, incoming ones included where an explorer answers | history: journal rows, explorer client, merge | T3, T3b | TUI-3 (the explorer re-measure is done: 03-tui.md §History, 2026-10-28) | 800 |
 | TUI-8 | open any transaction (a row, a send, a typed hash) with its fee and token movements | transaction detail, `dropped/replaced`, `/` lookup | T4, T6c, T26 | TUI-7 | 750 |
 | TUI-9 | speed up or cancel a stuck send; retry an uncertain broadcast safely | replacements at nonce N, from a pinned own address and an intent the node confirms | T27, T28, T29 | TUI-8 (and TUI-5) | 600 |
 | TUI-10 | make the wallet or a new key without the shell | `n`, the first-run create, `B` as B1's pointer | T30, T31, T32 | TUI-3 | 600 (B2 only if the owner picks it) |
@@ -492,7 +492,9 @@ The moved text follows.
 - **Files:** `src/chains/mod.rs`, `src/chains/evm/mod.rs`, `src/chains/evm/explorer.rs` (new),
   `src/history.rs` (new), `src/lib.rs`, `src/wallet.rs`, `src/tui/app.rs`, `ui.rs`,
   `tests/fixtures/explorer/*.json` (new, single-line), `tests/tui.rs`.
-- **Depends on:** TUI-3 (the wallet tab); the explorer re-measure (loop.md §Entry conditions).
+- **Depends on:** TUI-3 (the wallet tab). The explorer re-measure that gated it was done on
+  2026-10-28 (03-tui.md §History): identical to 2026-10-27; no extra parser in v0.2, so the
+  explorer client reads the three Blockscout hosts of the table and nothing else.
 - **RED tests:**
   - Explorer fixture: a local HTTP server in the test, built like `tiny_rpc_reply`
     (tests/common/mod.rs:926), serving single-line Blockscout bodies cut from the 2026-10-27
@@ -572,8 +574,11 @@ The moved text follows.
   address with that replacement. `Review::matches` holds the nonce and the replaced hash with
   the intent. `wallet::replaced_intent(net, hash, from, nonce, journal_row)` reads the node's
   pending transaction for the hash (`eth_getTransactionByHash`, as `original_fees` does,
-  chains/evm/rpc.rs:356-373) and returns its `to`, `value` and `input` only when they match the
-  journal row (nonce, kind, `to`, the amount in base units and its token); this session's own
+  chains/evm/rpc.rs:356-373) and returns its `to`, `value` and `input` only when (1) the signed
+  transaction rebuilt from the returned fields hashes to the replaced hash, (2) the signer
+  recovered from its signature is this session's pinned own address (as `tx::decode_signed`
+  recovers one, chains/evm/tx.rs:449-460; the node's `from` field proves nothing), and (3) they
+  match the journal row (nonce, kind, `to`, the amount in base units and its token); this session's own
   `Review` of the send, kept in memory, is used before it. One intent rule for every signed
   replacement, transfer `s`/`x`, `R`, and (built on this in TUI-11) invoke `s`/`x`/`R` (03-tui.md
   §Status of a send, Replacements):
@@ -584,9 +589,11 @@ The moved text follows.
     a hash the node does not know with no review in this session, neither `s` nor `x` is offered.
   - `R` (after `BROADCAST_UNCERTAIN`, when the node may not know the hash) is offered only from
     this session's review. Without it (after a restart), `R` is not offered and the screen says:
-    look the hash up later (`/`, `zwallet tx`), and `s`/`x` come once the node knows it; or send
-    again through the normal send flow, whose duplicate guard names the journal row and pays twice
-    only if overridden with `d`.
+    look the hash up first (`/`, `zwallet tx`), and `s`/`x` come once the node knows it. It also
+    warns that a new send through the normal flow is a new payment that can pay twice even
+    without `d`: the repeat check looks back 10 minutes (`DUPLICATE_WINDOW_SECS`,
+    chains/mod.rs:836) in a journal any process of this user can edit (03-tui.md §Status of a
+    send, Replacements, which gives the screen's words).
   - A transfer's speed-up or retry needs its payee to be an address entry of the checked list on
     this chain; TUI-11 adds the invoke kind (contract entry and listed selector).
   - The checked list's fee cap and the reviewed maximum apply to the bumped fee and to the
@@ -608,7 +615,11 @@ The moved text follows.
     the mock's transaction unchanged: `s` and `x` are not offered and the screen says the journal
     and the node disagree; zero `SignTx`. (d) No password check in this session: `s` shows
     `needs: V`. (e) The bumped fee over the checked list's cap: zero `SignTx`. (f) The fee rising
-    past the reviewed maximum between review and confirm: zero `SignTx`, a new review.
+    past the reviewed maximum between review and confirm: zero `SignTx`, a new review. (g) A
+    restart; the mock's pending transaction for the hash has `from` the pinned address, but its
+    signature recovers to another key: `s` and `x` are not offered, zero `SignTx`. (h) The same
+    with fields that do not hash to the replaced hash (the amount changed, the signature kept):
+    not offered, zero `SignTx`.
   - T28 (mock node): `x`, type `cancel`: one `SignTx` with nonce N, `to` the key's pinned
     address, `value` 0, empty `input`; the review shows the race sentence. No password check:
     `needs: V`. The cancel's fee over the cap, and a fee rising past the reviewed maximum at
@@ -619,7 +630,8 @@ The moved text follows.
     review's `to`, `value` and `input`. (b) The journal row rewritten (amount raised, or `to`
     another listed payee) before `R`, in the same session: the same `SignTx`, the review's intent,
     not the journal's. (c) A new `App` (a restart), the mock not knowing the hash: `R` is not
-    offered, the screen says to look the hash up later or send again through the normal flow;
+    offered; the screen shows the warning that a new send can pay twice even without `d`, and
+    shows it too with the journal row's time moved past 10 minutes and with the row deleted;
     zero `SignTx`. (d) A restart, the mock knowing the hash and matching the journal: `R` is not
     offered, `s` and `x` are (T27 (b)). No action on that screen reaches a send without a nonce
     (the `Effect`s are listed).
@@ -726,8 +738,11 @@ The moved text follows.
     - cancel: `x`, `cancel` typed: one `SignTx`, nonce N, `to` the pinned own address, `value` 0,
       empty `input` (T28's self-transfer).
     - retry: in the session, the mock times out the broadcast: `R` signs the review's intent at
-      nonce N; after a restart with the node not knowing the hash: `R` is not offered, zero
-      `SignTx`.
+      nonce N; after a restart with the node not knowing the hash: `R` is not offered, the warning
+      of T29 (c) is shown, zero `SignTx`.
+    - forged node data: after a restart, the mock's pending invoke has `from` the pinned address
+      but a signature that recovers to another key, or arguments changed so its fields no longer
+      hash to the replaced hash (the selector kept): `s` and `x` are not offered, zero `SignTx`.
   - T35 (mock node): raw calldata with a listed first 4 bytes: as T34; an unlisted one: refused at
     the form.
   - T36. Which daemon: the `FakeDaemon` of tests/common/mod.rs:584-641 answers every request with
@@ -777,6 +792,16 @@ The moved text follows.
   and 3 send, its lookup on `/`, each through rules 1–7.
 - **PR:** TUI-12, after the Tron library PRs of 05-tron.md.
 - **Depends on:** TUI-5; 05-tron.md and the Tron library units it plans.
+
+## Review round 3 of v2 (2026-10-28)
+
+fable approved; grok-4.7 and gpt-6-astra rejected two sentences that round 2 added.
+
+| Item | Decision | Where |
+|---|---|---|
+| 1. A node-reported pending transaction is not "signed by this key" until checked (grok) | before it is a replacement's intent: the signed transaction rebuilt from the node's fields must hash to the replaced hash, and its recovered signer must be the pinned own address; else not offered | 03-tui.md §Status of a send, Replacements (One intent rule); row 28; T27 (g), (h), T34 (l); TUI-9 (`wallet::replaced_intent`, T27); TUI-11 (forged node data); flow.md |
+| Explorer re-measure (the dispatcher, 2026-10-28) | done: identical to 2026-10-27; no extra parser for base, arbitrum or polygon in v0.2; avalanche through Routescan stays out; the gate is satisfied | 03-tui.md §History (re-measured 2026-10-28); loop.md §Entry conditions; loop.done.md; TUI-7 |
+| 2. The fallback can pay twice without `d` (grok, gpt-6-astra R3-1) | the guarantee is deleted; a new send is a new payment and can pay twice without `d` (10-minute window, editable journal); the screen says so and says to look the hash up first | 03-tui.md Replacements (Retry after `BROADCAST_UNCERTAIN`); row 30; T29 (c); TUI-9 (`R` rule, T29 (c)); TUI-11 retry case |
 
 ## Review round 2 of v2 (2026-10-28)
 

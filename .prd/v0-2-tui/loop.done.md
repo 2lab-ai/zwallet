@@ -32,3 +32,11 @@ rewritten for v2 (every CLI function).
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
 | T1 | key list, active marked, lock state in the bar only | closed by `zwallet tui` (TUI-1b, PR #18) | TUI-1b | ✅ |
+
+## Entry condition closed: the explorer re-measure (2026-10-28)
+
+The re-measure that gated the TUI-7+8 PR ran on 2026-10-28, 04:50:25Z–04:50:46Z (the dispatcher;
+receipt: the dispatcher's record `explorer-remeasure/record.md` with the raw bodies, in the session scratchpad, outside the repo). The result is identical to 2026-10-27; Routescan's Etherscan-style path
+says "chain not supported" for base, arbitrum, polygon and bsc, and only avalanche answers, on both
+Routescan paths. Decision, in 03-tui.md §History: no extra parser for base, arbitrum or polygon in
+v0.2; avalanche through Routescan stays out of v0.2; the coverage per chain is unchanged.

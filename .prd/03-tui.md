@@ -5,8 +5,8 @@ PRs #6–#12 (`origin/main` c7d3f13) and after review rounds 1 and 2 the same da
 for TUI-1b (§Changes on 2026-10-28), and the same day, against `origin/main` 24f4b5b, to cover
 every CLI function (§Changes on 2026-10-28, v2: the coverage matrix, the re-decided non-goals,
 the navigation model; mockups in [`03-tui-screens.md`](03-tui-screens.md), research in
-[`research/tui-ux.md`](research/tui-ux.md)), then after review rounds 1 and 2 of v2 (§Changes
-on 2026-10-28, v2, review rounds 1 and 2). The signed
+[`research/tui-ux.md`](research/tui-ux.md)), then after review rounds 1 to 3 of v2 (§Changes
+on 2026-10-28, v2, review rounds 1 to 3). The signed
 whitelist shipped in v0.1 (WU1b, PR #4, [`04-whitelist.md`](04-whitelist.md)). TUI-1 starts once the
 agent-side v0.1 work is merged; G3 and G4 wait on owner actions only and do not block TUI code
 ([`v0-2-tui/loop.md`](v0-2-tui/loop.md) §Start condition). Fixed user statement:
@@ -140,9 +140,9 @@ which stays a start flag for the security reason written in it (review round 2).
 | 25 | `--allow-pending` | `transfer --allow-pending` | 3 send, review | `p` | its warning, then held by the review | T21 | TUI-5 |
 | 26 | `--allow-duplicate` | `transfer --allow-duplicate` | 3 send, review | `d` | as 25 | T21 | TUI-5 |
 | 27 | `--max-fee-gwei` | `transfer --max-fee-gwei` | 3 send, review | `g` | a price per gas in gwei, then the review again | T22 | TUI-5 |
-| 28 | `--nonce N --replace <hash> --bump <f>` (speed up) | `speed-up` | send status; transaction | `s`; `b` sets the bump | the same transfer at nonce N, the fees bumped; the intent from this session's review, or from the node's pending transaction matched to the journal row (§Status of a send, Replacements); the payee an address entry of the checked list on this chain, its nickname typed | T27 | TUI-9 |
+| 28 | `--nonce N --replace <hash> --bump <f>` (speed up) | `speed-up` | send status; transaction | `s`; `b` sets the bump | the same transfer at nonce N, the fees bumped; the intent from this session's review, or from the node's pending transaction once its hash and its recovered signer are checked and it matches the journal row (§Status of a send, Replacements); the payee an address entry of the checked list on this chain, its nickname typed | T27 | TUI-9 |
 | 29 | the same as a cancel (0 to the key itself) | `cancel` | send status; transaction | `x`; `b` sets the bump | 0 of the coin to the key's own pinned address at nonce N, for a transfer or an invoke alike; offered under the same intent rule as 28; `cancel` typed; the screen says the cancel races the original. `parse_units` takes `0` (core/amount.rs:8-45) and the daemon signs a native self-transfer (README.md:285-286) | T28 | TUI-9 |
-| 30 | `--nonce N --replace <hash>` (retry) | `retry` | send status | `R` | after `BROADCAST_UNCERTAIN`: the same send at nonce N, replacing only the first attempt, its intent from this session's review only (the node does not know the hash then); with no review in this session it is not offered, and the screen says what to do instead (§Status of a send, Replacements) | T29 | TUI-9 |
+| 30 | `--nonce N --replace <hash>` (retry) | `retry` | send status | `R` | after `BROADCAST_UNCERTAIN`: the same send at nonce N, replacing only the first attempt, its intent from this session's review only (the node does not know the hash then); with no review in this session it is not offered, and the screen warns that a new send can pay twice even without `d` (§Status of a send, Replacements) | T29 | TUI-9 |
 | 31 | `tx --chain <hash>` | `tx` | 2 wallet; 6 tools | `/`; tx | a hash typed in, then the transaction | T26 | TUI-8 |
 | 32 | `call` | `call` | 6 tools | call | contract, signature, arguments; the result | T33 | TUI-11 |
 | 33 | `invoke --to @nick --sig … [--value]` | `invoke` | 6 tools | invoke | a contract entry, one of its selectors, the signature and arguments, a value; review; the nickname typed; status | T34 | TUI-11 |
@@ -633,7 +633,7 @@ points flow.md §T7 names, and nothing else:
 5. The TUI shows the outcome (generation, entries, stopped daemons, warning, session) and every
    pane reloads: the old session has ended.
 
-## History (re-measured 2026-10-27)
+## History (measured 2026-10-27, re-measured 2026-10-28)
 
 Sources:
 1. **The send journal.** This is a *local claim*. Every row from it is looked up on chain (`tx`)
@@ -661,12 +661,41 @@ id>/address/<a>/transactions`) was probed in the same minutes:
 | avalanche | `avalanche.blockscout.com` | 404 | `text/plain` | no instance. Routescan 43114: 200 JSON (no-UA 200), another format, not used in v0.2 |
 | sepolia | `eth-sepolia.blockscout.com` | 200 | `application/json` | 50 items; `token-transfers` 200; no-UA 200 |
 
-Before the TUI-7+8 PR merges the table is measured again, Routescan's other paths for base, arbitrum and
-polygon included, and that data decides whether one more parser opens those chains
-([`v0-2-tui/loop.md`](v0-2-tui/loop.md) §Entry conditions). Until then the coverage note per chain
-follows this table: ethereum, optimism and sepolia show the explorer and the journal; base,
-arbitrum, polygon, bsc and avalanche show "this machine's sends only; incoming transfers not
-indexed".
+The table was measured again on 2026-10-28, before the TUI-7+8 PR, Routescan's other path for
+base, arbitrum and polygon included ([`v0-2-tui/loop.md`](v0-2-tui/loop.md) §Entry conditions;
+the data and the decision below). The coverage note per chain follows the table: ethereum,
+optimism and sepolia show the explorer and the journal; base, arbitrum, polygon, bsc and
+avalanche show "this machine's sends only; incoming transfers not indexed".
+
+**Re-measured 2026-10-28, 04:50:25Z–04:50:46Z** (the dispatcher; `curl 8.7.1`, no key, no
+`User-Agent` header; receipt: the dispatcher's record `explorer-remeasure/record.md` with the raw bodies, in the session scratchpad, outside the repo). Blockscout, the same request for the same
+address: identical to 2026-10-27.
+
+| Host | HTTP | Content-Type | Result |
+|---|---|---|---|
+| `eth.blockscout.com` | 200 | `application/json` | 50 items, 531,134 bytes |
+| `base.blockscout.com` | 403 | `text/html` | Cloudflare "Just a moment..." |
+| `arbitrum.blockscout.com` | 403 | `text/html` | Cloudflare "Just a moment..." |
+| `explorer.optimism.io` | 200 | `application/json` | 50 items, 527,444 bytes |
+| `polygon.blockscout.com` | 403 | `text/html` | Cloudflare "Just a moment..." |
+| `bsc.blockscout.com` | 404 | `text/plain` | "default backend - 404" |
+| `avalanche.blockscout.com` | 404 | `text/plain` | "default backend - 404" |
+| `eth-sepolia.blockscout.com` | 200 | `application/json` | 50 items, 498,828 bytes |
+
+Routescan, both paths, for base (8453), arbitrum (42161), polygon (137), bsc (56) and avalanche
+(43114):
+- the v2 address path (`/v2/network/mainnet/evm/<id>/address/<a>/transactions?limit=10`):
+  400 `NO_BLOCKCHAINS_FOR_PARAMS` for 8453, 42161 and 56; 400 `BLOCKCHAIN_NOTFOUND` for 137; 200
+  with 10 items for 43114;
+- the Etherscan-style path (`/v2/network/mainnet/evm/<id>/etherscan/api?module=account&action=txlist&address=<a>&page=1&offset=10&sort=desc`):
+  200 `{"status":"0","message":"chain not supported","result":null}` for 8453, 42161, 137 and 56;
+  200 with 10 items for 43114.
+
+**Decision (2026-10-28; the gate of loop.md §Entry conditions, now satisfied).** No keyless path
+opens base, arbitrum, polygon or bsc, so v0.2 adds no explorer parser for them, and their
+coverage note stays "this machine's sends only; incoming transfers not indexed". Avalanche
+answers only through Routescan, in another response format; it stays out of v0.2, with the same
+note. The coverage per chain above is unchanged.
 
 ERC-20 log scanning was dropped. Public nodes only serve about 5k blocks of logs (roughly 20 min on
 arbitrum, about 3 h on base). Those logs are also where address-poisoning `Transfer(you,
@@ -791,19 +820,29 @@ and one rule covers every one of them.
   nonce N) comes from (a) this TUI session's own `Review` of that send, held in memory, or else
   (b) the node's pending transaction for the replaced hash (`eth_getTransactionByHash`, which the
   CLI already reads for the replaced fees, `original_fees`, chains/evm/rpc.rs:356-373), used only
-  when it matches the journal row: nonce, kind, `to`, and the amount in base units with its token.
-  The journal keeps no calldata (its fields, chains/mod.rs:674-676), so an invoke's calldata comes
-  from (a) or from the node's transaction, which this key signed, and is judged by kind below. A
-  cancel's own content is fixed, but it is offered under the same rule, so it replaces only a send
-  the rule recognises. With neither (a) nor (b) the action is not offered; on a mismatch the
-  screen says the journal and the node disagree and names `zwallet tx`.
+  when it matches the journal row (nonce, kind, `to`, and the amount in base units with its token)
+  and only after two checks (added in review round 3). The node's `from` field proves nothing: the
+  node, or an RPC URL given with `--rpc`, `ZWALLET_RPC_<CHAIN>` or `e`, writes it. So zwallet
+  rebuilds the signed transaction from the fields the node returned (type, chain id, nonce, gas,
+  fees, `to`, `value`, `input`, access list, signature) and requires (1) its hash, the keccak-256
+  of its EIP-2718 encoding, to equal the replaced hash, and (2) the signer recovered from its
+  signature to equal this session's pinned own address, as `tx::decode_signed` recovers the signer
+  of a transaction zwallet signs (chains/evm/tx.rs:449-460). A field missing, a type zwallet does
+  not produce, or either check failing: the action is not offered (T27, T34). Only then is it this
+  key's transaction. The journal keeps no calldata (its fields, chains/mod.rs:674-676), so an
+  invoke's calldata comes from (a) or from the node's transaction that passed both checks, and is
+  judged by kind below. A cancel's own content is fixed, but it is offered under the same rule, so
+  it replaces only a send the rule recognises. With neither (a) nor (b) the action is not offered;
+  on a mismatch the screen says the journal and the node disagree and names `zwallet tx`.
 - **Retry after `BROADCAST_UNCERTAIN`.** That is the state in which the node may not know the
   hash, so `R` is offered only under (a), in the session that made the send. After a restart, or
-  without the review, `R` is not offered and the screen says what to do instead: look the hash
-  up later (`/`, or `zwallet tx`); once the node knows it, `s` and `x` are offered under (b). If it
-  never appears, send again through the normal send flow: its review shows the duplicate guard's
-  match with the journal row (README.md:572-583), and it pays twice only if the human overrides
-  that guard with `d`.
+  without the review, `R` is not offered, and the screen says what to do instead: look the hash
+  up first (`/`, or `zwallet tx`); once the node knows it, `s` and `x` are offered under (b). A new
+  send through the normal send flow is not a retry: it is a new payment at a new nonce, and it
+  may pay twice even without `d`, because the repeat check looks back only 10 minutes
+  (`DUPLICATE_WINDOW_SECS = 600`, chains/mod.rs:836; README.md:572-574) and reads a journal any
+  process of this user can edit (review round 3 deleted the claim that only `d` could pay twice).
+  The screen says, in these words: `the node does not know this hash; that is no proof the send failed. A new send is a new payment at a new nonce: it can pay twice, also without d (the repeat check looks back 10 minutes, in a journal any process of this user can edit). Look the hash up first.` T29.
 - **Judged by kind.** A transfer's speed-up or retry needs its payee to be an address entry of
   the checked list on this chain; the review shows its nickname, typed at confirm. An invoke's
   speed-up or retry needs the contract to be a contract entry of the checked list on this chain
@@ -956,14 +995,14 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T24 | `a`, kind contract, `router`, ethereum, `0x414bf389` | the outcome has `warning: a listed contract may forward value or act on its arguments`; `whitelist list --verify` shows the contract entry with its selector |
 | T25 | `m` (off → on) | the summary shows the old and the new value (off, on); `whitelist list --verify` has `allowMessageSigning: true` |
 | T26 | 2 wallet `/`, a hash on the mock; a hash the node does not know | the transaction screen (T4's fields); `not found` with the CLI's hint; a 63-digit hash cannot be entered (the field's alphabet and length) |
-| T27 | (a) this session's own send pending at nonce N, `s`, the payee's nickname typed; (b) the same from a history row after a restart, the node's pending transaction equal to the journal row; (c) the journal row rewritten (the amount raised, or `to` another listed payee), the node's transaction unchanged; (d) no password check in this session; (e) the bumped fee over the checked list's cap; (f) the fee rising past the reviewed maximum between review and confirm | (a), (b): one `SignTx` with nonce N and the same `to`, `value` and `input` as the review's (a) or the node's (b) transaction, fees at least 1.25x the replaced transaction's (`--bump`, README.md:615-617); the journal line; the status follows the new hash. (c): `s` and `x` are not offered; the screen says the journal and the node disagree. (d): `s` shows `needs: V`. (e), (f): zero `SignTx`. Every `SignTx` is counted at `FakeDaemon.received` (tests/common/mod.rs:586-587) |
+| T27 | (a) this session's own send pending at nonce N, `s`, the payee's nickname typed; (b) the same from a history row after a restart, the node's pending transaction equal to the journal row; (c) the journal row rewritten (the amount raised, or `to` another listed payee), the node's transaction unchanged; (d) no password check in this session; (e) the bumped fee over the checked list's cap; (f) the fee rising past the reviewed maximum between review and confirm; (g) after a restart, the mock's pending transaction for the hash has `from` the pinned address but a signature that recovers to another key; (h) its fields do not hash to the replaced hash | (a), (b): one `SignTx` with nonce N and the same `to`, `value` and `input` as the review's (a) or the node's (b) transaction, fees at least 1.25x the replaced transaction's (`--bump`, README.md:615-617); the journal line; the status follows the new hash. (c): `s` and `x` are not offered; the screen says the journal and the node disagree. (d): `s` shows `needs: V`. (e), (f): zero `SignTx`. Every `SignTx` is counted at `FakeDaemon.received` (tests/common/mod.rs:586-587). (g), (h): `s` and `x` are not offered; zero `SignTx` |
 | T28 | the same send, `x`, type `cancel`; again with no password check in this session; with the cancel's fee over the checked list's cap; with the fee rising past the reviewed maximum at confirm | one `SignTx`: nonce N, `to` the key's own pinned address, `value` 0, no calldata, and the review says the cancel races the original and may lose; without the check `x` shows `needs: V`; over the cap or past the maximum: zero `SignTx` (counted as in T27) |
-| T29 | (a) in this session, the mock times out `eth_sendRawTransaction` after accepting it, then `R` and the nickname; (b) the journal row rewritten (amount raised, or `to` another listed payee) before `R` in the same session; (c) a restart, the node not knowing the hash; (d) a restart, the node knowing the hash and matching the journal | (a): `BROADCAST_UNCERTAIN` and `R`; one `SignTx` at nonce N with the review's `to`, `value` and `input` and `--replace` the first hash. (b): the same, the review's intent, not the journal's. (c): `R` is not offered; the screen says to look the hash up later or send again through the normal flow, whose duplicate guard names the row; zero `SignTx`. (d): `R` is not offered, `s` and `x` are (T27 (b)). No action on that screen reaches a send without a nonce. Counted at `FakeDaemon.received` (tests/common/mod.rs:586-587) |
+| T29 | (a) in this session, the mock times out `eth_sendRawTransaction` after accepting it, then `R` and the nickname; (b) the journal row rewritten (amount raised, or `to` another listed payee) before `R` in the same session; (c) a restart, the node not knowing the hash, then again with the journal row aged past 10 minutes and with it deleted; (d) a restart, the node knowing the hash and matching the journal | (a): `BROADCAST_UNCERTAIN` and `R`; one `SignTx` at nonce N with the review's `to`, `value` and `input` and `--replace` the first hash. (b): the same, the review's intent, not the journal's. (c): `R` is not offered; the screen shows the warning of §Status of a send (Retry after `BROADCAST_UNCERTAIN`) that a new send can pay twice even without `d`, also with the journal row older than 10 minutes and with the row deleted; zero `SignTx`. (d): `R` is not offered, `s` and `x` are (T27 (b)). No action on that screen reaches a send without a nonce. Counted at `FakeDaemon.received` (tests/common/mod.rs:586-587) |
 | T30 | 1 keys `n`, `trading`, the password; again with `10m` | `zwallet list --json` has `trading` active and verified; with `10m`, unlocked until about now+10m |
 | T31 | an empty home, `zwallet tui`; the form with two passwords that differ, then the same | the create form; the mismatch creates nothing; then wallet.json exists, `main` is key 0 and the frame shows the backup reminder. `create` draws its own phrase, so the test reads it back after the run with `zwallet backup` on its own pty: no frame, no pty capture, no `Msg` `Debug` and no `Created` `Debug` holds the whole phrase, or any 3 consecutive words of it as consecutive word tokens (a single common word in the UI is no failure, so the result does not depend on the seed) |
 | T32 | 1 keys `B` | B1 (built): the one line naming `zwallet backup`, and no `Effect` reads the seed. B2 (only if the owner picks it): a home made from a fixed test mnemonic; the purpose sentence above the password field; the words drawn only from `wallet::recovery_phrase`'s value, held in one state field that no `Outside`, `Msg` or `Placed` carries; any key hides them, and so do 30 s; afterwards the field is empty and no later frame, no pty capture after `q` and no `Msg` `Debug` holds the whole phrase or any 3 consecutive words of it |
 | T33 | 6 tools call `balanceOf(address)(uint256)` on the mock; then a result of 600 characters of ESC and `█` | the result; then the result view shows at most 512 escaped characters in at most 7 rows, zero replaced cells |
-| T34 | 6 tools invoke `router`, `0x414bf389`, its signature and arguments, type `router`; then the replacements of a pending invoke at nonce N: (g) `s`, `router` typed; (h) `s` after the checked list dropped `router`, or dropped its selector `0x414bf389`; (i) a restart, the journal row rewritten (`to` another contract, or the value), the node's transaction unchanged; (j) `x`; (k) `R` after an uncertain invoke broadcast in this session, and after a restart with the node not knowing the hash | the review shows zwallet's decode (contract-call, contract, selector, value); one `SignTx`; the journal line has kind `invoke`. A signature whose selector `router` does not list cannot leave the form, which names the listed ones. (g): one `SignTx` at nonce N with the node's or the review's `to`, `value` and `input`, fees at least 1.25x the replaced one's. (h): the review refuses, zero `SignTx`. (i): `s` and `x` are not offered, zero `SignTx`. (j): one `SignTx`, T28's self-transfer. (k): in the session, the review's intent at nonce N; after the restart, not offered. Counted at `FakeDaemon.received` |
+| T34 | 6 tools invoke `router`, `0x414bf389`, its signature and arguments, type `router`; then the replacements of a pending invoke at nonce N: (g) `s`, `router` typed; (h) `s` after the checked list dropped `router`, or dropped its selector `0x414bf389`; (i) a restart, the journal row rewritten (`to` another contract, or the value), the node's transaction unchanged; (j) `x`; (k) `R` after an uncertain invoke broadcast in this session, and after a restart with the node not knowing the hash; (l) after a restart, the mock's pending invoke has `from` the pinned address but a signature that recovers to another key, or arguments that no longer hash to the replaced hash | the review shows zwallet's decode (contract-call, contract, selector, value); one `SignTx`; the journal line has kind `invoke`. A signature whose selector `router` does not list cannot leave the form, which names the listed ones. (g): one `SignTx` at nonce N with the node's or the review's `to`, `value` and `input`, fees at least 1.25x the replaced one's. (h): the review refuses, zero `SignTx`. (i): `s` and `x` are not offered, zero `SignTx`. (j): one `SignTx`, T28's self-transfer. (k): in the session, the review's intent at nonce N; after the restart, not offered. Counted at `FakeDaemon.received`. (l): `s` and `x` are not offered; zero `SignTx` |
 | T35 | invoke with raw calldata | first 4 bytes listed: as T34; not listed: refused at the form |
 | T36 | 6 tools sign: (a) message signing on, a 512-character message; (b) two messages that differ only in the last character; (c) a message with 2 leading spaces and 1 trailing space; (d) `e` after the review; (e) message signing off; (f) a paste with a non-ASCII character, and 513 characters | (a): the review shows all 512 characters in 7 rows of the message block at 80x24; with a real test daemon (as tests/cli.rs:194-225 runs one) the signature checks against the address (`verify_message`, chains/evm/mod.rs:193) and the returned digest is EIP-191's of the bytes the review held; and, calling `wallet::sign_message` directly with the review's held bytes and a `FakeDaemon` bound at `d.sock` (the TUI's warm-session gate reads the process table, not the socket), the one `SignMessage` request's `message_hex` decodes to exactly those bytes. (b): each review shows its own last character and each request carries its own bytes. (c): the spaces stand inside the brackets and the line says `leading spaces 2, trailing spaces 1`. (d): the review is dropped; Enter signs nothing until a new review. (e): the review shows `WHITELIST_DENIED` and points to `m` on 5 whitelist. (f): refused at the field, which names `zwallet sign-message`. The `FakeDaemon` (tests/common/mod.rs:584-641) answers every request with one fixed reply and does not sign: it only captures the request. The proof is transitive: the `FakeDaemon` path proves that `wallet::sign_message`'s input is the request's bytes, and the real daemon's digest proves that the TUI hands the library the bytes its review held |
 | T37 | 6 tools token, a contract on the mock whose `symbol()` is 40 characters with ESC | its balance with the symbol escaped and cut at 32; no send is offered for it |
@@ -983,6 +1022,22 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 - At least one counter-example per unit ([`v0-2-tui/units.md`](v0-2-tui/units.md)): an outside
   string with a control character or a QR glyph, a 600-character name, a forged explorer row, a
   rewritten whitelist.json, a forged session view, a password in a frame.
+
+## Changes on 2026-10-28, v2, review round 3
+
+fable approved; grok-4.7 and gpt-6-astra rejected two sentences that round 2 added; every
+round-2 fix held. Both sentences are corrected (§Status of a send, Replacements):
+
+1. The node's pending transaction is no longer called "signed by this key" unchecked. Before it
+   is a replacement's intent, its rebuilt hash must equal the replaced hash and its recovered
+   signer this session's pinned own address; otherwise the action is not offered (T27 (g), (h);
+   T34 (l)).
+2. The fallback after an uncertain broadcast no longer claims that only `d` can pay twice. A new
+   send is a new payment and can pay twice without `d` (the repeat check looks back 10 minutes in
+   an editable journal); the screen says so and says to look the hash up first (T29 (c)).
+3. The explorer re-measure that gated the TUI-7+8 PR was run by the dispatcher on 2026-10-28:
+   identical to 2026-10-27; no extra parser in v0.2, avalanche through Routescan stays out, the
+   coverage per chain is unchanged (§History).
 
 ## Changes on 2026-10-28, v2, review round 2
 

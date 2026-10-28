@@ -14,9 +14,10 @@ code.
 
 ## Entry conditions
 
-- **TUI-7+8 merges only after the explorer table is measured again** (03-tui.md §History): the
-  Blockscout hosts, and Routescan's paths for base, arbitrum and polygon. That data decides
-  whether one more parser opens those chains; the decision is recorded in 03-tui.md first.
+- **Satisfied 2026-10-28: the explorer re-measure that gated TUI-7+8.** Receipt: the dispatcher's record `explorer-remeasure/record.md` with the raw bodies, in the session scratchpad, outside the repo
+  (04:50:25Z–04:50:46Z), copied into 03-tui.md §History (re-measured 2026-10-28). Decision recorded
+  there: no extra parser for base, arbitrum or polygon in v0.2; avalanche through Routescan stays
+  out; the coverage per chain is unchanged. Nothing gates TUI-7+8 now but TUI-5.
 - **Trade-offs Q and B** (03-tui.md §Open trade-offs) go to the owner. TUI-3+4 and TUI-10 build
   the CLI pointers (Q1, B1) and do not wait; Q3 lands as a delta of T18 if picked; B2 is built
   only if the owner picks it (recommended: B1).
@@ -34,7 +35,7 @@ review round 1 of v2, 2026-10-28).
 | TUI-3+4 | zwallet · at dispatch | "see and receive": `actions.rs` and the form helpers first; tabs, menu, hints; balances, every network, chain switch and session RPC; receive, `V` on every key, `A`, session, `u`, the start flag `--allow-ptrace-scope-0` (T5, T8, T12–T20, T42) | coding agent + dispatcher gate | planned, after TUI-2 |
 | TUI-5 | zwallet · at dispatch | send: payee, amount, review with overrides and fee ceiling, confirm, status, `w` (T6, T6b, T21, T22, T43) | coding agent + dispatcher gate | planned, after TUI-3+4 |
 | TUI-6 | zwallet · at dispatch | whitelist view and every change, the zero-address refusal at add; pty run across T2, T6, T7 (T7, T11, T23–T25, T44) | coding agent + dispatcher gate | planned, right after TUI-5, its own review |
-| TUI-7+8 | zwallet · at dispatch | history (journal, explorer, merge); transaction detail, `dropped/replaced`, `/` lookup (T3, T3b, T4, T6c, T26) | coding agent + dispatcher gate | planned, after TUI-5 and the re-measure |
+| TUI-7+8 | zwallet · at dispatch | history (journal, explorer, merge); transaction detail, `dropped/replaced`, `/` lookup (T3, T3b, T4, T6c, T26) | coding agent + dispatcher gate | planned, after TUI-5 (the explorer re-measure is done, 2026-10-28) |
 | TUI-9 | zwallet · at dispatch | speed up, cancel, retry at nonce N (T27–T29) | coding agent + dispatcher gate | planned, after TUI-7+8 |
 | TUI-10 | zwallet · at dispatch | new key, first-run create, `B` as B1 (T30–T32) | coding agent + dispatcher gate | planned, after TUI-3+4 |
 | TUI-11 | zwallet · at dispatch | call, invoke and its replacements, sign a message, a token by contract (T33–T37) | coding agent + dispatcher gate | planned, after TUI-9 |
