@@ -3,6 +3,7 @@
 //! nothing (`.prd/05-tron.md`).
 
 pub mod address;
+pub mod registry;
 pub mod rpc;
 
 use crate::chains::evm::policy::ListView;

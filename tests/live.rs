@@ -15,6 +15,10 @@ const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 /// Multicall3, the same address on every chain: a contract that is no registry token.
 const MULTICALL3: &str = "0xca11bde05977b3631167028862be2a173976ca11";
+/// Key 0 of the public test mnemonic on Tron (`.prd/05-tron.md` §Derivation): a live account
+/// whose owner permission another key holds since someone took it over (M7). Nothing here pins
+/// its balance or its keys, which can change.
+const TWER: &str = "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6";
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "live: public RPC"]
@@ -490,7 +494,129 @@ async fn every_registry_token_answers_its_symbol_and_decimals() {
             }
         }
     }
+    // The Tron registry, through Tron's default endpoint.
+    assert!(!chains::tron::registry::TOKENS.is_empty());
+    let tron = chains::find("tron").unwrap();
+    let net = Net {
+        chain: tron,
+        rpc_url: tron.default_rpc().to_string(),
+    };
+    for t in chains::tron::registry::TOKENS {
+        let meta = match chains::tron::rpc::connect(&net).await {
+            Ok(c) => chains::tron::rpc::trc20_meta(&c, t.address, TWER).await,
+            Err(e) => Err(e),
+        };
+        let row = format!("{:<9} {:<4} {}", tron.key, t.symbol, t.address);
+        match meta {
+            Ok(m)
+                if m.symbol == t.onchain_symbol && m.decimals == t.decimals && m.from_registry =>
+            {
+                println!("ok   {row} {} {}", m.symbol, m.decimals);
+            }
+            Ok(m) => failures.push(format!(
+                "{row}: symbol {:?} decimals {} (registry's: {}), expected {:?} {}",
+                m.symbol, m.decimals, m.from_registry, t.onchain_symbol, t.decimals
+            )),
+            Err(e) => failures.push(format!("{row}: {}", e.message)),
+        }
+    }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// One POST to Tron's HTTP API at the default endpoint, read by the test itself (no zwallet
+/// code), with a User-Agent that names nobody: the reply as JSON.
+fn tron_post(call: &str, body: Value) -> Value {
+    use alloy::transports::http::reqwest;
+    let url = format!(
+        "{}/wallet/{call}",
+        chains::find("tron").unwrap().default_rpc()
+    );
+    let run = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    run.block_on(async {
+        let reply = reqwest::Client::builder()
+            .user_agent("zwallet-live-test")
+            .build()
+            .unwrap()
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert!(reply.status().is_success(), "{}", reply.status());
+        serde_json::from_slice(&reply.bytes().await.unwrap()).unwrap()
+    })
+}
+
+/// A fresh wallet whose cached Tron address is [`TWER`] (read while locked: the cache).
+fn wallet_caching_twer() -> Home {
+    let home = Home::new();
+    home.create("live", &[]);
+    home.edit_wallet(|v| v["keys"][0]["addresses"]["tron"] = serde_json::json!(TWER));
+    home
+}
+
+#[test]
+#[ignore = "live: public RPC"]
+fn tr6_tron_balance_is_the_nodes_and_warns_exactly_when_another_key_owns_it() {
+    let home = wallet_caching_twer();
+    let account = tron_post(
+        "getaccount",
+        serde_json::json!({ "address": TWER, "visible": true }),
+    );
+    let v = home.run(&["balance", "--chain", "tron", "--json"]).ok();
+    println!("{v:#}");
+    assert_eq!(v["address"], TWER);
+    assert_eq!(
+        v["raw"],
+        account["balance"].as_u64().unwrap_or(0).to_string(),
+        "{account}"
+    );
+    // This address alone at threshold 1 (or no owner permission: the default one) is the only
+    // owner that gives no warning.
+    let p = &account["owner_permission"];
+    let alone = p.is_null()
+        || (p["threshold"] == 1
+            && p["keys"]
+                .as_array()
+                .is_some_and(|k| k.len() == 1 && k[0]["address"] == TWER && k[0]["weight"] == 1));
+    assert_eq!(v.get("warning").is_some(), !alone, "{v} / {p}");
+}
+
+#[test]
+#[ignore = "live: public RPC"]
+fn tr7_usdt_balance_is_the_contracts_with_the_registrys_symbol_and_decimals() {
+    let home = wallet_caching_twer();
+    let payload = bs58::decode(TWER).with_check(None).into_vec().unwrap();
+    let parameter = format!("{}{}", "0".repeat(24), alloy::hex::encode(&payload[1..]));
+    let reply = tron_post(
+        "triggerconstantcontract",
+        serde_json::json!({
+            "owner_address": TWER,
+            "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+            "function_selector": "balanceOf(address)",
+            "parameter": parameter,
+            "visible": true,
+        }),
+    );
+    let word = reply["constant_result"][0].as_str().unwrap();
+    let raw = U256::from_str_radix(word, 16).unwrap();
+    let v = home
+        .run(&["balance", "--chain", "tron", "--token", "usdt", "--json"])
+        .ok();
+    println!("{v:#}");
+    assert_eq!(
+        (&v["symbol"], &v["decimals"], &v["symbolSource"]),
+        (
+            &serde_json::json!("USDT"),
+            &serde_json::json!(6),
+            &serde_json::json!("registry")
+        )
+    );
+    assert_eq!(v["raw"], raw.to_string(), "{reply}");
 }
 
 #[test]
@@ -502,7 +628,6 @@ fn balance_without_chain_reads_every_network() {
     // reads): Hardhat's account #0, public test key, dust on many networks; on Tron the same
     // mnemonic's key 0, TWer2... (05-tron.md M7).
     const HARDHAT_0: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-    const TWER: &str = "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6";
     home.edit_wallet(|v| {
         for (chain, a) in v["keys"][0]["addresses"].as_object_mut().unwrap() {
             let known = if chain == "tron" { TWER } else { HARDHAT_0 };
@@ -529,14 +654,21 @@ fn balance_without_chain_reads_every_network() {
             "sepolia"
         ]
     );
+    // TR8: Tron among the mainnets, with its own address on its row.
+    let tron = rows.iter().find(|r| r["chain"] == "tron").unwrap();
+    assert_eq!(tron["address"], TWER, "{tron:#}");
     // Each answered through its default RPC, with every registry token of its chain read.
     for row in rows {
         assert!(row.get("error").is_none(), "{row:#}");
         let id = row["chainId"].as_u64().unwrap();
-        let tokens = evm::registry::TOKENS
-            .iter()
-            .filter(|t| t.chain_id == id)
-            .count();
+        let tokens = if row["chain"] == "tron" {
+            chains::tron::registry::TOKENS.len()
+        } else {
+            evm::registry::TOKENS
+                .iter()
+                .filter(|t| t.chain_id == id)
+                .count()
+        };
         let rows = row["tokens"].as_array().unwrap();
         assert_eq!(rows.len(), tokens, "{row:#}");
         assert!(rows.iter().all(|t| t.get("error").is_none()), "{row:#}");

@@ -210,3 +210,352 @@ fn a_gateway_error_names_the_origin_only_and_a_non_json_answer_its_position() {
     assert!(common::ascii_printable(&msg), "{msg:?}");
     assert!(msg.len() < 400, "{msg}");
 }
+
+// ---- TRON-2: USDT, the owner-permission warning, the every-network row ----
+
+/// Key 0 of the public test mnemonic, as M7 found it: someone holds its owner permission.
+const TWER: &str = "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6";
+
+/// `home`'s cached Tron address replaced with `address` (read while locked: the cache).
+fn cache_tron(home: &Home, address: &str) {
+    home.edit_wallet(|v| v["keys"][0]["addresses"]["tron"] = json!(address));
+}
+
+#[test]
+fn tr6_an_owner_permission_held_by_another_key_is_a_warning_naming_it() {
+    let home = Home::new();
+    home.create("main", &[]);
+    cache_tron(&home, TWER);
+    let node = MockTron::start(tron::node(tron::taken_over_account(), 0));
+    let v = home
+        .run(&["balance", "--chain", "tron", "--rpc", &node.url, "--json"])
+        .ok();
+    assert_eq!(
+        (&v["address"], &v["raw"], &v["balance"], &v["activated"]),
+        (
+            &json!(TWER),
+            &json!("8000010"),
+            &json!("8.00001"),
+            &json!(true)
+        ),
+        "{v}"
+    );
+    let w = v["warning"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no warning: {v}"));
+    assert!(w.contains(tron::TAKEOVER_KEY), "{w}");
+    assert!(w.contains("do not fund it"), "{w}");
+    // The same warning on the token's row and on `balance` without --chain.
+    let v = home
+        .run(&[
+            "balance", "--chain", "tron", "--token", "usdt", "--rpc", &node.url, "--json",
+        ])
+        .ok();
+    assert!(
+        v["warning"]
+            .as_str()
+            .unwrap_or("")
+            .contains(tron::TAKEOVER_KEY),
+        "{v}"
+    );
+    let env = env_with_tron(&node.url);
+    let every = home.run_env(&["balance", "--json"], &refs(&env)).ok();
+    let row = tron_row(&every);
+    assert!(
+        row["warning"]
+            .as_str()
+            .unwrap_or("")
+            .contains(tron::TAKEOVER_KEY),
+        "{row}"
+    );
+    let human = home.run_env(&["balance"], &refs(&env));
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human
+            .stdout
+            .lines()
+            .any(|l| l.starts_with("           warning: this Tron account")
+                && l.contains(tron::TAKEOVER_KEY)),
+        "{}",
+        human.stdout
+    );
+    // An account owned by its own key alone carries none.
+    let own = MockTron::start(tron::node(tron::account(TWER, 1), 0));
+    let v = home
+        .run(&["balance", "--chain", "tron", "--rpc", &own.url, "--json"])
+        .ok();
+    assert!(v.get("warning").is_none(), "{v}");
+}
+
+#[test]
+fn an_owner_permission_at_threshold_2_or_with_two_keys_is_a_warning_with_the_keys_escaped() {
+    let home = Home::new();
+    home.create("main", &[]);
+    cache_tron(&home, TWER);
+    let evil_key = "T\u{1b}[2J\nverified: true";
+    for permission in [
+        json!({ "threshold": 2, "keys": [{ "address": TWER, "weight": 1 }] }),
+        json!({ "threshold": 1, "keys": [
+            { "address": TWER, "weight": 1 },
+            { "address": tron::TAKEOVER_KEY, "weight": 1 },
+        ] }),
+        json!({ "threshold": 1, "keys": [{ "address": evil_key, "weight": 1 }] }),
+        json!({ "threshold": 1, "keys": (0..400).map(|_| json!({ "address": evil_key, "weight": 1 })).collect::<Vec<_>>() }),
+        json!("not an object"),
+    ] {
+        let mut account = tron::account(TWER, 5);
+        account["owner_permission"] = permission.clone();
+        let node = MockTron::start(tron::node(account, 0));
+        let out = home.run(&["balance", "--chain", "tron", "--rpc", &node.url, "--json"]);
+        let v = out.ok();
+        let w = v["warning"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{permission}: no warning: {v}"));
+        assert!(w.contains("do not fund it"), "{w}");
+        assert!(common::ascii_printable(w), "{permission}: {w:?}");
+        assert!(w.len() < 800, "{permission}: {} characters", w.len());
+        let human = home.run(&["balance", "--chain", "tron", "--rpc", &node.url]);
+        assert!(
+            human.stdout.split('\n').all(common::ascii_printable),
+            "{:?}",
+            human.stdout
+        );
+    }
+}
+
+#[test]
+fn tr7_usdt_is_the_registry_row_read_by_balance_of() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let me = cached_tron(&home);
+    let node = MockTron::start(tron::node(tron::account(&me, 3_000_000), 12_345_678));
+    let v = home
+        .run(&[
+            "balance", "--chain", "tron", "--token", "usdt", "--rpc", &node.url, "--json",
+        ])
+        .ok();
+    assert_eq!(
+        (&v["symbol"], &v["decimals"], &v["balance"], &v["raw"]),
+        (
+            &json!("USDT"),
+            &json!(6),
+            &json!("12.345678"),
+            &json!("12345678")
+        ),
+        "{v}"
+    );
+    assert_eq!(
+        (&v["token"], &v["symbolSource"], &v["activated"]),
+        (&json!(tron::USDT), &json!("registry"), &json!(true)),
+        "{v}"
+    );
+    // One balanceOf of this address at the registry contract; symbol and decimals are the
+    // registry's, never asked.
+    let calls = node.calls("/wallet/triggerconstantcontract");
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(
+        calls[0],
+        json!({
+            "owner_address": me,
+            "contract_address": tron::USDT,
+            "function_selector": "balanceOf(address)",
+            "parameter": tron::address_word(&me),
+            "visible": true,
+        })
+    );
+    // `USDT` in any case; anything else that is no T... address is refused before any request.
+    let seen = node.seen().len();
+    home.run(&[
+        "balance", "--chain", "tron", "--token", "USDT", "--rpc", &node.url, "--json",
+    ])
+    .ok();
+    for bad in [
+        "usdc",
+        "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+        "tR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+    ] {
+        home.run(&[
+            "balance", "--chain", "tron", "--token", bad, "--rpc", &node.url, "--json",
+        ])
+        .err("INVALID_ADDRESS");
+    }
+    assert_eq!(node.seen().len(), seen + 3, "{:?}", node.paths());
+}
+
+#[test]
+fn a_contract_named_by_address_answers_its_own_symbol_marked_as_its_own() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let me = cached_tron(&home);
+    // TWer2... as a "token": it answers symbol() = USDT, but it is not the registry contract.
+    let fake = MockTron::start(tron::node(tron::account(&me, 0), 7));
+    let v = home
+        .run(&[
+            "balance", "--chain", "tron", "--token", TWER, "--rpc", &fake.url, "--json",
+        ])
+        .ok();
+    assert_eq!(
+        (&v["token"], &v["symbolSource"], &v["symbol"], &v["raw"]),
+        (
+            &json!(TWER),
+            &json!("contract"),
+            &json!("USDT"),
+            &json!("7")
+        ),
+        "{v}"
+    );
+    // A symbol with an escape: shown escaped and cut, still the contract's.
+    let evil =
+        MockTron::start(
+            move |path, body| match (path, body["function_selector"].as_str()) {
+                ("/wallet/triggerconstantcontract", Some("symbol()")) => Reply::Json(
+                    tron::constant(&tron::abi_string(&format!("\u{1b}[2J{}", "U".repeat(100)))),
+                ),
+                _ => tron::node(tron::account(&me, 0), 7)(path, body),
+            },
+        );
+    let v = home
+        .run(&[
+            "balance", "--chain", "tron", "--token", TWER, "--rpc", &evil.url, "--json",
+        ])
+        .ok();
+    let sym = v["symbol"].as_str().unwrap();
+    assert!(common::ascii_printable(sym) && sym.len() <= 32, "{sym:?}");
+    assert_eq!(v["symbolSource"], "contract");
+    // The registry contract named by its address: the registry's symbol.
+    let real = MockTron::start(tron::node(tron::account(&cached_tron(&home), 0), 1));
+    let v = home
+        .run(&[
+            "balance",
+            "--chain",
+            "tron",
+            "--token",
+            tron::USDT,
+            "--rpc",
+            &real.url,
+            "--json",
+        ])
+        .ok();
+    assert_eq!(
+        (&v["symbol"], &v["symbolSource"]),
+        (&json!("USDT"), &json!("registry")),
+        "{v}"
+    );
+}
+
+#[test]
+fn a_balance_of_that_is_not_one_word_or_that_failed_is_rpc_error_escaped_and_bounded() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let me = cached_tron(&home);
+    let revert = format!("{}", "\u{1b}".repeat(600));
+    let cases: Vec<Value> = vec![
+        // 33 bytes.
+        tron::constant(&format!("{}00", tron::word(5))),
+        // The node says the call failed, with 600 ESC as its message (hex, as java-tron writes
+        // it).
+        json!({
+            "result": { "result": false, "code": "CONTRACT_EXE_ERROR", "message": alloy::hex::encode(&revert) },
+            "constant_result": [tron::word(5)],
+        }),
+        // No result at all.
+        json!({ "constant_result": [tron::word(5)] }),
+        // Not hex.
+        tron::constant("zz"),
+    ];
+    for reply in cases {
+        let account = tron::account(&me, 2);
+        let node = MockTron::start(move |path, body| match path {
+            "/wallet/triggerconstantcontract" => Reply::Json(reply.clone()),
+            _ => tron::node(account.clone(), 0)(path, body),
+        });
+        let out = home.run(&[
+            "balance", "--chain", "tron", "--token", "usdt", "--rpc", &node.url, "--json",
+        ]);
+        let msg = out.err("RPC_ERROR");
+        assert!(common::ascii_printable(&msg), "{msg:?}");
+        assert!(msg.len() <= 600, "{} characters: {msg}", msg.len());
+        assert!(out.json().get("raw").is_none(), "{}", out.stdout);
+    }
+}
+
+/// The `tron` row of `balance` without `--chain`.
+fn tron_row(v: &Value) -> Value {
+    v["chains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["chain"] == "tron")
+        .unwrap_or_else(|| panic!("no tron row: {v}"))
+        .clone()
+}
+
+#[test]
+fn tr7_tr8_the_tron_row_has_trx_usdt_and_its_own_address_and_a_failed_usdt_read_is_its_row() {
+    let home = Home::new();
+    let evm = home.create("main", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let me = cached_tron(&home);
+    let node = MockTron::start(tron::node(tron::account(&me, 1_000_000), 2_500_000));
+    let env = env_with_tron(&node.url);
+    let v = home.run_env(&["balance", "--json"], &refs(&env)).ok();
+    // The top-level address is the EVM one; the tron row names its own.
+    assert_eq!(v["address"], evm.as_str());
+    let keys: Vec<&str> = v["chains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["chain"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys.last(), Some(&"sepolia"));
+    assert!(keys.contains(&"tron"));
+    let row = tron_row(&v);
+    assert_eq!(
+        row,
+        json!({
+            "chain": "tron",
+            "chainId": 728126428,
+            "address": me,
+            "activated": true,
+            "native": { "symbol": "TRX", "decimals": 6, "balance": "1", "raw": "1000000" },
+            "tokens": [{
+                "symbol": "USDT", "address": tron::USDT, "decimals": 6,
+                "balance": "2.5", "raw": "2500000",
+            }],
+        })
+    );
+    let human = home.run_env(&["balance"], &refs(&env));
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human
+            .stdout
+            .contains(&format!("\ntron       1 TRX ({me})\n           2.5 USDT\n")),
+        "{}",
+        human.stdout
+    );
+    // balanceOf fails: the token row says why, TRX is still shown.
+    let account = tron::account(&me, 1_000_000);
+    let broken = MockTron::start(move |path, body| match path {
+        "/wallet/triggerconstantcontract" => Reply::Json(json!({
+            "result": { "code": "CONTRACT_VALIDATE_ERROR", "message": alloy::hex::encode("no contract") },
+        })),
+        _ => tron::node(account.clone(), 0)(path, body),
+    });
+    let env = env_with_tron(&broken.url);
+    let v = home.run_env(&["balance", "--json"], &refs(&env)).ok();
+    let row = tron_row(&v);
+    assert_eq!(row["native"]["raw"], "1000000", "{row}");
+    let usdt = &row["tokens"][0];
+    assert_eq!(
+        (&usdt["symbol"], &usdt["errorCode"]),
+        (&json!("USDT"), &json!("RPC_ERROR")),
+        "{usdt}"
+    );
+    assert!(
+        usdt["error"].as_str().unwrap().contains("no contract"),
+        "{usdt}"
+    );
+    assert!(usdt.get("raw").is_none(), "{usdt}");
+}

@@ -6282,3 +6282,101 @@ fn whitelist_entries_and_fee_caps_for_tron_wait_for_the_tron_signer() {
         assert!(!home.path().join("whitelist.json").exists(), "{args:?}");
     }
 }
+
+// ---- Tron (TRON-2): a key made before this build knew Tron ----
+
+#[test]
+fn tr3_a_key_without_a_tron_cache_is_locked_until_unlock_or_verify_adds_it() {
+    let home = Home::new();
+    let evm = home.create("main", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tron = derived_tron(&home);
+    // As a wallet made before this version: no `tron` in its cache.
+    home.edit_wallet(|v| {
+        v["keys"][0]["addresses"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tron");
+    });
+    // Locked: nothing to show, and the error says how to get it.
+    let msg = home
+        .run(&["address", "--chain", "tron", "--json"])
+        .err("WALLET_LOCKED");
+    assert!(msg.contains("zwallet unlock"), "{msg}");
+    assert!(
+        msg.contains("zwallet address --chain tron --verify"),
+        "{msg}"
+    );
+    // `addresses` still lists every other chain; the tron row says why it has no address.
+    let all = home.run(&["addresses", "--json"]).ok();
+    let rows = all["addresses"].as_array().unwrap();
+    for row in rows {
+        if row["chainId"] == "tron" {
+            assert_eq!(row["errorCode"], "WALLET_LOCKED", "{row}");
+            assert!(row.get("address").is_none(), "{row}");
+        } else {
+            assert_eq!(row["address"], evm.as_str(), "{row}");
+        }
+    }
+    // With the password: added from the seed, said so, and no tamper warning.
+    let v = home
+        .run_stdin(
+            &[
+                "address",
+                "--chain",
+                "tron",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
+            &format!("{PW}\n"),
+        )
+        .ok();
+    assert_eq!(
+        (&v["address"], &v["verifiedBy"]),
+        (&json!(tron), &json!("password")),
+        "{v}"
+    );
+    assert_eq!(
+        v["added"],
+        json!([{ "key": "main", "chain": "tron", "now": tron }]),
+        "{v}"
+    );
+    assert!(
+        v.get("warning").is_none() && v.get("repaired").is_none(),
+        "{v}"
+    );
+    // Then cached: the locked read shows it.
+    let v = home.run(&["address", "--chain", "tron", "--json"]).ok();
+    assert_eq!(v["address"], tron.as_str(), "{v}");
+    // A second --verify has nothing to add.
+    let v = home
+        .run_stdin(
+            &["address", "--verify", "--password-stdin", "--json"],
+            &format!("{PW}\n"),
+        )
+        .ok();
+    assert!(v.get("added").is_none(), "{v}");
+    // The human text names what was added.
+    home.edit_wallet(|v| {
+        v["keys"][0]["addresses"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tron");
+    });
+    let human = home.run_stdin(
+        &["address", "--chain", "tron", "--verify", "--password-stdin"],
+        &format!("{PW}\n"),
+    );
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human
+            .stdout
+            .contains(&format!("added: key 'main' tron: {tron}")),
+        "{}",
+        human.stdout
+    );
+    assert!(!human.stdout.contains("warning"), "{}", human.stdout);
+}

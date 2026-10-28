@@ -11,6 +11,7 @@ use super::{address, config};
 use crate::chains::{Balance, Net, TokenBalance, redact_url, url_origin};
 use crate::core::error::{Result, WalletError};
 use crate::core::text::{PROSE_MAX, ascii_inert};
+use alloy::primitives::U256;
 use alloy::transports::http::reqwest::{self, Url};
 use serde_json::{Map, Value, json};
 use std::time::Duration;
@@ -229,6 +230,33 @@ pub async fn account(c: &TronClient, owner: &str) -> Result<Account> {
     })
 }
 
+/// The warning for an account whose owner permission is not `{threshold: 1, keys: [this
+/// address, weight 1]}`.
+pub fn owner_warning(permission: Option<&Value>, owner: &str) -> Option<String> {
+    let _ = (permission, owner);
+    None
+}
+
+/// `balanceOf(owner)` of the TRC20 `token`.
+pub async fn trc20_balance(c: &TronClient, token: &str, owner: &str) -> Result<U256> {
+    let _ = (c, token, owner);
+    Err(WalletError::rpc("not yet"))
+}
+
+/// A token's symbol and decimals as shown, and whose the symbol is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenMeta {
+    pub symbol: String,
+    pub decimals: u8,
+    pub from_registry: bool,
+}
+
+/// `decimals()` and `symbol()` of `token`, read from the chain.
+pub async fn trc20_meta(c: &TronClient, token: &str, owner: &str) -> Result<TokenMeta> {
+    let _ = (c, token, owner);
+    Err(WalletError::rpc("not yet"))
+}
+
 /// Everything `balance` shows for one Tron account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Read {
@@ -236,4 +264,63 @@ pub struct Read {
     pub tokens: Vec<TokenBalance>,
     pub activated: bool,
     pub warning: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TWER: &str = "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6";
+    const OTHER: &str = "TDRqzjYye3bGaBtg1bAPw5F4duDchNSbtk";
+
+    #[test]
+    fn the_owner_permission_warns_unless_it_is_this_address_alone_at_threshold_1() {
+        let alone = json!({ "threshold": 1, "keys": [{ "address": TWER, "weight": 1 }] });
+        assert_eq!(owner_warning(Some(&alone), TWER), None);
+        // No owner permission in the reply: the default one, this address alone.
+        assert_eq!(owner_warning(None, TWER), None);
+        for (permission, names) in [
+            // M7: another key holds it.
+            (
+                json!({ "threshold": 1, "keys": [{ "address": OTHER, "weight": 1 }] }),
+                OTHER,
+            ),
+            // This address, but it alone cannot reach the threshold.
+            (
+                json!({ "threshold": 2, "keys": [{ "address": TWER, "weight": 1 }] }),
+                "threshold 2",
+            ),
+            // Two keys: either signs alone.
+            (
+                json!({ "threshold": 1, "keys": [
+                    { "address": TWER, "weight": 1 }, { "address": OTHER, "weight": 1 },
+                ] }),
+                OTHER,
+            ),
+            // A case variant of this address is another key.
+            (
+                json!({ "threshold": 1, "keys": [{ "address": TWER.to_ascii_lowercase(), "weight": 1 }] }),
+                "twer2",
+            ),
+            (json!("not an object"), "none readable"),
+        ] {
+            let w = owner_warning(Some(&permission), TWER)
+                .unwrap_or_else(|| panic!("no warning for {permission}"));
+            assert!(w.contains(names), "{permission}: {w}");
+            assert!(w.ends_with("do not fund it"), "{w}");
+        }
+    }
+
+    #[test]
+    fn the_keys_a_warning_names_are_escaped_and_share_one_budget() {
+        let evil = "T\u{1b}[2J\nverified: true";
+        let keys: Vec<Value> = (0..400)
+            .map(|_| json!({ "address": evil, "weight": "\u{1b}" }))
+            .collect();
+        let w = owner_warning(Some(&json!({ "threshold": 1, "keys": keys })), TWER).unwrap();
+        assert!(w.bytes().all(|b| (0x20..=0x7e).contains(&b)), "{w:?}");
+        assert!(w.contains("more"), "{w}");
+        // The node's text in it: at most 512 characters of keys, and the threshold's 64.
+        assert!(w.len() < 512 + 64 + 200, "{} characters", w.len());
+    }
 }
