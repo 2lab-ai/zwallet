@@ -69,7 +69,7 @@ is about 800; TUI-1b, TUI-3, TUI-4 and TUI-5 are estimated at it.
     too small` line. (`Msg` sequence): `q` ends the app. (unit, `term.rs`): the restore guard
     writes the leave-alternate-screen and show-cursor sequences to a test writer on drop and from
     the panic hook (`catch_unwind`); the hook then writes its one fixed line, never the payload.
-    (pty, `PtyChild`, tests/common/mod.rs:940): `zwallet tui`, then `q`; the pty is back in
+    (pty, `PtyChild`, tests/common/mod.rs:941): `zwallet tui`, then `q`; the pty is back in
     canonical mode with echo.
   - T10 (`Msg` sequence): a status refresh that reports locked makes the bar say `locked`. (pty):
     with a test daemon unlocked, `zwallet lock` from a second process; within two refreshes
@@ -199,7 +199,7 @@ trust state, 03-tui.md §Address trust) lands in TUI-2a, its rule 4 in TUI-2b.
   conditions).
 - **RED tests:**
   - Explorer fixture: a local HTTP server in the test, built like `tiny_rpc_reply`
-    (tests/common/mod.rs:1560), serving single-line Blockscout bodies cut from the 2026-10-27
+    (tests/common/mod.rs:1561), serving single-line Blockscout bodies cut from the 2026-10-27
     captures to the kept fields plus a few dropped ones.
   - T3 (`TestBackend`, the `App` built with the fixture explorer and a fixture journal file): 14
     transactions, one hash in both the journal and the explorer, 2 pending: exactly 10 rows,
