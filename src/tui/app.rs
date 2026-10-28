@@ -222,7 +222,10 @@ impl App {
     }
 
     fn key(&mut self, key: Key) -> Vec<Effect> {
-        if let Some(line) = self.confirm.take() {
+        // Any key but `y` says no; Ctrl-C says no and still quits.
+        if let Some(line) = self.confirm.take()
+            && key != Key::Interrupt
+        {
             return match key {
                 Key::Char('y') => vec![Effect::SetActive(line.key)],
                 _ => Vec::new(),
