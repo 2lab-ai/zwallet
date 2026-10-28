@@ -113,9 +113,12 @@ Decisions (the dispatcher's, 2026-10-28):
    TUI-1b adds it to rule 3's table.
 5. TUI-1c extends `common::openpty` with a window size (default 120x40, settable), reading the
    output while the child runs, and the pty's termios for the echo check, read through the
-   master: when the child, its session's leader, exits, macOS revokes every open slave of its
-   terminal, the test's own too (a probe on 2026-10-28: `tcgetattr` on the slave failed with
-   `ENOTTY` after the exit, on the master it read the modes the child left).
+   master. The test keeps no slave of a full-screen child's pty once it is spawned, so the pty
+   ends with the child and the reader after the last byte on Linux too (whose master gives no
+   end while any slave is open); and on macOS the exit of the child, its session's leader,
+   revokes every open slave of its terminal (probes on 2026-10-28: `tcgetattr` on a slave failed
+   with `ENOTTY` after the exit; on the master it read the modes the child left, on macOS and
+   Linux; 25,603 bytes, then the end, 200 of 200 runs on both with no slave in the parent).
 6. Moving the argv-listed attacker from `tests/cli.rs` into `tests/common` is allowed: helper
    lines change in `tests/cli.rs`, no assertion does.
 
@@ -181,7 +184,7 @@ Decisions (the dispatcher's, 2026-10-28):
   conditions).
 - **RED tests:**
   - Explorer fixture: a local HTTP server in the test, built like `tiny_rpc_reply`
-    (tests/common/mod.rs:1550), serving single-line Blockscout bodies cut from the 2026-10-27
+    (tests/common/mod.rs:1560), serving single-line Blockscout bodies cut from the 2026-10-27
     captures to the kept fields plus a few dropped ones.
   - T3 (`TestBackend`, the `App` built with the fixture explorer and a fixture journal file): 14
     transactions, one hash in both the journal and the explorer, 2 pending: exactly 10 rows,
