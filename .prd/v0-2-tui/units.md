@@ -35,7 +35,7 @@ is about 800; TUI-1b, TUI-3, TUI-4 and TUI-5 are estimated at it.
 | TUI-1a | ratatui and crossterm, `FilteredBackend` and the terminal guard (`src/tui/term.rs`), `wallet::keys`, `wallet::status`, `wallet::net`, `list` and `status` on them | none | the agent-side v0.1 work merged (loop.md §Start condition) | 610 (measured) |
 | TUI-1b | `zwallet tui`, the screens (keys list, status bar, size rule), the cell/style/budget helpers | T1 | TUI-1a | 800 |
 | TUI-1c | the pty runs (restore after `q`, `locked` within two refreshes), the argv-listed fake, the pty helpers | T9, T10 | TUI-1b | 350 |
-| TUI-2 | warm-up, password field, the password check (checked list, pinned addresses), make active, address trust | T2, T2b | TUI-1 | 750 |
+| TUI-2 | warm-up, password field, the password check (checked list, pinned addresses), make active, address trust | T2, T2b | TUI-1 | 750; three PRs (§TUI-2 split) |
 | TUI-3 | home: balance, send journal rows, explorer client, merge | T3, T3b | TUI-2; the explorer re-measure (loop.md §Entry conditions) | 800 |
 | TUI-4 | tx detail with receipt token movements, `dropped/replaced`, chain switch | T4, T6c, T8 | TUI-3 | 800 |
 | TUI-5 | assets, transfer: picker from the checked list, amount, review, exact-intent confirm, send status | T5, T6, T6b | TUI-4 | 800 |
@@ -169,6 +169,21 @@ Decisions (the dispatcher's, 2026-10-28):
     warm-up fails the warm-up itself (daemon/mod.rs:311): no session starts.
   - A process answers `address` with 600 `▀▄` characters: the pane shows the CLI's "not an
     address" error escaped; the bar never shows it as an address.
+
+### TUI-2 split (2026-10-28)
+
+The coding pass measured the nine RED tests above at 557 changed lines on their own, and the
+whole unit at about 1,100-1,300, so it stopped at a clean point (the brief's rule past the cap)
+and TUI-2 is three PRs. The tests above are unchanged; each lands in the PR below. The REDs
+written for TUI-2b and TUI-2c before any TUI-2 code are kept for them (dispatcher scratchpad,
+`tui2b-deferred-tests.rs`). The dispatcher's A1 (2026-10-28: the not-verified note follows the
+trust state, 03-tui.md §Address trust) lands in TUI-2a, its rule 4 in TUI-2b.
+
+| PR | Branch | Scope | Closes | State |
+|---|---|---|---|---|
+| TUI-2a | `feat/tui-2-warmup` | the six entry points; `unlock`, `change`, `list --verify`, `whitelist list --verify` on them; the `open_with_password`/`check_list` unit test; `s` and its confirmation, the T2b pty run; a refused `s` stops the pane (counter-example); A1 in the TUI and `list` | T2b | in review, 2026-10-28 |
+| TUI-2b | | the password field (`src/tui/password.rs`), the warm-up, the password check in `spawn_blocking`; `zwallet tui --allow-ptrace-scope-0` (without Yama a session start refuses, as in the Docker gate); the T2 pty run, both `Msg` tests, the exact-order and password-in-a-frame counter-examples; A1 rule 4 | T2 | planned, about 800 |
+| TUI-2c | | pinned addresses checked on later reads, the open key's address and trust in the bar (`wallet::address`); the pinning and 600 `▀▄` counter-examples | none | planned, about 200 |
 
 ## TUI-3 — home: balance, journal rows, explorer, merge
 

@@ -93,13 +93,17 @@ Commands that act on a key take `--key <name>` (default: the active key).
   key, its short address and how far it is verified; then `locked` or `signing (agent too) until
   HH:MMZ` (UTC; `YYYY-MM-DD HH:MMZ` when a day or more away), and the RPC host. The lock state is
   read again every 5 s, so a `zwallet lock` from another shell shows. Keys: `j`/`k` or the
-  arrows move, `r` reads everything again, `L` locks every zwallet daemon of this user (as
-  `zwallet lock`), `q` or Ctrl-C quits (after a running `L` is done; a stop that failed is
-  printed once the terminal is given back). It needs 80x24 and says so on one line when the
-  terminal is smaller. Text from wallet.json, the daemon socket and the environment is escaped
-  and bounded as in the CLI, every cell goes through one filter that lets only printable ASCII
-  and `₮` through, and no QR code is drawn. This version shows the keys and the lock state;
-  the warm-up (`--warm`, checked but not used yet), home, transfer and whitelist screens follow.
+  arrows move, `s` asks, then `y` makes the selected key the globally active one, the one the
+  agent uses by default (as `zwallet change`: a key whose cached address the daemon's answer
+  contradicts is refused, the error in the pane), `r` reads everything again, `L` locks every
+  zwallet daemon of this user (as `zwallet lock`), `q` or Ctrl-C quits (after a running `L` is
+  done; a stop that failed is printed once the terminal is given back). The note under the list
+  never asks to verify the key the bar shows verified by session; it then flags the other keys,
+  as `list` does. It needs 80x24 and says so on one line when the terminal is smaller. Text from
+  wallet.json, the daemon socket and the environment is escaped and bounded as in the CLI, every
+  cell goes through one filter that lets only printable ASCII and `₮` through, and no QR code is
+  drawn. This version shows the keys and the lock state and makes a key active; the warm-up
+  (`--warm`, checked but not used yet), home, transfer and whitelist screens follow.
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
   reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's
@@ -157,7 +161,11 @@ Commands that act on a key take `--key <name>` (default: the active key).
     does not hold the socket), the command still succeeds, unverified, with a `warning` naming the
     pid and what it is, ending ``run `zwallet lock` and unlock again``. A process whose code cannot
     be read (an unsigned program, such as an x86_64 one on any Mac, or a non-dumpable one on
-    Linux) is not named: its answer is only not verified. `balance` adds no note line.
+    Linux) is not named: its answer is only not verified. `balance` adds no note line. `list`
+    without `--verify` never asks to verify the active key while this build's key daemon of the
+    home derived the rows (macOS): its note is then ``not verified: the other keys' addresses;
+    `zwallet list --verify` checks them``, and with one key there is none; locked, on Linux, or
+    with another process answering, it is the note above.
 
   While a daemon answers, a cache that its answer contradicts fails these commands (and `list`)
   with `VALIDATION_ERROR`. Only when every process that answered is this build's key daemon (so

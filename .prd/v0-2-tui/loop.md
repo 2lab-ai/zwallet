@@ -28,7 +28,8 @@ end); the dispatcher's decision in review round 1 the same day.
 |---|---|---|---|---|
 | TUI-1b | zwallet · `feat/tui-1b-screens` · `.worktrees/feat-tui-1b-screens` | `zwallet tui`, the screens, the cell/style/budget helpers, T1 frames, the T9 frames and `q`, the T10 `Msg` test, the cached-address counter-example, README (T1) | coding agent + dispatcher gate | approved after review round 5 (gpt6 APPROVE, code-reviewer APPROVE), gate green on bbe8b5c (macOS, x86, Linux), PR next, 2026-10-28: d7c8323 (RED), fd7e9c9, 75754ae, fd104cc, f8a9fd9, 249c5c7; review round 1: e02db59 (RED), 606bd40, d3668d4; round 2: f5b1640 (RED), 80b8845, 0c248cf; round 3: ab914b3 (RED), 8221618, 15d2020; round 4: f07a184 (RED), 01afa20; round 5: e631c23 (RED), 5cd6512; merges of TUI-1a (d7b91bc, 694eac5, 8ad1d1a, e49f8f1, 6e70102, 841d4b9) and of main after #17 (6299eb5) |
 | TUI-1c | zwallet · `feat/tui-1c-pty` · `.worktrees/feat-tui-1c-pty` | the pty runs for T9 and T10, the argv-listed fake, the attacker moved into `tests/common`, the pty helpers (T9, T10) | coding agent + dispatcher gate | in review (round 4), 2026-10-28, from TUI-1b at 0c248cf: eae51a2 (the attacker and five helpers moved, `tests/cli.rs` imports only), 1948f20 (the pty helpers and the three pty tests; they pass on TUI-1b's code, no `src` change; the assertions were seen failing on a scratch build with the restore, the refresh and the expiry budget broken), 94e5be8 (T10's bound written as 10 s; the fake's expiry read up to its separator), e3cd07c and 016ddcc (docs); 65be4dd (merge of TUI-1b round 5, 5cd6512); d1f8101 (flow.md's reference); review round 1: 6f0c5fe (RED: a valid stream cut inside a sequence counted as stray; the 79x24 check passed on a live snapshot), f5a60cf (stray bytes and the 79x24 screen judged on the last frame, the whole output up to leaving the alternate screen; at 79x24 after both reads are drawn; a scratch build drawing more at 79x24 once the status lands fails it), b53292b (docs); review round 2: 917b311 (RED: T9 reaches the loaded 79x24 screen by a resize instead of beating a refresh; an exited child is reported before a wait's limit), 8175f48 (`PtyChild::resize`; `wait_output` reports an exited child once the reader has every byte, which held on macOS only: on Linux the reader never ended while the test held a slave, fixed in round 3; the 79x24 fixture ends as the real stream does), 6697e57 (docs); review round 3: 268333d (a full-screen child's pty keeps no slave in the test, so the reader ends after the last byte on Linux too; RED: the early-exit test failed 3 of 3 in rust:1.99-bookworm at 6697e57; a macOS probe lost no byte in 200 runs with the parent's slave closed), then this docs commit. T10 measured 3.1-4.9 s from `zwallet lock` returning, over 22 runs (round 3's gate: macOS on a pty 4.68, 4.80, 4.85 s; Linux 4.88, 4.88, 4.87 s). Changed lines against TUI-1b's 5cd6512 (counting rule, before this commit): tests 1,003 raw, about 811 with the 192 moved lines counted once; `.prd` 48 |
-| TUI-2 | zwallet · `feat/tui-2-warmup` · `.worktrees/feat-tui-2-warmup` | warm-up, password field, password check (checked list, pinned addresses), make active, address trust (T2, T2b) | coding agent + dispatcher gate | planned, after TUI-1c |
+| TUI-2a | zwallet · `feat/tui-2-warmup` · `.worktrees/feat-tui-2-warmup` | the TUI-2 entry points and the CLI on them, `s` (T2b), A1 ([`units.md`](units.md) §TUI-2 split) | coding agent + dispatcher gate | in review, 2026-10-28, from TUI-1c at a0c644f: 4f4d54f (RED), af10704, e47b593; 773aa03 (RED: a refused `s` cut in the notice line), 3711370; then the docs commit |
+| TUI-2b, TUI-2c | zwallet · branches from TUI-2a | the warm-up, password field and check (T2); pinned addresses on later reads and the open key's trust | coding agent + dispatcher gate | planned, after TUI-2a |
 | TUI-3 | zwallet · `feat/tui-3-history` · `.worktrees/feat-tui-3-history` | balance, journal rows, explorer client, merge (T3, T3b) | coding agent + dispatcher gate | planned, after TUI-2 and the explorer re-measure |
 | TUI-4 | zwallet · `feat/tui-4-detail` · `.worktrees/feat-tui-4-detail` | tx detail with receipt token movements, `dropped/replaced`, chain switch (T4, T6c, T8) | coding agent + dispatcher gate | planned, after TUI-3 |
 | TUI-5 | zwallet · `feat/tui-5-transfer` · `.worktrees/feat-tui-5-transfer` | assets, transfer from the checked list, exact-intent confirm, send status (T5, T6, T6b) | coding agent + dispatcher gate | planned, after TUI-4 |
@@ -59,8 +60,8 @@ end); the dispatcher's decision in review round 1 the same day.
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
 | T1 | key list, active marked, lock state in the bar only | no `zwallet tui` (`wallet::keys` landed in TUI-1a) | TUI-1b | 🚪 |
-| T2 | warm-up ≈ 1h, open key verified by password, global active key unchanged | no `wallet::prepare_unlock` / `wallet::unlock` / `wallet::open_with_password` / `wallet::check_list`, no password field | TUI-2 | 🚪 |
-| T2b | `s` makes the key active | no `wallet::set_active` | TUI-2 | 🚪 |
+| T2 | warm-up ≈ 1h, open key verified by password, global active key unchanged | no password field or warm-up (the entry points landed in TUI-2a) | TUI-2b | 🚪 |
+| T2b | `s` makes the key active | closes when TUI-2a merges: `t2b_on_a_pty_s_then_y_makes_the_selected_key_active` (tests/tui.rs) | TUI-2a | 🚪 |
 | T3 | 10 rows, merged, pending first, coverage note | no journal reader, explorer client or merge | TUI-3 | 🚪 |
 | T3b | explorer unavailable: journal only, note says so | no explorer client | TUI-3 | 🚪 |
 | T4 | detail fields equal the fixture's, receipt token movements included | `lookup_tx` has no fee, confirmations or token movements | TUI-4 | 🚪 |
@@ -74,10 +75,12 @@ end); the dispatcher's decision in review round 1 the same day.
 | T10 | `zwallet lock` elsewhere shows `locked` within two refreshes (10 s) | closes when TUI-1b and TUI-1c merge: the `Msg` test in TUI-1b, the pty run `t10_on_a_pty_zwallet_lock_elsewhere_shows_locked_within_two_refreshes` (tests/tui.rs) in TUI-1c | TUI-1c | 🚪 |
 | T11 | pty across T2 and T7: no echo, no password in a frame, cancel and retry | needs TUI-2 and TUI-6 | TUI-6 | 🚪 |
 
-## Open for TUI-2
+## Open for TUI-2b
 
 From TUI-1c's review rounds 1 and 2 (2026-10-28), for the first unit whose pty runs resize or
-print after the TUI. (Round 4 closed a third line, the stderr join in `PtyChild::stderr()`: a daemon
+print after the TUI. Narrowed by TUI-2a, whose only pty run (T2b) does neither: it adds no code on
+the resize path (the input thread is unchanged), and writes nothing after the terminal is given
+back (a refused `s` is drawn in the pane). TUI-2b rewrites the input thread for password mode. (Round 4 closed a third line, the stderr join in `PtyChild::stderr()`: a daemon
 the warm-up starts inherits neither that pipe nor the pty slave, since `spawn_daemon` gives it
 `Stdio::null()` for stderr and marks every fd from 3 up close-on-exec, src/core/protocol.rs:1354,
 :1363.)
