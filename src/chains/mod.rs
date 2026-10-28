@@ -5,6 +5,7 @@
 //! do (no network), [`ChainFamily`] adds what the one-shot CLI does over RPC.
 
 pub mod evm;
+pub mod tron;
 
 use crate::chains::evm::policy::ListView;
 use crate::core::error::{ErrorCode, Result, WalletError};
