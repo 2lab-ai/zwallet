@@ -3,7 +3,7 @@
 Status: **planned**, 2026-10-27, revised after review rounds 1 and 2 the same day; TUI-1 split
 into three PRs on 2026-10-28 (§TUI-1 split); rewritten on 2026-10-28 (v2) for every CLI function
 ([`../03-tui.md`](../03-tui.md) §Coverage matrix, §Changes on 2026-10-28, v2), and after review
-round 1 the same day (§Review round 1 of v2). Fourteen units, TUI-1a … TUI-12, ordered by what the
+rounds 1 and 2 the same day (§Review round 1 of v2, §Review round 2 of v2). Fourteen units, TUI-1a … TUI-12, ordered by what the
 owner can do once they are merged; units are the spec's grouping, and §PRs and previews says which
 units share a PR and which merges become a preview. Each unit closes the acceptance IDs of
 [`../03-tui.md`](../03-tui.md) §Acceptance listed for it; every ID T1–T44 (48 with T2b, T3b, T6b,
@@ -56,15 +56,15 @@ once. Every estimate of a unit not yet started is an estimate, not a measurement
 | TUI-1c | (the same, proven on a pty) | the pty runs (restore after `q`, `locked` within two refreshes), the argv-listed fake, the pty helpers | T9, T10 | TUI-1b | 350 |
 | TUI-2 | unlock from the TUI, see the open key verified, make a key active | warm-up, password field, the password check (checked list, pinned addresses), make active, address trust | T2, T2b | TUI-1 | 750 |
 | TUI-3 | see the balance on any chain and on every network, through any RPC; find every function from `?` | tab line, action menu (52 rows), hint lines, popups and fields; 2 wallet balances, every network, the chain picker and its session RPC | T5, T8, T12, T13, T15, T42 | TUI-2 | 900 |
-| TUI-4 | receive: the address and its trust (Q1's pointer to the QR); verify and repair every key's address; unlock for a chosen time; see the session | 4 receive, `V` on every key, `A`, 7 session, `u`, `P` and `--allow-ptrace-scope-0` | T14, T16, T17, T18, T19, T20 | TUI-3 | 800 (+250 if the owner picks Q3) |
+| TUI-4 | receive: the address and its trust (Q1's pointer to the QR); verify and repair every key's address; unlock for a chosen time; see the session | 4 receive, `V` on every key, `A`, 7 session, `u`, the start flag `--allow-ptrace-scope-0` | T14, T16, T17, T18, T19, T20 | TUI-3 | 800 (+250 if the owner picks Q3) |
 | TUI-5 | send the coin or a registry token to a listed payee and see it mined, waiting as long as he likes | 3 send: asset, payee, amount, review with the overrides and the fee ceiling, exact-intent confirm, status, `w` | T6, T6b, T21, T22, T43 | TUI-3 | 850 |
 | TUI-6 | curate the whitelist: payees, contracts, fee caps, message signing, reset; never list the zero address | 5 whitelist: view, `V`, every change, the zero-address refusal at add (CLI and TUI); the pty run across T2, T6 and T7 | T7, T11, T23, T24, T25, T44 | TUI-5 | 850 |
 | TUI-7 | see the last 10 transactions, incoming ones included where an explorer answers | history: journal rows, explorer client, merge | T3, T3b | TUI-3; the explorer re-measure (loop.md §Entry conditions) | 800 |
 | TUI-8 | open any transaction (a row, a send, a typed hash) with its fee and token movements | transaction detail, `dropped/replaced`, `/` lookup | T4, T6c, T26 | TUI-7 | 750 |
 | TUI-9 | speed up or cancel a stuck send; retry an uncertain broadcast safely | replacements at nonce N, from a pinned own address and an intent the node confirms | T27, T28, T29 | TUI-8 (and TUI-5) | 600 |
 | TUI-10 | make the wallet or a new key without the shell | `n`, the first-run create, `B` as B1's pointer | T30, T31, T32 | TUI-3 | 600 (B2 only if the owner picks it) |
-| TUI-11 | read and call contracts, sign a message, read any token | 6 tools: call, invoke, sign, token | T33, T34, T35, T36, T37 | TUI-5 | 800 |
-| TUI-12 | everything above on Tron | the Tron rows of 03-tui.md §Coverage matrix | T38, T39, T40, T41 | TUI-5; 05-tron.md and its library units | per 05-tron.md |
+| TUI-11 | read and call contracts (and speed up, cancel or retry an invoke), sign a message, read any token | 6 tools: call, invoke and its replacements, sign, token | T33, T34, T35, T36, T37 | TUI-9 (replacements), TUI-5 | 900 |
+| TUI-12 | on Tron, what T38–T41 define: receive, TRX and TRC20 USDT balances, send to a listed Tron payee, look a hash up | the Tron rows of 03-tui.md §Coverage matrix | T38, T39, T40, T41 | TUI-5; 05-tron.md and its library units | per 05-tron.md |
 
 ## PRs and previews (the dispatcher's plan after review round 1, 2026-10-28)
 
@@ -82,7 +82,7 @@ path.
 | TUI-7+8 | TUI-7, TUI-8 | history and the transaction detail: reads | 1,550 |
 | TUI-9 | TUI-9 | replacements sign at a fixed nonce: kept apart from the reads (grok, astra) | 600 |
 | TUI-10 | TUI-10 | seed creation | 600 |
-| TUI-11 | TUI-11 | invoke and sign-message, kept apart from seed creation (grok) | 800 |
+| TUI-11 | TUI-11 | invoke (with its replacements, on TUI-9's) and sign-message, kept apart from seed creation (grok) | 900 |
 | TUI-12 | TUI-12 | Tron, after the Tron library PRs of 05-tron.md | per 05-tron.md |
 
 | Preview | After | The owner can |
@@ -91,7 +91,7 @@ path.
 | M2 | TUI-5 and TUI-6 | send to a listed payee and curate the whitelist from the TUI |
 | M3 | TUI-7+8 and TUI-9 | read the history and any transaction; speed up, cancel or retry a stuck send |
 | M4 | TUI-10 and TUI-11 | create the wallet and keys; call and invoke contracts; sign a message; read any token |
-| M5 | TUI-12 | all of the above on Tron |
+| M5 | TUI-12 | on Tron, the capabilities T38–T41 define (receive, balances, send to a listed payee, lookup) as 05-tron.md specifies them; no Tron contract call, message signing or replacement unless 05-tron.md adds it |
 
 **Old and new names.** Units TUI-3 … TUI-6 of 2026-10-27 never started; their text moved, with
 its RED tests and counter-examples (reviewed in rounds 1–3 below), as follows. The review-round
@@ -293,7 +293,10 @@ Decisions (the dispatcher's, 2026-10-28):
   (`store::unlock_repairing`, commands.rs:965-1052, :973), returning the `repaired` list; `V` on
   1 keys calls TUI-2's `wallet::open_with_password` with every key, as `list --verify` does
   (commands.rs:846-908). `Command::Tui` gains `--allow-ptrace-scope-0` (cli.rs:83-93), passed to
-  TUI-2's `wallet::prepare_unlock`. The session tab reads `wallet::status` (wallet.rs:103).
+  TUI-2's `wallet::prepare_unlock`; it is a start flag only, with no key in the TUI (03-tui.md
+  §Coverage matrix row 8: a same-uid process can type into the TUI's terminal, so two keys and
+  no password would be no control). With it, 7 session and the warm-up's password popup say
+  `ptrace_scope 0 accepted`. The session tab reads `wallet::status` (wallet.rs:103).
   Trade-off Q: Q1 is a line of text; Q3 adds `QR_DARK` and `QR_LIGHT` to `src/tui/style.rs` and a
   QR widget over `qrcode` (src/qr.rs:3), which the CLI already depends on.
 - **Files:** `src/cli.rs`, `src/wallet.rs`, `src/commands.rs`, `src/tui/actions.rs`, `app.rs`,
@@ -319,11 +322,13 @@ Decisions (the dispatcher's, 2026-10-28):
     key list's widths; TUI-1b's `an_index_of_1000_and_a_32_character_name_never_cut_the_address`,
     tests/tui.rs:362, keeps passing for rows without the word).
   - T20 (unit, `ptrace_scope_check` on a fixture file, core/protocol.rs:464): the TUI's
-    `prepare_unlock` refuses scope 0 and names `P` and `zwallet tui --allow-ptrace-scope-0`; with
-    the flag, from the start flag or from `P` then `y`, it passes. (`Msg` sequence): `P` shows
-    the CLI's warning and takes `y`; on macOS `P` says `needs: Linux`. (pty, Linux, where
-    `common::ptrace_scope_is_open`, tests/cli.rs:1025): the warm-up without either stops before
-    the password field.
+    `prepare_unlock` refuses scope 0 and names `zwallet tui --allow-ptrace-scope-0`; with the
+    start flag it passes. (`TestBackend`): with the flag, 7 session and the warm-up's password
+    popup say `ptrace_scope 0 accepted`. (`Msg` sequence): the menu row `unlock
+    --allow-ptrace-scope-0` shows the start flag and its reason, and Enter on it starts no
+    `Effect`; no key sets the flag (every key of every screen is sent and the flag stays off).
+    (pty, Linux, where `common::ptrace_scope_is_open`, tests/cli.rs:1025): the warm-up without
+    the flag stops before the password field.
 - **Counter-examples:**
   - wallet.json's cache for `beta` is `"\u{1b}[2J"` and 600 `█`: `A` shows `was` escaped and cut
     at 64; no row shows it as an address.
@@ -568,14 +573,22 @@ The moved text follows.
   the intent. `wallet::replaced_intent(net, hash, from, nonce, journal_row)` reads the node's
   pending transaction for the hash (`eth_getTransactionByHash`, as `original_fees` does,
   chains/evm/rpc.rs:356-373) and returns its `to`, `value` and `input` only when they match the
-  journal row (nonce, `to`, the amount in base units and its token); this session's own `Review`
-  of the send, kept in memory, is used before it. Rules (03-tui.md §Status of a send,
-  Replacements):
+  journal row (nonce, kind, `to`, the amount in base units and its token); this session's own
+  `Review` of the send, kept in memory, is used before it. One intent rule for every signed
+  replacement, transfer `s`/`x`, `R`, and (built on this in TUI-11) invoke `s`/`x`/`R` (03-tui.md
+  §Status of a send, Replacements):
   - `s`, `x` and `R` are offered only while this session holds the pinned own address; otherwise
     `needs: V`. A cached or `d.sock` address is never the cancel's `to` or the `from`.
   - The journal (`<home>/sends-<chainId>-<address>.jsonl`, chains/mod.rs:674-681, writable by any
     process of this user) is never the only source of the intent; on a mismatch with the node, or
-    a hash the node does not know, neither `s` nor `x` is offered.
+    a hash the node does not know with no review in this session, neither `s` nor `x` is offered.
+  - `R` (after `BROADCAST_UNCERTAIN`, when the node may not know the hash) is offered only from
+    this session's review. Without it (after a restart), `R` is not offered and the screen says:
+    look the hash up later (`/`, `zwallet tx`), and `s`/`x` come once the node knows it; or send
+    again through the normal send flow, whose duplicate guard names the journal row and pays twice
+    only if overridden with `d`.
+  - A transfer's speed-up or retry needs its payee to be an address entry of the checked list on
+    this chain; TUI-11 adds the invoke kind (contract entry and listed selector).
   - The checked list's fee cap and the reviewed maximum apply to the bumped fee and to the
     cancel's 0-value self-transfer: past either, zero `SignTx`.
   - The cancel's review and status say it races the original and may lose.
@@ -600,10 +613,16 @@ The moved text follows.
     address, `value` 0, empty `input`; the review shows the race sentence. No password check:
     `needs: V`. The cancel's fee over the cap, and a fee rising past the reviewed maximum at
     confirm: zero `SignTx` each.
-  - T29 (mock node that times out `eth_sendRawTransaction` after accepting it): the status says
+  - T29 (mock node that times out `eth_sendRawTransaction` after accepting it): (a) the status says
     `BROADCAST_UNCERTAIN` and offers `R`; `R` opens the review at nonce N with `--replace` the
-    first hash; no action on that screen reaches a send without a nonce (the `Effect`s are
-    listed).
+    first hash and the review's intent; the nickname typed: one `SignTx` with nonce N and the
+    review's `to`, `value` and `input`. (b) The journal row rewritten (amount raised, or `to`
+    another listed payee) before `R`, in the same session: the same `SignTx`, the review's intent,
+    not the journal's. (c) A new `App` (a restart), the mock not knowing the hash: `R` is not
+    offered, the screen says to look the hash up later or send again through the normal flow;
+    zero `SignTx`. (d) A restart, the mock knowing the hash and matching the journal: `R` is not
+    offered, `s` and `x` are (T27 (b)). No action on that screen reaches a send without a nonce
+    (the `Effect`s are listed).
 - **Counter-examples:**
   - The node reports nonce N mined by another hash before confirm: confirm signs nothing (zero
     `SignTx`) and shows the CLI's "already mined (nonce consumed)" message (README.md:594-602).
@@ -642,8 +661,9 @@ The moved text follows.
     (and the pty capture) is split into word tokens (runs of `a-z`); it fails if it holds the whole
     phrase, or any 3 consecutive words of the phrase as 3 consecutive tokens. A single word is not
     searched (BIP39 words such as `key` or `wallet` are UI words too, and the result would
-    depend on the seed); 3 consecutive words do not occur by chance in zwallet's own text. The
-    same search runs over every `Msg`'s `Debug` and `Created`'s `Debug`.
+    depend on the seed). The 3-word search is a test heuristic, not a proof: the guarantee is
+    structural, `Created` and every `Msg` carry no phrase and no render path reads one, and the
+    search runs over every `Msg`'s `Debug` and `Created`'s `Debug` to catch a break of it.
   - T32 (`TestBackend`): B1: `B` draws the one line naming `zwallet backup`, and no `Effect`
     reads the seed. B2 (only if the owner picks it, pty): a home made from a fixed test mnemonic
     (a `tests/common` helper over `Seed::from_phrase`, core/seed.rs:74, and `store::encrypt`,
@@ -676,8 +696,15 @@ The moved text follows.
   takes those held bytes and nothing else.
 - **Files:** `src/wallet.rs`, `src/commands.rs`, `src/tui/actions.rs`, `app.rs`, `ui.rs`,
   `tests/evm_offline.rs`, `tests/tui.rs`.
-- **Depends on:** TUI-5 (review and confirm), TUI-2 (the checked list's contract entries and
-  policy).
+- **Invoke replacements (review round 2):** `s`, `x` and `R` on a pending or uncertain invoke use
+  TUI-9's `Replacement` and `wallet::replaced_intent` under the one intent rule (this session's
+  review, or the node's pending transaction matched to the journal row; the journal keeps no
+  calldata, so the calldata comes from the review or the node). A speed-up or retry is judged as
+  an invoke: the contract a contract entry of the checked list on this chain and the calldata's
+  first 4 bytes one of its listed selectors, under the fee cap; the contract's nickname is typed.
+  A cancel is TUI-9's self-transfer. (03-tui.md §Status of a send, Replacements.)
+- **Depends on:** TUI-9 (replacements), TUI-5 (review and confirm), TUI-2 (the checked list's
+  contract entries and policy).
 - **RED tests:**
   - T33 (mock node): `balanceOf(address)(uint256)` on a fixture token: the result as the CLI
     renders it.
@@ -686,6 +713,21 @@ The moved text follows.
     whose decoded `to` and `input` equal the review's; the journal line has kind `invoke`. A
     signature whose selector `router` does not list stays in the form, which names the listed
     ones.
+  - T34, invoke replacements (mock node; every `SignTx` counted at `FakeDaemon.received`,
+    tests/common/mod.rs:586-587), a pending invoke of `router` at nonce N:
+    - success: `s`, bump 1.25, `router` typed: one `SignTx`; decoded (`tx::decode_unsigned`,
+      chains/evm/tx.rs:378): nonce N, `to` the contract, `value` and `input` as the review's (in
+      the session) or the node's (after a restart, matching the journal row), fees at least 1.25
+      times the replaced transaction's.
+    - policy refusal: the checked list re-signed without `router`, or with `router` but without
+      `0x414bf389`: the review refuses, zero `SignTx`.
+    - journal mismatch: after a restart, the journal row rewritten with `to` another contract, or
+      another value, the node's transaction unchanged: `s` and `x` are not offered, zero `SignTx`.
+    - cancel: `x`, `cancel` typed: one `SignTx`, nonce N, `to` the pinned own address, `value` 0,
+      empty `input` (T28's self-transfer).
+    - retry: in the session, the mock times out the broadcast: `R` signs the review's intent at
+      nonce N; after a restart with the node not knowing the hash: `R` is not offered, zero
+      `SignTx`.
   - T35 (mock node): raw calldata with a listed first 4 bytes: as T34; an unlisted one: refused at
     the form.
   - T36. Which daemon: the `FakeDaemon` of tests/common/mod.rs:584-641 answers every request with
@@ -709,6 +751,10 @@ The moved text follows.
       and points to `m` on 5 whitelist.
     - (`Msg` sequence) a paste holding a non-ASCII character, and 513 characters: refused at the
       field, which names `zwallet sign-message`.
+    - Why the two halves prove the whole: the `FakeDaemon` call proves that what
+      `wallet::sign_message` is given is what the request carries; the real daemon's digest
+      proves that the TUI gives the library the bytes its review held. Together: the bytes shown
+      are the bytes signed.
   - T37 (mock node): a token whose `symbol()` is 40 characters with ESC: the balance, the symbol
     escaped and cut at 32; no send offered.
 - **Counter-examples:**
@@ -732,6 +778,23 @@ The moved text follows.
 - **PR:** TUI-12, after the Tron library PRs of 05-tron.md.
 - **Depends on:** TUI-5; 05-tron.md and the Tron library units it plans.
 
+## Review round 2 of v2 (2026-10-28)
+
+fable approved; grok-4.7 and gpt-6-astra rejected on new items; every round-1 fix held.
+
+| Item | Decision | Where |
+|---|---|---|
+| 1. One intent rule for every signed replacement (grok) | transfer `s`/`x`, `R` and invoke `s`/`x`/`R`: this session's review, or the node's pending transaction matched to the journal row; never the journal alone. `R`, whose state is a hash the node may not know, only from this session's review; otherwise not offered, and the screen says to look the hash up later or send again through the normal flow (its duplicate guard names the row) | 03-tui.md §Status of a send, Replacements; rows 28–30, 35; T29 (a)–(d), T34; TUI-9 rules and T29; TUI-11 T34 |
+| 2. Invoke replacements judged as invoke (astra R2-1) | a transfer's speed-up or retry needs the address entry; an invoke's needs the contract entry and a listed selector (the invoke review's check), plus the fee cap; the contract's nickname typed; a cancel is the same self-transfer for both; success, policy refusal and journal mismatch tests in TUI-11, which now depends on TUI-9 | 03-tui.md Replacements, row 35, T34; TUI-11 (invoke replacements, T34 cases); unit table; loop.md |
+| 3. No in-TUI `ptrace_scope` switch (grok; fable) | `P` removed; `zwallet tui --allow-ptrace-scope-0` only, for the reason in row 8 (a same-uid process can type into the TUI's terminal); the menu row explains it and starts no `Effect`; with the flag, 7 session and the warm-up's password popup say `ptrace_scope 0 accepted`; the count gains "a start flag only, with a security reason" | 03-tui.md row 8, Count, §Screens and keys, T20; TUI-4; flow.md; mockups (session, unlock popup, menu) |
+| `b` on the cancel review (fable) | defined: on a replacement's review `b` sets the bump and runs the review again | 03-tui.md Replacements, §Screens and keys, rows 28, 29, 35 |
+| Invoke review hint (fable) | the frame shows a failing pending guard with `p` in its hint | 03-tui-screens.md (invoke review) |
+| T36's proof (fable) | one line: the `FakeDaemon` call proves library input = request bytes; the real daemon's digest proves TUI review bytes = library input | 03-tui.md T36; TUI-11 |
+| Menu filter (astra) | an exact alias match shows only its rows, so `whitelist add` leaves one row | 03-tui.md §Screens and keys |
+| 3-word search (astra) | called a heuristic; the guarantee is structural (no phrase in `Created`, `Msg` or a render path) | TUI-10 T31 |
+| M5 scope (astra) | Tron per T38–T41 only | §PRs and previews; unit table |
+| Explorer re-measure (fable) | gates the TUI-7+8 PR | 03-tui.md §History; loop.md §Entry conditions |
+
 ## Review round 1 of v2 (2026-10-28)
 
 Three engines (grok-4.7, gpt-6-astra, fable) rejected the v2 spec. Each item, the decision, and
@@ -743,7 +806,7 @@ where it now lives.
 | 2. Cancel and speed-up (grok, fable P0, astra) | offered only with a pinned own address (else `needs: V`); the intent from this session's `Review` or the node's pending transaction matched to the journal, never the journal alone; zero `SignTx` over the cap or past the reviewed maximum; the race said on screen | 03-tui.md §Status of a send, Replacements; rows 28–29; T27, T28; TUI-9 |
 | 3. Trade-off B (grok, astra; fable conditional) | recommended B1; B2 only as the owner's option with fable's conditions (purpose sentence above the password field, hidden after at most 30 s, scrollback claims only for terminals checked); no unit builds B2 unless picked; `backup` counts as a CLI pointer | 03-tui.md §Open trade-offs B, §Non-goals, §Coverage matrix row 11 and Count; T32; TUI-10; 03-tui-screens.md (two B2 frames) |
 | 4. T12/T13 testable (fable; grok, astra) | an Alias column, one token per row, rows 1–52 = the menu's 52 rows; start flags and env vars marked; the hint rule by focus; T13 checks the frames its PR draws, each later unit the same on its own; 29 mockups regenerated under the rule | 03-tui.md §Coverage matrix, §Screens and keys, T12, T13; §Every unit above; 03-tui-screens.md |
-| 5. Functions replaced by something else (astra F1) | `--rpc`: an RPC URL for the session on the chain picker (`e`, T42); `--wait-timeout`: `w` with a typed duration (T43); `--allow-ptrace-scope-0`: `P` on 7 session (T20); `tui --chain/--warm`: `c` and `u`; recount: 46 reachable EVM, 2 CLI pointers, 4 Tron, 3 CLI-only, 2 never signed, 2 not applicable | 03-tui.md §Coverage matrix rows 8, 20, 24, 46 and Count; T20, T42, T43; TUI-3, TUI-4, TUI-5 |
+| 5. Functions replaced by something else (astra F1) | `--rpc`: an RPC URL for the session on the chain picker (`e`, T42); `--wait-timeout`: `w` with a typed duration (T43); `--allow-ptrace-scope-0`: `P` on 7 session (T20; removed in round 2, a start flag only); `tui --chain/--warm`: `c` and `u`; recount: 46 reachable EVM, 2 CLI pointers, 4 Tron, 3 CLI-only, 2 never signed, 2 not applicable | 03-tui.md §Coverage matrix rows 8, 20, 24, 46 and Count; T20, T42, T43; TUI-3, TUI-4, TUI-5 |
 | 6. Sign-message review (astra F2) | rule 4's message block: 76 a row between `[` and `]`, 7 rows for 512 at 80x24, leading and trailing spaces counted; an edit drops the review; the bytes shown are the bytes signed; the `FakeDaemon` only captures (it does not sign) | 03-tui.md §Display integrity rule 4, §Status of a send, T36; TUI-11; 03-tui-screens.md (sign review) |
 | 7. Secret-exposure tests (astra F3) | no single-word search; the whole phrase and runs of 3 consecutive words as word tokens; a fixed test mnemonic for B2; `create`'s phrase read back with `zwallet backup` (it cannot be fixed); the path the widget draws from and no residue after it closes | 03-tui.md T31, T32; TUI-10 |
 | 8. T15 (fable P0) | all 8 `ZWALLET_RPC_<CHAIN>` set; the chains without a mock on a closed port | 03-tui.md T15; TUI-3 |

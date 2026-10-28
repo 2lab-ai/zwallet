@@ -1,6 +1,6 @@
 # v0.2 TUI — loop
 
-Status: **in-progress**, 2026-10-28 (v2: every CLI function; revised after review round 1 of v2).
+Status: **in-progress**, 2026-10-28 (v2: every CLI function; revised after review rounds 1 and 2 of v2).
 Target = [`ssot.md`](ssot.md), [`../03-tui.md`](../03-tui.md) §Coverage matrix and acceptance
 T1–T44. Current code, function by
 function: [`flow.md`](flow.md). Units: [`units.md`](units.md). This file holds only open work;
@@ -31,13 +31,13 @@ review round 1 of v2, 2026-10-28).
 |---|---|---|---|---|
 | TUI-1c | zwallet · `feat/tui-1c-pty` · `.worktrees/feat-tui-1c-pty` | pty runs for T9 and T10, the argv-listed fake, the pty helpers | coding agent + dispatcher gate | in progress (branch at a0c644f, TUI-1b merged in) |
 | TUI-2 | zwallet · `feat/tui-2-warmup` · `.worktrees/feat-tui-2-warmup` | warm-up, password field, password check, make active, address trust (T2, T2b) | coding agent + dispatcher gate | in progress: RED 4f4d54f (the TUI-2a slice: `open_with_password`, `check_list`, `s` then `y`, the not-verified note) |
-| TUI-3+4 | zwallet · at dispatch | "see and receive": `actions.rs` and the form helpers first; tabs, menu, hints; balances, every network, chain switch and session RPC; receive, `V` on every key, `A`, session, `u`, `P` (T5, T8, T12–T20, T42) | coding agent + dispatcher gate | planned, after TUI-2 |
+| TUI-3+4 | zwallet · at dispatch | "see and receive": `actions.rs` and the form helpers first; tabs, menu, hints; balances, every network, chain switch and session RPC; receive, `V` on every key, `A`, session, `u`, the start flag `--allow-ptrace-scope-0` (T5, T8, T12–T20, T42) | coding agent + dispatcher gate | planned, after TUI-2 |
 | TUI-5 | zwallet · at dispatch | send: payee, amount, review with overrides and fee ceiling, confirm, status, `w` (T6, T6b, T21, T22, T43) | coding agent + dispatcher gate | planned, after TUI-3+4 |
 | TUI-6 | zwallet · at dispatch | whitelist view and every change, the zero-address refusal at add; pty run across T2, T6, T7 (T7, T11, T23–T25, T44) | coding agent + dispatcher gate | planned, right after TUI-5, its own review |
 | TUI-7+8 | zwallet · at dispatch | history (journal, explorer, merge); transaction detail, `dropped/replaced`, `/` lookup (T3, T3b, T4, T6c, T26) | coding agent + dispatcher gate | planned, after TUI-5 and the re-measure |
 | TUI-9 | zwallet · at dispatch | speed up, cancel, retry at nonce N (T27–T29) | coding agent + dispatcher gate | planned, after TUI-7+8 |
 | TUI-10 | zwallet · at dispatch | new key, first-run create, `B` as B1 (T30–T32) | coding agent + dispatcher gate | planned, after TUI-3+4 |
-| TUI-11 | zwallet · at dispatch | call, invoke, sign a message, a token by contract (T33–T37) | coding agent + dispatcher gate | planned, after TUI-5 |
+| TUI-11 | zwallet · at dispatch | call, invoke and its replacements, sign a message, a token by contract (T33–T37) | coding agent + dispatcher gate | planned, after TUI-9 |
 | TUI-12 | zwallet · at dispatch | Tron on every tab (T38–T41) | coding agent + dispatcher gate | planned, after TUI-5 and the Tron library PRs |
 
 ## Previews
@@ -89,7 +89,7 @@ review round 1 of v2, 2026-10-28).
 | T17 | receive: full address and trust | no receive tab | TUI-3+4 | 🚪 |
 | T18 | the QR code (trade-off Q) | Q not decided; Q1 line missing | TUI-3+4 | 🚪 |
 | T19 | `V` verifies every key; `A` repairs the cache | `address --verify` reads the password itself | TUI-3+4 | 🚪 |
-| T20 | `P` and `zwallet tui --allow-ptrace-scope-0` | no such key or flag | TUI-3+4 | 🚪 |
+| T20 | the start flag only; `ptrace_scope 0 accepted` shown; no key sets it | no such flag | TUI-3+4 | 🚪 |
 | T21 | allow-pending and allow-duplicate on the review | no review | TUI-5 | 🚪 |
 | T22 | fee ceiling on the review | no review | TUI-5 | 🚪 |
 | T23 | remove, fee cap, reset | edit path reads `/dev/tty` itself | TUI-6 | 🚪 |
@@ -98,12 +98,12 @@ review round 1 of v2, 2026-10-28).
 | T26 | look a hash up | no field | TUI-7+8 | 🚪 |
 | T27 | speed up at nonce N: pinned address, node-confirmed intent, cap | no replacement in a library entry point | TUI-9 | 🚪 |
 | T28 | cancel at nonce N | as T27 | TUI-9 | 🚪 |
-| T29 | retry after `BROADCAST_UNCERTAIN` | as T27 | TUI-9 | 🚪 |
+| T29 | retry after `BROADCAST_UNCERTAIN`, from this session's review only | as T27 | TUI-9 | 🚪 |
 | T30 | new key, verified, active | `create` reads the password and prints | TUI-10 | 🚪 |
 | T31 | first-run create, no phrase or 3-word run in a frame | as T30 | TUI-10 | 🚪 |
 | T32 | the phrase: B1's line (B2 only if picked) | B1 line missing | TUI-10 | 🚪 |
 | T33 | `call` and its bounded result | `call` is private | TUI-11 | 🚪 |
-| T34 | invoke a listed contract with a listed selector | `invoke` is private | TUI-11 | 🚪 |
+| T34 | invoke a listed contract and selector; its replacements judged as invoke | `invoke` is private | TUI-11 | 🚪 |
 | T35 | invoke with raw calldata | as T34 | TUI-11 | 🚪 |
 | T36 | sign a message: the message block, bytes shown = bytes signed | `sign_message` is private | TUI-11 | 🚪 |
 | T37 | a token by contract, symbol bounded | `balance --token` is private | TUI-11 | 🚪 |
