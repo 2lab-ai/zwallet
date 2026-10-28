@@ -1138,19 +1138,30 @@ fn a_key_the_bar_shows_verified_by_session_is_never_asked_to_be_verified() {
         !rows.iter().any(|r| r.contains("address --verify")),
         "{rows:#?}"
     );
-    // Locked, or unverified (Linux, another process answering): the note stays as it was.
-    let other = Some("pid 7 runs other code".to_string());
+    // Locked, or unverified (Linux, another process answering): the note stays as it was, and
+    // the impostor's warning keeps its place above it.
+    let other = "pid 7 runs other code".to_string();
     for trust in [
         Trust::Locked,
         Trust::Unverified(None),
-        Trust::Unverified(other),
+        Trust::Unverified(Some(other.clone())),
     ] {
+        let mut keys = keys_ab();
+        keys.trust = trust.clone();
+        app.update(Msg::Keys(app.generation(), Ok(keys)));
         let mut status = open_status(now() + 3600);
-        status.address = Some((Some(B.into()), trust));
+        status.address = Some((Some(B.into()), trust.clone()));
         app.update(Msg::Status(app.generation(), Ok(status)));
         let (rows, _) = checked_frame(&mut screen, &app);
         let note = "not verified: run `zwallet address --verify` before funding";
-        assert!(rows.iter().any(|r| r.contains(note)), "{rows:#?}");
+        let at = rows
+            .iter()
+            .position(|r| r.contains(note))
+            .expect("the note");
+        if trust.warning().is_some() {
+            let warned = format!("warning: {other}");
+            assert!(rows[at - 1].contains(&warned), "{rows:#?}");
+        }
     }
 }
 
