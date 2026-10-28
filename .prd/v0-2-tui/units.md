@@ -172,9 +172,11 @@ Decisions (the dispatcher's, 2026-10-28):
 
 ### TUI-2 split (2026-10-28)
 
-The coding pass measured the nine RED tests above at 557 changed lines on their own, and the
-whole unit at about 1,100-1,300, so it stopped at a clean point (the brief's rule past the cap)
-and TUI-2 is three PRs. The tests above are unchanged; each lands in the PR below. The REDs
+The coding pass measured the nine RED tests above at 557 changed lines on their own, so it
+stopped at a clean point (the brief's rule past the cap) and TUI-2 is three PRs. TUI-2a, the
+entry points with the CLI on them, `s` and A1, is 790 changed lines by the counting rule (662
+insertions and 157 deletions against TUI-1c's tip, 29 lines moved into `src/wallet.rs` counted
+once; A1 about 160 of them); TUI-2b is about 800 and TUI-2c about 200. The tests above are unchanged; each lands in the PR below. The REDs
 written for TUI-2b and TUI-2c before any TUI-2 code are kept for them (dispatcher scratchpad,
 `tui2b-deferred-tests.rs`). The dispatcher's A1 (2026-10-28: the not-verified note follows the
 trust state, 03-tui.md §Address trust) lands in TUI-2a, its rule 4 in TUI-2b.
