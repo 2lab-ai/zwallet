@@ -49,7 +49,7 @@ cap, each PR reviewable as one argument). Worktrees at `.worktrees/<branch with 
 | TR14 | the action table, zero signatures per refusal | no Tron policy | B2 | 🚪 |
 | TR15 | fee cap, missing cap, expiration window | no Tron policy | B2 | 🚪 |
 | TR16 | a forged daemon reply is refused, nothing broadcast | no `inspect_signed` for Tron | C | 🚪 |
-| TR17 | dry-run with `fees`; a refused dry-run asks no signature | no `prepare_transfer` for Tron | C | 🚪 |
+| TR17 | dry-run with `fees`; a refused dry-run asks no signature; activation at the prices read, staked bandwidth assumed gone in the maximum | no `prepare_transfer` for Tron | C | 🚪 |
 | TR18 | `INSUFFICIENT_FUNDS` ×4 (one above the estimate, below the maximum), revert `RPC_ERROR`, before signing | no preflight | C | 🚪 |
 | TR19 | nonce flags refused on `tron` | flags apply to every chain | C | 🚪 |
 | TR20 | TRX and USDT sent and confirmed against the mock; fee above the estimate stays within the maximum | no broadcast | C | 🚪 |

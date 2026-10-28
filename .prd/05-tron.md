@@ -386,16 +386,25 @@ Tron charges two resources (M5, `getchainparameters`, 03:15Z):
 | `getTransactionFee` | 1,000 sun/byte | bandwidth burned when neither staked nor free bandwidth covers the whole transaction |
 | `getFreeNetLimit` | 600 bytes/day | free bandwidth per activated account |
 | `getEnergyFee` | 100 sun/energy | energy burned beyond staked energy, up to `fee_limit` |
-| `getCreateNewAccountFeeInSystemContract` | 1,000,000 sun | added when TRX goes to an account that does not exist (`TransferActuator.java:129-131`) |
-| `getCreateAccountFee` | 100,000 sun | bandwidth for that creation when staked bandwidth does not cover it; free bandwidth is never used for it (`BandwidthProcessor.java:192-262`) |
+| `getCreateNewAccountFeeInSystemContract` | 1,000,000 sun | added to the fee when TRX goes to an account that does not exist (`TransferActuator.java:45-57` execute, `:129-131` validate) |
+| `getCreateAccountFee` | 100,000 sun | the bandwidth bill of such a transfer when staked bandwidth does not cover it; it replaces the normal bandwidth bill (below) |
+| `getCreateNewAccountBandwidthRate` | 1 | staked bandwidth such a transfer uses: bytes × this rate |
 | `getMaxFeeLimit` | 15,000,000,000 sun | the chain's ceiling on `fee_limit` |
 
 Bandwidth comes from staked bandwidth if it covers the whole transaction, else free bandwidth if it
-does, else bytes × `getTransactionFee` is burned (`BandwidthProcessor.java:160-170`).
+does, else bytes × `getTransactionFee` is burned (`BandwidthProcessor.java:160-170`). **A TRX
+transfer to an account that does not exist at execution is billed on another branch instead**:
+`contractCreateNewAccount` is true (`BandwidthProcessor.java:259-287`), so the processor calls
+`consumeForCreateNewAccount` and skips the normal bill (`continue`, `:139-152`). That branch takes
+bytes × `getCreateNewAccountBandwidthRate` of staked bandwidth if it is there, else burns
+`getCreateAccountFee`; free bandwidth is never used (`:192-205`, `:248-257`). The two bills are
+alternatives, never summed. Which branch runs is decided when the block executes, by whether the
+payee exists then.
 
 Measured costs:
-- TRX transfer: 267 bytes → 0 TRX with free bandwidth left, else 0.267 TRX; to an account that
-  does not exist, plus 1 TRX and 0.1 TRX (or staked bandwidth).
+- TRX transfer: 267 bytes → 0 TRX with free bandwidth left, else 0.267 TRX. To an account that
+  does not exist: 1 TRX (system-contract fee) plus 0.1 TRX in place of the 0.267 (or staked
+  bandwidth in place of both bandwidth bills), at the 2026-10-28 prices.
 - USDT transfer (simulated from `TPdMMF…`, 1 USDT): to a holder with a balance, 64,285 energy
   (penalty 49,635) = 6.4285 TRX if burned; to an address holding no USDT, 130,285 energy (penalty
   100,635) = 13.0285 TRX (M3). The mainnet transfer `21b776c7…` used exactly 130,285 energy and 345
@@ -413,19 +422,33 @@ Decisions:
   (`triggerconstantcontract`); a simulation whose `result.result` is not `true` is `RPC_ERROR`
   before signing, naming the revert.
 - **Preflight, before signing**, from `getaccount`, `getaccountresource`, `getchainparameters` and,
-  for TRX, `getaccount(to)`. Two totals in sun, both at the prices read now:
-  - **`estimatedCostSun`**, what the send is expected to burn: the TRX amount (type 1); bandwidth,
-    0 if staked or free bandwidth covers the bytes, else bytes × `getTransactionFee`; activation
-    (TRX to an account that does not exist), 1,000,000 + (0 if staked bandwidth covers it, else
-    100,000); energy (type 31), max(0, `energy_used` − (`EnergyLimit` − `EnergyUsed`)) ×
-    `getEnergyFee`.
-  - **`maxCostSun`**, the most the signed transaction can burn: the TRX amount (type 1); the
-    signed `fee_limit` (type 31: the node burns at most this for energy, whatever energy the call
-    really uses, `VMActuator.java:583-621` and `ReceiptCapsule.java:275-302`, §Open questions;
-    it is 1.2 × the simulated cost or more); bandwidth as if no staked or free
-    bandwidth were left, bytes × `getTransactionFee` (another transaction can use them first);
-    activation as above when the payee does not exist at the preflight (an account is never
-    removed, so a payee that exists stays free).
+  for TRX, `getaccount(to)`. It computes two totals in sun. Every price in them is the value
+  `getchainparameters` returned in this preflight, never a constant from M5: `getTransactionFee` (P_tx), `getEnergyFee` (P_e),
+  `getCreateNewAccountFeeInSystemContract` (P_sys), `getCreateAccountFee` (P_ca),
+  `getCreateNewAccountBandwidthRate` (R). `bytes` is the signed transaction's bandwidth size
+  (§The transaction).
+  - **`estimatedCostSun`**, what the send is expected to burn, on the branch today's state
+    selects:
+    - TRX to a payee that exists: amount + bandwidth, where bandwidth = 0 if staked or free
+      bandwidth covers `bytes`, else `bytes` × P_tx;
+    - TRX to a payee that does not exist: amount + P_sys + (0 if staked bandwidth covers
+      `bytes` × R, else P_ca); no normal bandwidth bill (the branch replaces it);
+    - USDT: bandwidth as for an existing payee + max(0, `energy_used` − (`EnergyLimit` −
+      `EnergyUsed`)) × P_e.
+  - **`maxCostSun`**, the most the signed transaction can burn at these prices, with no staked or
+    free bandwidth assumed (another transaction can use them first), on whichever branch runs:
+    - TRX to a payee that exists at the preflight as a normal account: amount + `bytes` × P_tx.
+      java-tron deletes an account only when a contract self-destructs (`deleteContract`,
+      `RepositoryImpl.java:488-491`, `TransactionTrace.java:373-378`), so for a normal account
+      the new-account branch cannot run;
+    - TRX to a payee that does not exist at the preflight, or exists as a contract account
+      (`getaccount` `type: "Contract"`, which can self-destruct before the block): amount +
+      max(P_sys + P_ca, `bytes` × P_tx). The first term is the new-account branch with staked
+      bandwidth gone; the second is the normal branch. Each is the exact bill of its branch and
+      only one runs, so this is the exact maximum, not a sum of both;
+    - USDT: `bytes` × P_tx + the signed `fee_limit` (the node burns at most `fee_limit` for
+      energy, whatever energy the call really uses, `VMActuator.java:583-621` and
+      `ReceiptCapsule.java:275-302`, §Open questions; it is 1.2 × the simulated cost or more).
   - **What no field bounds:** a change of `getTransactionFee`, `getEnergyFee` (it changes how much
     energy `fee_limit` buys, not the TRX it caps), `getCreateAccountFee` or
     `getCreateNewAccountFeeInSystemContract` by a governance proposal between the preflight and
@@ -435,12 +458,15 @@ Decisions:
   is below `maxCostSun` (`shortfall` = `maxCostSun` − balance), even when it covers
   `estimatedCostSun`; when the USDT balance is below the amount; or when the sender's account is
   not activated (`getaccount` = `{}`: "this Tron address holds no TRX yet; send it TRX first, for
-  bandwidth and energy").
+  bandwidth and energy"). This is stricter than the node, on purpose: an account that would pay
+  only with staked energy and bandwidth, and holds less liquid TRX than `fee_limit` + `bytes` ×
+  P_tx, is refused, though the node might accept the transaction. A send never depends on
+  resources another transaction can take first.
 - **Shown before sending**: dry-run and live output carry `fees: {bandwidthBytes, bandwidthSource:
   "staked"|"free"|"burn", bandwidthSun, activationSun, energy, energySun, feeLimit,
   estimatedCostSun, maxCostSun, estimatedCost, maxCost, pricesAtBlock}` (`estimatedCost` and
   `maxCost` in TRX). "TRX left" anywhere (`nativeBalance` − cost, the TUI review) is balance −
-  `maxCostSun`, labelled "at least".
+  `maxCostSun`, labelled "at least, at the prices of block N" (`pricesAtBlock`).
 - **After the send**, `--wait` adds `feeSun`, what the receipt says was burned. It can exceed
   `estimatedCostSun` (energy above the simulation) and stays within `maxCostSun` at unchanged
   prices. A call that runs out of energy is `success: false` (`OUT_OF_ENERGY`) with up to
@@ -469,8 +495,9 @@ so:
     timestamp is past `expiresAt` + 60 s; that node has the txID neither mined
     (`gettransactioninfobyid`, `gettransactionbyid`) nor pending (`gettransactionfrompending`);
     and that node's head is no more than 60 s behind this machine's clock. The output carries
-    `asOf: {block, blockTime, host}` and says "not included as of block N on <host>; another node
-    may have it. Sending this payment again is a second payment if this one was included";
+    `asOf: {block, blockTime, host}` and says "this node returned no record of it as of block N on
+    <host>; another node may have it. Sending this payment again is a second payment if this one
+    was included";
   - when that node's head is more than 60 s behind this machine's clock: `status: "not found"`
     with `nodeBehindSecs` and "this node is <n> s behind; ask another node with `--rpc`", never
     `expired-unseen`;
@@ -479,8 +506,12 @@ so:
   No message says or implies that sending again is safe. A repeat within 10 minutes still needs
   `--allow-duplicate`, and the duplicate refusal names the earlier txID and its `expiresAt` with
   "if it was included, this is a second payment; look it up first (`zwallet tx --chain tron
-  <txid>`)". A wording test scans the code and these docs for text that calls a resend safe, as
-  04's round 8 test does for restore hints.
+  <txid>`)". A wording test, as 04's round 8 test does for restore hints, refuses these phrases
+  in `src/` and `README.md`, case-insensitive: "cannot double-pay", "can't double-pay", "no
+  double payment", "cannot be paid twice", "safe to send again", "safe to resend", "safe to
+  retry", "you can resend", "until then do not send", "after that, send", "can never be
+  included", "was never included", "was not paid", "definitively". It does not scan this file,
+  which quotes them.
 - **Broadcast outcomes** (`Wallet.java:507-630`, E6), the request carrying the exact signed bytes:
   - `result: true` → sent. A `txid` in the reply other than the computed one →
     `broadcastWarning`, then the computed one is looked up.
@@ -566,8 +597,8 @@ For the `03-tui.md` coverage matrix (owned by the parallel TUI task; this spec d
 |---|---|---|---|---|
 | Tron address | key; chain `tron` in the chain picker | `T…`, trust level (session / locked / unverified) | none | `WALLET_LOCKED` for an old key with no cached Tron address (with the `--verify` command); `VALIDATION_ERROR` for a tampered cache |
 | Balance | key | TRX; USDT; `not activated`; the owner-permission warning | none | `RPC_ERROR` (chain identity, 429 from a TronGrid `--rpc`); a USDT row error |
-| Transfer TRX / USDT | payee from the checked list's address entries naming `tron` only (never `*`); asset TRX or USDT; amount (6 decimals) | review: from, `T…` and nickname, amount and symbol, bandwidth source and burn, activation fee, energy and burn, `feeLimit`, estimated and maximum cost in TRX (`estimatedCostSun`, `maxCostSun`), TRX left = balance − `maxCostSun` ("at least"), `expiresAt`; then the txID (64 hex) and status pending → mined / success / failed, or `expired-unseen` with its "as of block N on <host>" wording and no resend offer | the exact-intent confirm EVM uses | `WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED` (with the `fee-cap tron` command), `INSUFFICIENT_FUNDS` (TRX for fees, not activated), duplicate and send-lock `VALIDATION_ERROR`, owner-permission refusal, `RPC_ERROR` (simulation revert, node rejection), `BROADCAST_UNCERTAIN` (with `expiresAt`) |
-| Tx detail | txID | status, from, to, amount, token, block, success, energy, bandwidth, fee burned, `expiresAt` | none | `RPC_ERROR` when the node answers about another transaction |
+| Transfer TRX / USDT | payee from the checked list's address entries naming `tron` only (never `*`); asset TRX or USDT; amount (6 decimals) | review: from, `T…` and nickname, amount and symbol, bandwidth source and burn, activation fee, energy and burn, `feeLimit`, estimated and maximum cost in TRX (`estimatedCostSun`, `maxCostSun`), TRX left = balance − `maxCostSun` ("at least, at the prices of block N"), `expiresAt`; then the txID (64 hex) and status pending → mined / success / failed, or `expired-unseen` with its "this node returned no record of it as of block N on <host>" wording and no resend offer | the exact-intent confirm EVM uses | `WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED` (with the `fee-cap tron` command), `INSUFFICIENT_FUNDS` (TRX for fees, not activated), duplicate and send-lock `VALIDATION_ERROR`, owner-permission refusal, `RPC_ERROR` (simulation revert, node rejection), `BROADCAST_UNCERTAIN` (with `expiresAt`) |
+| Tx detail | txID | status, from, to, amount, token, block, success, energy, bandwidth, fee burned, `expiresAt`; for `expired-unseen` its `asOf` (block, time, host) and the sentence "this node returned no record of it as of block N on <host>; another node may have it. Sending this payment again is a second payment if this one was included"; for a lagging node `nodeBehindSecs` and "ask another node" | none; never a resend offer | `RPC_ERROR` when the node answers about another transaction |
 | History | key | the send journal's Tron rows (with `expiresAt`) | none | a note that Tron history is the journal only (no Tron explorer client is specified) |
 | Whitelist | nickname, `T…` (chain fixed to `tron`); `fee-cap tron` amount in TRX | the summary with `T…` and its stored 0x body | the password, as for every edit | the parse-time refusals of §The whitelist |
 
@@ -577,7 +608,7 @@ For the `03-tui.md` coverage matrix (owned by the parallel TUI task; this spec d
 |---|---|---|---|
 | Q1 | Tronscan's URL form `https://tronscan.org/#/transaction/<id>`, `/#/address/<T…>` | Tronscan is a script-rendered page; not fetched | TRON-7 opens one live URL and reads the page |
 | Q2 | Which level other wallets (TronLink, Ledger Live) count for their second account | Not published in a source read here; the spec claims key 0 only (TronWeb's default path) | TR23: the owner imports the mnemonic in their Tron wallet and compares key 0 |
-| Q3 | Does `POST /wallet/broadcasthex` work without a key on PublicNode and TronGrid? | Not called with a payload: this spec's brief allowed read-only calls only. GET → 405 shows the servlet is there (M9) | Before PR C starts: one `POST /wallet/broadcasthex` per endpoint carrying an **unsigned** transaction (no signature, so no node can include it; java-tron refuses it, `TransactionCapsule.java:654-656` "miss sig or contract"). A `SIGERROR` reply means the keyless POST reaches validation; a 401/403 means PR C needs another default |
+| Q3 | Does `POST /wallet/broadcasthex` work without a key on PublicNode and TronGrid? | Not called with a payload: this spec's brief allowed read-only calls only. GET → 405 shows the servlet is there (M9) | Before PR C starts, run by the dispatcher: one `POST /wallet/broadcasthex` per endpoint whose `transaction` is a serialized `Transaction {raw_data: 1}` with no `signature` field (not the bare `raw_data` hex, which would fail as a parse error and test nothing). No node can include it; java-tron refuses it, `TransactionCapsule.java:654-656` "miss sig or contract". A `SIGERROR` reply shows a keyless POST reaches validation; it is not evidence that a signed broadcast succeeds (that is TR23). A 401/403 means PR C needs another default |
 
 Closed while writing: staked energy is spent before any TRX is burned
 (`ReceiptCapsule.java:275-302`), and the energy a call may use is min(staked + balance ÷ price,
@@ -599,18 +630,18 @@ therefore covers `energy_used` × price even when staked energy will pay.
 | TR8 | `balance` (every network) | a `tron` row among the mainnets with TRX and USDT; Sepolia still last; the row has its own `address` |
 | TR9 | `whitelist add bob <T…>` (password) | summary shows `T…` and its stored `0x` body, chains `tron`; `whitelist.json` stores `0x…` with `["tron"]`; `list --json` shows `address: "T…", family: "tron"`; `--verify` gives `verified: true` |
 | TR10 | `add` with `T…` and `--chains base`; `T…` and `--chains '*'`; `0x…` and `--chains tron`; `--chains tron,base`; a bad checksum; `--contract` on `tron`; and `validate` on a hand-built list with `chains: ["tron", "base"]` or a contract entry on `tron` | each `VALIDATION_ERROR` before the password, nothing written; `validate` refuses both lists |
-| TR11 | a list signed before this version (gen ≥ 1, EVM entries, one `*` entry) | verifies, unchanged bytes; the golden-bytes test passes untouched; the `*` entry is no payee on `tron` (`payee` with `wildcard: false`) and still one on every EVM chain; an older build's `check_shapes` accepts a list with a `tron` entry; the EVM `check_tx` (whose `payee` path is unchanged from `main`, `covers_chain`) refuses a native transfer and a registry `transfer` on `base` to the EVM twin `0x<body>` of a `chains: ["tron"]` entry with `WHITELIST_DENIED` and no `command`, and so does the daemon's `sign_tx` |
+| TR11 | a list signed before this version (gen ≥ 1, EVM entries, one `*` entry) | verifies, unchanged bytes; the golden-bytes test passes untouched; the `*` entry is no payee on `tron` (`payee` with `wildcard: false`) and still one on every EVM chain; an older build's `check_shapes` accepts a list with a `tron` entry; a new-build regression of the old meaning (not a run of an old binary): the EVM `check_tx`, whose `payee` path is `covers_chain` as on `main`, refuses a native transfer and a registry `transfer` on `base` to the EVM twin `0x<body>` of a `chains: ["tron"]` entry with `WHITELIST_DENIED` and no `command`, and so does the daemon's `sign_tx` |
 | TR12 | decode the golden vectors; sign one with the test key | fields as §The transaction; re-encode is byte-equal; txID = sha256; the signature recovers to the key; `v` ∈ {0, 1}; low `s`; both mainnet signatures recover to their owners |
 | TR13 | `tron::tx::decode_raw` on bytes with `raw_data` field 10 (memo), 9, 12 or 3 (`ref_block_num`); a field twice or out of order; trailing bytes; two contracts; type 46, 2, 30, 54; `Contract` field 3, 4 or 5 (`Permission_id` 2); an `Any` field 3; a wrong `type_url`; `TransferContract` field 4; `TriggerSmartContract` `call_value` (its field 3), `call_token_value` (5), `token_id` (6) or field 7; a wrong wire type; a non-minimal varint | each `VALIDATION_ERROR` "refusing to sign"; type 46's message says it hands the account to other keys |
 | TR14 | daemon `sign_tx` with a verified list: TRX and USDT to `bob` (tron); TRX to an unlisted `T…`; to an entry for `base` only; to a `*` entry's body; to self; USDT to the USDT contract; a non-registry TRC20 `transfer`; `approve`; owner = another key; `NoList`; `Unusable`; and every TR13 input through `sign_tx` | the first two signed; then `WHITELIST_DENIED` with `whitelist add <nick> T… --chains tron`; `WHITELIST_DENIED` without `command` ×6; `VALIDATION_ERROR`; `WHITELIST_INVALID` (with the add command); `WHITELIST_INVALID` (no command); `VALIDATION_ERROR`; zero signatures for every refusal (daemon-side count) |
 | TR15 | `fee_limit` above the cap; a list with no `tron` cap (a TRX send, then a USDT send); `fee_limit` on type 1; expiration > now + 5 min; expiration ≤ timestamp | `FEE_CAP_EXCEEDED` with `fee-cap tron <fee_limit in TRX>`, `feeWei`, `capWei`; `FEE_CAP_EXCEEDED` with `fee-cap tron 30` (TRX), then `fee-cap tron <max(fee_limit, 30)>`; `VALIDATION_ERROR` ×3 |
 | TR16 | a fake daemon replies with a `txHash` ≠ sha256(`rawData`), with `rawData` ≠ the bytes sent, or with a signature from another key | `VALIDATION_ERROR`, nothing broadcast, no journal line |
-| TR17 | mock: `transfer --chain tron --to @bob --amount 1 --dry-run`; and to an unlisted `T…` | `fees`, `feeLimit`, `whitelist: {allowed: true}`, `txHash`, `recoveredFrom`, no raw bytes, no broadcast; the unlisted one: `whitelist: {allowed: false, …}` and no signature request |
+| TR17 | mock: `transfer --chain tron --to @bob --amount 1 --dry-run`; and to an unlisted `T…`; TRX to a payee that does not exist with prices unlike M5 (P_sys 2 TRX, P_ca 0.3 TRX, P_tx 2,000 sun); the same with staked bandwidth that covers `bytes` × R; TRX to a payee whose `getaccount` says `type: "Contract"` | `fees`, `feeLimit`, `whitelist: {allowed: true}`, `txHash`, `recoveredFrom`, no raw bytes, no broadcast; the unlisted one: `whitelist: {allowed: false, …}` and no signature request; the new payee: `maxCostSun` = amount + max(2,300,000, `bytes` × 2,000) and `estimatedCostSun` = amount + 2,300,000, from the prices read; a balance between amount + 1,100,000 (M5's figure) and that maximum is `INSUFFICIENT_FUNDS`; with staked bandwidth, `estimatedCostSun` = amount + 2,000,000 while `maxCostSun` is unchanged; the contract payee: `maxCostSun` = amount + max(P_sys + P_ca, `bytes` × P_tx) |
 | TR18 | mock: TRX balance below amount + bandwidth + activation; USDT with too little TRX for energy; a TRX balance above `estimatedCostSun` but below `maxCostSun` (no staked energy, `fee_limit` = 1.2 × the estimate); an unactivated sender; a simulation that reverts | `INSUFFICIENT_FUNDS` ×4 (the third names `maxCostSun` and `shortfall` against it) and `RPC_ERROR`, each before signing (zero `SignTx`) |
 | TR19 | `transfer --chain tron` with `--nonce`, `--replace`, `--bump`, `--allow-pending`, `--max-fee-gwei` | `VALIDATION_ERROR` before any RPC |
-| TR20 | mock: TRX and USDT to `@bob` with `--wait`; a USDT receipt whose energy is above the simulation but within `fee_limit`; one with `OUT_OF_ENERGY` | `broadcasthex` bytes decode to the signed transaction; txHash = sha256(raw_data); one journal line with `expiresAt`; USDT receipt `SUCCESS` with all-zero `contractResult` → `success: true`; a `REVERT` receipt → `success: false`; the higher-energy receipt → `success: true`, `feeSun` above `estimatedCostSun` and within `maxCostSun`; `OUT_OF_ENERGY` → `success: false` with `feeSun` and a message that the fee was burned |
+| TR20 | mock: TRX and USDT to `@bob` with `--wait`; a USDT receipt whose energy is above the simulation but within `fee_limit`; one with `OUT_OF_ENERGY` | `broadcasthex` bytes decode to the signed transaction; txHash = sha256(raw_data); one journal line with `expiresAt`; USDT receipt `SUCCESS` with all-zero `contractResult` → `success: true`; a `REVERT` receipt → `success: false`; the higher-energy receipt → `success: true`, `feeSun` above `estimatedCostSun` and within `maxCostSun`; a TRX send to a new payee whose receipt burns P_ca though staked bandwidth covered it at the preflight → within `maxCostSun`; `OUT_OF_ENERGY` → `success: false` with `feeSun` and a message that the fee was burned |
 | TR21 | mock: `DUP_TRANSACTION_ERROR`; `CONTRACT_VALIDATE_ERROR`; a reply with another `txid`; a timeout; a lookup answer whose `raw_data` hashes to another id; a repeat within 10 min | success with `broadcastWarning`; `RPC_ERROR` nothing broadcast; `broadcastWarning` and the computed txID looked up; `BROADCAST_UNCERTAIN` with `expiresAt` and the second-payment sentence; `RPC_ERROR`; the duplicate refusal naming the earlier txID, its `expiresAt` and the second-payment sentence |
-| TR25 | mock, `tx --chain tron <id>` and `--wait`: (a) the tx was included before its expiration but the node answers `{}` while its head is before `expiresAt` + 60 s; (b) the node's head is 90 s behind this machine's clock and past `expiresAt` + 60 s per the local clock only; (c) this machine's clock is past `expiresAt` + 60 s, the node's head is not; (d) a journal txID, the node's head 2 min past `expiresAt` and within 60 s of the local clock, nothing mined or pending; (e) an id not in the journal, nothing found | (a) `not found`; (b) `not found` with `nodeBehindSecs`; (c) `not found`; (d) `expired-unseen` with `asOf: {block, blockTime, host}` and "a second payment if this one was included"; (e) `not found`. Never `expired-unseen` in (a)–(c) or (e). A wording test over the code and the docs finds no text that calls a resend safe |
+| TR25 | mock, `tx --chain tron <id>` and `--wait`: (a) the tx was included before its expiration but the node answers `{}` while its head is before `expiresAt` + 60 s; (b) the node's head is 90 s behind this machine's clock and past `expiresAt` + 60 s per the local clock only; (c) this machine's clock is past `expiresAt` + 60 s, the node's head is not; (d) a journal txID, the node's head 2 min past `expiresAt` and within 60 s of the local clock, nothing mined or pending; (e) an id not in the journal, nothing found | (a) `not found`; (b) `not found` with `nodeBehindSecs`; (c) `not found`; (d) `expired-unseen` with `asOf: {block, blockTime, host}`, "this node returned no record of it as of block N" and "a second payment if this one was included"; (e) `not found`. Never `expired-unseen` in (a)–(c) or (e). A wording test over the code and the docs finds no text that calls a resend safe |
 | TR22 | the TUI coverage matrix | every row of §TUI is a row there (closed by the TUI task) |
 | TR23 | **owner-gated.** The owner funds the key's Tron address with a little TRX and USDT, adds a payee, and decides to send. Then `transfer --chain tron --to @<nick> --amount <small> --wait`, TRX then USDT | both `success: true`; Tronscan shows both; the owner's own Tron wallet shows key 0's address from the mnemonic (Q2); `broadcasthex` carried both sends |
 | TR24 | `sign-message --chain tron`; `call --chain tron …`; `invoke --chain tron …` | `CAPABILITY_UNSUPPORTED` |
@@ -634,6 +665,20 @@ Three-engine review: grok-4.7 APPROVE, gpt-6-astra REJECT, fable REJECT.
 5. PRs: A (see it), B1 (codec), B2 (guard), C (send it), no line cap
    ([`v0-3-tron/units.md`](v0-3-tron/units.md)).
 
+## Review round 2 (2026-10-28): what changed
+
+grok-4.7 APPROVE, fable APPROVE, gpt-6-astra REJECT on one residual of round 1's F1.
+1. Activation in `estimatedCostSun` and `maxCostSun` uses the prices this preflight reads, never
+   M5's constants. `maxCostSun` assumes staked bandwidth is gone, and treats a payee that is
+   missing or a contract (which can self-destruct before the block) as able to take either
+   bandwidth branch. The new-account bandwidth bill replaces the normal one (java-tron cited), so
+   the maximum takes the larger branch, not a sum (§Fees, TR17, TR20).
+2. Non-blocking: the wording test's banned phrases are listed (§Send safety); the `maxCostSun`
+   balance check is stricter than the node, on purpose (§Fees); TR11 is a new-build regression of
+   the old meaning; Q3's POST carries a `Transaction` envelope without a signature, and its reply
+   is not evidence of a signed broadcast; "this node returned no record of it as of block N"; the
+   TUI's "TRX left" names its prices' block; the TUI's tx detail shows `asOf`.
+
 ## Evidence
 
 | ID | Source |
@@ -643,7 +688,7 @@ Three-engine review: grok-4.7 APPROVE, gpt-6-astra REJECT, fable REJECT.
 | E3 | Ledger Tron app, LedgerHQ/app-tron@a0f3aebf51202e8587668d317c887b6f26838d1c, `Makefile:43` `PATH_APP_LOAD_PARAMS = "44'/195'"` |
 | E4 | `node vec-tronweb.cjs` and `node vec-scure.cjs` (scratch), 2026-10-28: both print the TR1 table |
 | E5 | tronprotocol/protocol@8432beca98c52ba04c82aea0b48ae9f9f882c82a: `core/Tron.proto:336-384` (Contract), `:431-445` (raw); `core/contract/balance_contract.proto:32-36`; `core/contract/smart_contract.proto:74-81`; `api/api.proto:653-675` (Return codes) |
-| E6 | java-tron, tronprotocol/java-tron@b33eed89a6a424c498d4fb1b03ca2c86eddf4840: `chainbase/.../TransactionCapsule.java:468-492, 519-526, 584-587, 654-656, 721-725`; `chainbase/.../ReceiptCapsule.java:275-302`; `actuator/.../VMActuator.java:583-621`; `crypto/.../Rsv.java:17-24`; `crypto/.../ECKey.java:923-941, 978-986`; `framework/.../db/Manager.java:798-822, 853`; `common/.../Constant.java:19, 29`; `actuator/.../TransferActuator.java:111-131`; `chainbase/.../db/BandwidthProcessor.java:116-128, 160-170, 192-262`; `framework/.../Wallet.java:507-630, 1855-1870`; `framework/.../http/BroadcastHexServlet.java:23-43`; `framework/.../http/FullNodeHttpApiService.java:464, 495`; `framework/.../jsonrpc/TronJsonRpcImpl.java:426-427, 1369-1371` |
+| E6 | java-tron, tronprotocol/java-tron@b33eed89a6a424c498d4fb1b03ca2c86eddf4840: `chainbase/.../TransactionCapsule.java:468-492, 519-526, 584-587, 654-656, 721-725`; `chainbase/.../ReceiptCapsule.java:275-302`; `actuator/.../VMActuator.java:583-621`; `crypto/.../Rsv.java:17-24`; `crypto/.../ECKey.java:923-941, 978-986`; `framework/.../db/Manager.java:798-822, 853`; `common/.../Constant.java:19, 29`; `actuator/.../TransferActuator.java:45-57, 111-131`; `actuator/.../vm/repository/RepositoryImpl.java:488-491`; `chainbase/.../db/TransactionTrace.java:373-378`; `chainbase/.../db/BandwidthProcessor.java:116-128, 139-152, 160-170, 192-262, 259-287`; `framework/.../Wallet.java:507-630, 1855-1870`; `framework/.../http/BroadcastHexServlet.java:23-43`; `framework/.../http/FullNodeHttpApiService.java:464, 495`; `framework/.../jsonrpc/TronJsonRpcImpl.java:426-427, 1369-1371` |
 | E7 | tokio-rs/prost@79ed991edf4f8451c57b89c68b5bce8e53cde367 `prost-derive/src/lib.rs:191`; crates.io: prost 0.14.4 (2026-06-07) |
 | E8 | https://tether.to/en/supported-protocols, fetched 2026-10-28 |
 | E9 | https://www.circle.com/blog/circle-is-discontinuing-support-for-usdc-on-the-tron-blockchain (2024-02-21) and https://developers.circle.com/stablecoins/usdc-contract-addresses, fetched 2026-10-28 |
