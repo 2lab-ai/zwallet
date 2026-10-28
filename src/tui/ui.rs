@@ -34,6 +34,17 @@ const ASCII: border::Set = border::Set {
 
 const SEP: &str = " | ";
 
+/// The question after `make <key>` that `s` asks: the active key is what the agent signs with.
+const MAKE_ACTIVE: &str = " the active key, the agent's default? y = yes, any other key = no";
+
+/// The key list's note while the bar's key is not verified (03-tui.md §Address trust).
+const NOT_VERIFIED: &str = "not verified: run `zwallet address --verify` before funding";
+
+/// The key list's note while a session of this build verifies the bar's key: the other rows are
+/// not verified, and what checks them (TUI-2b makes it the TUI's own password check).
+const OTHER_KEYS: &str =
+    "not verified: the other keys' addresses; `zwallet list --verify` checks them";
+
 /// The widest key name the key list shows; a longer one is cut to it, ending in `...`. Narrower
 /// still when the index is wider than three digits, so the address is always whole (marker 3,
 /// name 27, index 6 and address 42 fill the pane's 78 columns).
@@ -90,10 +101,18 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         .text("keys", NORMAL)
         .draw(frame, title, &mut placed);
     keys_pane(frame, pane, app, &mut placed);
-    match app.notice() {
-        Some(error) => Row::default().outside(error, ERROR),
-        None => Row::default().text(
-            "j/k move   r refresh   L lock every zwallet daemon   q quit",
+    match (app.notice(), app.confirming()) {
+        (Some(error), _) => Row::default().outside(error, ERROR),
+        // The name gives way to the question, down to 8 (5 characters and `...`).
+        (None, Some(key)) => {
+            let room = usize::from(hint.width).saturating_sub(5 + MAKE_ACTIVE.len());
+            Row::default()
+                .text("make ", WARNING)
+                .outside(&key.name.cut(room.max(8)), WARNING)
+                .text(MAKE_ACTIVE, WARNING)
+        }
+        (None, None) => Row::default().text(
+            "j/k move   s make active   r refresh   L lock every zwallet daemon   q quit",
             HINT,
         ),
     }
@@ -126,7 +145,24 @@ fn keys_pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>)
         Pane::Failed(error) => {
             error_view(frame, inner, "the key list cannot be shown:", error, placed)
         }
-        Pane::Ready(list) => key_rows(frame, inner, app.selected(), list, placed),
+        Pane::Ready(list) => {
+            let note = key_note(app, list);
+            key_rows(frame, inner, app.selected(), list, note, placed)
+        }
+    }
+}
+
+/// The note under the key list. The rows are never marked verified, so it flags them, but never
+/// a key the bar shows verified by session: then it names the other keys and what checks them,
+/// and with no other key it says nothing.
+fn key_note(app: &App, list: &KeyList) -> Option<&'static str> {
+    match app.status() {
+        Pane::Ready(bar) if bar.trust == Some(TrustLine::Session) => {
+            let verified = bar.key.as_ref().map(Outside::text);
+            let others = list.rows.iter().any(|k| Some(k.name.text()) != verified);
+            others.then_some(OTHER_KEYS)
+        }
+        _ => Some(NOT_VERIFIED),
     }
 }
 
@@ -136,6 +172,7 @@ fn key_rows(
     area: Rect,
     selected: usize,
     list: &KeyList,
+    note: Option<&str>,
     placed: &mut Vec<Placed>,
 ) {
     let shown = area.height.saturating_sub(2) as usize;
@@ -175,12 +212,11 @@ fn key_rows(
             .outside(warning, WARNING)
             .draw(frame, line(area, bottom.saturating_sub(1)), placed);
     }
-    Row::default()
-        .text(
-            "not verified: run `zwallet address --verify` before funding",
-            HINT,
-        )
-        .draw(frame, line(area, bottom), placed);
+    if let Some(note) = note {
+        Row::default()
+            .text(note, HINT)
+            .draw(frame, line(area, bottom), placed);
+    }
 }
 
 /// An error alone in `area`: `heading`, then the error wrapped at the area's width, as many rows

@@ -105,6 +105,11 @@ fn start(effect: Effect, home: &Path, tx: &UnboundedSender<Msg>) {
                 let _ = tx.send(Msg::Locked(protocol::stop_all_daemons()));
             });
         }
+        Effect::SetActive(name) => {
+            tokio::spawn(async move {
+                let _ = tx.send(Msg::Activated(wallet::set_active(&home, &name).await));
+            });
+        }
     }
 }
 
