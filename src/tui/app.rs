@@ -315,7 +315,7 @@ fn key_list(keys: Keys) -> KeyList {
                 active: k.active,
             })
             .collect(),
-        warning: keys.warning.as_deref().map(Outside::warning),
+        warning: keys.trust.warning().map(Outside::warning),
     }
 }
 

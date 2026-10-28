@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-mod whitelist;
+pub(crate) mod whitelist;
 
 /// How long `--wait` polls for a receipt before reporting `status: "pending"`, unless
 /// `--wait-timeout` says otherwise.
@@ -558,7 +558,7 @@ impl<'a> Daemon<'a> {
 
     /// `key`'s address on `chain`: derived and checked against the cache, or the cache while
     /// locked. A mismatch is `VALIDATION_ERROR`.
-    async fn address(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
+    pub(crate) async fn address(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
         let derived = self.derive(key.index, chain).await?;
         self.checked(key, chain, derived.as_ref()).await
     }
@@ -593,6 +593,11 @@ const BY_PASSWORD: &str = "password";
 /// The note on an address shown unverified while the wallet is unlocked (or with no session to
 /// verify it, as `list` and an agent's `create`).
 const UNVERIFIED_NOTE: &str = "not verified: run `zwallet address --verify` before funding";
+
+/// `list`'s note while this build's session verifies the active key: the other keys' addresses
+/// are not verified, and the password checks them.
+const OTHER_KEYS_NOTE: &str =
+    "not verified: the other keys' addresses; `zwallet list --verify` checks them";
 
 /// The note on an address shown while the wallet is locked.
 const LOCKED_NOTE: &str = "not verified: the wallet is locked; `zwallet unlock <dur>` or `zwallet \
@@ -654,18 +659,8 @@ fn with_line(out: Out, line: &str) -> Out {
 const QR_AFTER_BACKUP: &str =
     "QR after backup: run `zwallet backup`, then `zwallet address --verify` (or unlock) to show it";
 
-/// Decrypts wallet.json in this process with the human's password and checks every key's cached
-/// addresses against the seed (a mismatch is `VALIDATION_ERROR`). Addresses derived from this
-/// seed are the ones reported `verified: true`: no other process or file can make them.
-fn open_with_password(home: &Path, password_stdin: bool) -> Result<(Seed, WalletFile)> {
-    store::read_wallet_file(home)?;
-    let pw = read_password(password_stdin, "Wallet password: ", false)?;
-    let (unsealed, file) = store::unlock(home, &pw, &chains::derive_addresses)?;
-    Ok((unsealed.seed, file))
-}
-
 /// `key`'s address on `chain` derived from `seed` here, checked against the cache.
-fn derive_checked(seed: &Seed, key: &KeyEntry, chain: &Chain) -> Result<String> {
+pub(crate) fn derive_checked(seed: &Seed, key: &KeyEntry, chain: &Chain) -> Result<String> {
     let derived = chain.family.keys().derive_address(seed, key.index)?;
     check_cache(key, chain.key, &derived)?;
     Ok(derived)
@@ -844,23 +839,24 @@ async fn add_subkey(
 }
 
 async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
-    let primary = chains::find(PRIMARY_CHAIN)?;
-    let (active, rows, warning, verified) = if v.verify {
-        let (seed, file) = open_with_password(home, v.password_stdin)?;
-        let mut rows = Vec::new();
-        for k in &file.keys {
-            rows.push(wallet::KeyRow {
-                name: k.name.clone(),
-                index: k.index,
-                address: Some(derive_checked(&seed, k, primary)?),
-                active: k.name == file.active,
-            });
-        }
-        let warning = index_warning(&file, &file.keys.iter().collect::<Vec<_>>());
-        (file.active, rows, warning, true)
+    let (active, rows, warning, verified, note) = if v.verify {
+        store::read_wallet_file(home)?;
+        let pw = read_password(v.password_stdin, "Wallet password: ", false)?;
+        // Addresses derived from this seed are the ones reported `verified: true`: no other
+        // process or file can make them.
+        let opened = wallet::open_with_password(home, &pw, None)?;
+        (opened.active, opened.keys, opened.warning, true, None)
     } else {
         let keys = wallet::keys(home).await?;
-        (keys.active, keys.rows, keys.warning, false)
+        // A session of this build verifies the active key (`status` and `address` say so):
+        // nothing asks to verify it, and the other keys stay flagged.
+        let note = match keys.trust {
+            Trust::Session if keys.rows.iter().all(|k| k.active) => None,
+            Trust::Session => Some(OTHER_KEYS_NOTE),
+            _ => Some(UNVERIFIED_NOTE),
+        };
+        let warning = keys.trust.warning().map(str::to_string);
+        (keys.active, keys.rows, warning, false, note)
     };
     let keys: Vec<Value> = rows
         .iter()
@@ -895,9 +891,9 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
         text.push_str(&format!("\nwarning: {w}"));
         out["warning"] = json!(w);
     }
-    if !verified {
+    if let Some(note) = note {
         text.push('\n');
-        text.push_str(UNVERIFIED_NOTE);
+        text.push_str(note);
     }
     Ok(Out::with_text(out, text))
 }
@@ -906,7 +902,7 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
 /// the list was edited: one of `shown` at or past `nextIndex`, or an index below the highest of
 /// `shown` that no key uses. The address is still this seed's, but where it sits matters for a
 /// wallet restored from the recovery phrase, which lists accounts in index order.
-fn index_warning(file: &WalletFile, shown: &[&KeyEntry]) -> Option<String> {
+pub(crate) fn index_warning(file: &WalletFile, shown: &[&KeyEntry]) -> Option<String> {
     let mut notes: Vec<String> = shown
         .iter()
         .filter(|k| k.index >= file.next_index)
@@ -944,15 +940,8 @@ fn index_warning(file: &WalletFile, shown: &[&KeyEntry]) -> Option<String> {
 }
 
 async fn change(home: &Path, name: &str, no_qr: bool) -> Result<Out> {
-    let primary = chains::find(PRIMARY_CHAIN)?;
-    // Check the target before switching to it, so a cache the daemon contradicts never becomes
-    // active.
-    let file = store::read_wallet_file(home)?;
-    let mut daemon = Daemon::new(home);
-    let address = daemon.address(file.key(Some(name))?, primary).await?;
-    let file = store::set_active(home, name)?;
-    let trust = daemon.trust();
-    let mut out = json!({ "active": file.active, "address": address });
+    let (address, trust) = wallet::set_active(home, name).await?;
+    let mut out = json!({ "active": name, "address": address });
     trust.mark(&mut out);
     Ok(with_qr(
         with_note(out, trust.note()),
@@ -1901,48 +1890,41 @@ pub(crate) async fn live_daemons(home: &Path) -> Result<(Vec<i32>, Option<Value>
 
 async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
     let ttl = parse_duration(&a.duration)?;
-    protocol::socket_path(home)?;
-    // Fail before prompting when there is nothing to unlock. Of this read only the key list's
-    // indices are used, for the index warning; the key, index and address shown are the ones the
-    // daemon derived from the decrypted seed.
-    let file = store::read_wallet_file(home)?;
-    protocol::check_ptrace_scope(a.allow_ptrace_scope_0)?;
-    protocol::check_daemons_findable()?;
-    // Pinned before the prompt, so a binary swapped in while the human types is never started.
-    let exe = DaemonExe::resolve()?;
+    // Fails before prompting when there is nothing to unlock.
+    let plan = wallet::prepare_unlock(home, ttl, a.allow_ptrace_scope_0)?;
     let pw = read_password(a.password.password_stdin, "Wallet password: ", false)?;
-    let session = start_session(home, &exe, &pw, ttl).await?;
+    let session = wallet::unlock(&plan, &pw).await?;
     drop(pw);
+    let ready = &session.ready;
     let mut out = json!({
         "locked": false,
         "duration": a.duration.trim(),
-        "expiresAt": session["expiresAt"],
-        "active": session["active"],
-        "index": session["index"],
-        "address": session["address"],
-        "daemonPid": session["pid"],
+        "expiresAt": ready["expiresAt"],
+        "active": ready["active"],
+        "index": ready["index"],
+        "address": ready["address"],
+        "daemonPid": ready["pid"],
         // Derived by this process's own daemon child from the seed this password opened.
         "verified": true,
         "verifiedBy": BY_PASSWORD,
         // The whitelist this session signs under, as its daemon verified it: the generation and
         // the entries, so a rolled-back list is visible.
-        // Its reason can quote whitelist.json, a file anyone of this user can write.
-        "whitelist": inert_whitelist(&session["whitelist"]),
+        "whitelist": session.whitelist,
     });
-    if let Some(w) = session_index_warning(&file, &session) {
+    if let Some(w) = session.warning {
         out["warning"] = json!(w);
     }
     Ok(with_qr(
         Out::json(out),
         true,
-        session["address"].as_str(),
+        ready["address"].as_str(),
         a.qr.no_qr,
     ))
 }
 
 /// [`index_warning`] (as `address --verify` gives it) for the key a new session reports: its
 /// name and index as the daemon derived them, against `file`'s key list and `nextIndex`.
-fn session_index_warning(file: &WalletFile, session: &Value) -> Option<String> {
+pub(crate) fn session_index_warning(file: &WalletFile, session: &Value) -> Option<String> {
     let index = session["index"]
         .as_u64()
         .and_then(|i| u32::try_from(i).ok())?;
