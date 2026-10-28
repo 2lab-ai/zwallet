@@ -90,7 +90,7 @@ matter:
 
 | Widget | Default it draws | Source (ratatui-widgets 0.3.2 / ratatui-core 0.1.2) | Use in zwallet |
 |---|---|---|---|
-| `Block` borders | `BorderType::Plain`: `┌ ─ ┐ │ └ ┘` | widgets block.rs:278; core symbols/line.rs:1, :11, :26 | only with the ASCII set `+ - |` (src/tui/ui.rs:24-33, as today) |
+| `Block` borders | `BorderType::Plain`: `┌ ─ ┐ │ └ ┘` | widgets block.rs:278; core symbols/line.rs:1, :11, :26 | only with the ASCII set `+`, `-`, `\|` (src/tui/ui.rs:24-33, as today) |
 | `Tabs` | divider `symbols::line::VERTICAL` = `│`; selected tab `REVERSED` | widgets tabs.rs:15, :143; core symbols/line.rs:1 | `.divider(" ")` or an ASCII string; selected style must be `style::SELECTED` (rule 2). The tab line can also be one `Row` of text, as the title line is now |
 | `Scrollbar` | vertical `DOUBLE_VERTICAL`: track `║`, thumb `█`, `▲` `▼`; `VERTICAL`: `│`, `█`, `↑`, `↓` | widgets scrollbar.rs:183-189; core symbols/scrollbar.rs:20-25, :34-39 | not used; a list shows `N of M` in its title (lazygit's `showListFooter`) |
 | `Gauge` | `symbols::block::FULL` = `█`, partial blocks with `use_unicode` | widgets gauge.rs:187-223; core symbols/block.rs:1 | not used |
