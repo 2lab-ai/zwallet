@@ -20,6 +20,7 @@ use crate::core::store::{self, KeyEntry, MasterOptions, WalletFile};
 use crate::core::time::parse_duration;
 use crate::daemon;
 use crate::qr;
+use crate::wallet;
 use alloy::hex;
 use alloy::primitives::{B256, U256};
 use serde_json::{Map, Value, json};
@@ -76,7 +77,7 @@ fn rpc_url(chain: &Chain, flag: Option<&str>) -> String {
     chain.resolve_rpc(flag, env.as_deref())
 }
 
-fn net(chain: &'static Chain, flag: Option<&str>) -> Net {
+pub(crate) fn net(chain: &'static Chain, flag: Option<&str>) -> Net {
     Net {
         chain,
         rpc_url: rpc_url(chain, flag),
@@ -182,7 +183,7 @@ async fn derive_via_daemon(home: &Path, index: u32) -> Result<BTreeMap<String, S
 
 /// The address `key` shows by default: the cached one on [`PRIMARY_CHAIN`], else on any chain;
 /// `None` when the cache has none. A cached value that is not an address is an error.
-fn primary_address(key: &KeyEntry) -> Result<Option<String>> {
+pub(crate) fn primary_address(key: &KeyEntry) -> Result<Option<String>> {
     key.addresses
         .get_key_value(PRIMARY_CHAIN)
         .or_else(|| key.addresses.iter().next())
@@ -195,7 +196,7 @@ fn primary_address(key: &KeyEntry) -> Result<Option<String>> {
 const VALUE_SHOWN: usize = 64;
 
 /// `value` escaped for a message (see [`VALUE_SHOWN`]).
-fn shown(value: &str) -> String {
+pub(crate) fn shown(value: &str) -> String {
     crate::core::text::shown(value, VALUE_SHOWN)
 }
 
@@ -205,7 +206,7 @@ fn shown(value: &str) -> String {
 /// cut to a prose budget, and `render_human` bounds the rest. Anything else (a string, an array,
 /// a number from whatever answers on `d.sock`) is no whitelist: it becomes one string, its JSON
 /// text made inert and cut to [`PROSE_MAX`](crate::core::text::PROSE_MAX), in both outputs.
-fn inert_whitelist(value: &Value) -> Value {
+pub(crate) fn inert_whitelist(value: &Value) -> Value {
     use crate::core::text::{PROSE_MAX, ascii_inert, inert_json};
     match value {
         Value::Null => Value::Null,
@@ -371,7 +372,7 @@ fn cache_mismatch(key: &KeyEntry, chain: &str, derived: &str) -> Result<Option<S
 /// and unlocked it with its own password through this very binary, or injected code into it. Only
 /// the address the human saved from their first unlock tells that apart: if it ever changes, stop.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Trust {
+pub enum Trust {
     Session,
     /// The wallet is locked: the cache.
     Locked,
@@ -381,7 +382,7 @@ enum Trust {
 }
 
 impl Trust {
-    fn verified(&self) -> bool {
+    pub fn verified(&self) -> bool {
         *self == Self::Session
     }
 
@@ -405,7 +406,7 @@ impl Trust {
         }
     }
 
-    fn warning(&self) -> Option<&str> {
+    pub fn warning(&self) -> Option<&str> {
         match self {
             Self::Unverified(Some(w)) => Some(w),
             _ => None,
@@ -416,7 +417,7 @@ impl Trust {
 /// The key daemon as one command asks it for addresses: each derivation is checked against the
 /// cache, and each process that gave one is checked once ([`protocol::check_peer`]); then
 /// [`Daemon::trust`] says what that verifies.
-struct Daemon<'a> {
+pub(crate) struct Daemon<'a> {
     home: &'a Path,
     peers: Vec<(Peer, PeerCheck)>,
     /// Some derivation came back.
@@ -426,7 +427,7 @@ struct Daemon<'a> {
 }
 
 impl<'a> Daemon<'a> {
-    fn new(home: &'a Path) -> Self {
+    pub(crate) fn new(home: &'a Path) -> Self {
         Self {
             home,
             peers: Vec::new(),
@@ -436,7 +437,7 @@ impl<'a> Daemon<'a> {
     }
 
     /// The daemon's derivation of key `index` on `chain`, or `None` while the wallet is locked.
-    async fn derive(&mut self, index: u32, chain: &Chain) -> Result<Option<String>> {
+    pub(crate) async fn derive(&mut self, index: u32, chain: &Chain) -> Result<Option<String>> {
         self.fetch(index, chain).await?
     }
 
@@ -520,7 +521,7 @@ impl<'a> Daemon<'a> {
     /// blames the cache only when every process that answered is this build's key daemon of the
     /// home (its answer is the seed's derivation); otherwise either side may be the tampered one,
     /// and a process known to be another one is named (also as the `warning` detail).
-    fn check_cache(&self, key: &KeyEntry, chain: &Chain, derived: &str) -> Result<()> {
+    pub(crate) fn check_cache(&self, key: &KeyEntry, chain: &Chain, derived: &str) -> Result<()> {
         let Some(cached) =
             cache_mismatch(key, chain.key, derived).map_err(|e| self.naming_impostor(e))?
         else {
@@ -555,7 +556,7 @@ impl<'a> Daemon<'a> {
 
     /// What the addresses this command took verify: [`Trust::Session`] only when every one was
     /// derived, and every process that answered is this build's key daemon of this home.
-    fn trust(&self) -> Trust {
+    pub(crate) fn trust(&self) -> Trust {
         let other = self.peers.iter().find_map(|(_, c)| c.warning());
         if other.is_some() {
             Trust::Unverified(other)
@@ -827,42 +828,34 @@ async fn add_subkey(
 
 async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
     let primary = chains::find(PRIMARY_CHAIN)?;
-    let (file, opened) = if v.verify {
+    let (active, rows, warning, verified) = if v.verify {
         let (seed, file) = open_with_password(home, v.password_stdin)?;
-        (file, Some(seed))
+        let mut rows = Vec::new();
+        for k in &file.keys {
+            rows.push(wallet::KeyRow {
+                name: k.name.clone(),
+                index: k.index,
+                address: Some(derive_checked(&seed, k, primary)?),
+                active: k.name == file.active,
+            });
+        }
+        let warning = index_warning(&file, &file.keys.iter().collect::<Vec<_>>());
+        (file.active, rows, warning, true)
     } else {
-        (store::read_wallet_file(home)?, None)
+        let keys = wallet::keys(home).await?;
+        (keys.active, keys.rows, keys.warning, false)
     };
-    let mut keys = Vec::new();
-    // Without the password `list` is never verified; asking through `Daemon` only decides how a
-    // mismatch is worded, and names an impostor (in that error, or as the `warning`).
-    let mut daemon = Daemon::new(home);
-    for k in &file.keys {
-        let address = match &opened {
-            Some(seed) => Some(derive_checked(seed, k, primary)?),
-            None => match daemon.derive(k.index, primary).await? {
-                Some(d) => {
-                    daemon.check_cache(k, primary, &d)?;
-                    Some(d)
-                }
-                None => primary_address(k)?,
-            },
-        };
-        keys.push(json!({
-            "name": k.name,
-            "index": k.index,
-            "address": address,
-            "active": k.name == file.active,
-        }));
-    }
-    let verified = opened.is_some();
-    let warning = if verified {
-        index_warning(&file, &file.keys.iter().collect::<Vec<_>>())
-    } else {
-        // Whatever answered on `d.sock` and is known not to be this build's key daemon, also
-        // when its answers matched the cache.
-        daemon.trust().warning().map(str::to_string)
-    };
+    let keys: Vec<Value> = rows
+        .iter()
+        .map(|k| {
+            json!({
+                "name": k.name,
+                "index": k.index,
+                "address": k.address,
+                "active": k.active,
+            })
+        })
+        .collect();
     let mut text = keys
         .iter()
         .map(|k| {
@@ -876,7 +869,7 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let mut out = json!({ "active": file.active, "keys": keys, "verified": verified });
+    let mut out = json!({ "active": active, "keys": keys, "verified": verified });
     if verified {
         out["verifiedBy"] = json!(BY_PASSWORD);
     }
@@ -1808,58 +1801,32 @@ async fn sign_message(home: &Path, a: SignMessageArgs) -> Result<Out> {
 }
 
 async fn status(home: &Path, no_qr: bool) -> Result<Out> {
-    let file = match store::read_wallet_file(home) {
-        Ok(f) => Some(f),
-        Err(e) if e.code == ErrorCode::WalletNotFound => None,
-        Err(e) => return Err(e),
-    };
-    let (pids, serving) = live_daemons(home).await?;
-    let others = protocol::other_daemon_pids(home)?;
-    let locked = pids.is_empty();
+    let status = wallet::status(home).await?;
     let mut out = json!({
-        "wallet": if file.is_some() { "configured" } else { "not configured" },
-        "locked": locked,
+        "wallet": if status.configured { "configured" } else { "not configured" },
+        "locked": status.locked,
         "home": home.display().to_string(),
     });
-    if !locked {
-        out["daemonPids"] = json!(pids);
+    if !status.locked {
+        out["daemonPids"] = json!(status.daemon_pids);
     }
-    out["otherDaemonPids"] = json!(others);
-    if let Some(d) = &serving {
-        // A number: `live_daemons` matched it against the process table.
-        out["daemonPid"] = d["pid"].clone();
-        // Whatever answers on `d.sock` writes these: the expiry as an escaped string (a real
-        // one is plain RFC 3339 and passes as it is), the whitelist with every string escaped.
-        out["expiresAt"] = json!(d["expiresAt"].as_str().map(shown));
+    out["otherDaemonPids"] = json!(status.other_daemon_pids);
+    if let Some(d) = &status.serving {
+        out["daemonPid"] = json!(d.pid);
+        out["expiresAt"] = json!(d.expires_at);
         // The whitelist as the serving daemon verifies it right now.
-        out["whitelist"] = inert_whitelist(&d["whitelist"]);
+        out["whitelist"] = d.whitelist.clone();
+    }
+    if let Some(active) = &status.active {
+        out["active"] = json!(active);
     }
     // The active key's address, and what verifies it.
-    let mut shown = None;
-    if let Some(file) = &file {
-        out["active"] = json!(file.active);
-        if let Ok(key) = file.key(None) {
-            let primary = chains::find(PRIMARY_CHAIN)?;
-            // Derived only by a listed daemon that says it serves this session.
-            let (address, trust) = if serving.is_some() {
-                let mut daemon = Daemon::new(home);
-                match daemon.derive(key.index, primary).await? {
-                    Some(d) => {
-                        daemon.check_cache(key, primary, &d)?;
-                        (Some(d), daemon.trust())
-                    }
-                    None => (primary_address(key)?, Trust::Locked),
-                }
-            } else if locked {
-                (primary_address(key)?, Trust::Locked)
-            } else {
-                (primary_address(key)?, Trust::Unverified(None))
-            };
-            out["address"] = json!(address);
-            trust.mark(&mut out);
-            shown = Some((address, trust));
-        }
+    let shown = status.address;
+    if let Some((address, trust)) = &shown {
+        out["address"] = json!(address);
+        trust.mark(&mut out);
     }
+    let others = status.other_daemon_pids;
     let note = shown.as_ref().and_then(|(_, trust)| trust.note());
     let mut text = with_note(out, note);
     if !others.is_empty()
@@ -1887,7 +1854,7 @@ const EXIT_GRACE: Duration = Duration::from_secs(1);
 /// from a daemon on its way out, which noticed expiry or a changed wallet.json and has removed
 /// its socket or just said so: the process table is read again until it is empty, for
 /// [`EXIT_GRACE`] at most. A squatter's reply never hides a daemon that stays.
-async fn live_daemons(home: &Path) -> Result<(Vec<i32>, Option<Value>)> {
+pub(crate) async fn live_daemons(home: &Path) -> Result<(Vec<i32>, Option<Value>)> {
     let pids = protocol::daemon_pids(home, None)?;
     if pids.is_empty() {
         return Ok((pids, None));

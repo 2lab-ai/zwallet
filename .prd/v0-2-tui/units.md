@@ -1,7 +1,8 @@
 # v0.2 TUI — units and order
 
-Status: **planned**, 2026-10-27, revised after review rounds 1 and 2 the same day. Six units,
-TUI-1 … TUI-6, each one PR, in dependency order. Each closes the acceptance IDs of
+Status: **planned**, 2026-10-27, revised after review rounds 1 and 2 the same day; TUI-1 split
+into three PRs on 2026-10-28 (§TUI-1 split). Six units, TUI-1 … TUI-6, each one PR (TUI-1 three:
+TUI-1a, TUI-1b, TUI-1c), in dependency order. Each closes the acceptance IDs of
 [`../03-tui.md`](../03-tui.md) §Acceptance listed for it; every ID T1–T11 (15 with T2b, T3b, T6b,
 T6c) is closed by exactly one unit. The library entry points are the ones [`flow.md`](flow.md)
 names in its "Split" column.
@@ -11,7 +12,7 @@ names in its "Split" column.
 generated; TUI-1's dependency change adds a few hundred lines there), and a block moved unchanged
 from `src/commands.rs` into `src/wallet.rs` counts once (`git diff --color-moved` shows it as a
 move). Test fixtures are single-line JSON files under `tests/fixtures/` and are counted. The cap
-is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
+is about 800; TUI-1b, TUI-3, TUI-4 and TUI-5 are estimated at it.
 
 **Every unit:**
 - RED first: each test below is written and seen failing before the code it checks.
@@ -31,7 +32,9 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
 
 | Unit | Scope | Closes | Depends on | Est. lines |
 |---|---|---|---|---|
-| TUI-1 | `zwallet tui`, terminal setup, `FilteredBackend`, cell/style/budget checks, keys list, status bar, lock detection | T1, T9, T10 | the agent-side v0.1 work merged (loop.md §Start condition) | 800 |
+| TUI-1a | ratatui and crossterm, `FilteredBackend` and the terminal guard (`src/tui/term.rs`), `wallet::keys`, `wallet::status`, `wallet::net`, `list` and `status` on them | none | the agent-side v0.1 work merged (loop.md §Start condition) | 610 (measured) |
+| TUI-1b | `zwallet tui`, the screens (keys list, status bar, size rule), the cell/style/budget helpers | T1 | TUI-1a | 800 |
+| TUI-1c | the pty runs (restore after `q`, `locked` within two refreshes), the argv-listed fake, the pty helpers | T9, T10 | TUI-1b | 350 |
 | TUI-2 | warm-up, password field, the password check (checked list, pinned addresses), make active, address trust | T2, T2b | TUI-1 | 750 |
 | TUI-3 | home: balance, send journal rows, explorer client, merge | T3, T3b | TUI-2; the explorer re-measure (loop.md §Entry conditions) | 800 |
 | TUI-4 | tx detail with receipt token movements, `dropped/replaced`, chain switch | T4, T6c, T8 | TUI-3 | 800 |
@@ -40,7 +43,7 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
 
 ## TUI-1 — `zwallet tui`, terminal setup, write point, keys, status bar, lock detection
 
-- **Closes:** T1, T9, T10.
+- **Closes:** T1, T9, T10 (T1 in TUI-1b; T9 and T10 in TUI-1c, §TUI-1 split).
 - **Adds the `ratatui` and `crossterm` dependencies** (Cargo.toml; the only unit that does).
 - **Entry points added:** `wallet::keys`, `wallet::status` (with `Trust` made `pub`),
   `wallet::net`. The `L` key calls `protocol::stop_all_daemons` (exists).
@@ -81,6 +84,37 @@ is about 800; TUI-1, TUI-3, TUI-4 and TUI-5 are estimated at it.
     answers `status` with `locked: false`, its own pid, and an `expiresAt` of 600 characters of
     ESC, `▀` and `▄`: the bar shows at most 64 escaped characters on one line (the budget
     assertion), and the address is not marked verified.
+
+### TUI-1 split (2026-10-28)
+
+The first coding pass measured about 610 changed lines for the dependencies, the write point and
+the three entry points alone, and estimated about 1,100 more for the rest, so TUI-1 is three PRs
+(the dispatcher's decision, 2026-10-28). The RED tests and counter-examples above are unchanged;
+each lands in the PR named below.
+
+| PR | Branch | Scope | Closes | State |
+|---|---|---|---|---|
+| TUI-1a | `feat/tui-1-shell` | `Cargo.toml`/`Cargo.lock` (ratatui 0.30.2, crossterm 0.29.0; kasuari 0.4.12 and num_threads 0.1.7 pinned to releases at least two weeks old); `src/tui/term.rs`: `FilteredBackend` and `Guard` with the panic hook (one guard per process; a panic while it holds the terminal restores it, writes the fixed line and ends the process with 101), with their RED tests, one of them a child process that panics inside `spawn_blocking`; `src/wallet.rs`: `keys`, `status`, `net`; `list` and `status` call them (no `list` or `status` assertion in `tests/cli.rs` changed; c14's lower bound tolerates a 2 s clock step, 5119e36). `Trust` is `pub`, re-exported as `wallet::Trust`; `Daemon` and its helpers stay in `src/commands.rs` as `pub(crate)` | none | in review |
+| TUI-1b | at dispatch | `Command::Tui { warm, chain }` and its dispatch; `src/tui/mod.rs`, `app.rs`, `ui.rs`, `text.rs`, `style.rs`; `tests/tui.rs` with the cell, style and budget helpers, T1, the T9 frames and the `q` `Msg` test, the T10 `Msg` test, the cached-address counter-example; the README `zwallet tui` section; 03-tui.md §Status bar, the 80x24 layout and rule 3's RPC host row (decisions 2 and 4) | T1 | planned |
+| TUI-1c | at dispatch | the T9 pty test (`q`, then canonical mode with echo), the T10 pty test (`zwallet lock` from a second process, `locked` within two refreshes), the argv-listed fake counter-example, the attacker moved into `tests/common`, the pty helpers (decision 5) | T9, T10 | planned |
+
+Decisions (the dispatcher's, 2026-10-28):
+1. The keys pane's error is a single-source error view, rule 4's exception: the CLI's
+   `VALIDATION_ERROR`, its value escaped and cut at 64 as the CLI does, then wrapped inside the
+   pane.
+2. The status bar is two lines at the bottom: line 1 chain · key · short address · trust; line 2
+   `locked` or `signing open (agent too) until HH:MMZ` (UTC, through
+   `core::time::parse_rfc3339_utc`) · RPC host. TUI-1b updates 03-tui.md §Status bar and the
+   80x24 layout.
+3. `TestBackend` tests build `StatusView` fixtures; behaviour against a real daemon is covered by
+   the pty runs of the zwallet binary. (Called from a test binary, `check_peer` compares the
+   test binary's own code, so a genuine daemon reads as another program there.)
+4. The RPC host is `redact_url`'s origin, the host only, at most 32 characters, cut with `...`;
+   TUI-1b adds it to rule 3's table.
+5. TUI-1c extends `common::openpty` with a window size (default 120x40, settable), reading the
+   output while the child runs, and the slave's termios for the echo check.
+6. Moving the argv-listed attacker from `tests/cli.rs` into `tests/common` is allowed: helper
+   lines change in `tests/cli.rs`, no assertion does.
 
 ## TUI-2 — warm-up, password field, password check, make active, address trust
 

@@ -836,7 +836,11 @@ fn c14_unlock_durations_set_expires_at() {
         let v = home.unlock(duration);
         let after = now_secs();
         let expires = v["expiresAt"].as_str().unwrap().to_string();
-        let lo = zwallet::core::time::rfc3339_utc(before + secs);
+        // Both sides floor to whole seconds, so only a wall-clock step back makes the daemon's
+        // expiry earlier than `before + secs`: up to 2 s of one is tolerated. Seen once, on
+        // 2026-10-28 under load: 2026-10-28T15:09:12Z against an expected 15:09:13Z. The
+        // duration arithmetic itself is exact (`parses_all_units`, src/core/time.rs).
+        let lo = zwallet::core::time::rfc3339_utc(before + secs - 2);
         let hi = zwallet::core::time::rfc3339_utc(after + secs + 1);
         assert!(
             lo <= expires && expires <= hi,
@@ -1978,9 +1982,10 @@ impl Outside {
         )
     }
 
-    /// Unlocks it for 30 s and returns its daemon's pid.
+    /// Unlocks it for 10 minutes and returns its daemon's pid: long enough that a slow run never
+    /// sees it expire (its drop stops it).
     fn unlock(&self) -> i32 {
-        self.run_stdin(&["unlock", "30s", "--password-stdin", "--json"])
+        self.run_stdin(&["unlock", "10m", "--password-stdin", "--json"])
             .ok()["daemonPid"]
             .as_i64()
             .unwrap() as i32
@@ -2036,10 +2041,23 @@ fn the_suite_stops_no_daemon_outside_its_test_homes() {
                 r.stderr.trim()
             ));
         }
-        if stopped(kept) || !pid_alive(kept) || !outside.daemon_pids().contains(&kept) {
+        // Which of the three happened: an outside daemon that merely expired is not alive, but
+        // not listed as stopped.
+        let mut seen = Vec::new();
+        if stopped(kept) {
+            seen.push(format!("{what} listed it as stopped"));
+        }
+        if !pid_alive(kept) {
+            seen.push("it is not alive".to_string());
+        }
+        if !outside.daemon_pids().contains(&kept) {
+            seen.push("the process table no longer lists it for its home".to_string());
+        }
+        if !seen.is_empty() {
             failures.push(format!(
-                "{what} stopped the daemon {kept} of {}, outside the test homes",
-                outside.path().display()
+                "{what}: the daemon {kept} of {}, outside the test homes: {}",
+                outside.path().display(),
+                seen.join("; ")
             ));
         }
     }

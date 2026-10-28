@@ -110,11 +110,16 @@ cell never holds, as `terminal_ok` (:24) tells. One `Backend` wrapper, `Filtered
 every cell whose symbol is not exactly one `terminal_ok` character with `?`, and counts the
 replacements. A replaced cell is one column wide: a glyph two columns wide becomes `?`, and the
 wrapper itself writes a space into the column the glyph covered, so the result does not depend on
-whether ratatui's diff sends that column. Tests draw through the same wrapper over ratatui's
-`TestBackend` and assert zero replacements on every frame: the wrapper is the last filter, as
-`write_human` is, and escaping where text comes in (rule 3) stays mandatory. The TUI's own chrome
-keeps to the set too: borders are `+`, `-` and `|`, the selection marker is `>`, the password mask
-is `*`, and busy states end in `...` (`checking...`, never `…`).
+whether ratatui's diff sends that column. Those spaces stop at the screen's width from the last
+size read through the wrapper (with a fullscreen or inline viewport, ratatui's `Terminal` reads one
+when it is made and before every frame; a fixed viewport reads neither, and the TUI's is
+fullscreen); a draw never asks the terminal, which fails the frame where none answers (no tty, no
+`TERM`). Before any size has been read it writes no space: no column is known to be on the
+screen, and one past the right edge would land on the last column. Tests draw through the same
+wrapper over ratatui's `TestBackend` and assert zero replacements on every frame: the wrapper is
+the last filter, as `write_human` is, and escaping where text comes in (rule 3) stays mandatory.
+The TUI's own chrome keeps to the set too: borders are `+`, `-` and `|`, the selection marker is
+`>`, the password mask is `*`, and busy states end in `...` (`checking...`, never `…`).
 
 What rule 1 rules out is terminal control **from data**: no byte sequence that came from a cell's
 content (an ESC, a CSI or OSC sequence, a BEL) ever reaches the terminal. The backend's own
@@ -474,9 +479,32 @@ it as well.
   started.
 - The buffer is cleared on success, cancel and every failure path. It lives until its last use:
   the session start (if any) and the password check (§Password check), then it is cleared.
-- A panic hook and normal unwinding both restore the terminal. The panic hook then prints one
-  fixed line through the write filter (`eprint_line`, core/terminal.rs:57), "zwallet tui stopped
-  unexpectedly; the terminal was restored", never the panic's payload.
+- A panic hook and normal unwinding both restore the terminal. The panic hook then writes one
+  fixed line, "zwallet tui stopped unexpectedly; the terminal was restored", never the panic's
+  payload: a constant byte string already in the terminal set (a test checks it), written with
+  `write(2)` on fd 2, not through the write filter, which allocates.
+- A panic while the TUI holds the terminal ends the process (`_exit(101)`), also one tokio would
+  catch (`spawn_blocking`), so no TUI ever goes on after a panic (`src/tui/term.rs`). The hook
+  restores the terminal's modes first (`tcsetattr` from the modes the guard recorded), then
+  writes the screen's restore sequences on fd 1 and the line on fd 2, each only when `poll(2)`
+  says the fd takes it within 100 ms: a full pipe or a stalled reader costs that output, never
+  the exit. Right after the modes it arms a 2 s deadline: `alarm(2)` with a SIGALRM handler
+  (installed with `sigaction`, SIGALRM unblocked on that thread) that restores the recorded
+  modes and calls `_exit(101)`, async-signal-safe calls only; so a write that blocks anyway
+  (another writer filled the pipe after `poll`) still ends the process, with the modes back. A
+  second panic meanwhile prints nothing and parks inside the hook; a parked thread keeps every
+  lock it holds (std's stdout and stderr locks too), which is why the hook's path takes no lock
+  and allocates nothing.
+- The TUI takes the terminal once per process (`Guard::enter`; every later call is refused, also
+  after the first guard dropped or the first call failed), and before it starts any other thread
+  or blocking task. So a panic while the terminal is being taken (modes recorded, raw mode on, the
+  screen not yet set up) comes on the taking thread, and is handled like one while it is held:
+  the recorded modes are restored and the process ends. A panic on another thread then is what
+  that call order rules out, and the hook does not make it safe: if it comes before raw mode is
+  set, it restores the modes (or finds none recorded), the taking thread then sets raw mode, and
+  the process can end raw. The `acquiring-locked` test covers only the other order, raw mode
+  first. `_exit` runs no destructors, so a `Zeroizing` buffer such as `PasswordBuf` is not
+  cleared on that path: its memory goes with the process.
 
 ## Architecture
 

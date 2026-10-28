@@ -9,6 +9,8 @@ pub mod commands;
 pub mod core;
 pub mod daemon;
 mod qr;
+pub mod tui;
+pub mod wallet;
 
 /// `zwallet <ver> (<channel> <rev12>)` — the `zwallet --version` line. Channel and build id come
 /// from `ZWALLET_BUILD_CHANNEL` / `ZWALLET_BUILD_ID` at compile time (`dev` / `unknown`
