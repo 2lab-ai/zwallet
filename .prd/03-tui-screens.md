@@ -1,8 +1,11 @@
 # zwallet — TUI screens (v2 mockups)
 
-Status: **planned**, 2026-10-28. ASCII mockups for [`03-tui.md`](03-tui.md) §Screens and keys:
-one per screen at 80x24 (the smallest size the TUI draws), and the home screen at 120x40 too.
-They are generated with exact widths; every cell is printable ASCII, as rule 1 asks. In a real
+Status: **planned**, 2026-10-28, regenerated after review round 1 the same day. ASCII mockups for
+[`03-tui.md`](03-tui.md) §Screens and keys: one per screen at 80x24 (the smallest size the TUI
+draws), and the home screen at 120x40 too. They are generated with exact widths; every cell is
+printable ASCII, as rule 1 asks, and the generator checks the hint rule on every frame (a frame
+whose focus is not a text field, a menu or a popup ends its hint line with `? actions`; one whose
+focus is shows no `? actions`; each heading below names a focus other than a pane). In a real
 frame the selected tab and the selected row are drawn in `style::SELECTED` (reverse video); here
 the selected tab is in `[ ]` and the selected row starts with `>`. Values are illustrative: the
 addresses are the test keys of the dispatcher's 2026-10-28 frames (alpha, beta) and well-known
@@ -43,7 +46,7 @@ ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## 1 keys: `n` new key
+## 1 keys: `n` new key (popup)
 
 `create <name>` for a further key: the password derives it here (`verified: true`, README.md:103-110), an optional duration is `create --unlock`. The form says the new key becomes the active key, because `create` makes it so. T30.
 
@@ -74,7 +77,7 @@ ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## 1 keys: first run
+## 1 keys: first run (text field)
 
 A home without `wallet.json`: the keys tab is the `create` form for the master seed, `--words` included, the password typed twice (`read_password(.., true)`, commands.rs:702). Bar line 1 says `no wallet in this home` as today (src/tui/ui.rs:253-255). T31.
 
@@ -105,14 +108,45 @@ ethereum | no wallet in this home
 locked | ethereum-rpc.publicnode.com
 ```
 
-## 1 keys: `B` recovery phrase (trade-off B, option B2)
+## 1 keys: `B` recovery phrase, option B2 only (text field)
 
-Only if the owner picks B2 (03-tui.md §Open trade-offs). Until then `B` shows the one line `run zwallet backup in a shell to see the recovery phrase` (B1). The words are drawn by zwallet from the decrypted seed after the password typed for this screen; `word` stands for each of them here. T32.
+Built only if the owner picks B2 (03-tui.md §Open trade-offs; recommended: B1). With B1, which TUI-10 builds, `B` shows the one line `run zwallet backup in a shell to see the recovery phrase`. B2's first condition: the purpose sentence above the password field. T32.
+
+```text
+zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ recovery phrase (option B2: only if the owner picks it) ---------------------+
+|this shows your recovery phrase; anything that can read this terminal reads it|
+|                                                                              |
+|password  > ************_                                                     |
+|                                                                              |
+|Enter shows the 24 words; Esc cancels and shows nothing                       |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+
+type the password  Enter show  Esc cancel
+ethereum | alpha 0xCDe5...9E7E | verified by password
+signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
+```
+
+## 1 keys: the words, option B2 only (popup)
+
+B2 only. The words are drawn by zwallet from `wallet::recovery_phrase`'s value after the password typed for this screen; `word` stands for each of them here. Any key hides them, and so do 30 s. No claim about scrollback is made for a terminal not checked by hand. T32.
 
 ```text
 zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
 + recovery phrase (24 words, BIP39 English, no passphrase) --------------------+
-|anyone who can read this terminal can read these words now (tmux included)    |
+|this shows your recovery phrase; anything that can read this terminal reads it|
 |                                                                              |
 |  1. word      7. word     13. word     19. word                              |
 |  2. word      8. word     14. word     20. word                              |
@@ -121,8 +155,8 @@ zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
 |  5. word     11. word     17. word     23. word                              |
 |  6. word     12. word     18. word     24. word                              |
 |                                                                              |
-|write them down offline. Any key hides them; they hide by themselves in 60 s. |
-|they are drawn only here, on the alternate screen: no scrollback keeps them   |
+|write them down offline. Any key hides them; they hide by themselves in 30 s. |
+|                                                                              |
 |                                                                              |
 |                                                                              |
 |                                                                              |
@@ -209,14 +243,14 @@ zwallet  1 keys [2 wallet] 3 send  4 receive  5 whitelist  6 tools  7 session
 |                                              ||                                                                      |
 |                                              ||                                                                      |
 +----------------------------------------------++----------------------------------------------------------------------+
-Enter send/details  Tab pane  a every network  / look up hash  c chain  [ ] tabs  ? actions  q quit
+Enter open  Tab pane  a every network  / look up hash  c chain  [ ] tabs  q quit  ? actions
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## `c` chain picker (any tab)
+## `c` chain picker (popup)
 
-`zwallet chains` as a list: key, name, symbol, chain id, RPC host (the host only, rule 3). Picking one reloads every pane for that chain (T8); the agent's default chain does not exist and nothing is stored (no settings file).
+`zwallet chains` as a list: key, name, symbol, chain id, RPC host (the host only, rule 3). Picking one reloads every pane for that chain (T8); nothing is stored. `e` sets an RPC URL for the highlighted chain.
 
 ```text
 zwallet  1 keys [2 wallet] 3 send  4 receive  5 whitelist  6 tools  7 session
@@ -240,14 +274,45 @@ zwallet  1 keys [2 wallet] 3 send  4 receive  5 whitelist  6 tools  7 session
 |  mined    10-21 19:44Z  out  5 USDC        alice         journal explorer    |
 |ethereum: explorer and this machine's sends; 2 explorer rows not shown        |
 +------------------------------------------------------------------------------+
-j/k move  Enter switch  Esc close
+j/k move  Enter switch  e its RPC  Esc close
+ethereum | alpha 0xCDe5...9E7E | verified by password
+signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
+```
+
+## `c` then `e`: an RPC URL for this session (popup)
+
+`--rpc <url>` in the TUI (§Coverage matrix row 20): the URL for the highlighted chain, for this session only, through the CLI's resolver; the field draws the scheme and host as typed and the rest as `*`; the chain id is checked before use. T42.
+
+```text
+zwallet  1 keys [2 wallet] 3 send  4 receive  5 whitelist  6 tools  7 session
++ balances: alpha on ethereum (a: every network) ------------------------------+
+|> ETH        1.204381                                                         |
+|+ chain (the TUI's own; the agent's default is unchanged) -------------------+|
+||  key        name              symbol  chain id  rpc host                   ||
+||  ethereum   Ethereum          ETH     1         ethereum-rpc.publicnode.com||
+||> base       Base              ETH     8453      base-rpc.publicnode.com    ||
++|+ RPC for base, this TUI session only -------------------------------------+|+
++||url  > https://base-mainnet.example-node.io/*****************_            ||+
+|||the path and the query are drawn as *: they may hold an API key           |||
+|||the node must answer chain id 8453 before it is used                      |||
+|||nothing is saved: after a restart, ZWALLET_RPC_BASE or the default        |||
+|||                                                                          |||
+|||Enter uses it; Esc keeps the one in use                                   |||
+|++--------------------------------------------------------------------------++|
+|  mined    10-24 08:47Z  in   1 ETH         0x7d1B...e2F0 explorer            |
+|  mined    10-23 16:20Z  out  0.1 ETH       bob           journal explorer    |
+|  mined    10-22 10:05Z  in   300 USDC      0x9f2c...81Ab explorer            |
+|  mined    10-21 19:44Z  out  5 USDC        alice         journal explorer    |
+|ethereum: explorer and this machine's sends; 2 explorer rows not shown        |
++------------------------------------------------------------------------------+
+type the URL  Enter use  Esc cancel
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
 ## 3 send: payee
 
-Step 2 of 5 (step 1 is the asset, skipped when the send starts from a balance row). Only the checked list's address entries that cover this chain (T6b); a typed address is not accepted. A new payee is added on 5 whitelist.
+Step 2 of 5 (step 1 is the asset, skipped when the send starts from a balance row). Only the checked list's address entries that cover this chain (T6b); a typed address is not accepted, and an entry at the zero address is never offered (T44). A new payee is added on 5 whitelist.
 
 ```text
 zwallet  1 keys  2 wallet [3 send] 4 receive  5 whitelist  6 tools  7 session
@@ -276,9 +341,9 @@ ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## 3 send: amount
+## 3 send: amount (text field)
 
-The amount field takes `0-9` and one `.` (rule 3). The decimals come from the registry (or the chain's coin).
+The amount field takes `0-9` and one `.` (rule 3). The focus is the field, so the hint line has no `? actions`: `?` would be typed (and refused by the field's alphabet). The decimals come from the registry (or the chain's coin).
 
 ```text
 zwallet  1 keys  2 wallet [3 send] 4 receive  5 whitelist  6 tools  7 session
@@ -302,7 +367,7 @@ zwallet  1 keys  2 wallet [3 send] 4 receive  5 whitelist  6 tools  7 session
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
-Enter review  Esc back  ? actions
+type the amount  Enter review  Esc back
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
@@ -333,12 +398,12 @@ zwallet  1 keys  2 wallet [3 send] 4 receive  5 whitelist  6 tools  7 session
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
-Enter confirm  p allow pending  d allow repeat  g fee ceiling  Esc back
+Enter confirm  p pending ok  d repeat ok  g fee ceiling  Esc back  ? actions
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## 3 send: confirm
+## 3 send: confirm (popup)
 
 Confirm by typing the payee's nickname (T6).
 
@@ -371,7 +436,7 @@ signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 
 ## 3 send: status
 
-The hash at once, then the status every 3 s; after 90 s `unknown - run zwallet tx` (03-tui.md §Status of a send). `s` speeds the send up and `x` cancels it, both as a replacement at its nonce (T27, T28); after `BROADCAST_UNCERTAIN` the screen offers `R`, a retry at the same nonce (T29).
+The hash at once, then the status every 3 s; after 90 s `unknown - run zwallet tx`, and `w` with a typed duration keeps polling (T43). `s` speeds the send up and `x` cancels it, both as a replacement at its nonce, offered only with a pinned own address and an intent the node confirms (T27, T28); after `BROADCAST_UNCERTAIN` the screen offers `R`, a retry at the same nonce (T29).
 
 ```text
 zwallet  1 keys  2 wallet [3 send] 4 receive  5 whitelist  6 tools  7 session
@@ -385,6 +450,37 @@ zwallet  1 keys  2 wallet [3 send] 4 receive  5 whitelist  6 tools  7 session
 |                                                                              |
 |leaving this screen cancels nothing; the send is in the journal               |
 |s speeds it up and x cancels it, both at nonce 13 (a replacement)             |
+|w keeps waiting for a duration you type (now: 90 s, as zwallet's --wait)      |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+
+Enter details  w keep waiting  s speed up  x cancel  Esc wallet  ? actions
+ethereum | alpha 0xCDe5...9E7E | verified by password
+signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
+```
+
+## 3 send: `x` cancel, review
+
+A cancel is 0 of the coin to the key's own pinned address at nonce N, under the checked list's fee cap; the review says it races the original (03-tui.md §Status of a send, Replacements). Confirm by typing `cancel`. T28.
+
+```text
+zwallet  1 keys  2 wallet [3 send] 4 receive  5 whitelist  6 tools  7 session
++ send: cancel nonce 13, review (nothing is signed yet) -----------------------+
+|replaces    0x5be1...c0e4, nonce 13, pending; the node's transaction          |
+|            matches the journal row                                           |
+|sends       0 ETH to alpha's own address, pinned by the password check:       |
+|            0xCDe5267162DDaBFb9e61a1B1deF841760B799E7E                        |
+|fee         at most 0.000289 ETH (21000 gas x 13.75 gwei max, bump 1.25)      |
+|fee cap     0.003 ETH (the checked list, gen 4)                               |
+|                                                                              |
+|a cancel replaces nonce 13 only if it is mined first; if the original is      |
+|mined first, the payment stands and the cancel fails                          |
 |                                                                              |
 |                                                                              |
 |                                                                              |
@@ -395,7 +491,7 @@ zwallet  1 keys  2 wallet [3 send] 4 receive  5 whitelist  6 tools  7 session
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
-Enter details  s speed up  x cancel  Esc wallet  ? actions
+Enter confirm (type cancel)  b bump  Esc back  ? actions
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
@@ -462,9 +558,9 @@ ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## 4 receive: `Q` QR code (trade-off Q, option Q3)
+## 4 receive: `Q` QR code at 120x40, option Q3 only (overlay)
 
-Only if the owner picks Q3 (03-tui.md §Open trade-offs). Until then `Q` shows the one line `zwallet address shows it as a QR code` (Q1). With Q3: a full-screen overlay at 120x40 or larger; the dotted block marks where the 74x37 cells of the code go (each module two spaces in `QR_DARK` or `QR_LIGHT`); at 80x24 `Q` says `the QR code needs a 120x40 terminal; zwallet address shows one`. T18.
+Only if the owner picks Q3 (03-tui.md §Open trade-offs; recommended). Until then `Q` shows the one line `zwallet address shows it as a QR code` (Q1). With Q3: a full-screen overlay at 120x40 or larger; the dotted block marks where the 74x37 cells of the code go (each module two spaces in `QR_DARK` or `QR_LIGHT`); at 80x24 `Q` says `the QR code needs a 120x40 terminal; zwallet address shows one`. T18.
 
 ```text
 scan to send to 0xCDe5267162DDaBFb9e61a1B1deF841760B799E7E  (the same address on every EVM network)
@@ -510,7 +606,7 @@ any key closes   the QR is drawn only for an address verified by password or by 
 
 ## 5 whitelist
 
-The list as the password check verified it (or `not verified` with `V` offered, 03-tui.md §Password check), its policy, and the session's view as information only. T7.
+The list as the password check verified it (or `not verified` with `V` offered, 03-tui.md §Password check), its policy, and the session's view as information only (T7). `z`, a signed entry at the zero address from before TUI-6, is flagged, never offered as a payee, and `d` removes it (T44).
 
 ```text
 zwallet  1 keys  2 wallet  3 send  4 receive [5 whitelist] 6 tools  7 session
@@ -519,7 +615,8 @@ zwallet  1 keys  2 wallet  3 send  4 receive [5 whitelist] 6 tools  7 session
 |> alice    address   0x758a863FA27ffFc71686d4a67B7c45e79D0235FE  ethereum,base|
 |  bob      address   0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045  *            |
 |  router   contract  0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD  ethereum     |
-|                                                                              |
+|  z        address   0x0000000000000000000000000000000000000000  ethereum     |
+|z is the zero address: never offered as a payee; d removes it                 |
 |fee caps    ethereum 0.003 ETH, base 0.0005 ETH, (6 more: Enter on policy)    |
 |messages    sign-message is off                                               |
 |session     the running session reports gen 4, 3 entries (not checked here)   |
@@ -532,16 +629,15 @@ zwallet  1 keys  2 wallet  3 send  4 receive [5 whitelist] 6 tools  7 session
 |                                                                              |
 |                                                                              |
 |                                                                              |
-|                                                                              |
 +------------------------------------------------------------------------------+
 a add  d remove  f fee cap  m messages  R reset  V check  Enter send  ? actions
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## 5 whitelist: `a` add
+## 5 whitelist: `a` add (text field)
 
-`whitelist add`: the kind (address or contract with selectors, T24), nickname, the full address typed (never pre-filled), chains picked from a list (`*` included), and a duration that becomes `--unlock`.
+`whitelist add`: the kind (address or contract with selectors, T24), nickname, the full address typed (never pre-filled; the zero address refused, T44), chains picked from a list (`*` included), and a duration that becomes `--unlock`.
 
 ```text
 zwallet  1 keys  2 wallet  3 send  4 receive [5 whitelist] 6 tools  7 session
@@ -570,7 +666,7 @@ ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## 5 whitelist: summary and password
+## 5 whitelist: summary and password (popup)
 
 `wallet::whitelist_plan`'s summary above the password field (03-tui.md §Whitelist edits). `d` remove, `f` fee cap, `m` message signing and `R` reset use the same popup (T23, T25).
 
@@ -632,7 +728,7 @@ ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## 6 tools: call
+## 6 tools: call (text field)
 
 `call`: a contract address, a signature and arguments typed in; nothing is signed, so the address may be any (T33).
 
@@ -689,45 +785,45 @@ zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist [6 tools] 7 session
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
-Enter confirm (type router)  g fee ceiling  Esc back
+Enter confirm (type router)  g fee ceiling  Esc back  ? actions
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## 6 tools: sign a message
+## 6 tools: sign a message, review
 
-`sign-message`: the message typed or pasted, shown escaped; confirm by typing `sign`. With message signing off, the review shows the refusal and the `5 whitelist` key `m` (T36).
+`sign-message`: rule 4's message block shows the whole message, here 512 characters, 76 to a row between `[` and `]`, so a space at either end of a row is visible; the line under it counts the bytes and the leading and trailing spaces. `e` goes back to the field and drops the review. Confirm by typing `sign`. With message signing off, the review shows the refusal and points to `m` on 5 whitelist (T36).
 
 ```text
 zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist [6 tools] 7 session
-+ tools: sign a message (EIP-191) as alpha ------------------------------------+
-|message     login to example.org at 2026-10-28T14:05Z nonce 8812_             |
-|            typed or pasted; shown escaped: a newline is \u{a}                |
-|bytes       52                                                                |
++ tools: sign 2/3: review as alpha (nothing is signed yet) --------------------+
+|the whole message, 76 characters a row, between [ and ]:                      |
+|[login to example.org as alpha; nonce 8812; issued 2026-10-28T14:05Z; login t]|
+|[o example.org as alpha; nonce 8812; issued 2026-10-28T14:05Z; login to examp]|
+|[le.org as alpha; nonce 8812; issued 2026-10-28T14:05Z; login to example.org ]|
+|[as alpha; nonce 8812; issued 2026-10-28T14:05Z; login to example.org as alph]|
+|[a; nonce 8812; issued 2026-10-28T14:05Z; login to example.org as alpha; nonc]|
+|[e 8812; issued 2026-10-28T14:05Z; login to example.org as alpha; nonce 8812;]|
+|[ issued 2026-10-28T14:05Z; login to example.org as alpha]                    |
+|512 bytes; leading spaces 0, trailing spaces 0                                |
 |signer      alpha 0xCDe5267162DDaBFb9e61a1B1deF841760B799E7E                  |
 |whitelist   message signing is on (the checked list, gen 4)                   |
-|                                                                              |
 |a signature can stand for you off chain: sign only what you wrote             |
-|                                                                              |
-|                                                                              |
-|                                                                              |
-|                                                                              |
-|                                                                              |
-|                                                                              |
+|e edits the message, which drops this review                                  |
 |                                                                              |
 |                                                                              |
 |                                                                              |
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
-Enter confirm (type sign)  Esc back
+Enter confirm (type sign)  e edit  Esc back  ? actions
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
 ## 7 session
 
-`status` in full (T16), `u` to unlock for a typed duration (T14), `L` to lock, the chains.
+`status` in full (T16), `u` to unlock for a typed duration (T14), `P` to accept `ptrace_scope` 0 for this TUI's sessions on Linux (T20), `L` to lock, the chains.
 
 ```text
 zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools [7 session]
@@ -737,6 +833,7 @@ zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools [7 session]
 |other homes 1 daemon (pid 4411); L stops it too                               |
 |whitelist   the running session reports gen 4, 3 entries (not checked here)   |
 |home        /Users/z/.zwallet                                                 |
+|ptrace      Linux only: P accepts ptrace_scope 0 for this TUI's sessions      |
 |version     zwallet 0.2.0 (preview 24f4b5b0c1d2)                              |
 |                                                                              |
 |chains      ethereum base arbitrum optimism polygon bsc avalanche sepolia     |
@@ -749,16 +846,15 @@ zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools [7 session]
 |                                                                              |
 |                                                                              |
 |                                                                              |
-|                                                                              |
 +------------------------------------------------------------------------------+
-u unlock for...  L lock every zwallet daemon  c chain  ? actions
+u unlock for...  P ptrace_scope 0  L lock every daemon  c chain  ? actions
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```
 
-## 7 session: `u` unlock for a duration
+## 7 session: `u` unlock for a duration (popup)
 
-`unlock <dur>`: the duration, then the password (the TUI-2 password field). On Linux `zwallet tui --allow-ptrace-scope-0` carries the CLI flag (T20).
+`unlock <dur>`: the duration, then the password (the TUI-2 password field).
 
 ```text
 zwallet  1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools [7 session]
@@ -789,28 +885,28 @@ locked | ethereum-rpc.publicnode.com
 
 ## `?` or `:` action menu
 
-Every action of the TUI, with its key, the CLI command it matches and the tab it lives on, or why it cannot run now. Typing filters, Enter runs (T12).
+One row per §Coverage matrix row 1–52, so `actions (52)`: its key, what it does, its alias token (the matrix's Alias column) and its tab, or why it cannot run now (`needs: Linux` on macOS, `CLI pointer` for B1). Typing filters, Enter runs (T12). The navigation keys and the version are on its last lines and are not counted.
 
 ```text
 zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
 + keys (* = active: the agent's default; > = open here) -----------------------+
-|>+ actions (37): type to filter, Enter runs, Esc closes --------------------+ |
+|>+ actions (52): type to filter, Enter runs, Esc closes --------------------+ |
 | |> _                                                                       | |
-| |  Enter open a key / warm up     unlock, --key           1                | |
-| |  s     make the key active      change                  1                | |
-| |  n     new key                  create                  1                | |
-| |  V     verify every address     list --verify           1                | |
-| |  A     repair cached addresses  address --verify        1                | |
-| |  B     show the recovery phrase backup                  1                | |
-| |  a     every network            balance                 2                | |
-| |  /     look up a hash           tx                      2                | |
-| |  3     send to a listed payee   transfer                3                | |
-| |  x     cancel a pending send    transfer --nonce        needs: pending tx| |
-| |  m     message signing on/off   whitelist allow-mes...  needs: V         | |
-| |  ...   (j/k scrolls; 26 more)                                            | |
+| |  1     the key list          list                           1            | |
+| |  V     verify every address  list --verify                  1            | |
+| |  -     create the wallet     create                         first run    | |
+| |  n     new key               create                         1            | |
+| |  n     new key, then unlock  create --unlock                1            | |
+| |  s     make the key active   change                         1            | |
+| |  Enter warm up / unlock      unlock                         1; 7 u       | |
+| |  P     accept ptrace_scope 0 unlock --allow-ptrace-scope-0  needs: Linux | |
+| |  L     lock every daemon     lock                           any tab      | |
+| |  7     the session           status                         7            | |
+| |  B     recovery phrase       backup                         CLI pointer  | |
+| |  ...   (j/k scrolls; 41 more)                                            | |
+| |keys: 1-7 tabs  [ ] tabs  j/k move  r refresh  Esc back  q quit           | |
+|e|zwallet 0.2.0 (preview 24f4b5b0c1d2)                                      | |
 | +--------------------------------------------------------------------------+ |
-|every address above was derived from the seed with the password (V, 14:02Z)   |
-|                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
 type to filter  j/k move  Enter run  Esc close
@@ -820,7 +916,7 @@ signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 
 ## `?` action menu, filtered
 
-Typing `fee` leaves the two fee actions; Enter runs the selected one, which opens its screen or form.
+Typing `fee` leaves the two rows whose words or alias hold it; Enter runs the selected one, which opens its screen or form.
 
 ```text
 zwallet  1 keys [2 wallet] 3 send  4 receive  5 whitelist  6 tools  7 session
@@ -829,10 +925,10 @@ zwallet  1 keys [2 wallet] 3 send  4 receive  5 whitelist  6 tools  7 session
 |  USDC       2500                                                             |
 |  US+ actions: type to filter, Enter runs, Esc closes -------------------+    |
 |  ze|> fee_                                                              |    |
-|    |  f   set a chain's fee cap        whitelist fee-cap         5      |    |
-+----|  g   fee ceiling for this send    transfer --max-fee-gwei   3      |----+
+|    |  g   fee ceiling for a send   transfer --max-fee-gwei   3          |    |
++----|  f   a chain's fee cap        whitelist fee-cap         5          |----+
 + rec|                                                                    |----+
-|> pe|2 of 37 actions match                                               |    |
+|> pe|2 of 52 actions match                                               |    |
 |  mi+--------------------------------------------------------------------+    |
 |  mined    10-27 09:12Z  out  1000 USDC     bob           journal explorer    |
 |  reverted 10-26 22:05Z  out  0 ETH         router        journal explorer    |
