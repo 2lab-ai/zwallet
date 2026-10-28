@@ -881,14 +881,15 @@ pub fn openpty_sized((columns, rows): (u16, u16)) -> (File, OwnedFd) {
         ws_ypixel: 0,
     };
     // SAFETY: openpty writes two fds into the out-params and reads the window; a null name and
-    // termios are allowed.
+    // termios are allowed. The window goes as a raw pointer: libc declares it `*mut` on macOS and
+    // `*const` on Linux, where clippy rejects a `&mut` (unnecessary_mut_passed).
     let rc = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut window,
+            &raw mut window,
         )
     };
     assert_eq!(rc, 0, "openpty failed");

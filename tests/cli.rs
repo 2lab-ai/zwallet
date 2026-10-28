@@ -4,8 +4,8 @@
 mod common;
 
 use common::{
-    ATTACKER_C, DaemonChild, FakeDaemon, Home, KillOnDrop, PW, build_attacker,
-    daemon_argv_impostor, have, pid_alive, run_in, wait_dead, wait_until_answering,
+    DaemonChild, FakeDaemon, Home, KillOnDrop, PW, build_attacker, daemon_argv_impostor, have,
+    pid_alive, run_in, wait_dead, wait_until_answering,
 };
 use serde_json::json;
 use std::fs;
@@ -4423,7 +4423,7 @@ fn s7_own_code_behind_a_symlink_to_zwallet_with_its_uuid_is_not_verified() {
         .unwrap();
     let src = dir.path().join("attacker.c");
     let p = dir.path().join("P");
-    fs::write(&src, ATTACKER_C).unwrap();
+    fs::write(&src, common::ATTACKER_C).unwrap();
     let cc = std::process::Command::new("cc")
         .arg("-o")
         .arg(&p)
