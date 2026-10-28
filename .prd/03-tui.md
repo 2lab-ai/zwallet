@@ -668,7 +668,7 @@ optimism and sepolia show the explorer and the journal; base, arbitrum, polygon,
 avalanche show "this machine's sends only; incoming transfers not indexed".
 
 **Re-measured 2026-10-28, 04:50:25Z–04:50:46Z** (the dispatcher; `curl 8.7.1`, no key, no
-`User-Agent` header; receipt: the dispatcher's record `explorer-remeasure/record.md` with the raw bodies, in the session scratchpad, outside the repo). Blockscout, the same request for the same
+`User-Agent` header; receipt: [`research/explorer-remeasure-2026-10-28.md`](research/explorer-remeasure-2026-10-28.md), every status line and the decision). Blockscout, the same request for the same
 address: identical to 2026-10-27.
 
 | Host | HTTP | Content-Type | Result |

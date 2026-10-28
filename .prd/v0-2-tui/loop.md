@@ -14,7 +14,7 @@ code.
 
 ## Entry conditions
 
-- **Satisfied 2026-10-28: the explorer re-measure that gated TUI-7+8.** Receipt: the dispatcher's record `explorer-remeasure/record.md` with the raw bodies, in the session scratchpad, outside the repo
+- **Satisfied 2026-10-28: the explorer re-measure that gated TUI-7+8.** Receipt: [`../research/explorer-remeasure-2026-10-28.md`](../research/explorer-remeasure-2026-10-28.md), every status line and the decision
   (04:50:25Z–04:50:46Z), copied into 03-tui.md §History (re-measured 2026-10-28). Decision recorded
   there: no extra parser for base, arbitrum or polygon in v0.2; avalanche through Routescan stays
   out; the coverage per chain is unchanged. Nothing gates TUI-7+8 now but TUI-5.
