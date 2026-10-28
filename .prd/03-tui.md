@@ -62,7 +62,8 @@ a first-time user (§Screens and keys).
   4. confirm by typing the payee's nickname;
   5. the tx hash appears at once, and the screen follows its status (§Status of a send).
 - **T7 Whitelist.** List the entries (gen, `verified` state, policy), add an address entry or a
-  contract entry with selectors, remove an entry, set the fee cap, reset. The `verified` state is
+  contract entry with selectors, remove an entry, set the fee cap, turn message signing on or off
+  (added 2026-10-28), reset. The `verified` state is
   the password check's (§Password check).
   - Every change asks for the password, even when warm, and runs the 04 edit protocol
     (§Whitelist edits).
@@ -316,7 +317,9 @@ otherwise ethereum (T8). Nothing is stored.
   the narrowest name are cut, with `...` too; at 80 columns none are (the longest, the 40 of
   `not verified (no session check on Linux)`, fit beside 8 with the widest chain). In the key
   list the name is cut to 27, or less when the index is wider than three digits, so the address
-  after it is whole; on line 2 the expiry is cut to 17 and a status error to 37, and the RPC host
+  after it is whole; from TUI-4 on, a row that carries the trust word `verified` (rule 7, T19)
+  cuts the name to 17 instead (marker 3, name 17, index 6, address 42, `  verified` 10 fill 78),
+  so the address and the word are whole too; on line 2 the expiry is cut to 17 and a status error to 37, and the RPC host
   is at most 32. `q` while
   `L` is stopping daemons waits for it (`locking... (quits when done)`); a stop that failed is
   printed after the terminal is given back.
@@ -445,8 +448,8 @@ rules 1–4.
 password checked in this TUI session (§Password check), or, for an address only, for a derivation
 by this build's key daemon of this home, which the kernel confirmed (`PeerCheck::ThisBuild`, macOS
 only), as the CLI marks it today (`Trust::Session`, commands.rs:555-566). Nothing a daemon reports
-about the whitelist, and nothing a file says, is ever drawn as verified. On 1 keys a row says
-`verified` only for a key whose address the password check of this TUI session derived
+about the whitelist, and nothing a file says, is ever drawn as verified. On 1 keys (from TUI-4
+on) a row says `verified` only for a key whose address the password check of this TUI session derived
 (the warm-up's named keys, or every key after `V`), or the active key while the bar says
 `verified by session`.
 
@@ -840,7 +843,7 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T10 | `zwallet lock` from another shell | the TUI shows `locked` within two refreshes (10 s) |
 | T11 | pty test across T2 and T7 | no echo; the password appears in no captured frame; cancel mid-entry, then a retry, works |
 | T12 | `?`, type `whitelist add`, Enter | one menu row (key `a`, tab 5); Enter opens the add form. A test lists the CLI column of §Coverage matrix rows 1–52 and asserts each is a menu alias and each menu row is one of them; an action that cannot run shows its reason, and Enter on it changes nothing |
-| T13 | from the start: `1` … `7`, `[`, `]`, Esc in a popup and in a sub-screen; every screen at 80x24 | each tab reached; every frame's hint line ends in `? actions`; Esc closes the popup, then returns to the tab; every screen of [`03-tui-screens.md`](03-tui-screens.md) fits 80x24 (`TestBackend`) |
+| T13 | from the start: `1` … `7`, `[`, `]`, Esc in a popup and in a sub-screen; every screen at 80x24 | each tab reached; every frame's hint line ends in `? actions`; Esc closes the popup, then returns to the tab; every 80x24 frame of [`03-tui-screens.md`](03-tui-screens.md) fits 80x24 (`TestBackend`) |
 | T14 | 7 session, `u`, `10m`, the password | the bar says `signing (agent too) until` ≈ now+10m; `zwallet status --json` has the same `expiresAt` |
 | T15 | 2 wallet, `a`, mock nodes for two chains and one that fails | one line per network, testnet last; the failed one `error: … [CODE]` cut to 72 (`brief`); `2 of 3 networks have a balance; 1 did not answer`; zero tokens hidden |
 | T16 | 7 session, a daemon of this home and one of another home | lock state, expiry, daemon pid, `other homes: 1 daemon`, the session's whitelist as `reports gen N, M entries (not checked here)`; with TUI-1c's argv-listed fake: its values escaped within their budgets, nothing drawn verified |

@@ -14,7 +14,7 @@ Popups are drawn over the pane (`Clear`, then an ASCII-bordered block).
 
 ## 1 keys
 
-The keys tab after `V`: every key's address derived from the seed in this TUI, so each row says `verified` (rule 7). After a warm-up alone (TUI-2) only the keys the password check named (the open key and the active key) say `verified`; the other rows carry the note `V checks every key's address with the password`, and a key the bar shows `verified by session` is not flagged (TUI-2's note fix, 4f4d54f). `>` is the key open in the TUI, `*` the globally active key. T1 (merged), T2, T2b, T19.
+The keys tab after `V`: every key's address derived from the seed in this TUI, so each row says `verified` (rule 7). The per-row word comes with TUI-4 (T19): the name gives way to 17 so the address and the word stay whole (03-tui.md §Status bar). Before it, after a warm-up alone (TUI-2), the rows carry no word and TUI-2's note says what checks them; a key the bar shows `verified by session` is not flagged (TUI-2's note fix, 4f4d54f). `>` is the key open in the TUI, `*` the globally active key. T1 (merged), T2, T2b, T19.
 
 ```text
 zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session

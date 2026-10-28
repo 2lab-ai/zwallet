@@ -262,6 +262,10 @@ Decisions (the dispatcher's, 2026-10-28):
   - T19 (pty): `V` on 1 keys: every row `verified`; the test edits `beta`'s cached address, `V`
     shows the CLI's `VALIDATION_ERROR` naming `A`; `A` and the password: the `repaired` list and
     every row `verified`; `zwallet list --verify --password-stdin` agrees.
+  - (`TestBackend`): at 80x24 a 32-character key name, an index of 1000 and the word `verified`:
+    the address and the word are whole, the name is cut with `...` (03-tui.md §Status bar, the
+    key list's widths; TUI-1b's `an_index_of_1000_and_a_32_character_name_never_cut_the_address`,
+    tests/tui.rs:362, keeps passing for rows without the word).
   - T20 (unit, `ptrace_scope_check` on a fixture file, core/protocol.rs:464): the TUI's
     `prepare_unlock` refuses scope 0 and names `zwallet tui --allow-ptrace-scope-0`; with the
     flag it passes. (pty, Linux, where `common::ptrace_scope_is_open`, tests/cli.rs:1025): the
