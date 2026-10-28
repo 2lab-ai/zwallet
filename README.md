@@ -26,8 +26,9 @@ formula on macOS and the checksummed release binary on Arch. Or download a binar
 
 On macOS every binary zwallet publishes (arm64 and x86_64) is ad-hoc code-signed with the hardened
 runtime. `unlock` needs a signed build: it compares the code of the key daemon it starts with its
-own. A build from source is signed by the linker on Apple silicon, but not on an Intel Mac, where
-`unlock` refuses it until it is signed: `codesign --force --sign - "$(command -v zwallet)"`.
+own. The linker signs arm64 output only: any x86_64 build, including one built on Apple silicon,
+is unsigned until it is signed afterwards, and `unlock` refuses it until then:
+`codesign --force --sign - "$(command -v zwallet)"`.
 
 `zwallet --version` prints `zwallet <version> (<channel> <rev12>)`: channel `release` or `preview`
 for published binaries, `dev` for a local build.
@@ -151,10 +152,12 @@ Commands that act on a key take `--key <name>` (default: the active key).
     `zwallet unlock <dur>` or `zwallet address --verify` checks it`` in human output; or, while
     unlocked, an address no session verified (an agent's `create`, `list` without `--verify`, or
     Linux), with ``not verified: run `zwallet address --verify` before funding``. When the
-    process answering on `d.sock` is not this build's key daemon of this home (another program,
-    another zwallet build such as the one before a `brew upgrade`, or one that does not hold the
-    socket), the command still succeeds, unverified, with a `warning` naming the pid and what it
-    is, ending ``run `zwallet lock` and unlock again``. `balance` adds no note line.
+    process answering on `d.sock` is known not to be this build's key daemon of this home
+    (another program, another zwallet build such as the one before a `brew upgrade`, or one that
+    does not hold the socket), the command still succeeds, unverified, with a `warning` naming the
+    pid and what it is, ending ``run `zwallet lock` and unlock again``. A process whose code cannot
+    be read (an unsigned program, such as an x86_64 one on any Mac, or a non-dumpable one on
+    Linux) is not named: its answer is only not verified. `balance` adds no note line.
 
   While a daemon answers, a cache that its answer contradicts fails these commands (and `list`)
   with `VALIDATION_ERROR`. Only when every process that answered is this build's key daemon (so
@@ -238,7 +241,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
   swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
   genuine daemon of a wallet the human did not make), or injects code into the genuine binary
-  (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, `LD_PRELOAD`) — the same
+  (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, or on any binary while System
+  Integrity Protection is off; `LD_PRELOAD`) — the same
   class as replacing the binary, which nothing here can prevent. So keep the address you saved
   from your first unlock; if it ever changes, stop. **Piped and `--json` output changed with
   this check**: the locked note now names `zwallet unlock`, and a session-verified result gains
@@ -851,7 +855,8 @@ things a same-user process can still do, and what to do about them:
   swapped-in program can fork a process that keeps the channel, then exec this build, which
   passes, and that process can read the password. (It could also exec this build with
   `DYLD_INSERT_LIBRARIES`; the binaries zwallet ships carry the hardened runtime, under which dyld
-  ignores that variable, but a build from source does not.) A Homebrew-installed binary is
+  ignores that variable while System Integrity Protection is on, but a build from source does
+  not.) A Homebrew-installed binary is
   writable by the user, and so by the agent. For
   real protection install zwallet where the agent cannot write (e.g. a root-owned directory), or
   run the agent as a different OS user.

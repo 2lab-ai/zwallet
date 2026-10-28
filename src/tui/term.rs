@@ -13,22 +13,39 @@ use std::cell::UnsafeCell;
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::os::fd::RawFd;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 /// The one way the TUI writes cells to a terminal, as `write_human` is the CLI's: a cell whose
 /// symbol is not exactly one [`terminal_ok`] character other than the newline reaches the inner
 /// backend as `?`, and is counted. A replaced glyph two columns wide becomes one `?`, and this
-/// writes a space into the column it covered, whether or not ratatui's diff sends that column.
-/// So no byte of a cell's content (an ESC, a CSI or OSC sequence, a BEL, a block glyph) reaches
-/// the terminal; the inner backend's own cursor and style sequences do.
+/// writes a space into the column it covered, whether or not ratatui's diff sends that column,
+/// once a size has passed through it ([`FilteredBackend::width`]). So no byte of a cell's content
+/// (an ESC, a CSI or OSC sequence, a BEL, a block glyph) reaches the terminal; the inner backend's
+/// own cursor and style sequences do.
 pub struct FilteredBackend<B> {
     inner: B,
     replaced: usize,
+    /// The screen's width from the last `size()` that passed through this filter, where a
+    /// replaced wide cell's blank columns stop; a failed `size()` leaves it as it was. A draw
+    /// never asks the terminal itself: where none answers (no tty and no `TERM`) that fails the
+    /// whole frame. ratatui's `Terminal` reads the size when it is made and before every frame
+    /// (fullscreen and inline viewports), so in the TUI one has always passed.
+    ///
+    /// 0 until one has: then a draw writes no blank column, as on a screen 0 columns wide. Of the
+    /// other ways, a blank column written unclipped can land past the right edge, which a terminal
+    /// writes on its last column, and a failed draw loses the frame for one cell. The cost: a
+    /// column the glyph covered may still show what an earlier frame drew there, a cell that
+    /// passed this filter, never a byte of this one.
+    width: AtomicU16,
 }
 
 impl<B> FilteredBackend<B> {
     pub fn new(inner: B) -> Self {
-        Self { inner, replaced: 0 }
+        Self {
+            inner,
+            replaced: 0,
+            width: AtomicU16::new(0),
+        }
     }
 
     /// How many cells were replaced since this was made. Every frame the tests draw keeps it 0:
@@ -67,8 +84,7 @@ impl<B: Backend> Backend for FilteredBackend<B> {
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
         let mut cells: Vec<(u16, u16, Cell)> = Vec::new();
-        // The screen's width, read once per draw and only for a wide cell replaced.
-        let mut width = None;
+        let width = self.width.load(Ordering::Relaxed);
         for (x, y, cell) in content {
             if cell_ok(cell.symbol()) {
                 cells.push((x, y, cell.clone()));
@@ -79,17 +95,9 @@ impl<B: Backend> Backend for FilteredBackend<B> {
             shown.set_symbol("?");
             let covered = covered(cell);
             cells.push((x, y, shown.clone()));
-            if covered > 1 {
-                let width = match width {
-                    Some(w) => w,
-                    None => *width.insert(self.inner.size()?.width),
-                };
-                shown.set_symbol(" ");
-                for column in
-                    (x.saturating_add(1)..x.saturating_add(covered)).filter(|c| *c < width)
-                {
-                    cells.push((column, y, shown.clone()));
-                }
+            shown.set_symbol(" ");
+            for column in (x.saturating_add(1)..x.saturating_add(covered)).filter(|c| *c < width) {
+                cells.push((column, y, shown.clone()));
             }
         }
         self.inner.draw(cells.iter().map(|(x, y, c)| (*x, *y, c)))
@@ -123,8 +131,12 @@ impl<B: Backend> Backend for FilteredBackend<B> {
         self.inner.clear_region(clear_type)
     }
 
+    /// The inner backend's size; its width is kept for the draws that follow
+    /// ([`FilteredBackend::width`]).
     fn size(&self) -> Result<Size, Self::Error> {
-        self.inner.size()
+        let size = self.inner.size()?;
+        self.width.store(size.width, Ordering::Relaxed);
+        Ok(size)
     }
 
     fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
@@ -626,7 +638,8 @@ mod tests {
 
     /// `cells` (column, row, symbol) handed to the `Backend` trait directly, as ratatui's
     /// `Terminal` hands it what its diff found changed. Only for a cell the diff refuses in a
-    /// debug build: a lone control character (ratatui-core's `cell_width` asserts on it).
+    /// debug build (a lone control character: ratatui-core's `cell_width` asserts on it), or for a
+    /// backend whose `size()` fails, which a `Terminal` reads before every frame.
     fn hand_over(backend: &mut impl Backend, cells: &[(u16, u16, &str)]) {
         let cells: Vec<(u16, u16, Cell)> = cells
             .iter()
@@ -743,6 +756,117 @@ mod tests {
         // A `?` where each of them was: the cursor moved to column 1, then to column 9.
         assert!(holds(&bytes, b"\x1b[1;1H?"), "{bytes:?}");
         assert!(holds(&bytes, b"\x1b[1;9H?"), "{bytes:?}");
+    }
+
+    /// A [`TestBackend`] screen whose `size()` answers only while `answers` is set; otherwise it
+    /// fails, as crossterm's does with no terminal and no `TERM` (a test run with no tty and `TERM`
+    /// unset, on Linux or macOS alike, or a terminal that is gone). It counts every `size()` call.
+    struct Screen {
+        cells: TestBackend,
+        answers: std::cell::Cell<bool>,
+        asked: std::cell::Cell<usize>,
+    }
+
+    impl Backend for Screen {
+        type Error = std::io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            self.cells.draw(content).map_err(|e| match e {})
+        }
+
+        fn hide_cursor(&mut self) -> std::io::Result<()> {
+            self.cells.hide_cursor().map_err(|e| match e {})
+        }
+
+        fn show_cursor(&mut self) -> std::io::Result<()> {
+            self.cells.show_cursor().map_err(|e| match e {})
+        }
+
+        fn get_cursor_position(&mut self) -> std::io::Result<Position> {
+            self.cells.get_cursor_position().map_err(|e| match e {})
+        }
+
+        fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> std::io::Result<()> {
+            self.cells
+                .set_cursor_position(position)
+                .map_err(|e| match e {})
+        }
+
+        fn clear(&mut self) -> std::io::Result<()> {
+            self.cells.clear().map_err(|e| match e {})
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> std::io::Result<()> {
+            self.cells.clear_region(clear_type).map_err(|e| match e {})
+        }
+
+        fn size(&self) -> std::io::Result<Size> {
+            self.asked.set(self.asked.get() + 1);
+            if !self.answers.get() {
+                return Err(std::io::Error::other("no terminal"));
+            }
+            self.cells.size().map_err(|e| match e {})
+        }
+
+        fn window_size(&mut self) -> std::io::Result<WindowSize> {
+            self.cells.window_size().map_err(|e| match e {})
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.cells.flush().map_err(|e| match e {})
+        }
+    }
+
+    #[test]
+    fn a_draw_never_asks_the_terminal_for_its_size_and_clips_at_the_last_size_it_saw() {
+        let mut backend = FilteredBackend::new(Screen {
+            cells: TestBackend::new(12, 1),
+            answers: false.into(),
+            asked: 0.into(),
+        });
+        let xs: Vec<(u16, u16, &str)> = (0..12).map(|x| (x, 0, "X")).collect();
+        hand_over(&mut backend, &xs);
+        // No size has passed through the filter yet. The cell the no-tty gate failed on (a control
+        // sequence ratatui counts wide) and a wide glyph each become `?`, and nothing is written
+        // after them: no column is known to be on the screen.
+        hand_over(&mut backend, &[(0, 0, "\u{1b}[31m"), (3, 0, "\u{6f22}")]);
+        assert_eq!(backend.replaced(), 2);
+        assert_eq!(row(backend.inner().cells.buffer(), 0), "?XX?XXXXXXXX");
+        // The size ratatui's `Terminal` reads before every frame passes through the filter once;
+        // then the terminal stops answering. The covered column is blanked, the one past the
+        // right edge is not written.
+        backend.inner().answers.set(true);
+        assert_eq!(backend.size().unwrap().width, 12);
+        backend.inner().answers.set(false);
+        hand_over(&mut backend, &xs);
+        hand_over(&mut backend, &[(3, 0, "\u{6f22}"), (11, 0, "\u{6f22}")]);
+        assert_eq!(backend.replaced(), 4);
+        assert_eq!(row(backend.inner().cells.buffer(), 0), "XXX? XXXXXX?");
+        // Asked once, by the test: never by a draw.
+        assert_eq!(backend.inner().asked.get(), 1);
+        // The screen shrinks to 8 columns and the next size passes through: the blank columns
+        // stop at the new width (a write at column 8 would panic in `TestBackend`).
+        backend.inner.cells.resize(8, 1);
+        backend.inner().answers.set(true);
+        assert_eq!(backend.size().unwrap().width, 8);
+        let xs: Vec<(u16, u16, &str)> = (0..8).map(|x| (x, 0, "X")).collect();
+        hand_over(&mut backend, &xs);
+        hand_over(&mut backend, &[(7, 0, "\u{6f22}")]);
+        assert_eq!(backend.replaced(), 5);
+        assert_eq!(row(backend.inner().cells.buffer(), 0), "XXXXXXX?");
+        // A failed size() keeps the last width: the covered column is still blanked, and the one
+        // past the right edge still not written.
+        backend.inner().answers.set(false);
+        assert!(backend.size().is_err());
+        assert_eq!(backend.width.load(Ordering::Relaxed), 8);
+        hand_over(&mut backend, &xs);
+        hand_over(&mut backend, &[(3, 0, "\u{6f22}"), (7, 0, "\u{6f22}")]);
+        assert_eq!(backend.replaced(), 7);
+        assert_eq!(row(backend.inner().cells.buffer(), 0), "XXX? XX?");
+        assert_eq!(backend.inner().asked.get(), 3);
     }
 
     /// What crossterm writes to leave the alternate screen and to show the cursor.
