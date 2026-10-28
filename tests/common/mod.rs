@@ -941,8 +941,15 @@ pub struct PtyChild {
     pub child: Child,
     pub master: File,
     seen: String,
-    /// Kept open: on macOS the pty drops unread output once every slave is closed.
-    _slave: OwnedFd,
+    /// This process's copy of the slave. Kept for [`PtyChild::spawn`] and
+    /// [`PtyChild::spawn_on_terminal`], whose output is read only from time to time (it was kept
+    /// because macOS was seen to drop unread output once every slave is closed). `None` for
+    /// [`PtyChild::spawn_full_screen`]: with no slave left here, the pty ends with the child and
+    /// the reader ends after the last byte, also on Linux, whose master gives no end while any
+    /// slave is open. Measured on 2026-10-28 (a session leader writing 25,603 bytes, then exiting,
+    /// read all along): with this copy closed every byte arrived, then the end, 200 of 200 runs
+    /// on macOS and on Linux; with it open, Linux gave no end within 10 s.
+    _slave: Option<OwnedFd>,
     /// With [`PtyChild::spawn_on_terminal`]: the master of the terminal stdout is on (and its
     /// slave, kept open), and the bytes it showed.
     out: Option<(File, OwnedFd)>,
@@ -996,6 +1003,8 @@ impl PtyChild {
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::piped());
         let mut pty = Self::start(cmd, master, slave, None);
+        // The child has its own; the reader must see the pty end when the child does.
+        pty._slave = None;
         let (read, stop) = (
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(AtomicBool::new(false)),
@@ -1034,7 +1043,7 @@ impl PtyChild {
             child,
             master,
             seen: String::new(),
-            _slave: slave,
+            _slave: Some(slave),
             out,
             shown: Vec::new(),
             screen: None,
@@ -1060,7 +1069,7 @@ impl PtyChild {
     /// Waits (bounded) until what the child wrote to the terminal so far satisfies `until`, and
     /// returns it. Panics with the frame (and the exit and stderr, once the child has exited) when
     /// the child has exited and the reader has every byte (it ends when the pty does, after the
-    /// last one), or past `limit`.
+    /// last one: this process holds no slave of a full-screen child's pty), or past `limit`.
     pub fn wait_output(&mut self, limit: Duration, until: impl Fn(&[u8]) -> bool) -> Vec<u8> {
         let start = Instant::now();
         loop {
@@ -1104,8 +1113,8 @@ impl PtyChild {
 
     /// Once the child has exited: its last frame ([`Frame::last`]), from everything it wrote
     /// before it gave the terminal back. All of it was written before the exit; the wait is for
-    /// the reader to catch up, and fails once it has read everything if the terminal was never
-    /// given back.
+    /// the reader to catch up, and fails once the reader has ended (the pty ended with the child)
+    /// if the terminal was never given back.
     pub fn final_frame(&mut self, limit: Duration) -> Frame {
         assert!(
             matches!(self.child.try_wait(), Ok(Some(_))),
@@ -1167,8 +1176,9 @@ impl PtyChild {
     }
 
     /// The pty's local modes now (`c_lflag`: `ICANON`, `ECHO`, ...), as the child left them once
-    /// it has exited. Read through the master, which shares them: when the child, its session's
-    /// leader, exits, macOS revokes every open slave of its terminal (ours too, then `ENOTTY`).
+    /// it has exited. Read through the master, which shares them on macOS and Linux: this process
+    /// keeps no slave of a full-screen child's pty, and on macOS the exit of the child, its
+    /// session's leader, revokes every open slave of its terminal (`ENOTTY` then).
     pub fn local_modes(&self) -> libc::tcflag_t {
         use std::os::fd::AsRawFd;
         // SAFETY: tcgetattr fills a zeroed termios for an fd this test owns.
