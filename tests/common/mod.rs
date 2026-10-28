@@ -613,7 +613,37 @@ impl FakeDaemon {
         Self::bind_with_reply(path, bytes)
     }
 
+    /// [`FakeDaemon::answering`] with `result` for every request but an `address` request on
+    /// chain `tron`, which gets the same result with `address` = `tron` and `chain` = `tron`: a
+    /// squatter that answers each chain family with an address of its own shape.
+    pub fn answering_per_family(path: &Path, result: Value, tron: &str) -> Self {
+        let reply = |result: &Value| {
+            let mut r =
+                serde_json::to_vec(&serde_json::json!({ "v": 2, "ok": true, "result": result }))
+                    .unwrap();
+            r.push(b'\n');
+            r
+        };
+        let mut on_tron = result.clone();
+        on_tron["address"] = Value::from(tron);
+        on_tron["chain"] = Value::from("tron");
+        let (evm, tron) = (reply(&result), reply(&on_tron));
+        Self::bind_with(path, move |request| {
+            let asked: Value = serde_json::from_slice(request).unwrap_or(Value::Null);
+            if asked["op"] == "address" && asked["chain"] == "tron" {
+                tron.clone()
+            } else {
+                evm.clone()
+            }
+        })
+    }
+
     fn bind_with_reply(path: &Path, reply: Vec<u8>) -> Self {
+        Self::bind_with(path, move |_| reply.clone())
+    }
+
+    /// Answers each request with what `reply` makes of its bytes.
+    fn bind_with(path: &Path, reply: impl Fn(&[u8]) -> Vec<u8> + Send + 'static) -> Self {
         let listener = UnixListener::bind(path).expect("bind fake daemon");
         listener.set_nonblocking(true).unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -627,8 +657,9 @@ impl FakeDaemon {
                         s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                         let mut buf = Vec::new();
                         let _ = s.read_to_end(&mut buf);
+                        let answer = reply(&buf);
                         rx.lock().unwrap().push(buf);
-                        let _ = s.write_all(&reply);
+                        let _ = s.write_all(&answer);
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(5)),
                 }

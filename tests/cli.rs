@@ -63,7 +63,14 @@ fn create_then_fresh_processes_read_the_same_wallet() {
     assert_eq!(base["address"], address.as_str());
     let all = home.run(&["addresses", "--json"]).ok();
     let rows = all["addresses"].as_array().unwrap();
-    assert!(rows.iter().all(|r| r["address"] == address.as_str()));
+    // One address on every EVM chain; Tron's is its own (`T...`).
+    for r in rows {
+        if r["chainId"] == "tron" {
+            assert!(r["address"].as_str().unwrap().starts_with('T'), "{r}");
+        } else {
+            assert_eq!(r["address"], address.as_str(), "{r}");
+        }
+    }
     assert!(rows.iter().any(|r| r["chainId"] == "polygon"));
 
     let status = home.run(&["status", "--json"]).ok();
@@ -1235,13 +1242,16 @@ fn k1_squatter_answering_the_cached_address_is_never_verified() {
         .as_str()
         .unwrap()
         .to_string();
-    // It read the cache and repeats it, so the daemon cross-check finds no mismatch.
-    let fake = FakeDaemon::answering(
+    // It read the cache and repeats it (each chain family's), so the daemon cross-check finds
+    // no mismatch.
+    let tron = derived_tron(&home);
+    let fake = FakeDaemon::answering_per_family(
         &home.sock(),
         serde_json::json!({
             "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z",
             "chain": "ethereum", "index": 0, "active": "main", "address": addr,
         }),
+        &tron,
     );
     for args in ADDRESS_VIEWS.iter().copied().chain([
         &["change", "main", "--json"][..],
@@ -3759,14 +3769,16 @@ fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
 fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
     let home = Home::new();
     home.create("main", &[]);
-    // An agent's script edits the cache and listens on d.sock, answering the edited address.
+    // An agent's script edits the cache and listens on d.sock, answering the edited address
+    // (each chain family's).
     poison_cache(&home);
-    let fake = FakeDaemon::answering(
+    let fake = FakeDaemon::answering_per_family(
         &home.sock(),
         serde_json::json!({
             "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z",
             "chain": "ethereum", "index": 0, "active": "main", "address": POISON,
         }),
+        TRON_POISON,
     );
     // The listener runs in this test harness binary, not zwallet: its code is not this build's.
     // On macOS the cdhash catches that; on Linux its readable executable is not this build's.
@@ -4029,7 +4041,7 @@ fn wait_until_answering(home: &Home, limit: Duration) {
 }
 
 /// A tiny attacker: binds `$1/d.sock` and answers every request with an ok reply carrying the
-/// POISON address, from its own code. Built with `cc` in the test, so its cdhash and executable
+/// POISON address (TRON_POISON to an `address` request on `tron`), from its own code. Built with `cc` in the test, so its cdhash and executable
 /// are not zwallet's. `ATTACKER_REPLY` replaces the whole reply (one JSON line), and
 /// `ATTACKER_NONDUMPABLE` makes it non-dumpable on Linux, as a genuine key daemon is, so its
 /// executable cannot be read and who answered is not known (`Unknown`).
@@ -4059,12 +4071,20 @@ static void logev(const char *ev, long n) {
 }
 /* One connection, in its own process: read what the client sends (bounded by SO_RCVTIMEO so a
    client that is slow to send its request or its EOF never blocks us), then answer. */
-static void handle(int s, const char *reply) {
+static void handle(int s, const char *reply, const char *reply_tron) {
   struct timeval to; to.tv_sec = 2; to.tv_usec = 0;
   setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+  /* The request's first 4 KiB, to tell an address request on tron from any other. */
+  char req[4096]; size_t kept = 0;
   char b[1024]; ssize_t n; long got = 0;
-  while ((n = read(s, b, sizeof b)) > 0) got += n;
+  while ((n = read(s, b, sizeof b)) > 0) {
+    got += n;
+    size_t take = (size_t)n < sizeof req - 1 - kept ? (size_t)n : sizeof req - 1 - kept;
+    memcpy(req + kept, b, take); kept += take;
+  }
+  req[kept] = 0;
   logev(n == 0 ? "eof" : "read-stop", got);
+  if (strstr(req, "\"op\":\"address\"") && strstr(req, "\"chain\":\"tron\"")) reply = reply_tron;
   size_t len = strlen(reply), off = 0;
   while (off < len) { ssize_t w = write(s, reply + off, len - off); if (w <= 0) break; off += w; }
   logev("replied", got);
@@ -4096,14 +4116,21 @@ int main(int argc, char **argv) {
   if (!wl) wl = "null";
   const char *raw = getenv("ATTACKER_REPLY");
   size_t cap = (raw ? strlen(raw) : strlen(exp) + strlen(wl)) + 512;
-  char *reply = malloc(cap);
-  if (!reply) return 4;
-  if (raw) snprintf(reply, cap, "%s\n", raw);
-  else snprintf(reply, cap,
-    "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
-    "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"ethereum\",\"index\":0,"
-    "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n",
-    (int)getpid(), exp, wl);
+  char *reply = malloc(cap), *reply_tron = malloc(cap);
+  if (!reply || !reply_tron) return 4;
+  if (raw) { snprintf(reply, cap, "%s\n", raw); snprintf(reply_tron, cap, "%s\n", raw); }
+  else {
+    snprintf(reply, cap,
+      "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
+      "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"ethereum\",\"index\":0,"
+      "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n",
+      (int)getpid(), exp, wl);
+    snprintf(reply_tron, cap,
+      "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
+      "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"tron\",\"index\":0,"
+      "\"active\":\"main\",\"address\":\"TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C\"}}\n",
+      (int)getpid(), exp, wl);
+  }
   logev("listening", 0);
   for (;;) {
     int s = accept(l, 0, 0);
@@ -4112,7 +4139,7 @@ int main(int argc, char **argv) {
     /* Each connection is served in its own child, so a client that is slow on one connection
        never keeps us from accepting and answering another. */
     pid_t pid = fork();
-    if (pid == 0) { close(l); handle(s, reply); _exit(0); }
+    if (pid == 0) { close(l); handle(s, reply, reply_tron); _exit(0); }
     close(s);
   }
 }
