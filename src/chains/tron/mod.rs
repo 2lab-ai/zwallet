@@ -5,6 +5,7 @@
 pub mod address;
 pub mod registry;
 pub mod rpc;
+pub mod tx;
 
 use crate::chains::evm::policy::ListView;
 use crate::chains::{Balance, Chain, Family, FamilyKeys, Net, TokenBalance};
