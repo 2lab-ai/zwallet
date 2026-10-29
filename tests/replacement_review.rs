@@ -1906,7 +1906,8 @@ async fn tools_invoke_and_raw_reviews_show_the_pending_and_repeat_verdicts() {
         assert_eq!(app.tools().stage, Stage::InvokeReview, "{}", frame(&app));
         let shown = frame(&app);
         assert!(shown.contains("repeats 1 blocked"), "raw {raw}:\n{shown}");
-        assert!(shown.contains("pending 0 blocked"), "raw {raw}:\n{shown}");
+        // N1: a guard with nothing to block reads `clear`, not `blocked`.
+        assert!(shown.contains("pending 0 clear"), "raw {raw}:\n{shown}");
         let work = press(&mut app, Key::Char('d'));
         drive_ui(&mut app, &f, work).await;
         assert!(

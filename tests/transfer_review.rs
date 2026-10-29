@@ -1214,3 +1214,22 @@ async fn tui_send_review_survives_a_tab_round_trip_and_sends_once() {
     assert_eq!(f.signer.count(), 1);
     assert_eq!(app.transfer().stage, Stage::Status, "{}", frame(&app));
 }
+
+/// N1: the transfer review's guard labels say `clear` with nothing to block, `blocked` with a
+/// count and no override, and `OVERRIDE` once overridden.
+#[tokio::test]
+async fn tui_send_review_guard_labels_say_clear_blocked_or_override() {
+    let f = Fixture::new(false);
+    let node = Node::new("base");
+    let mut app = tui_app(&f, &node);
+    to_review(&mut app, &f).await;
+    let shown = frame(&app);
+    assert!(
+        shown.contains("pending 0 clear | repeats 0 clear"),
+        "{shown}"
+    );
+    let work = key(&mut app, Key::Char('d'));
+    drive(&mut app, &f, work).await;
+    let shown = frame(&app);
+    assert!(shown.contains("repeats 0 OVERRIDE"), "{shown}");
+}
