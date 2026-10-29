@@ -1022,3 +1022,80 @@ async fn tron_payee_step_passes_the_global_tab_keys() {
     key(&mut app, Key::Char('2'));
     assert_eq!(app.tab(), Tab::Wallet, "{}", screen(&app));
 }
+
+async fn sent_and_mined(app: &mut App, f: &Fixture) {
+    review(app, f, false).await;
+    let work = confirm(app);
+    let waits = drive(app, f, work).await;
+    assert_eq!(f.count(), 1);
+    app.update(Msg::Transfer(
+        waits[0].0,
+        TransferMsg::Receipt(Ok(Some(json!({"status":"mined","success":true})))),
+    ));
+    assert_eq!(app.transfer().stage, Stage::Status);
+}
+
+/// D4: after a finished Tron send the status offers `n new payment`, as on EVM.
+#[tokio::test]
+async fn tron_status_offers_n_new_payment() {
+    let f = Fixture::new(0);
+    let n = Node::new();
+    let mut app = app(&f, &n);
+    sent_and_mined(&mut app, &f).await;
+    let view = screen(&app);
+    assert!(view.contains("n new payment"), "{view}");
+    let work = key(&mut app, Key::Char('n'));
+    drive(&mut app, &f, work).await;
+    assert_eq!(app.transfer().stage, Stage::Assets, "{}", screen(&app));
+    assert!(app.transfer().status.is_none());
+    assert_eq!(f.count(), 1, "a new payment starts with its own review");
+}
+
+/// D4: Enter on a Tron balance row starts a new payment for that asset, also after a send.
+#[tokio::test]
+async fn tron_enter_on_a_balance_row_starts_a_new_payment_for_that_asset() {
+    let f = Fixture::new(0);
+    let n = Node::new();
+    let mut app = app(&f, &n);
+    sent_and_mined(&mut app, &f).await;
+    key(&mut app, Key::Char('2'));
+    let usdt = &chains::tron::registry::TOKENS[0];
+    app.update(Msg::Balances(
+        app.generation(),
+        "main".into(),
+        Ok(wallet::ChainBalances {
+            chain: n.net().chain,
+            key: "main".into(),
+            address: FROM.into(),
+            trust: wallet::Trust::Session,
+            native: chains::Balance {
+                symbol: "TRX".into(),
+                decimals: 6,
+                raw: alloy::primitives::U256::from(100_000_000u64),
+            },
+            tokens: vec![chains::TokenBalance {
+                address: usdt.address.into(),
+                symbol: "USDT".into(),
+                decimals: 6,
+                raw: Ok(alloy::primitives::U256::from(250_000_000u64)),
+            }],
+            activated: Some(true),
+            warning: None,
+        }),
+    ));
+    let view = screen(&app);
+    assert!(view.contains("250 USDT"), "{view}");
+    key(&mut app, Key::Tab);
+    // The focused balance row is the top one drawn: header, TRX, then USDT.
+    key(&mut app, Key::Down);
+    key(&mut app, Key::Down);
+    let work = key(&mut app, Key::Enter);
+    drive(&mut app, &f, work).await;
+    assert_eq!(app.tab(), zwallet::tui::actions::Tab::Send);
+    assert!(app.transfer().status.is_none(), "{}", screen(&app));
+    assert_eq!(app.transfer().stage, Stage::Payees, "{}", screen(&app));
+    assert_eq!(
+        app.transfer().asset.as_ref().map(|a| a.symbol.as_str()),
+        Some("USDT")
+    );
+}
