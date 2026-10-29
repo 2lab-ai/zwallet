@@ -661,3 +661,77 @@ fn t44_pty_legacy_zero_is_flagged_excluded_from_picker_and_removable() {
     assert!(!node.journal.exists());
     quit(&mut tui);
 }
+
+/// A loopback Blockscout stand-in: an empty first page for both history requests, counted.
+fn mock_explorer() -> (String, Arc<AtomicU64>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let count = Arc::new(AtomicU64::new(0));
+    let seen = count.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                line.clear();
+            }
+            seen.fetch_add(1, Ordering::SeqCst);
+            let body = r#"{"items":[]}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (url, count)
+}
+
+/// Fix 12: the Wallet tab's history on ethereum reads the explorer named by
+/// `ZWALLET_EXPLORER_ETHEREUM`, never the public Blockscout. HTTPS_PROXY points at a closed
+/// loopback port, so a build that ignored the override still could not reach a public server.
+#[test]
+fn t12_pty_wallet_history_reads_the_explorer_override_not_a_public_server() {
+    let _exclusive = common::exclusive();
+    let home = Home::new();
+    let created = home.create("main", &[]);
+    let from = created["address"].as_str().unwrap();
+    let node = Node::new(&home, from);
+    let (explorer, requests) = mock_explorer();
+    let mut command = home.command(&["tui", "--allow-ptrace-scope-0"]);
+    for chain in chains::CHAINS {
+        command.env(chain.rpc_env_var(), "http://127.0.0.1:1");
+    }
+    command
+        .env("ZWALLET_RPC_ETHEREUM", &node.url)
+        .env("ZWALLET_EXPLORER_ETHEREUM", &explorer)
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("https_proxy", "http://127.0.0.1:9");
+    let mut tui = PtyChild::spawn_full_screen(command, SIZE);
+    tui.wait_frame(WAIT, |f| {
+        contains(f, "* main ") && bar(f).1.starts_with("locked | ")
+    });
+    tui.send(b"\r");
+    wait(&mut tui, "Wallet password:");
+    tui.send(format!("{PW}\r").as_bytes());
+    tui.wait_frame(WAIT, warmup_complete);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while requests.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let frame = tui.wait_frame(WAIT, |f| contains(f, "ethereum:"));
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        2,
+        "the override got no history request:\n{}",
+        frame.rows.join("\n")
+    );
+    assert!(
+        contains(&frame, "ethereum: explorer and this machine's sends"),
+        "{}",
+        frame.rows.join("\n")
+    );
+    quit(&mut tui);
+}
