@@ -263,10 +263,15 @@ impl CheckedPayee {
     }
 }
 
-/// Address entries on this chain only. Invalid/zero addresses and contracts are not choices.
-/// The caller checks the fingerprint before presenting the picker; this pure operation uses
-/// only the list retained by the password check.
+/// Address entries on this EVM chain only (its key or `*`). Invalid/zero addresses and contracts
+/// are not choices. A Tron chain gets none here: `*` never covers it, and its payees are
+/// T-addresses scoped exactly to `tron` (`tron_send::tron_transfer_payees`, the same rule as
+/// `whitelist::checked_payees`). The caller checks the fingerprint before presenting the picker;
+/// this pure operation uses only the list retained by the password check.
 pub fn transfer_payees(checked: &CheckedList, chain: &'static Chain) -> Vec<CheckedPayee> {
+    if !matches!(chain.family, Family::Evm(_)) {
+        return Vec::new();
+    }
     checked
         .list
         .entries

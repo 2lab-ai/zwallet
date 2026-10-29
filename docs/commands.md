@@ -117,7 +117,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   against the hash and shows the full registry token contract, burned sun, expiry and unknown
   execution results. It offers no speed-up, cancel or resend control.
 
-  `3 send` on Tron offers TRX and registry USDT to an exact Tron-only checked nickname. Review
+  `3 send` on Tron offers TRX and registry USDT to an exact Tron-only checked nickname, shown
+  as its T-address; a `*` entry covers EVM chains only and is never offered on Tron. Review
   shows the held full addresses, integer token units, bandwidth/energy/activation costs,
   maximum TRX cost, conservative TRX left, reference-price block and expiration. Enter requires
   the exact nickname before signing. A fee maximum increase returns a new review. `d` explicitly

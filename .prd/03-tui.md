@@ -591,8 +591,11 @@ started and before the password check (a process of this user racing the TUI) is
 1: the session stays, the pane shows the error, and no list is checked and no address is pinned.
 
 What the checked list is used for, on macOS and Linux alike:
-- the payee picker offers its address entries that apply on this chain (`Entry::covers_chain`,
-  core/whitelist.rs:141), and nothing else;
+- the payee picker offers its address entries that apply on this chain, and nothing else: on an
+  EVM chain those naming it or `*` (`Entry::covers_chain`, core/whitelist.rs:145;
+  `wallet::transfer_payees`), on Tron only those scoped exactly to `tron`, shown as their
+  T-address (`tron_send::tron_transfer_payees`); `*` never covers Tron, and the EVM list offers
+  nothing on Tron (added 2026-10-30, T6b);
 - T7's `verified` state is the checked list's;
 - T4 labels a from or to address with a nickname only from it.
 
@@ -621,7 +624,9 @@ through `src/tui/app/whitelist.rs` and `src/tui/ui/whitelist.rs`. `Change` has v
 native/token/calldata per-transaction limits, message signing and reset. `WhitelistPlan` owns
 the exact bounded summary and both-file fingerprint. The CLI uses the same plan/apply/view
 functions. `checked_payees` checks that fingerprint and excludes contracts and zero-address
-entries; Tron requires exact scope, while `*` remains EVM-only.
+entries; Tron requires exact scope, while `*` remains EVM-only. The send pickers apply the same
+rule: `transfer_payees` is EVM-only and `tron_transfer_payees` lists Tron-only entries as
+T-addresses (§Address trust).
 
 The forms bound every field and validate before preparation. The exact prepared summary wraps
 and scrolls before the password is accepted. Removal and message toggles use only a locally
@@ -1037,7 +1042,7 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T4 | Enter on a row | fields equal the fixture's expected values, token movements from the receipt included |
 | T5 | USDC fixture balance | native + USDC rows; zero-balance tokens hidden |
 | T6 | asset → `alice` → amount → review → type `alice` | hash shown at once; status reaches mined on the mock; journal line written |
-| T6b | the payee picker | lists only the checked list's address entries valid on this chain; a non-listed address cannot be entered |
+| T6b | the payee picker; on Tron, a checked list with a `*` EVM entry and a Tron entry | lists only the checked list's address entries valid on this chain; a non-listed address cannot be entered; on Tron only the Tron entry, as its T-address, never the `*` entry |
 | T6c | nonce mined by another hash (fixture) | status `dropped/replaced` |
 | T7 | add `bob` while warm | the change and its outcomes are shown above the password field; `whitelist list --verify` shows `bob` at gen+1; the wallet is locked afterwards, or warm for the duration chosen with the change |
 | T8 | `c` → base | every pane reloads for base; the RPC host shown redacted |
@@ -1101,6 +1106,9 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 2. **The whitelist plan is the checked list** (review of #47, NB1). The prepare worker compares
    `plan.fingerprint()` with the checked list's after the plan's own read, not before it
    (§Whitelist edits).
+3. **The Tron payee picker never offers `*`** (review of #47, NB2). It already used
+   `tron_transfer_payees` on this branch; `transfer_payees`, which counts `*` and shows 0x, now
+   offers nothing outside EVM (§Address trust; T6b).
 
 ## Changes on 2026-10-28, v2, review round 3
 
