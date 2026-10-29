@@ -3,10 +3,12 @@
 //! the loop's (`tui::run`). What comes in from outside is made [`Outside`] here, where it arrives.
 
 mod addresses;
+pub mod create;
 pub mod history;
 mod navigation;
 pub mod transfer;
 pub mod whitelist;
+use create::{CreateEffect, CreateMsg, CreateUi};
 use history::{DetailRead, DetailRequest, HistoryRead, HistoryScope, HistoryTarget, HistoryView};
 pub use navigation::{FieldPurpose, Navigation, Popup, RpcChoice, UserText};
 
@@ -50,6 +52,7 @@ pub enum Msg {
     History(HistoryScope, Result<HistoryRead>),
     Transaction(Box<DetailRequest>, Result<DetailRead>),
     HistoryList(u64, crate::core::whitelist::Fingerprint, Result<()>),
+    Create(CreateMsg),
     Key(Key),
     Paste(UserText),
     Verified(
@@ -94,6 +97,7 @@ pub enum Effect {
     LoadHistory(HistoryScope),
     LoadTransaction(Box<DetailRequest>),
     CheckHistoryList(u64, crate::core::whitelist::Fingerprint),
+    Create(CreateEffect),
     /// `wallet::keys`, then [`Msg::Keys`] with this generation: a lock starts a new one, and a
     /// read from an older one is dropped.
     LoadKeys(u64),
@@ -208,6 +212,7 @@ pub enum PasswordPurpose {
 pub struct App {
     whitelist: whitelist::WhitelistUi,
     transfer: transfer::Transfer,
+    create: CreateUi,
     nav: Navigation,
     history: HistoryView,
     password_purpose: PasswordPurpose,
@@ -248,6 +253,7 @@ impl App {
             transfer: transfer::Transfer::default(),
             nav: Navigation::new(net),
             history: HistoryView::default(),
+            create: CreateUi::default(),
             password_purpose: PasswordPurpose::Warm,
             activating: false,
             chain: net.chain,
@@ -283,6 +289,10 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        let msg = match self.create_update(msg) {
+            std::ops::ControlFlow::Continue(work) => return work,
+            std::ops::ControlFlow::Break(msg) => msg,
+        };
         let msg = match self.whitelist_update(msg) {
             std::ops::ControlFlow::Continue(work) => return work,
             std::ops::ControlFlow::Break(msg) => msg,
@@ -631,6 +641,7 @@ impl App {
             | Msg::WhitelistRead(..)
             | Msg::WhitelistPrepared(..)
             | Msg::WhitelistApplied(..)
+            | Msg::Create(_)
             | Msg::Paste(_)
             | Msg::Verified(_)
             | Msg::Balances(..)
@@ -778,7 +789,8 @@ impl App {
     }
 
     /// A submitted operation must report its outcome before terminal failure or quit can
-    /// release its runtime. Later forms extend this predicate for their submitted workers.
+    /// release its runtime. Later forms extend this predicate for their submitted workers;
+    /// `Checking` includes creation, cache repair and session startup.
     pub fn mutation_pending(&self) -> bool {
         self.locking
             || self.activating

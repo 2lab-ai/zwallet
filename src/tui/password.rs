@@ -106,3 +106,71 @@ mod tests {
         assert!(!password.append("\r") && !password.append("\0"));
     }
 }
+
+/// Input-thread-only confirmation. Neither buffer can enter a message or formatting path.
+#[derive(Default)]
+pub struct PasswordPair {
+    first: Option<PasswordBuf>,
+}
+impl PasswordPair {
+    pub fn remember(&mut self, first: PasswordBuf) {
+        self.clear();
+        self.first = Some(first);
+    }
+    pub fn confirm(&mut self, mut second: PasswordBuf) -> Option<PasswordBuf> {
+        let mut first = self.first.take()?;
+        let matches = first.as_str() == second.as_str();
+        second.wipe();
+        if matches {
+            Some(first)
+        } else {
+            first.wipe();
+            None
+        }
+    }
+    pub fn clear(&mut self) {
+        if let Some(mut first) = self.first.take() {
+            first.wipe();
+        }
+    }
+}
+impl PasswordBuf {
+    pub fn wipe(&mut self) {
+        self.bytes.zeroize();
+        self.len = 0;
+    }
+}
+impl Drop for PasswordPair {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+#[cfg(test)]
+mod confirmation_tests {
+    use super::*;
+    fn buffer(text: &str) -> PasswordBuf {
+        let mut b = PasswordBuf::default();
+        assert!(b.append(text));
+        b
+    }
+    #[test]
+    fn matching_moves_one_owner_and_failure_and_cancel_empty_both_buffers() {
+        let mut pair = PasswordPair::default();
+        pair.remember(buffer("fixture-password-1"));
+        assert!(pair.confirm(buffer("fixture-password-2")).is_none());
+        assert!(pair.first.is_none());
+        pair.remember(buffer("fixture-password-1"));
+        pair.clear();
+        assert!(pair.first.is_none());
+        pair.remember(buffer("fixture-password-1"));
+        let mut accepted = pair
+            .confirm(buffer("fixture-password-1"))
+            .expect("same input");
+        assert!(pair.first.is_none());
+        assert_eq!(accepted.characters(), 18);
+        accepted.wipe();
+        assert_eq!(accepted.characters(), 0);
+        assert!(accepted.bytes.iter().all(|byte| *byte == 0));
+    }
+}

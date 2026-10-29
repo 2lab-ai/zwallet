@@ -15,9 +15,9 @@ use crate::cli::{
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::password::read_password;
-use crate::core::protocol::{self, DaemonExe, Peer, PeerCheck, Request, SIGN_TIMEOUT};
-use crate::core::seed::{DEFAULT_WORD_COUNT, Seed, VALID_WORD_COUNTS};
-use crate::core::store::{self, KeyEntry, MasterOptions, WalletFile};
+use crate::core::protocol::{self, Peer, PeerCheck, Request, SIGN_TIMEOUT};
+use crate::core::seed::Seed;
+use crate::core::store::{self, KeyEntry, WalletFile};
 use crate::core::time::parse_duration;
 use crate::daemon;
 use crate::qr;
@@ -29,7 +29,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use zeroize::Zeroizing;
 
 pub(crate) mod whitelist;
 
@@ -190,7 +189,7 @@ async fn key_address(home: &Path, key: &KeyEntry, chain: &Chain) -> Result<Strin
 }
 
 /// Derives every chain's address for key `index` through the unlocked daemon.
-async fn derive_via_daemon(home: &Path, index: u32) -> Result<BTreeMap<String, String>> {
+pub(crate) async fn derive_via_daemon(home: &Path, index: u32) -> Result<BTreeMap<String, String>> {
     let mut per_family: BTreeMap<&str, String> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for chain in CHAINS {
@@ -717,115 +716,49 @@ pub(crate) fn derive_checked(seed: &Seed, key: &KeyEntry, chain: &Chain) -> Resu
     Ok(derived)
 }
 
-async fn start_session(
-    home: &Path,
-    exe: &DaemonExe,
-    password: &str,
-    ttl: Duration,
-) -> Result<Value> {
-    protocol::start_daemon(home, exe, password, ttl).await
-}
-
 async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
-    store::validate_key_name(&a.name)?;
     let ttl = a.unlock.as_deref().map(parse_duration).transpose()?;
-    if ttl.is_some() {
-        protocol::socket_path(home)?;
-        // Before the prompt and before anything is written: refused here, nothing was created.
-        protocol::check_ptrace_scope(a.allow_ptrace_scope_0)?;
-        protocol::check_daemons_findable()?;
-    }
-    // Pinned before any password prompt (see `DaemonExe`).
-    let exe = ttl.map(|_| DaemonExe::resolve()).transpose()?;
-    let (file, addresses, master, password, verified) = match store::read_wallet_file(home) {
-        Err(e) if e.code == ErrorCode::WalletNotFound => {
-            let words = a.words.unwrap_or(DEFAULT_WORD_COUNT);
-            if !VALID_WORD_COUNTS.contains(&words) {
-                return Err(WalletError::validation(format!(
-                    "--words must be one of {VALID_WORD_COUNTS:?}"
-                )));
-            }
-            let pw = read_password(a.password.password_stdin, "New wallet password: ", true)?;
-            store::validate_new_password(&pw)?;
-            let opts = MasterOptions {
-                words,
-                ..MasterOptions::default()
-            };
-            let file = store::create_master(home, &pw, &a.name, opts, &chains::derive_addresses)?;
-            // Derived from the seed create_master generated in memory (and verified on disk
-            // before publishing), not read back from the cache.
-            let addresses = file.key(Some(&a.name))?.addresses.clone();
-            (file, addresses, "created", Some(pw), true)
-        }
-        Err(e) => return Err(e),
-        Ok(_) => {
-            if a.words.is_some() {
-                return Err(WalletError::validation(
-                    "--words only applies when creating the master seed",
-                ));
-            }
-            let (file, addresses, pw) = add_subkey(home, &a, ttl.is_none()).await?;
-            // Derived here from the seed the password opened, or else by whatever daemon
-            // answered.
-            let verified = pw.is_some();
-            (file, addresses, "existing", pw, verified)
-        }
+    let plan = wallet::prepare_create(home, &a.name, a.words, ttl, a.allow_ptrace_scope_0)?;
+    let human = a.password.password_stdin || std::io::stdin().is_terminal();
+    let created = if !plan.creates_master() && ttl.is_none() && !human && unlocked(home).await? {
+        wallet::create_via_daemon(plan).await?
+    } else {
+        let first = plan.creates_master();
+        let prompt = if first {
+            "New wallet password: "
+        } else {
+            "Wallet password: "
+        };
+        let password = read_password(a.password.password_stdin, prompt, first)?;
+        wallet::create(plan, password).await?
     };
-    let key = file.key(Some(&a.name))?;
-    let address = addresses
-        .get(PRIMARY_CHAIN)
-        .or_else(|| addresses.values().next())
-        .cloned();
+    let address = created.address();
     let mut out = json!({
-        "name": key.name,
-        "index": key.index,
+        "name": created.name,
+        "index": created.index,
         "address": address,
-        "active": file.active,
-        "master": master,
+        "active": created.active,
+        "master": if created.master_created { "created" } else { "existing" },
         "home": home.display().to_string(),
         "chains": CHAINS.iter().map(|c| c.key).collect::<Vec<_>>(),
-        "verified": verified,
+        "verified": created.verified,
     });
-    if verified {
+    if created.verified {
         out["verifiedBy"] = json!(BY_PASSWORD);
     }
-    if let (Some(ttl), Some(exe), Some(pw)) = (ttl, &exe, password.as_deref()) {
-        let session = start_session(home, exe, pw, ttl).await?;
-        // The daemon derived the active key's address from the seed on its own; it must be the
-        // key this call just created.
-        let same = session["active"] == json!(a.name)
-            && session["address"]
-                .as_str()
-                .zip(address.as_deref())
-                .is_some_and(|(d, c)| d.eq_ignore_ascii_case(c));
-        if !same {
-            let mismatch = format!(
-                "after create the key daemon reports active key {} at {}, not '{}' at {}; \
-                 wallet.json changed meanwhile",
-                session["active"],
-                session["address"],
-                a.name,
-                address.as_deref().unwrap_or("-")
-            );
-            return Err(relocked(mismatch, protocol::stop_all_daemons()));
-        }
+    if let Some(session) = &created.session {
         out["locked"] = json!(false);
-        out["expiresAt"] = session["expiresAt"].clone();
-        out["daemonPid"] = session["pid"].clone();
-        // The whitelist this session signs under, as `unlock` shows it.
-        // Its reason can quote whitelist.json, a file anyone of this user can write.
-        out["whitelist"] = inert_whitelist(&session["whitelist"]);
+        out["expiresAt"] = session.ready["expiresAt"].clone();
+        out["daemonPid"] = session.ready["pid"].clone();
+        out["whitelist"] = session.whitelist.clone();
     }
-    if master == "created" && std::io::stderr().is_terminal() {
-        crate::core::terminal::eprint_line(
-            "Write down your recovery phrase now: run `zwallet backup` before funding this wallet.",
-        );
+    if let Some(reminder) = created.backup_reminder
+        && std::io::stderr().is_terminal()
+    {
+        crate::core::terminal::eprint_line(reminder);
     }
-    // Unverified only when derived through the daemon, so while unlocked.
-    let out = with_note(out, (!verified).then_some(UNVERIFIED_NOTE));
-    if master == "created" {
-        // The recovery phrase is not backed up yet, and funds sent before it is are at risk:
-        // no code to scan here, only how to get one.
+    let out = with_note(out, (!created.verified).then_some(UNVERIFIED_NOTE));
+    if created.master_created {
         return Ok(if qr_shown(a.qr.no_qr) {
             with_line(out, QR_AFTER_BACKUP)
         } else {
@@ -834,65 +767,11 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
     }
     Ok(with_qr(
         out,
-        verified,
+        created.verified,
         primary_chain()?,
-        address.as_deref(),
+        address,
         a.qr.no_qr,
     ))
-}
-
-/// The error for a `create --unlock` whose new session shows another key: says whether locking
-/// again worked, never claims it when it did not.
-fn relocked(mismatch: String, relock: Result<Vec<i32>>) -> WalletError {
-    match relock {
-        Ok(_) => WalletError::validation(format!("{mismatch}, so the wallet was locked again")),
-        Err(e) => WalletError::validation(format!(
-            "{mismatch}, and locking the wallet again failed: {}. The wallet may still be \
-             unlocked: run `zwallet lock`",
-            e.message
-        )),
-    }
-}
-
-/// Adds key `a.name` to an existing master. With a terminal or `--password-stdin` (a human), or
-/// without `may_use_daemon`, it is derived here from the seed decrypted with a one-off password,
-/// and the password is returned. Otherwise (an agent, while unlocked) it is derived through
-/// whatever key daemon answers, and nothing proves which seed that is. The password and scrypt
-/// run before the writer lock is taken, so a slow human never blocks other writers; the index is
-/// planned, derived and published under the lock, so concurrent creates get distinct indices.
-async fn add_subkey(
-    home: &Path,
-    a: &CreateArgs,
-    may_use_daemon: bool,
-) -> Result<(
-    WalletFile,
-    BTreeMap<String, String>,
-    Option<Zeroizing<String>>,
-)> {
-    let human = a.password.password_stdin || std::io::stdin().is_terminal();
-    let local = if may_use_daemon && !human && unlocked(home).await? {
-        None
-    } else {
-        let pw = read_password(a.password.password_stdin, "Wallet password: ", false)?;
-        let (unsealed, file) = store::unlock(home, &pw, &chains::derive_addresses)?;
-        Some((unsealed.seed, file.crypto.ciphertext, pw))
-    };
-    let lock = store::MetaLock::acquire(home)?;
-    let file = lock.read()?;
-    if let Some((_, sealed, _)) = &local
-        && file.crypto.ciphertext != *sealed
-    {
-        return Err(WalletError::validation(
-            "wallet.json's master changed while the password was checked; retry",
-        ));
-    }
-    let index = store::plan_new_key(&file, &a.name)?;
-    let addresses = match &local {
-        None => derive_via_daemon(home, index).await?,
-        Some((seed, ..)) => chains::derive_addresses(seed, index)?,
-    };
-    let file = lock.add_key(&a.name, index, addresses.clone())?;
-    Ok((file, addresses, local.map(|(.., pw)| pw)))
 }
 
 async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
@@ -2032,13 +1911,13 @@ mod tests {
 
     #[test]
     fn relock_failure_is_reported_not_swallowed() {
-        let ok = relocked("mismatch".into(), Ok(vec![42]));
+        let ok = wallet::relocked("mismatch".into(), Ok(vec![42]));
         assert!(
             ok.message.ends_with("so the wallet was locked again"),
             "{}",
             ok.message
         );
-        let failed = relocked(
+        let failed = wallet::relocked(
             "mismatch".into(),
             Err(WalletError::validation(
                 "could not stop the key daemon process(es) 42",

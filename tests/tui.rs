@@ -1797,14 +1797,14 @@ mod navigation {
         assert!(text.contains("actions (55)"));
         assert!(text.contains(&zwallet::version_line()));
         assert!(!text.lines().nth(21).unwrap().contains("? actions"));
-        paste(&mut app, "create --unlock");
+        paste(&mut app, "sign-message");
         assert!(app.update(Msg::Key(Key::Enter)).is_empty());
         assert!(view(&app).contains("in a later version"));
         for c in ['q', '?', '1'] {
             app.update(Msg::Key(Key::Char(c)));
         }
         match app.navigation().popup.as_ref().unwrap() {
-            Popup::Menu(menu) => assert_eq!(menu.filter().value(), "create --unlockq?1"),
+            Popup::Menu(menu) => assert_eq!(menu.filter().value(), "sign-messageq?1"),
             _ => panic!("menu should stay open"),
         }
         paste(&mut app, "\u{1b}evil\u{2588}");
@@ -2301,4 +2301,355 @@ fn t19_on_a_pty_verify_all_refuses_bad_cache_then_repair_agrees_with_cli() {
     }
     assert_eq!(home.run(&["status", "--json"]).ok()["locked"], true);
     quit(&mut tui);
+}
+
+mod creation {
+    use super::*;
+    use zeroize::Zeroizing;
+    use zwallet::tui::app::create::{CreateEffect, CreateMsg, CreateStage};
+    use zwallet::tui::app::{PasswordState, UserText};
+    fn paste(app: &mut App, value: &str) {
+        app.update(Msg::Paste(UserText(Zeroizing::new(value.into()))));
+    }
+    fn frame(app: &App) -> String {
+        checked_frame(&mut screen(80, 24), app).0.join("\n")
+    }
+    fn form(app: &mut App, name: &str, first: bool, ttl: &str) -> u64 {
+        paste(app, name);
+        app.update(Msg::Key(Key::Enter));
+        if first {
+            app.update(Msg::Key(Key::Enter));
+        }
+        paste(app, ttl);
+        app.update(Msg::Key(Key::Enter));
+        paste(app, name);
+        match app.update(Msg::Key(Key::Enter)).remove(0) {
+            Effect::Create(CreateEffect::Prepare {
+                id,
+                name: actual,
+                words,
+                ttl: duration,
+            }) => {
+                assert_eq!(actual, name);
+                assert_eq!(words, first.then_some(24));
+                assert_eq!(
+                    duration,
+                    if ttl.is_empty() {
+                        None
+                    } else {
+                        Some(Duration::from_secs(600))
+                    }
+                );
+                id
+            }
+            _ => panic!("must prepare before password"),
+        }
+    }
+    fn created(name: &str, first: bool) -> wallet::Created {
+        wallet::Created {
+            name: name.into(),
+            index: if first { 0 } else { 2 },
+            addresses: chains::CHAINS
+                .iter()
+                .map(|c| (c.key.to_string(), family_address(c, A)))
+                .collect(),
+            active: name.into(),
+            master_created: first,
+            verified: true,
+            session: None,
+            backup_reminder: first.then_some("Back up the new wallet before funding it."),
+        }
+    }
+    #[test]
+    fn create_empty_home_opens_first_form_and_password_confirmation_precedes_submission() {
+        let mut app = app();
+        app.update(Msg::Keys(
+            app.generation(),
+            Err(WalletError::new(ErrorCode::WalletNotFound, "no wallet")),
+        ));
+        assert!(matches!(app.creation().stage, CreateStage::Form));
+        assert!(frame(&app).contains("Create the first wallet and key 0"));
+        let id = form(&mut app, "main", true, "");
+        assert_eq!(app.password_state(), PasswordState::Preparing);
+        app.update(Msg::Create(CreateMsg::Prepared(id, Ok(true))));
+        assert!(frame(&app).contains("New wallet password"));
+        assert!(app.update(Msg::PasswordSubmitted).is_empty());
+        app.update(Msg::Create(CreateMsg::PasswordAgain));
+        assert!(frame(&app).contains("Repeat the new wallet password"));
+        app.update(Msg::Create(CreateMsg::PasswordMismatch));
+        assert!(matches!(app.creation().stage, CreateStage::PasswordFirst));
+        assert!(frame(&app).contains("Both cleared"));
+        app.update(Msg::Create(CreateMsg::PasswordAgain));
+        assert_eq!(
+            app.update(Msg::PasswordSubmitted),
+            vec![Effect::Create(CreateEffect::Submit { id })]
+        );
+    }
+    #[test]
+    fn create_additional_key_names_active_change_and_asks_once_with_typed_unlock() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('n')));
+        assert!(frame(&app).contains("new key becomes active"));
+        let id = form(&mut app, "trading", false, "10m");
+        app.update(Msg::Create(CreateMsg::Prepared(id, Ok(false))));
+        assert!(matches!(
+            app.creation().stage,
+            CreateStage::PasswordExisting
+        ));
+        assert!(frame(&app).contains("Wallet password"));
+        assert_eq!(
+            app.update(Msg::PasswordSubmitted),
+            vec![Effect::Create(CreateEffect::Submit { id })]
+        );
+        app.update(Msg::Create(CreateMsg::Finished(
+            id,
+            Ok(created("trading", false)),
+        )));
+        assert_eq!(app.open_key(), Some("trading"));
+        assert!(app.pinned("trading"));
+        for chain in chains::CHAINS {
+            assert!(app.family_pinned("trading", chain));
+        }
+        assert!(frame(&app).contains("active, verified by password"));
+    }
+    #[test]
+    fn create_submission_cannot_be_cancelled_and_quit_waits_for_failure_and_refresh() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('n')));
+        let id = form(&mut app, "trading", false, "");
+        app.update(Msg::Create(CreateMsg::Prepared(id, Ok(false))));
+        app.update(Msg::PasswordSubmitted);
+        app.update(Msg::PasswordCancelled);
+        app.update(Msg::Key(Key::Esc));
+        assert!(matches!(app.creation().stage, CreateStage::Submitting));
+        app.update(Msg::Key(Key::Char('q')));
+        assert!(!app.quitting());
+        let work = app.update(Msg::Create(CreateMsg::Finished(
+            id,
+            Err(WalletError::validation("unlock failed after creation")),
+        )));
+        assert!(work.iter().any(|e| matches!(e, Effect::LoadKeys(_))));
+        assert!(work.iter().any(|e| matches!(e, Effect::LoadStatus(_))));
+        assert!(app.quitting());
+        assert!(app.take_quit_error().is_some());
+    }
+    #[test]
+    fn create_lock_waits_until_optional_unlock_and_creation_finish() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('n')));
+        let id = form(&mut app, "trading", false, "10m");
+        app.update(Msg::Create(CreateMsg::Prepared(id, Ok(false))));
+        app.update(Msg::PasswordSubmitted);
+        assert!(app.update(Msg::Key(Key::Char('L'))).is_empty());
+        assert!(app.locking());
+        let work = app.update(Msg::Create(CreateMsg::Finished(
+            id,
+            Ok(created("trading", false)),
+        )));
+        assert!(work.contains(&Effect::LockAll));
+    }
+    #[test]
+    fn create_completed_view_keeps_emergency_lock_available() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('n')));
+        let id = form(&mut app, "trading", false, "10m");
+        app.update(Msg::Create(CreateMsg::Prepared(id, Ok(false))));
+        app.update(Msg::PasswordSubmitted);
+        app.update(Msg::Create(CreateMsg::Finished(
+            id,
+            Ok(created("trading", false)),
+        )));
+        assert!(matches!(app.creation().stage, CreateStage::Done(_)));
+        assert_eq!(app.update(Msg::Key(Key::Char('L'))), vec![Effect::LockAll]);
+        assert!(app.locking());
+        assert!(matches!(app.creation().stage, CreateStage::Done(_)));
+        frame(&app);
+        app.update(Msg::Key(Key::Char('q')));
+        assert!(!app.quitting());
+        app.update(Msg::Locked(Ok(vec![])));
+        assert!(app.quitting());
+    }
+    #[test]
+    fn create_form_bounds_input_name_confirmation_and_all_five_word_counts() {
+        let mut app = app();
+        app.update(Msg::Key(Key::Char('n')));
+        paste(&mut app, "\u{1b}[2J\u{2588}");
+        assert_eq!(app.creation().form.as_ref().unwrap().fields[0].value(), "");
+        paste(&mut app, "main");
+        app.update(Msg::Key(Key::Enter));
+        for expected in [12, 15, 18, 21, 24] {
+            app.update(Msg::Key(Key::Right));
+            assert_eq!(
+                app.creation().form.as_ref().unwrap().fields[1].value(),
+                expected.to_string()
+            );
+            frame(&app);
+        }
+        app.update(Msg::Key(Key::Enter));
+        app.update(Msg::Key(Key::Enter));
+        paste(&mut app, "wrong");
+        assert!(app.update(Msg::Key(Key::Enter)).is_empty());
+        assert!(frame(&app).contains("exact new key name"));
+        app.update(Msg::Key(Key::Esc));
+        assert!(!app.creation().stage.active());
+    }
+    #[test]
+    fn create_success_reminds_backup_without_secret_carriers_and_backup_has_no_effect() {
+        let mut app = app();
+        app.update(Msg::Key(Key::Char('n')));
+        let id = form(&mut app, "main", true, "");
+        app.update(Msg::Create(CreateMsg::Prepared(id, Ok(true))));
+        app.update(Msg::Create(CreateMsg::PasswordAgain));
+        app.update(Msg::PasswordSubmitted);
+        let public = created("main", true);
+        let msg = Msg::Create(CreateMsg::Finished(id, Ok(public.clone())));
+        let debug = format!("{public:?} {msg:?}");
+        assert!(!debug.contains(PW));
+        assert!(!debug.contains("mnemonic"));
+        app.update(msg);
+        assert!(frame(&app).contains("Back up this new wallet before funding it"));
+        assert!(app.update(Msg::Key(Key::Char('B'))).is_empty());
+        assert!(frame(&app).contains("run zwallet backup in a shell to see the recovery phrase"));
+    }
+    #[test]
+    fn create_cannot_replace_an_existing_verified_derivation_index() {
+        let mut app = pinned_app_with_checked_list();
+        app.update(Msg::Key(Key::Char('1')));
+        app.update(Msg::Key(Key::Char('n')));
+        let id = form(&mut app, "trading", false, "");
+        app.update(Msg::Create(CreateMsg::Prepared(id, Ok(false))));
+        app.update(Msg::PasswordSubmitted);
+        app.update(Msg::Create(CreateMsg::Finished(
+            id,
+            Ok(created("a", false)),
+        )));
+        assert!(frame(&app).contains("index conflicts"));
+        assert_eq!(app.verified_key().unwrap().index, 0);
+    }
+    #[test]
+    fn create_existing_wallet_disappearance_never_silently_creates_a_new_master() {
+        let mut app = locked_ab();
+        app.update(Msg::Keys(
+            app.generation(),
+            Err(WalletError::new(
+                ErrorCode::WalletNotFound,
+                "missing wallet",
+            )),
+        ));
+        assert!(!app.creation().stage.active());
+        app.update(Msg::Key(Key::Char('n')));
+        let id = form(&mut app, "trading", false, "");
+        app.update(Msg::Create(CreateMsg::Prepared(id, Ok(true))));
+        assert_eq!(app.password_state(), PasswordState::Failed);
+        assert!(frame(&app).contains("appeared or disappeared"));
+        assert!(app.update(Msg::PasswordSubmitted).is_empty());
+    }
+}
+
+#[test]
+fn t30_on_a_pty_create_key_activates_it_and_optional_unlock_uses_typed_duration() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let mut tui = PtyChild::spawn_full_screen(tui_without_public_rpc(&home), PTY_SIZE);
+    tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains("* main ")));
+    tui.send(b"ntrading\r10m\rtrading\r");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows
+            .iter()
+            .any(|r| r.contains("Wallet password: verify and create"))
+    });
+    let before = now();
+    tui.send(format!("{PW}\r").as_bytes());
+    let created = tui.wait_frame(PTY_WAIT, |f| {
+        f.rows
+            .iter()
+            .any(|r| r.contains("Created trading") && r.contains("verified by password"))
+    });
+    assert!(created.rows.iter().any(|r| r.contains("active")));
+    let list = home.run(&["list", "--json"]).ok();
+    assert_eq!(list["active"], "trading");
+    let status = home.run(&["status", "--json"]).ok();
+    let expires = parse_rfc3339_utc(status["expiresAt"].as_str().unwrap()).unwrap();
+    assert!((before + 590..=now() + 610).contains(&expires));
+    quit(&mut tui);
+    assert!(
+        !String::from_utf8_lossy(&tui.output()).contains(PW),
+        "password reached a TUI capture"
+    );
+}
+
+#[test]
+fn t31_on_a_pty_first_wallet_confirms_password_and_never_displays_recovery_words() {
+    let home = Home::new();
+    let mut tui = PtyChild::spawn_full_screen(tui_without_public_rpc(&home), PTY_SIZE);
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows
+            .iter()
+            .any(|r| r.contains("Create the first wallet and key 0"))
+    });
+    // Name, default 24 words, no unlock, then the explicit name confirmation.
+    tui.send(b"main\r\r\rmain\r");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("New wallet password"))
+    });
+    tui.send(format!("{PW}\r").as_bytes());
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows
+            .iter()
+            .any(|r| r.contains("Repeat the new wallet password"))
+    });
+    tui.send(b"different-fixture-password\r");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("Both cleared"))
+    });
+    assert!(!home.wallet_json().exists());
+    tui.send(format!("{PW}\r").as_bytes());
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows
+            .iter()
+            .any(|r| r.contains("Repeat the new wallet password"))
+    });
+    tui.send(format!("{PW}\r").as_bytes());
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows
+            .iter()
+            .any(|r| r.contains("Back up this new wallet before funding it"))
+    });
+    let list = home.run(&["list", "--json"]).ok();
+    assert_eq!(list["keys"][0]["name"], "main");
+    assert_eq!(list["keys"][0]["index"], 0);
+    quit(&mut tui);
+    let captured = zeroize::Zeroizing::new(String::from_utf8_lossy(&tui.output()).into_owned());
+    assert!(!captured.contains(PW), "password reached a TUI capture");
+    // Read the generated phrase only through the existing terminal-only CLI after TUI exit.
+    // No assertion formats this private capture or a phrase word.
+    let mut backup = PtyChild::spawn_on_terminal(home.command(&["backup"]));
+    backup.wait_for("Wallet password:", PTY_WAIT);
+    backup.type_line(PW);
+    let (output, text) = backup.finish_terminal();
+    assert!(output.status.success(), "fixture backup failed");
+    let text = zeroize::Zeroizing::new(text);
+    let words: Vec<&str> = text
+        .lines()
+        .filter_map(|line| {
+            let (number, word) = line.trim().split_once(". ")?;
+            number.parse::<usize>().ok()?;
+            Some(word.trim())
+        })
+        .collect();
+    assert_eq!(
+        words.len(),
+        24,
+        "fixture backup did not yield the requested word count"
+    );
+    let tokens: Vec<&str> = captured
+        .split(|c: char| !c.is_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for three in words.windows(3) {
+        assert!(
+            !tokens.windows(3).any(|shown| shown == three),
+            "recovery words reached the TUI"
+        );
+    }
 }

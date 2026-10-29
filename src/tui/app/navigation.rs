@@ -69,7 +69,7 @@ pub struct Navigation {
     pub allow_ptrace_scope_0: bool,
     nets: BTreeMap<&'static str, Net>,
     pub(super) family_reads: BTreeMap<(String, &'static str), (String, Trust)>,
-    family_pins: BTreeMap<(String, &'static str), String>,
+    pub(super) family_pins: BTreeMap<(String, &'static str), String>,
     rpc_request: u64,
     pending_rpc: Option<u64>,
 }
@@ -113,6 +113,10 @@ const IMPLEMENTED: &[ActionId] = &[
     ActionId::MessagePolicy,
     ActionId::Reset,
     ActionId::WhitelistUnlock,
+    ActionId::CreateFirst,
+    ActionId::CreateKey,
+    ActionId::CreateUnlock,
+    ActionId::Backup,
     ActionId::List,
     ActionId::VerifyKeys,
     ActionId::SetActive,
@@ -858,6 +862,10 @@ impl App {
             return work;
         }
         match action {
+            ActionId::CreateFirst | ActionId::CreateKey | ActionId::CreateUnlock => {
+                return self.begin_create();
+            }
+            ActionId::Backup => return self.backup_hint(),
             ActionId::List => self.nav.tab = Tab::Keys,
             ActionId::VerifyKeys => {
                 return self.begin_password(PasswordPurpose::Verify { all: true });

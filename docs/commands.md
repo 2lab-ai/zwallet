@@ -83,9 +83,17 @@ Commands that act on a key take `--key <name>` (default: the active key).
   repairs cached addresses and shows old/new values. `u` asks for a duration and then the wallet
   password before starting that signing session. `7 session` shows the home, expiry, daemon
   pids, and the daemon's reported whitelist generation/count as information only. The startup
-  ptrace flag cannot be changed by any TUI key. Key creation and tools
+  ptrace flag cannot be changed by any TUI key. Contract and message tools
   remain ![WIP](https://img.shields.io/badge/status-WIP-yellow).
   See [feature status](features.md#planned-features).
+  On `1 keys`, `n` creates another key; an empty wallet home opens the first-wallet form.
+  Enter a key name, choose 12/15/18/21/24 seed words on first creation (Left/Right), optionally
+  enter an unlock duration, then type the name again to confirm. Preparation precedes the
+  password field. A new wallet asks for the new password twice; another key asks once.
+  The created key becomes active for the agent. A submitted creation finishes before quitting
+  or locking; a failed unlock may follow a successful file write, so the key list is refreshed.
+  `B` points to `zwallet backup` in a shell; the TUI never displays a recovery phrase.
+
   `3 send` reviews and sends EVM native/registry-token transfers using the pinned open key.
   `5 whitelist` lists the policy; `V` checks it locally with the password before selection or
   a message toggle. `a` adds a payee, `C` adds an EVM contract with selectors, `d` removes the

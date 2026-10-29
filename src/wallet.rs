@@ -7,6 +7,11 @@ pub use whitelist::{
     Change, EditSession, WhitelistOutcome, WhitelistPlan, WhitelistUnlock, WhitelistView,
     whitelist_apply, whitelist_plan, whitelist_view,
 };
+mod create;
+pub(crate) use create::create_via_daemon;
+#[cfg(test)]
+pub(crate) use create::relocked;
+pub use create::{CreatePlan, Created, create, prepare_create};
 
 pub mod read;
 pub use read::{

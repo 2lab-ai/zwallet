@@ -3,6 +3,7 @@
 //! pane is wrapped there, 03-tui.md §Display integrity rule 4); the chrome is ASCII; every style
 //! is one of `style`'s. [`draw`] returns where it put each outside value, for the tests.
 
+mod create;
 pub(crate) mod history;
 mod transfer;
 mod tron_transfer;
@@ -111,7 +112,9 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         );
     }
     tabs.draw(frame, title, &mut placed);
-    if whitelist::active(app) {
+    if app.creation().stage.active() {
+        create::draw(frame, pane, app, &mut placed);
+    } else if whitelist::active(app) {
         whitelist::draw(frame, pane, app, &mut placed);
     } else if app.password_state() != PasswordState::Idle {
         keys_pane(frame, pane, app, &mut placed);
@@ -126,7 +129,17 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
     } else {
         data_pane(frame, pane, app, &mut placed);
     }
-    let hint_row = if whitelist::active(app) {
+    let hint_row = if matches!(
+        app.creation().stage,
+        super::app::create::CreateStage::Done(_)
+    ) {
+        Row::default().text("Enter/Esc keys   B backup hint   L lock all   q quit", HINT)
+    } else if app.creation().stage.active() {
+        Row::default().text(
+            "Enter next/confirm   Tab next   Shift-Tab previous   Esc back   Ctrl-C quit",
+            HINT,
+        )
+    } else if whitelist::active(app) {
         Row::default().text(whitelist::hint(app), HINT)
     } else if matches!(app.password_state(), PasswordState::Input { .. }) {
         Row::default().text("Enter check   Esc cancel   Ctrl-C quit", HINT)
@@ -165,7 +178,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
             .text("   ? actions", HINT)
     } else {
         let words = match app.tab() {
-            Tab::Keys => "Enter open  V verify  A repair  s active  u unlock  ? actions",
+            Tab::Keys => "Enter open  n new  B backup  V verify  A repair  s active  ? actions",
             Tab::Wallet => {
                 "Tab focus  j/k  Enter detail  / hash  a networks  c chain  r  ? actions"
             }
