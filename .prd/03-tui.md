@@ -326,7 +326,11 @@ duration); in round 2: `b` on a replacement's review (the bump). No key lowers a
 field" includes every list, review and outcome: the send asset and payee lists (EVM and Tron),
 the chain picker, a read-only popup (`Q`, `B`), the whitelist list, summary and outcome, the tools
 menu and contract list, and a replacement review. There `1`–`7`, `[` and `]` switch tabs; a popup
-closes first, and a review or outcome is still there on return (added 2026-10-30, D1).
+closes first, and a review or outcome is still there on return (added 2026-10-30, D1) and
+still completes: the whitelist plan is applied by the id that prepared it, not by the list-read
+counter a return moves on; the send, replacement and tools reviews confirm as before (a tools
+review that the key, chain or RPC no longer matches is dropped, and the screen says so). Creation
+is a modal: its fields keep the digits and its result stays until Enter or Esc.
 
 **Text fields.** While a field has the focus every key goes to it (within its alphabet, rule 3)
 except Enter, Esc, Tab, the arrows and Ctrl-C; so `q`, `?` and the digits are typed, not acted on.
@@ -1172,6 +1176,11 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 11. **No test reaches a public explorer** (gate audit). History's explorer base can be named by
     `ZWALLET_EXPLORER_<CHAIN>`, and `tests/common` sets it to a closed loopback port for every
     process it starts (§History, source 2).
+12. **A review left with a tab key still completes** (round 2, review of fix 7). Returning to 5
+    moved the list-read counter and the password applied the wrong plan id; the review now keeps
+    the id that prepared it. Tools reviews no longer reset on a tab key. Each screen that holds a
+    review is tested by leaving with a key, returning with a key and completing it (§Screens and
+    keys). The send and tools guard labels read `clear`, `blocked` or `OVERRIDE`.
 
 ## Changes on 2026-10-28, v2, review round 3
 
