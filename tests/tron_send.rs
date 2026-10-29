@@ -383,29 +383,34 @@ async fn lookup_rejects_wrong_raw_and_wait_has_one_deadline() {
 
 #[tokio::test]
 async fn wait_distinguishes_incomplete_observation_from_completed_not_found() {
-    for slow_observation in [true, false] {
-        let node = MockTron::start(move |p, b| {
-            if slow_observation && p == "/wallet/gettransactioninfobyid" {
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            Reply::Json(fixture(p, b))
-        });
-        let v = lookup::wait(
-            &net(&node),
-            &"11".repeat(32),
-            None,
-            Duration::from_millis(150),
-        )
+    let (release, blocked) = std::sync::mpsc::channel();
+    let blocked = Mutex::new(blocked);
+    let incomplete = MockTron::start(move |p, b| {
+        if p == "/wallet/gettransactioninfobyid" {
+            // The test owns completion. A timeout must not invent a completed observation.
+            blocked.lock().unwrap().recv().unwrap();
+        }
+        Reply::Json(fixture(p, b))
+    });
+    let network = net(&incomplete);
+    let hash = "11".repeat(32);
+    let deadline = lookup::wait(&network, &hash, None, Duration::from_millis(150));
+    // This real-I/O check also permits the deadline to expire during connection. The private
+    // polling tests expire at known awaits to prove both sides without an RPC speed assumption.
+    let result = deadline.await;
+    // Release even when connecting used the deadline, so a late handler cannot be stranded.
+    release.send(()).unwrap();
+    let v = result.unwrap();
+    assert_eq!(v["status"], "unknown");
+    assert!(v["found"].is_null());
+
+    let complete = MockTron::start(|p, b| Reply::Json(fixture(p, b)));
+    let v = lookup::lookup_tx(&net(&complete), &"11".repeat(32), None)
         .await
         .unwrap();
-        if slow_observation {
-            assert_eq!(v["status"], "unknown");
-            assert!(v["found"].is_null());
-        } else {
-            assert_eq!(v["status"], "not found");
-            assert_eq!(v["found"], false);
-        }
-    }
+    assert_eq!(v["status"], "not found");
+    assert_eq!(v["found"], false);
+    assert_eq!(complete.calls("/wallet/getblock").len(), 1);
 }
 
 #[tokio::test]

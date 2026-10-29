@@ -225,24 +225,50 @@ pub async fn wait(
 ) -> Result<Map<String, Value>> {
     let hash = parse_hash(hash)?;
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut last = json!({"chain": net.chain.key, "txHash": hash, "status": "unknown", "found": null,
+    let last = json!({"chain": net.chain.key, "txHash": hash, "status": "unknown", "found": null,
         "hint": format!("the first observation did not finish before the wait deadline; look it up with `zwallet tx --chain tron {hash}`. {SECOND_PAYMENT}")}).as_object().unwrap().clone();
     let c = match tokio::time::timeout_at(deadline, rpc::connect(net)).await {
         Ok(c) => c?,
         Err(_) => return Ok(last),
     };
+    poll_observations(
+        last,
+        || observe(&c, net, &hash, expiration),
+        || tokio::time::sleep(Duration::from_secs(2)),
+        tokio::time::sleep_until(deadline),
+    )
+    .await
+}
+
+// Keep the observation/deadline boundary independent of network speed. Production supplies
+// one absolute timer and the ordinary polling interval; tests can expire it at a known await.
+async fn poll_observations<O, F, P, S, D>(
+    mut last: Map<String, Value>,
+    mut observe: O,
+    mut pause: P,
+    deadline: D,
+) -> Result<Map<String, Value>>
+where
+    O: FnMut() -> F,
+    F: std::future::Future<Output = Result<Map<String, Value>>>,
+    P: FnMut() -> S,
+    S: std::future::Future<Output = ()>,
+    D: std::future::Future<Output = ()>,
+{
+    tokio::pin!(deadline);
     loop {
-        match tokio::time::timeout_at(deadline, observe(&c, net, &hash, expiration)).await {
-            Ok(result) => last = result?,
-            Err(_) => return Ok(last),
+        tokio::select! {
+            biased;
+            () = &mut deadline => return Ok(last),
+            result = observe() => last = result?,
         }
         if last["status"] == "mined" || last["status"] == "expired-unseen" {
             return Ok(last);
         }
-        let next = (tokio::time::Instant::now() + Duration::from_secs(2)).min(deadline);
-        tokio::time::sleep_until(next).await;
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(last);
+        tokio::select! {
+            biased;
+            () = &mut deadline => return Ok(last),
+            () = pause() => {},
         }
     }
 }
@@ -334,5 +360,108 @@ pub async fn broadcast(net: &Net, signed: &SignedTx, record: &SendRecord) -> Res
         Ok(found) if found.get("found") == Some(&json!(true)) => Ok(Broadcast::KnownDespite { warning: format!("{why}; the node reports this transaction by its computed txID"), rpc_tx_hash: rpc_hash }),
         _ => Err(WalletError::new(ErrorCode::BroadcastUncertain, format!("{why}; look it up with `zwallet tx --chain tron {}`; it can still be included until {}. {SECOND_PAYMENT}", signed.tx_hash, send::expires_at(expires)))
             .with_detail("txHash", signed.tx_hash.as_str()).with_detail("from", signed.signer.as_str()).with_detail("expiresAt", send::expires_at(expires)).with_detail("journal", record.journal.display())),
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+    use tokio::sync::oneshot;
+
+    async fn expire_at_known_await(completed: bool, during_pause: bool) {
+        let initial = json!({"status":"unknown","found":null})
+            .as_object()
+            .unwrap()
+            .clone();
+        let snapshot = json!({"status":"not found","found":false,"observed":"held evidence"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let expected = if completed {
+            snapshot.clone()
+        } else {
+            initial.clone()
+        };
+        let (at_boundary, boundary) = oneshot::channel();
+        let boundary_sender = Rc::new(RefCell::new(Some(at_boundary)));
+        let (expire, expired) = oneshot::channel();
+        let calls = Rc::new(Cell::new(0));
+        let calls_in_observe = calls.clone();
+        let notify = boundary_sender.clone();
+        let observation = move || {
+            let call = calls_in_observe.get() + 1;
+            calls_in_observe.set(call);
+            let snapshot = snapshot.clone();
+            let notify = notify.clone();
+            async move {
+                if completed && call == 1 {
+                    return Ok(snapshot);
+                }
+                notify.borrow_mut().take().unwrap().send(()).unwrap();
+                std::future::pending::<Result<Map<String, Value>>>().await
+            }
+        };
+        let pause = move || {
+            let notify = boundary_sender.clone();
+            async move {
+                if during_pause {
+                    notify.borrow_mut().take().unwrap().send(()).unwrap();
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        let wait = poll_observations(initial, observation, pause, async {
+            expired.await.unwrap()
+        });
+        let control = async {
+            boundary.await.unwrap();
+            expire.send(()).unwrap();
+        };
+        // This timeout is only a deadlock watchdog; the observation result never depends on
+        // its duration. The oneshot expires the deadline exactly at the selected boundary.
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(wait, control)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap(), expected);
+        assert_eq!(calls.get(), if completed && !during_pause { 2 } else { 1 });
+    }
+    #[tokio::test]
+    async fn expired_deadline_does_not_accept_a_ready_late_result() {
+        let initial = json!({"status":"unknown","found":null})
+            .as_object()
+            .unwrap()
+            .clone();
+        let result = poll_observations(
+            initial.clone(),
+            || {
+                std::future::ready(Ok(json!({"status":"mined","found":true})
+                    .as_object()
+                    .unwrap()
+                    .clone()))
+            },
+            || std::future::ready(()),
+            std::future::ready(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, initial);
+    }
+    #[tokio::test]
+    async fn deadline_before_first_observation_returns_unknown() {
+        expire_at_known_await(false, false).await;
+    }
+    #[tokio::test]
+    async fn deadline_during_next_observation_keeps_completed_not_found() {
+        expire_at_known_await(true, false).await;
+    }
+    #[tokio::test]
+    async fn deadline_during_poll_pause_keeps_completed_not_found() {
+        expire_at_known_await(true, true).await;
     }
 }

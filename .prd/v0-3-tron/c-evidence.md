@@ -74,3 +74,22 @@ race repair: sign-message/call/invoke still reject, and C's separate 19 tests ex
 and lookup. The entire gate was rerun successfully; no failing test was skipped.
 Local receipt: /tmp/zwallet-c-final-gate.log. Exact-head Linux/macOS CI remains pending.
 The independent review corrections above and current B2 daemon rejection corpus are retained.
+
+## PR42 Linux CI repair
+
+Run40842932300 at deda723 passed macOS but Linux failed one of19 Tron-send tests:
+wait_distinguishes_incomplete_observation_from_completed_not_found expected a completed
+not-found snapshot within150ms and received unknown instead. Delaying each normal fixture RPC
+by60ms reproduced that exact failure: the first multi-RPC observation did not finish in150ms.
+The production unknown result was correct for that incomplete observation.
+
+The polling loop now has a private observation/pause/deadline seam with the same absolute
+deadline. Four channel-driven unit regressions prove the exact incomplete-first, incomplete-next,
+poll-sleep and simultaneous-ready deadline boundaries without a network-speed assumption.
+The HTTP integration test still checks incomplete observation and actual completed not-found,
+but no longer requires normal RPCs to finish in150ms. No retry or timeout inflation was added.
+
+Parent static review found no remaining blocker. The repaired source passed the whole Rust1.95.0
+fmt/locked all-target strict Clippy/test gate: 595 passed, 0 failed, 14 explicit live skips.
+All19 Tron-send tests, including the unchanged real isolated daemon/CLI test, passed.
+Log: /tmp/zwallet-c-ci-repair-full-gate.log. New exact-head CI remains required before readiness.
