@@ -60,13 +60,24 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
         return;
     }
     match &app.navigation().lines {
-        Pane::Ready(lines) => draw_lines(
-            frame,
-            Rect { height: 4, ..inner },
-            lines,
-            app.navigation().scroll,
-            placed,
-        ),
+        // With the balances focused, the top row is the one Enter acts on.
+        Pane::Ready(lines) => {
+            for (y, value) in lines
+                .iter()
+                .skip(app.navigation().scroll)
+                .take(4)
+                .enumerate()
+            {
+                let style = if y == 0 && state.balance_focus {
+                    SELECTED
+                } else {
+                    NORMAL
+                };
+                Row::default()
+                    .outside(&value.cut(usize::from(inner.width)), style)
+                    .draw(frame, line(inner, y as u16), placed);
+            }
+        }
         Pane::Loading => {
             Row::default()
                 .text("reading balances...", HINT)

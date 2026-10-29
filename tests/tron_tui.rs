@@ -1099,3 +1099,47 @@ async fn tron_enter_on_a_balance_row_starts_a_new_payment_for_that_asset() {
         Some("USDT")
     );
 }
+
+/// D4 stays within TR25: until a Tron send is mined its status offers nothing that reads as a
+/// resend, so neither `n` nor Enter on a balance row replaces it.
+#[tokio::test]
+async fn tron_unmined_status_keeps_its_warning_instead_of_a_new_payment() {
+    let f = Fixture::new(0);
+    let n = Node::new();
+    let mut app = app(&f, &n);
+    review(&mut app, &f, false).await;
+    let work = confirm(&mut app);
+    drive(&mut app, &f, work).await;
+    assert_eq!(
+        app.transfer().status.as_ref().unwrap().state,
+        ReceiptState::Pending
+    );
+    assert!(!screen(&app).contains("n new payment"));
+    assert!(key(&mut app, Key::Char('n')).is_empty());
+    assert_eq!(app.transfer().stage, Stage::Status);
+    key(&mut app, Key::Char('2'));
+    app.update(Msg::Balances(
+        app.generation(),
+        "main".into(),
+        Ok(wallet::ChainBalances {
+            chain: n.net().chain,
+            key: "main".into(),
+            address: FROM.into(),
+            trust: wallet::Trust::Session,
+            native: chains::Balance {
+                symbol: "TRX".into(),
+                decimals: 6,
+                raw: alloy::primitives::U256::from(100_000_000u64),
+            },
+            tokens: vec![],
+            activated: Some(true),
+            warning: None,
+        }),
+    ));
+    key(&mut app, Key::Tab);
+    key(&mut app, Key::Down);
+    assert!(screen(&app).contains("100 TRX"));
+    key(&mut app, Key::Enter);
+    assert_eq!(app.transfer().stage, Stage::Status, "{}", screen(&app));
+    assert_eq!(f.count(), 1);
+}

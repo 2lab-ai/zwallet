@@ -127,6 +127,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   maximum TRX cost, conservative TRX left, reference-price block and expiration. Enter requires
   the exact nickname before signing. A fee maximum increase returns a new review. `d` explicitly
   allows a repeat and keeps the second-payment warning visible; EVM nonce/gwei controls are absent.
+  Once the send is mined its status offers `n new payment`; until then it offers no new payment.
+  On either family, Enter on a balance row of `2 wallet` (Tab focuses the balances; the top row
+  drawn is the one chosen) starts a payment of that asset.
   The status reports the locally computed txID and journal expiration. `w` extends its receipt
   deadline. `L` and `q` wait for a submitted send to finish before locking or leaving.
   The four `tron ...` action-menu rows use these same handlers when Tron is selected. On an

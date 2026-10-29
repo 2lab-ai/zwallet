@@ -264,6 +264,9 @@ impl App {
                 self.transfer.field = Some(Field::new(Kind::Amount));
                 self.transfer.stage = Stage::Amount;
             }
+            // Once mined, `n` starts a new payment as on EVM (its review runs the repeat check).
+            // Tron has no nonce, so nothing replaces the broadcast one.
+            (Stage::Status, Key::Char('n')) if self.new_payment_offered() => return None,
             (Stage::Status, Key::Char('n') | Key::Char('s') | Key::Char('x') | Key::Char('R')) => {
                 self.transfer.notice = Some(Outside::detail(chain::lookup::SECOND_PAYMENT));
             }

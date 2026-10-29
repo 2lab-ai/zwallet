@@ -70,6 +70,9 @@ pub struct Navigation {
     nets: BTreeMap<&'static str, Net>,
     pub(super) family_reads: BTreeMap<(String, &'static str), (String, Trust)>,
     pub(super) family_pins: BTreeMap<(String, &'static str), String>,
+    /// The single-network balance lines that are an asset: line index -> its token contract
+    /// (`None` the native coin). Enter on such a row starts a payment of that asset.
+    pub(super) balance_assets: BTreeMap<usize, Option<String>>,
     rpc_request: u64,
     pending_rpc: Option<u64>,
 }
@@ -94,6 +97,7 @@ impl Navigation {
             nets,
             family_pins: BTreeMap::new(),
             family_reads: BTreeMap::new(),
+            balance_assets: BTreeMap::new(),
             rpc_request: 0,
             pending_rpc: None,
         }
@@ -348,12 +352,17 @@ impl App {
                         }
                         let mut lines =
                             vec![Outside::detail(&format!("{} balances", read.chain.name))];
+                        self.nav.balance_assets.clear();
                         if !read.native.raw.is_zero() {
+                            self.nav.balance_assets.insert(lines.len(), None);
                             lines.push(amount_line(&read.native));
                         }
                         for token in read.tokens {
                             match token.raw {
                                 Ok(raw) if !raw.is_zero() => {
+                                    self.nav
+                                        .balance_assets
+                                        .insert(lines.len(), Some(token.address.clone()));
                                     lines.push(amount_line(&chains::Balance {
                                         symbol: token.symbol,
                                         decimals: token.decimals,
@@ -684,8 +693,16 @@ impl App {
                 Some(self.load_view())
             }
             Key::Enter if self.nav.tab == Tab::Wallet => {
+                // With the balances focused, the top row drawn is the chosen one; an asset row
+                // starts a payment of that asset.
+                let asset = (self.history.balance_focus && !self.nav.every)
+                    .then(|| self.nav.balance_assets.get(&self.nav.scroll).cloned())
+                    .flatten();
                 self.nav.tab = Tab::Send;
-                Some(self.show_transfer())
+                Some(match asset {
+                    Some(token) => self.start_payment(token),
+                    None => self.show_transfer(),
+                })
             }
             Key::Enter | Key::Char('s') if self.nav.tab != Tab::Keys => Some(Vec::new()),
             _ => None,

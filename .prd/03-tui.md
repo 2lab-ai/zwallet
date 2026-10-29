@@ -839,6 +839,15 @@ use `record_receipt`, which reports a receipt that did not come in time as `pend
 keep polling that long from now, as `--wait --wait-timeout` does (T43). Leaving the screen never
 cancels anything; the journal has already recorded the send.
 
+**A new payment from the status (added 2026-10-30, D4).** `n` on the status starts a new
+payment, and so does Enter on a balance row of 2 wallet (with the balances focused by Tab, the
+top row drawn is the chosen one): that one selects the row's asset and goes on to the payees.
+A new payment runs its own review, with the repeat check. On EVM `n` is offered on every status.
+On Tron, which has no nonce to replace, only a mined status (success, reverted or outcome
+unknown) offers it; a pending, unknown or `expired-unseen` one keeps its second-payment warning
+and offers nothing that reads as a resend (TR25), and Enter on a balance row returns to it. A
+send in flight keeps its screen.
+
 **Review and confirm.** The review runs `prepare` as a dry-run, the duplicate check and the
 whitelist check; it takes no send lock and asks the daemon to sign nothing. The whitelist verdict
 and the fee cap, at the review and at confirm, are computed on the checked list (the same bytes
@@ -1141,6 +1150,9 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
    only `pending override false / duplicate override false`; they now show `pending N` and
    `repeats N`, blocked or overridden, before the nickname (§Status of a send, Invoke and
    sign-message).
+9. **A new payment after a mined Tron send** (D4). A Tron status had no `n`, and `3` or Enter on
+   a balance row returned to it. A mined Tron status now offers `n new payment`, and Enter on a
+   balance row starts a payment of that asset on both families (§Status of a send).
 
 ## Changes on 2026-10-28, v2, review round 3
 

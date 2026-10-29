@@ -96,6 +96,9 @@ pub struct Transfer {
     cancel_watch: Option<tokio::sync::watch::Sender<bool>>,
     lock_after_send: bool,
     jobs: BTreeMap<u64, TransferJob>,
+    /// The asset a balance row's Enter chose (its token contract, `None` the native coin): the
+    /// asset list that lands next selects it and moves on to the payees.
+    wanted: Option<Option<String>>,
 }
 impl Default for Transfer {
     fn default() -> Self {
@@ -119,6 +122,7 @@ impl Default for Transfer {
             cancel_watch: None,
             lock_after_send: false,
             jobs: BTreeMap::new(),
+            wanted: None,
         }
     }
 }
@@ -363,6 +367,50 @@ impl App {
             .ok_or_else(|| WalletError::validation("needs: V; whitelist not verified"))?;
         Ok((key.name, key.index, from, checked.clone()))
     }
+    /// Enter on a balance row: a new payment for that asset (`token`, `None` the native coin),
+    /// after a finished or pending status too, as `n` does. A send in flight keeps its screen.
+    pub(super) fn start_payment(&mut self, token: Option<String>) -> Vec<Effect> {
+        if self.sending() || !self.new_payment_offered() {
+            return self.show_transfer();
+        }
+        self.transfer.context = None;
+        let work = self.show_transfer();
+        self.transfer.wanted = Some(token);
+        work
+    }
+    /// Whether a new payment may replace the status screen. A Tron send has no nonce to replace;
+    /// until it is mined, its status keeps the second-payment warning and offers nothing that
+    /// reads as a resend (TR25). EVM's pending status has `s`/`x`/`R` and offers `n` throughout.
+    pub(super) fn new_payment_offered(&self) -> bool {
+        !(self.on_tron() && self.transfer.stage == Stage::Status)
+            || self.transfer.status.as_ref().is_some_and(|s| {
+                matches!(
+                    s.state,
+                    ReceiptState::Success | ReceiptState::Reverted | ReceiptState::MinedUnknown
+                )
+            })
+    }
+    fn choose_asset(&mut self) -> Vec<Effect> {
+        let Some(asset) = self.transfer.assets.get(self.transfer.selected).cloned() else {
+            return Vec::new();
+        };
+        self.transfer.asset = Some(asset);
+        let (_, _, _, checked) = match self.transfer_ready() {
+            Ok(v) => v,
+            Err(e) => {
+                self.transfer_error(e);
+                return Vec::new();
+            }
+        };
+        self.transfer.stage = Stage::Loading;
+        self.transfer_job(
+            TransferJob::Payees {
+                net: self.net().clone(),
+                checked,
+            },
+            false,
+        )
+    }
     pub(super) fn show_transfer(&mut self) -> Vec<Effect> {
         let context = (
             self.open_key.clone().unwrap_or_default(),
@@ -394,6 +442,7 @@ impl App {
             }
         }
         self.transfer.context = Some(context);
+        self.transfer.wanted = None;
         self.transfer.tron = TronTransfer::default();
         self.transfer.review = None;
         self.transfer.draft = None;
@@ -492,151 +541,160 @@ impl App {
             &event,
             TransferMsg::Sent(_) | TransferMsg::Tron(TronMsg::Changed(_))
         );
-        let mut work = match event {
-            TransferMsg::Tron(event) => self.tron_transfer_message(event),
-            TransferMsg::Assets(Ok(rows)) => {
-                self.transfer.active = None;
-                self.transfer.assets = rows;
-                self.transfer.stage = Stage::Assets;
-                Vec::new()
-            }
-            TransferMsg::Payees(Ok(rows)) => {
-                self.transfer.active = None;
-                self.transfer.payees = rows;
-                self.transfer.selected = 0;
-                self.transfer.stage = Stage::Payees;
-                Vec::new()
-            }
-            TransferMsg::Review(Ok(review)) => {
-                self.transfer.active = None;
-                self.transfer.review = Some(*review);
-                self.transfer.stage = Stage::Review;
-                Vec::new()
-            }
-            TransferMsg::Assets(Err(e))
-            | TransferMsg::Payees(Err(e))
-            | TransferMsg::Review(Err(e)) => {
-                self.transfer_error(e);
-                Vec::new()
-            }
-            TransferMsg::Progress {
-                hash,
-                nonce,
-                journal,
-            } => {
-                if let Some(original) = self.transfer.retained.as_ref().and_then(|review| {
-                    crate::wallet::replacement::OriginalIntent::from_transfer(review).ok()
-                }) {
-                    self.register_retained_replacement(&hash, original);
-                }
-                self.transfer.status = Some(SendStatus {
-                    hash,
-                    nonce: Some(nonce),
-                    expiration: None,
-                    journal: Outside::home(&journal.to_string_lossy()),
-                    state: ReceiptState::Pending,
-                    wait: SEND_WAIT,
-                    note: None,
-                    uncertain: false,
-                    net: self.net().clone(),
-                });
-                Vec::new()
-            }
-            TransferMsg::Sent(result) => {
-                self.transfer.active = None;
-                // q waits for this result: a failed send must leave a failing exit status,
-                // including recovery details when its durable journal was already reported.
-                if self.quit
-                    && let Err(error) = &result
-                {
-                    self.quit_error.get_or_insert_with(|| error.clone());
-                }
-                match result {
-                    Ok(SendTransferOutcome::ReviewChanged(review)) => {
-                        self.transfer.review = Some(*review);
-                        self.transfer.stage = Stage::Review;
-                        self.transfer.field = None;
-                        self.transfer.notice = Some(Outside::detail(
-                            "review changed; nothing signed; confirm the new values",
-                        ));
-                        Vec::new()
-                    }
-                    Ok(SendTransferOutcome::Sent(_)) => {
-                        self.transfer.stage = Stage::Status;
-                        self.start_receipt_wait(SEND_WAIT)
-                    }
-                    Err(error) if self.transfer.status.is_some() => {
-                        self.transfer.stage = Stage::Status;
-                        if let Some(status) = &mut self.transfer.status {
-                            status.state = ReceiptState::Unknown;
-                            status.uncertain = error.code == ErrorCode::BroadcastUncertain;
-                            status.note = Some(Outside::error(&error));
+        let mut work =
+            match event {
+                TransferMsg::Tron(event) => self.tron_transfer_message(event),
+                TransferMsg::Assets(Ok(rows)) => {
+                    self.transfer.active = None;
+                    self.transfer.assets = rows;
+                    self.transfer.stage = Stage::Assets;
+                    match self.transfer.wanted.take().and_then(|wanted| {
+                        self.transfer.assets.iter().position(|a| a.token == wanted)
+                    }) {
+                        Some(index) => {
+                            self.transfer.selected = index;
+                            self.choose_asset()
                         }
-                        // An uncertain broadcast must still be watched by its computed hash.
-                        if error.code == ErrorCode::BroadcastUncertain {
+                        None => Vec::new(),
+                    }
+                }
+                TransferMsg::Payees(Ok(rows)) => {
+                    self.transfer.active = None;
+                    self.transfer.payees = rows;
+                    self.transfer.selected = 0;
+                    self.transfer.stage = Stage::Payees;
+                    Vec::new()
+                }
+                TransferMsg::Review(Ok(review)) => {
+                    self.transfer.active = None;
+                    self.transfer.review = Some(*review);
+                    self.transfer.stage = Stage::Review;
+                    Vec::new()
+                }
+                TransferMsg::Assets(Err(e))
+                | TransferMsg::Payees(Err(e))
+                | TransferMsg::Review(Err(e)) => {
+                    self.transfer_error(e);
+                    Vec::new()
+                }
+                TransferMsg::Progress {
+                    hash,
+                    nonce,
+                    journal,
+                } => {
+                    if let Some(original) = self.transfer.retained.as_ref().and_then(|review| {
+                        crate::wallet::replacement::OriginalIntent::from_transfer(review).ok()
+                    }) {
+                        self.register_retained_replacement(&hash, original);
+                    }
+                    self.transfer.status = Some(SendStatus {
+                        hash,
+                        nonce: Some(nonce),
+                        expiration: None,
+                        journal: Outside::home(&journal.to_string_lossy()),
+                        state: ReceiptState::Pending,
+                        wait: SEND_WAIT,
+                        note: None,
+                        uncertain: false,
+                        net: self.net().clone(),
+                    });
+                    Vec::new()
+                }
+                TransferMsg::Sent(result) => {
+                    self.transfer.active = None;
+                    // q waits for this result: a failed send must leave a failing exit status,
+                    // including recovery details when its durable journal was already reported.
+                    if self.quit
+                        && let Err(error) = &result
+                    {
+                        self.quit_error.get_or_insert_with(|| error.clone());
+                    }
+                    match result {
+                        Ok(SendTransferOutcome::ReviewChanged(review)) => {
+                            self.transfer.review = Some(*review);
+                            self.transfer.stage = Stage::Review;
+                            self.transfer.field = None;
+                            self.transfer.notice = Some(Outside::detail(
+                                "review changed; nothing signed; confirm the new values",
+                            ));
+                            Vec::new()
+                        }
+                        Ok(SendTransferOutcome::Sent(_)) => {
+                            self.transfer.stage = Stage::Status;
                             self.start_receipt_wait(SEND_WAIT)
-                        } else {
+                        }
+                        Err(error) if self.transfer.status.is_some() => {
+                            self.transfer.stage = Stage::Status;
+                            if let Some(status) = &mut self.transfer.status {
+                                status.state = ReceiptState::Unknown;
+                                status.uncertain = error.code == ErrorCode::BroadcastUncertain;
+                                status.note = Some(Outside::error(&error));
+                            }
+                            // An uncertain broadcast must still be watched by its computed hash.
+                            if error.code == ErrorCode::BroadcastUncertain {
+                                self.start_receipt_wait(SEND_WAIT)
+                            } else {
+                                Vec::new()
+                            }
+                        }
+                        Err(error) => {
+                            self.transfer_error(error);
                             Vec::new()
                         }
                     }
-                    Err(error) => {
-                        self.transfer_error(error);
-                        Vec::new()
+                }
+                TransferMsg::Receipt(result) => {
+                    if let Some(status) = &mut self.transfer.status {
+                        status.state = match result {
+                            Ok(Some(receipt))
+                                if matches!(status.net.chain.family, chains::Family::Tron(_)) =>
+                            {
+                                if let Some(hint) = receipt.get("hint").and_then(Value::as_str) {
+                                    status.note = Some(Outside::warning(hint));
+                                }
+                                match receipt.get("status").and_then(Value::as_str) {
+                                    Some("mined") => {
+                                        match receipt.get("success").and_then(Value::as_bool) {
+                                            Some(true) => ReceiptState::Success,
+                                            Some(false) => ReceiptState::Reverted,
+                                            None => ReceiptState::MinedUnknown,
+                                        }
+                                    }
+                                    Some("expired-unseen") => ReceiptState::ExpiredUnseen,
+                                    _ => {
+                                        if status.note.is_none() {
+                                            status.note = Some(Outside::warning(
+                                                crate::chains::tron::lookup::SECOND_PAYMENT,
+                                            ));
+                                        }
+                                        ReceiptState::Unknown
+                                    }
+                                }
+                            }
+                            Ok(Some(receipt)) => {
+                                match receipt.get("success").and_then(Value::as_bool) {
+                                    Some(true) => ReceiptState::Success,
+                                    Some(false) => ReceiptState::Reverted,
+                                    None => ReceiptState::Unknown,
+                                }
+                            }
+                            Ok(None) => {
+                                if matches!(status.net.chain.family, chains::Family::Tron(_)) {
+                                    status.note = Some(Outside::warning(
+                                        crate::chains::tron::lookup::SECOND_PAYMENT,
+                                    ));
+                                }
+                                ReceiptState::Unknown
+                            }
+                            Err(error) => {
+                                status.note = Some(Outside::error(&error));
+                                ReceiptState::Unknown
+                            }
+                        };
                     }
+                    Vec::new()
                 }
-            }
-            TransferMsg::Receipt(result) => {
-                if let Some(status) = &mut self.transfer.status {
-                    status.state = match result {
-                        Ok(Some(receipt))
-                            if matches!(status.net.chain.family, chains::Family::Tron(_)) =>
-                        {
-                            if let Some(hint) = receipt.get("hint").and_then(Value::as_str) {
-                                status.note = Some(Outside::warning(hint));
-                            }
-                            match receipt.get("status").and_then(Value::as_str) {
-                                Some("mined") => {
-                                    match receipt.get("success").and_then(Value::as_bool) {
-                                        Some(true) => ReceiptState::Success,
-                                        Some(false) => ReceiptState::Reverted,
-                                        None => ReceiptState::MinedUnknown,
-                                    }
-                                }
-                                Some("expired-unseen") => ReceiptState::ExpiredUnseen,
-                                _ => {
-                                    if status.note.is_none() {
-                                        status.note = Some(Outside::warning(
-                                            crate::chains::tron::lookup::SECOND_PAYMENT,
-                                        ));
-                                    }
-                                    ReceiptState::Unknown
-                                }
-                            }
-                        }
-                        Ok(Some(receipt)) => {
-                            match receipt.get("success").and_then(Value::as_bool) {
-                                Some(true) => ReceiptState::Success,
-                                Some(false) => ReceiptState::Reverted,
-                                None => ReceiptState::Unknown,
-                            }
-                        }
-                        Ok(None) => {
-                            if matches!(status.net.chain.family, chains::Family::Tron(_)) {
-                                status.note = Some(Outside::warning(
-                                    crate::chains::tron::lookup::SECOND_PAYMENT,
-                                ));
-                            }
-                            ReceiptState::Unknown
-                        }
-                        Err(error) => {
-                            status.note = Some(Outside::error(&error));
-                            ReceiptState::Unknown
-                        }
-                    };
-                }
-                Vec::new()
-            }
-        };
+            };
         if send_finished && std::mem::take(&mut self.transfer.lock_after_send) {
             work.push(Effect::LockAll);
         }
@@ -721,27 +779,7 @@ impl App {
                 self.transfer.selected = (self.transfer.selected + 1).min(len.saturating_sub(1));
                 Vec::new()
             }
-            (Stage::Assets, Key::Enter) => {
-                let Some(asset) = self.transfer.assets.get(self.transfer.selected).cloned() else {
-                    return Some(Vec::new());
-                };
-                self.transfer.asset = Some(asset);
-                let (_, _, _, checked) = match self.transfer_ready() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        self.transfer_error(e);
-                        return Some(Vec::new());
-                    }
-                };
-                self.transfer.stage = Stage::Loading;
-                self.transfer_job(
-                    TransferJob::Payees {
-                        net: self.net().clone(),
-                        checked,
-                    },
-                    false,
-                )
-            }
+            (Stage::Assets, Key::Enter) => self.choose_asset(),
             (Stage::Payees, Key::Enter) => {
                 let Some(payee) = self.transfer.payees.get(self.transfer.selected).cloned() else {
                     return Some(Vec::new());
@@ -928,6 +966,9 @@ impl App {
             Stage::Review => "Enter confirm  p allow pending  d allow repeat  g fee  ? actions",
             Stage::Payees | Stage::Assets => {
                 "arrows choose  Enter select  Esc back  q quit  ? actions"
+            }
+            Stage::Status if self.on_tron() && self.new_payment_offered() => {
+                "w wait longer  n new payment  2 wallet  q quit  ? actions"
             }
             Stage::Status if self.on_tron() => "w wait longer  2 wallet  q quit  ? actions",
             Stage::Status => "w wait longer  n new payment  2 wallet  q quit  ? actions",
