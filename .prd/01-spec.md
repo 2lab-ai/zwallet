@@ -14,6 +14,12 @@ implemented; the TUI is partial and additional chain families are WIP. See
 acceptance scenarios below include future work and are not a release checklist.
 Fixed user statement and scope: [`v0-1/ssot.md`](v0-1/ssot.md). Driver: [`v0-1/loop.md`](v0-1/loop.md).
 
+## Future direction
+
+![WIP](https://img.shields.io/badge/status-WIP-yellow) [Agent economy](07-agent-economy.md): task accounting and cumulative budgets,
+investment execution, digital-service payments and merchant checkout. These extend the
+original development-allocation use case; they are not current CLI capabilities.
+
 ## Problem
 
 The user wanted an Ethereum address the agent can use on its own, funded with a small amount
@@ -27,6 +33,11 @@ The user wanted an Ethereum address the agent can use on its own, funded with a 
 - **Tether WDK CLI** (`@tetherto/wdk-cli` 1.0.0-beta.7) creates keys locally and uses public nodes.
   But its signing daemon's session lasts `SESSION_TTL_MINUTES = 5` (`src/config/constants.js:51`),
   so an agent would need a human to unlock it every five minutes.
+
+This is the historical comparison recorded at project inception, not a current
+limitation claim. The [2026-10-29 research](../docs/marketing/research.md) finds that
+current WDK supports configurable TTL, including an unlimited setting. Use that
+dated comparison for public positioning.
 
 Both were research only; zwallet takes no code, design or dependency from either (user,
 2026-10-21: "twak은 처음에 리서치할때만 쓴거고 전혀 관계없음"). It is its own Rust wallet CLI, with
@@ -62,7 +73,7 @@ no account, no API key, no telemetry and no OS keychain.
   releases on `v*` tags, Homebrew formulae `2lab-ai/tap/zwallet` and `2lab-ai/tap/zwallet-preview`,
   and an `xbrew install zwallet` recipe.
 
-## Non-goals
+## v0.1 non-goals
 
 Swap, bridge, on/off-ramp, price alerts, DCA, x402, WalletConnect, ENS names, any third-party API
 key, telemetry, the OS keychain, daemon autostart, hardware wallets, multiple accounts per wallet,

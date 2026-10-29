@@ -3,8 +3,8 @@
 [Back to README](../README.md) · [Command reference](commands.md) · [Development](development.md)
 
 This page is for people deciding whether zwallet fits their workflow and contributors
-checking what still needs to be built. Reviewed on 2026-10-29 against main `51b4a51`
-with the changes in [PR #29](https://github.com/2lab-ai/zwallet/pull/29).
+checking what still needs to be built. Reviewed on 2026-10-29 against main `99fff4e`,
+including merged [PR #29](https://github.com/2lab-ai/zwallet/pull/29).
 “Implemented” means a reachable code path exists in this source revision; it
 does not mean every published binary includes it or every public RPC is reachable.
 
@@ -41,12 +41,16 @@ implementation does not make the corresponding TUI workflow implemented.
 | Calldata-aware duplicate detection for `invoke`; configurable duplicate window | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [Deferred whitelist work](../.prd/04-whitelist.md#not-in-v01-stays-planned). Current matching uses chain, kind, recipient and amount (plus token for token transfers), over a fixed ten-minute window. |
 | User-added transfer tokens | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [Deferred whitelist work](../.prd/04-whitelist.md#not-in-v01-stays-planned). Reading a token by contract address is already available. |
 | Secure Enclave / hardware whitelist key | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [Deferred whitelist work](../.prd/04-whitelist.md#not-in-v01-stays-planned). Today's whitelist authority derives from the wallet password; it is not a second factor. |
+| Task ledger and native spend reports | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [AE-1](../.prd/07-agent-economy.md). The [example workflow](agent-workflow.md) computes a report externally from existing outputs; there is no built-in report command. |
+| Investment execution adapters | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [AE-3](../.prd/07-agent-economy.md). Strategies, venue constraints, bounded approvals, typed signing and P&L accounting are not implemented. |
+| Digital-service payments (including x402 exploration) | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [AE-4](../.prd/07-agent-economy.md). No built-in buyer/payment-protocol adapter or fulfillment reconciliation. |
+| Merchant checkout and purchase automation | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [AE-5](../.prd/07-agent-economy.md). No shopping, order, delivery or refund integration. |
 
 ## Unsupported is not always planned
 
-There is no zwallet import/restore or password-change command, EIP-712 typed-data
-signing, Windows build, swap/bridge workflow, WalletConnect or ENS resolution in the
-reviewed CLI. Do not infer a delivery commitment from an absent feature. The WIP table
+Import/restore, password changes, Windows and WalletConnect/ENS are absent without
+a delivery commitment here. EIP-712 and bounded approval support are design prerequisites
+for future investment/payment adapters, not implemented capabilities. The WIP table
 above lists work supported by the repository's plans.
 
 ## Keeping the status accurate

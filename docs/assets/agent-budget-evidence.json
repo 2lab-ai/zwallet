@@ -1,0 +1,446 @@
+{
+  "network": "local Anvil, Sepolia chain ID; NOT public Sepolia",
+  "sourceRevision": "99fff4eae7a94fa81374904c2290598b1cf79b36",
+  "scriptedWorkflow": true,
+  "presentation": "selected JSON fields; commands executed for real",
+  "commands": [
+    {
+      "argv": [
+        "create",
+        "demo",
+        "--json",
+        "--password-stdin"
+      ],
+      "exitCode": 0,
+      "result": {
+        "active": "demo",
+        "address": "0x5e6022Ca0CF2a615aceBcE717b207a37Bad087fE",
+        "chains": [
+          "ethereum",
+          "base",
+          "arbitrum",
+          "optimism",
+          "polygon",
+          "bsc",
+          "avalanche",
+          "sepolia"
+        ],
+        "home": "/tmp/zwt-demo-edb80dix",
+        "index": 0,
+        "master": "created",
+        "name": "demo",
+        "verified": true,
+        "verifiedBy": "password"
+      }
+    },
+    {
+      "argv": [
+        "whitelist",
+        "add",
+        "dev-service",
+        "0x1111111111111111111111111111111111111111",
+        "--chains",
+        "sepolia",
+        "--json",
+        "--password-stdin"
+      ],
+      "exitCode": 0,
+      "result": {
+        "base": "empty",
+        "change": "added",
+        "entries": [
+          "dev-service"
+        ],
+        "entry": {
+          "address": "0x1111111111111111111111111111111111111111",
+          "chains": [
+            "sepolia"
+          ],
+          "kind": "address",
+          "nickname": "dev-service"
+        },
+        "gen": 1,
+        "hint": "pass --unlock <duration> to keep signing",
+        "locked": true,
+        "previousGen": null,
+        "stoppedDaemons": [],
+        "verified": true
+      }
+    },
+    {
+      "argv": [
+        "whitelist",
+        "native-cap",
+        "sepolia",
+        "0.005",
+        "--json",
+        "--password-stdin"
+      ],
+      "exitCode": 0,
+      "result": {
+        "base": "current",
+        "change": "native-cap",
+        "entries": [
+          "dev-service"
+        ],
+        "gen": 2,
+        "hint": "pass --unlock <duration> to keep signing",
+        "locked": true,
+        "policy": {
+          "allowMessageSigning": false,
+          "maxFeeWei": {
+            "arbitrum": "500000000000000",
+            "avalanche": "50000000000000000",
+            "base": "500000000000000",
+            "bsc": "3000000000000000",
+            "ethereum": "3000000000000000",
+            "optimism": "500000000000000",
+            "polygon": "2000000000000000000",
+            "sepolia": "10000000000000000"
+          },
+          "transactionLimits": {
+            "sepolia": {
+              "maxNativeWei": "5000000000000000"
+            }
+          }
+        },
+        "previousGen": 1,
+        "stoppedDaemons": [],
+        "transactionLimit": {
+          "chain": "sepolia",
+          "perTransaction": true,
+          "target": "native value (wei)",
+          "value": "5000000000000000"
+        },
+        "verified": true
+      }
+    },
+    {
+      "argv": [
+        "whitelist",
+        "fee-cap",
+        "sepolia",
+        "0.001",
+        "--json",
+        "--password-stdin"
+      ],
+      "exitCode": 0,
+      "result": {
+        "base": "current",
+        "change": "fee-cap",
+        "entries": [
+          "dev-service"
+        ],
+        "feeCap": {
+          "chain": "sepolia",
+          "maxFee": "0.001 ETH",
+          "maxFeeWei": "1000000000000000"
+        },
+        "gen": 3,
+        "hint": "pass --unlock <duration> to keep signing",
+        "locked": true,
+        "previousGen": 2,
+        "stoppedDaemons": [],
+        "verified": true
+      }
+    },
+    {
+      "argv": [
+        "unlock",
+        "30m",
+        "--json",
+        "--password-stdin"
+      ],
+      "exitCode": 0,
+      "result": {
+        "active": "demo",
+        "address": "0x5e6022Ca0CF2a615aceBcE717b207a37Bad087fE",
+        "daemonPid": 34846,
+        "duration": "30m",
+        "expiresAt": "2026-10-29T07:15:33Z",
+        "index": 0,
+        "locked": false,
+        "verified": true,
+        "verifiedBy": "password",
+        "whitelist": {
+          "entries": [
+            "dev-service"
+          ],
+          "gen": 3,
+          "verified": true
+        }
+      }
+    },
+    {
+      "argv": [
+        "balance",
+        "--chain",
+        "sepolia",
+        "--json"
+      ],
+      "exitCode": 0,
+      "result": {
+        "address": "0x5e6022Ca0CF2a615aceBcE717b207a37Bad087fE",
+        "balance": "0.02",
+        "chain": "sepolia",
+        "decimals": 18,
+        "key": "demo",
+        "raw": "20000000000000000",
+        "symbol": "ETH",
+        "verified": true,
+        "verifiedBy": "session"
+      }
+    },
+    {
+      "argv": [
+        "transfer",
+        "--chain",
+        "sepolia",
+        "--to",
+        "@dev-service",
+        "--amount",
+        "0.001",
+        "--dry-run",
+        "--json"
+      ],
+      "exitCode": 0,
+      "result": {
+        "amount": "0.001",
+        "amountRaw": "1000000000000000",
+        "chain": "sepolia",
+        "chainId": 11155111,
+        "decimals": 18,
+        "dryRun": true,
+        "duplicateSends": [],
+        "from": "0x5e6022Ca0CF2a615aceBcE717b207a37Bad087fE",
+        "gasEstimate": 21000,
+        "gasLimit": 21000,
+        "gasLimitSource": "estimate",
+        "gasPrice": null,
+        "key": "demo",
+        "l1Fee": null,
+        "maxFeePerGas": "2000000001",
+        "maxGasCost": "0.000042000000021",
+        "maxPriorityFeePerGas": "1",
+        "nativeBalance": "0.02",
+        "nonce": 0,
+        "pendingCount": 0,
+        "pendingNonces": [],
+        "pendingRange": null,
+        "recoveredFrom": "0x5e6022Ca0CF2a615aceBcE717b207a37Bad087fE",
+        "shortfall": [],
+        "signerDecoded": {
+          "action": {
+            "kind": "native-transfer",
+            "to": "0x1111111111111111111111111111111111111111",
+            "value": "1000000000000000"
+          },
+          "chainId": 11155111,
+          "gasLimit": 21000,
+          "maxGasPrice": "2000000001",
+          "nonce": 0,
+          "to": "0x1111111111111111111111111111111111111111",
+          "value": "1000000000000000"
+        },
+        "sufficientFunds": true,
+        "symbol": "ETH",
+        "to": "0x1111111111111111111111111111111111111111",
+        "toNickname": "dev-service",
+        "txHash": "0x505f351b431113de51bb0096cb059567aacfb66d8d4cf86c0ffdb9ff8c02e331",
+        "type": "eip1559",
+        "whitelist": {
+          "allowed": true
+        }
+      }
+    },
+    {
+      "argv": [
+        "transfer",
+        "--chain",
+        "sepolia",
+        "--to",
+        "@dev-service",
+        "--amount",
+        "0.001",
+        "--wait",
+        "--json"
+      ],
+      "exitCode": 0,
+      "result": {
+        "amount": "0.001",
+        "amountRaw": "1000000000000000",
+        "blockNumber": 1,
+        "chain": "sepolia",
+        "chainId": 11155111,
+        "decimals": 18,
+        "dryRun": false,
+        "duplicateSends": [],
+        "explorerUrl": "https://sepolia.etherscan.io/tx/0x505f351b431113de51bb0096cb059567aacfb66d8d4cf86c0ffdb9ff8c02e331",
+        "from": "0x5e6022Ca0CF2a615aceBcE717b207a37Bad087fE",
+        "gasEstimate": 21000,
+        "gasLimit": 21000,
+        "gasLimitSource": "estimate",
+        "gasPrice": null,
+        "gasUsed": 21000,
+        "journal": "/tmp/zwt-demo-edb80dix/sends-11155111-0x5e6022ca0cf2a615acebce717b207a37bad087fe.jsonl",
+        "key": "demo",
+        "l1Fee": null,
+        "maxFeePerGas": "2000000001",
+        "maxGasCost": "0.000042000000021",
+        "maxPriorityFeePerGas": "1",
+        "nativeBalance": "0.02",
+        "nonce": 0,
+        "pendingCount": 0,
+        "pendingNonces": [],
+        "pendingRange": null,
+        "shortfall": [],
+        "signerDecoded": {
+          "action": {
+            "kind": "native-transfer",
+            "to": "0x1111111111111111111111111111111111111111",
+            "value": "1000000000000000"
+          },
+          "chainId": 11155111,
+          "gasLimit": 21000,
+          "maxGasPrice": "2000000001",
+          "nonce": 0,
+          "to": "0x1111111111111111111111111111111111111111",
+          "value": "1000000000000000"
+        },
+        "status": "success",
+        "success": true,
+        "sufficientFunds": true,
+        "symbol": "ETH",
+        "to": "0x1111111111111111111111111111111111111111",
+        "toNickname": "dev-service",
+        "txHash": "0x505f351b431113de51bb0096cb059567aacfb66d8d4cf86c0ffdb9ff8c02e331",
+        "type": "eip1559"
+      }
+    },
+    {
+      "argv": [
+        "tx",
+        "--chain",
+        "sepolia",
+        "0x505f351b431113de51bb0096cb059567aacfb66d8d4cf86c0ffdb9ff8c02e331",
+        "--json"
+      ],
+      "exitCode": 0,
+      "result": {
+        "blockNumber": 1,
+        "chain": "sepolia",
+        "explorerUrl": "https://sepolia.etherscan.io/tx/0x505f351b431113de51bb0096cb059567aacfb66d8d4cf86c0ffdb9ff8c02e331",
+        "found": true,
+        "from": "0x5e6022Ca0CF2a615aceBcE717b207a37Bad087fE",
+        "gasUsed": 21000,
+        "nonce": 0,
+        "status": "mined",
+        "success": true,
+        "symbol": "ETH",
+        "to": "0x1111111111111111111111111111111111111111",
+        "txHash": "0x505f351b431113de51bb0096cb059567aacfb66d8d4cf86c0ffdb9ff8c02e331",
+        "value": "0.001",
+        "valueRaw": "1000000000000000"
+      }
+    },
+    {
+      "argv": [
+        "transfer",
+        "--chain",
+        "sepolia",
+        "--to",
+        "@dev-service",
+        "--amount",
+        "0.006",
+        "--wait",
+        "--json"
+      ],
+      "exitCode": 1,
+      "result": {
+        "chain": "sepolia",
+        "counterparty": "0x1111111111111111111111111111111111111111",
+        "error": "refusing to sign: per-transaction native value cap exceeded on sepolia",
+        "errorCode": "WHITELIST_DENIED"
+      }
+    },
+    {
+      "argv": [
+        "balance",
+        "--chain",
+        "sepolia",
+        "--json"
+      ],
+      "exitCode": 0,
+      "result": {
+        "address": "0x5e6022Ca0CF2a615aceBcE717b207a37Bad087fE",
+        "balance": "0.018978999999979",
+        "chain": "sepolia",
+        "decimals": 18,
+        "key": "demo",
+        "raw": "18978999999979000",
+        "symbol": "ETH",
+        "verified": true,
+        "verifiedBy": "session"
+      }
+    },
+    {
+      "argv": [
+        "lock",
+        "--json"
+      ],
+      "exitCode": 0,
+      "result": {
+        "locked": true,
+        "stopped": [
+          34846
+        ],
+        "wasUnlocked": true
+      }
+    }
+  ],
+  "scenes": [
+    {
+      "at": 8.455,
+      "label": "01 / HUMAN: fund a dedicated wallet; unlock one session"
+    },
+    {
+      "at": 11.861,
+      "label": "02 / AGENT WORKFLOW: inspect funds and preview the payment"
+    },
+    {
+      "at": 17.959,
+      "label": "03 / AGENT WORKFLOW: send and verify, without another password"
+    },
+    {
+      "at": 24.065,
+      "label": "04 / POLICY: an over-limit request is refused before signing"
+    },
+    {
+      "at": 27.119,
+      "label": "05 / REPORT: account for the spend, fee and remaining allocation"
+    },
+    {
+      "at": 34.167,
+      "label": "06 / HUMAN CONTROL: end the session"
+    }
+  ],
+  "provisioning": {
+    "initialWei": "20000000000000000",
+    "nativeCap": "0.005 ETH per transaction",
+    "recipient": "0x1111111111111111111111111111111111111111",
+    "funding": "anvil_setBalance; valueless local ETH"
+  },
+  "report": {
+    "task": "local development payment fixture",
+    "payment": "0.001 ETH",
+    "gasFeeETH": "0.000021000000021",
+    "remainingETH": "0.018978999999979",
+    "confirmedTransactions": 1,
+    "deniedRequests": 1,
+    "txHash": "0x505f351b431113de51bb0096cb059567aacfb66d8d4cf86c0ffdb9ff8c02e331",
+    "provenance": "example script combines CLI JSON and local RPC receipt; not a built-in report command"
+  },
+  "duration": 37.261,
+  "binaryVersion": "zwallet 0.1.0 (dev unknown)",
+  "anvilVersion": "anvil Version: 1.7.1"
+}
