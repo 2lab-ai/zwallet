@@ -297,12 +297,11 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 .get("duplicateSends")
                 .and_then(serde_json::Value::as_array)
                 .map_or(0, Vec::len);
-            let verdict = |allowed: bool| if allowed { "OVERRIDE" } else { "blocked" };
             values.push((
                 format!(
                     "pending {pending} {} | repeats {repeats} {}",
-                    verdict(state.options.allow_pending),
-                    verdict(state.options.allow_duplicate)
+                    guard_verdict(pending, state.options.allow_pending),
+                    guard_verdict(repeats as u64, state.options.allow_duplicate)
                 ),
                 if pending > 0 || repeats > 0 {
                     WARNING

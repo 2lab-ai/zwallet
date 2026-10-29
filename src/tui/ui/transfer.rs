@@ -361,17 +361,9 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                         "NO"
                     },
                     pending,
-                    if review.options().allow_pending {
-                        "OVERRIDE"
-                    } else {
-                        "blocked"
-                    },
+                    guard_verdict(pending, review.options().allow_pending),
                     repeats,
-                    if review.options().allow_duplicate {
-                        "OVERRIDE"
-                    } else {
-                        "blocked"
-                    }
+                    guard_verdict(repeats as u64, review.options().allow_duplicate)
                 ))),
                 if pending > 0 || repeats > 0 || !review.sufficient_funds() {
                     WARNING

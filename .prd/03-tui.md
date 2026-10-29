@@ -954,7 +954,8 @@ and one rule covers every one of them.
 contract (from the checked list), the calldata, the value and the nonce, and shows zwallet's own
 decode of the unsigned transaction (`tx::decode_unsigned`, chains/evm/tx.rs:378); confirm follows
 the same exact-intent rule. Like the transfer review it shows the send guards' verdicts before
-the nickname is asked for, `pending N blocked|OVERRIDE | repeats N blocked|OVERRIDE`, so `p` and
+the nickname is asked for, `pending N <verdict> | repeats N <verdict>`, each `clear` (nothing to
+block), `blocked` (something, no override) or `OVERRIDE` (both reviews alike), so `p` and
 `d` are chosen knowingly (added 2026-10-30, D3). The repeat key is the CLI `invoke`'s (chain,
 kind, contract, value, token; `send_summary`, wallet/send.rs): another calldata to the same
 contract with the same value is a repeat in both. A message's review shows the whole message in rule 4's message block

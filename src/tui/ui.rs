@@ -241,6 +241,16 @@ fn data_pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>)
     }
 }
 
+/// A send guard's verdict on a review (pending or repeat): `clear` with nothing to block,
+/// `blocked` with something and no override, `OVERRIDE` once the human overrode it.
+fn guard_verdict(count: u64, overridden: bool) -> &'static str {
+    match (overridden, count) {
+        (true, _) => "OVERRIDE",
+        (false, 0) => "clear",
+        (false, _) => "blocked",
+    }
+}
+
 fn draw_lines(
     frame: &mut Frame,
     area: Rect,
