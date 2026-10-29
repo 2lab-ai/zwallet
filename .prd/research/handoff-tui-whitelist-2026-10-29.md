@@ -104,3 +104,22 @@ Evidence: /tmp/zwallet-h14-pty-first-run.log, /tmp/zwallet-h14-t45-second-run.lo
 Final parent gate passed: Rust 1.95.0 fmt, locked all-target strict Clippy and
 full suite **709 passed, 0 failed, 13 explicit live-test skips**. All 13 PTY
 cases passed again within this whole gate. Full log: /tmp/zwallet-h14-final-full-gate.log.
+
+## Final macOS CI warm-up synchronization repair — 2026-10-29
+
+CI 40857743153 passed Linux but failed the macOS combined warm/send/edit/re-warm
+PTY. Its old wait accepted password-verified and signing bars before the password
+worker completed: a previous password pin persists through locking, and a fresh
+Status can observe the daemon before Checked. Input during Checking is correctly
+ignored, leaving the fixture waiting on the wrong screen after its premature key.
+
+A deterministic public-App event-order regression reproduced the false readiness
+condition, then passed with the same predicate now used by the PTY: actual Wallet
+panel, fresh balances, normal input hint and both verification/signing bars. Product
+code and timeouts are unchanged. The failed actual PTY passed directly in 11.41 s,
+and the renewed Rust 1.95.0 fmt, strict locked all-target Clippy and complete debug
+suite passed: **710 passed, 0 failed, 13 ignored**. All 13 actual PTY cases passed
+again. Logs: `/tmp/zwallet-h14-warm-sync-pty.log` and
+`/tmp/zwallet-h14-warm-sync-full-gate.log`. The final combined tree uses its
+history-enabled Wallet hint with the same event-order regression. Fresh final-head
+CI follows this commit; the earlier failed CI is not counted as green.

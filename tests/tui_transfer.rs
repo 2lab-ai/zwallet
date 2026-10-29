@@ -122,6 +122,199 @@ fn bar(frame: &Frame) -> (&str, &str) {
     let len = frame.rows.len();
     (&frame.rows[len - 2], &frame.rows[len - 1])
 }
+fn warmup_complete(frame: &Frame) -> bool {
+    // A previous password pin survives locking. Status can observe the new daemon before
+    // Checked finishes, so verified/signing bars alone can still accompany "checking...".
+    // Only the completed password worker opens Wallet and restores its normal input hint.
+    bar(frame).0.contains("verified by password")
+        && bar(frame).1.starts_with("signing (agent too) until ")
+        && frame.rows[1].starts_with("+ wallet ")
+        && contains(frame, "Ethereum balances")
+        && frame.rows[frame.rows.len() - 3].trim_end()
+            == "a all networks  c chain  r refresh  L lock  q quit  ? actions"
+}
+
+mod warmup_sync {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
+    use zwallet::core::time::{rfc3339_utc, unix_secs};
+    use zwallet::tui::actions::Tab;
+    use zwallet::tui::app::{App, Effect, Key, Msg, PasswordState};
+    use zwallet::tui::{style, term::FilteredBackend, text::Source, ui};
+    use zwallet::wallet::{self, KeyRow, Keys, Serving, StatusView, Trust};
+
+    // The same visible frame predicate drives the real PTY and this deterministic event-order
+    // regression. No wallet, password, daemon, RPC, timer, or subprocess is involved here.
+    fn frame(app: &App) -> Frame {
+        let mut terminal = Terminal::new(FilteredBackend::new(TestBackend::new(80, 24))).unwrap();
+        let mut placed = Vec::new();
+        terminal.draw(|f| placed = ui::draw(f, app)).unwrap();
+        assert_eq!(terminal.backend().replaced(), 0);
+        let buffer = terminal.backend().inner().buffer();
+        let styles: Vec<_> = style::ALL
+            .iter()
+            .map(|style| {
+                let mut cell = Cell::default();
+                cell.set_style(*style);
+                cell.style()
+            })
+            .collect();
+        for cell in &buffer.content {
+            assert_eq!(cell.symbol().len(), 1);
+            assert!(cell.symbol().bytes().all(|b| (0x20..=0x7e).contains(&b)));
+            assert!(styles.contains(&cell.style()));
+        }
+        for p in placed {
+            let budget = match p.outside.source() {
+                Source::WhitelistName | Source::KeyName | Source::RpcHost => 32,
+                Source::Quantity => 78,
+                Source::TransactionHash => 66,
+                Source::Address => 42,
+                Source::Expiry | Source::Home => 64,
+                Source::Detail => 72,
+                Source::Input | Source::Error | Source::Warning => 512,
+            };
+            assert!(p.outside.text().len() <= budget);
+            assert!(p.outside.text().bytes().all(|b| (0x20..=0x7e).contains(&b)));
+            assert!(p.area.right() <= 80 && p.area.bottom() <= 24);
+            assert!(
+                p.area.height == 1
+                    || (p.outside.source() == Source::Error && (1..=7).contains(&p.area.height))
+            );
+            if p.area.height == 1 {
+                assert_eq!(usize::from(p.area.width), p.outside.text().len());
+            }
+            let shown = (p.area.y..p.area.bottom())
+                .flat_map(|y| (p.area.x..p.area.right()).map(move |x| buffer[(x, y)].symbol()))
+                .collect::<String>();
+            assert!(shown.starts_with(p.outside.text()));
+            assert!(shown[p.outside.text().len()..].bytes().all(|b| b == b' '));
+        }
+        Frame {
+            rows: (0..24)
+                .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect(),
+            stray: Vec::new(),
+            pending: String::new(),
+        }
+    }
+
+    fn keys() -> Keys {
+        Keys {
+            active: "main".into(),
+            rows: vec![KeyRow {
+                name: "main".into(),
+                index: 0,
+                address: Some(PAYEE.into()),
+                active: true,
+            }],
+            trust: Trust::Locked,
+        }
+    }
+    fn status(locked: bool) -> StatusView {
+        StatusView {
+            configured: true,
+            locked,
+            daemon_pids: if locked { vec![] } else { vec![4242] },
+            other_daemon_pids: vec![],
+            serving: (!locked).then(|| Serving {
+                pid: 4242,
+                expires_at: Some(rfc3339_utc(unix_secs(std::time::SystemTime::now()) + 600)),
+                whitelist: Value::Null,
+            }),
+            active: Some("main".into()),
+            address: Some((Some(PAYEE.into()), Trust::Locked)),
+        }
+    }
+    fn checked(app: &mut App) {
+        app.update(Msg::Checked(Ok((
+            wallet::Opened {
+                keys: keys().rows,
+                active: "main".into(),
+                warning: None,
+                anchor: Ok(None),
+                salted: false,
+            },
+            Err("fixture has no checked list".into()),
+        ))));
+    }
+
+    #[test]
+    fn warmup_waits_for_checked_wallet_after_status_reports_signing() {
+        let mut app = App::new(
+            &wallet::net_with(chains::find("ethereum").unwrap(), "http://127.0.0.1:1"),
+            Duration::from_secs(3600),
+        );
+        app.update(Msg::Keys(app.generation(), Ok(keys())));
+        app.update(Msg::Status(app.generation(), Ok(status(true))));
+        assert_eq!(
+            app.update(Msg::Key(Key::Enter)),
+            vec![Effect::PrepareUnlock]
+        );
+        app.update(Msg::Prepared(Ok(())));
+        app.update(Msg::PasswordSubmitted);
+        checked(&mut app);
+        assert!(app.pinned("main"));
+
+        // A whitelist edit has stopped the first session, but its password pin persists.
+        app.update(Msg::Keys(app.generation(), Ok(keys())));
+        app.update(Msg::Status(app.generation(), Ok(status(true))));
+        app.update(Msg::Key(Key::Char('u')));
+        for c in "10m".chars() {
+            app.update(Msg::Key(Key::Char(c)));
+        }
+        assert_eq!(
+            app.update(Msg::Key(Key::Enter)),
+            vec![Effect::PrepareDuration(Duration::from_secs(600))]
+        );
+        app.update(Msg::Prepared(Ok(())));
+        app.update(Msg::PasswordSubmitted);
+        assert_eq!(app.password_state(), PasswordState::Checking);
+
+        // The daemon starts before the worker finishes its local password check. A Tick's
+        // Status result can arrive here first, making both former readiness bars true.
+        app.update(Msg::Status(app.generation(), Ok(status(false))));
+        let checking = frame(&app);
+        assert!(bar(&checking).0.contains("verified by password"));
+        assert!(bar(&checking).1.starts_with("signing (agent too) until "));
+        assert!(contains(&checking, "checking..."));
+        assert!(
+            !warmup_complete(&checking),
+            "signing bars do not finish the password worker"
+        );
+        assert!(app.update(Msg::Key(Key::Char('1'))).is_empty());
+        assert_eq!(app.password_state(), PasswordState::Checking);
+
+        checked(&mut app);
+        assert_eq!(app.password_state(), PasswordState::Idle);
+        assert_eq!(app.tab(), Tab::Wallet);
+        // Wait for the wallet's fresh data too, not a stale pane from before the check.
+        assert!(!warmup_complete(&frame(&app)));
+        app.update(Msg::Keys(app.generation(), Ok(keys())));
+        app.update(Msg::Status(app.generation(), Ok(status(false))));
+        app.update(Msg::Balances(
+            app.generation(),
+            "main".into(),
+            Ok(wallet::ChainBalances {
+                chain: chains::find("ethereum").unwrap(),
+                key: "main".into(),
+                address: PAYEE.into(),
+                trust: Trust::Session,
+                native: chains::Balance {
+                    symbol: "ETH".into(),
+                    decimals: 18,
+                    raw: U256::from(10).pow(U256::from(18)),
+                },
+                tokens: vec![],
+                activated: None,
+                warning: None,
+            }),
+        ));
+        assert!(warmup_complete(&frame(&app)));
+        app.update(Msg::Key(Key::Char('1')));
+        assert_eq!(app.tab(), Tab::Keys);
+    }
+}
 fn wait(tui: &mut PtyChild, text: &str) -> Frame {
     tui.wait_frame(WAIT, |f| contains(f, text))
 }
@@ -151,10 +344,7 @@ fn start_and_warm(home: &Home, node: &Node, from: &str) -> PtyChild {
     tui.send(b"\r");
     wait(&mut tui, "Wallet password:");
     tui.send(format!("{PW}\r").as_bytes());
-    tui.wait_frame(WAIT, |f| {
-        bar(f).0.contains("verified by password")
-            && bar(f).1.starts_with("signing (agent too) until ")
-    });
+    tui.wait_frame(WAIT, warmup_complete);
     assert_eq!(home.run(&["status", "--json"]).ok()["locked"], false);
     assert_eq!(home.run(&["list", "--json"]).ok()["active"], "main");
     tui
@@ -378,10 +568,7 @@ fn t2_t6_t7_pty_warm_send_then_whitelist_edit_stops_all_and_requires_new_warmup(
     tui.send(b"10m\r");
     wait(&mut tui, "Wallet password:");
     tui.send(format!("{PW}\r").as_bytes());
-    tui.wait_frame(WAIT, |f| {
-        bar(f).0.contains("verified by password")
-            && bar(f).1.starts_with("signing (agent too) until ")
-    });
+    tui.wait_frame(WAIT, warmup_complete);
     tui.send(b"1");
     tui.wait_frame(WAIT, |f| {
         contains(f, "* main ") && bar(f).0.contains("verified by password")
