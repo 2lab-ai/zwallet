@@ -689,11 +689,11 @@ fn mock_explorer() -> (String, Arc<AtomicU64>) {
     (url, count)
 }
 
-/// Fix 12: the Wallet tab's history on ethereum reads the explorer named by
+/// The Wallet tab's history on ethereum reads the explorer named by
 /// `ZWALLET_EXPLORER_ETHEREUM`, never the public Blockscout. HTTPS_PROXY points at a closed
 /// loopback port, so a build that ignored the override still could not reach a public server.
 #[test]
-fn t12_pty_wallet_history_reads_the_explorer_override_not_a_public_server() {
+fn explorer_override_pty_wallet_history_reads_it_not_a_public_server() {
     let _exclusive = common::exclusive();
     let home = Home::new();
     let created = home.create("main", &[]);
@@ -722,9 +722,9 @@ fn t12_pty_wallet_history_reads_the_explorer_override_not_a_public_server() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let frame = tui.wait_frame(WAIT, |f| contains(f, "ethereum:"));
-    assert_eq!(
-        requests.load(Ordering::SeqCst),
-        2,
+    // Two requests per history load (transactions, token transfers); a reload may add more.
+    assert!(
+        requests.load(Ordering::SeqCst) >= 2,
         "the override got no history request:\n{}",
         frame.rows.join("\n")
     );
