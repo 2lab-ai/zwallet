@@ -3,8 +3,8 @@
 [Back to README](../README.md) · [Command reference](commands.md) · [Development](development.md)
 
 This page is for people deciding whether zwallet fits their workflow and contributors
-checking what still needs to be built. Reviewed on 2026-10-30 against the integration
-of the TUI v2 and Tron handoffs (#35, #37–#49) with main `2440ef2`.
+checking what still needs to be built. Reviewed on 2026-10-30 against main `599bde9`
+(PR #51: the TUI v2 and Tron handoffs #35 and #37–#49), shipped to preview 2026.10.29.2134.
 “Implemented” means a reachable code path exists in this source revision; it
 does not mean every published binary includes it or every public RPC is reachable.
 
@@ -36,7 +36,10 @@ implementation does not make the corresponding TUI workflow implemented.
 | Tron terminal wallet | T-address receive, TRX/USDT balances with activation/owner warnings, immutable fee review and exact nickname confirmation, expiration status and bare64 hash lookup. No Tron contract tools or replacements. Incoming transfers are not indexed. | [Tron state](../src/tui/app/transfer/tron.rs), [App/mock tests](../tests/tron_tui.rs), [lookup tests](../tests/tron_history.rs), [gate receipt](../.prd/v0-2-tui/h18-tron-tui-receipt.md) |
 | TUI wallet/key creation | First-wallet form and `n` for another key, optional timed unlock, locally verified addresses and active-key update; first-wallet password confirmation, backup reminder and `B` CLI pointer. Recovery phrases never enter a TUI message. | [creation state](../src/tui/app/create.rs), [worker](../src/tui/create_runtime.rs), [receipt](../.prd/research/handoff-tui-create-ui-2026-10-29.md) |
 | Terminal contract and message tools | ABI reads, checked-contract invokes with signature/raw calldata, immutable message review and typed confirmation, arbitrary-token read-only balances, and invoke speed-up/cancel/retry. | [tools API](../src/wallet/tools.rs), [tools state](../src/tui/app/tools.rs), [tool tests](../tests/tool_wallet.rs), [replacement integration](../tests/replacement_review.rs) |
-| TUI coverage | `zwallet tui` has a path for every CLI function in the [coverage matrix](../.prd/03-tui.md#coverage-matrix): all 55 menu actions have handlers, and a row that does not apply to the selected chain (EVM tools or replacement on Tron, Tron rows on EVM) says so. Password-verified family addresses stay pinned for the TUI lifetime. The recovery phrase and QR codes stay in the CLI (`B` and `Q` point there). Owner acceptance on a preview build is still to come. | [action table](../src/tui/actions.rs), [state](../src/tui/app.rs), [terminal tests](../tests/tui.rs), [work units](../.prd/v0-2-tui/units.md) |
+| TUI coverage | `zwallet tui` has a path for every CLI function in the [coverage matrix](../.prd/03-tui.md#coverage-matrix): all 55 menu actions have handlers, and a row that does not apply to the selected chain (EVM tools or replacement on Tron, Tron rows on EVM) says so. Password-verified family addresses stay pinned for the TUI lifetime. The recovery phrase and QR codes stay in the CLI (`B` and `Q` point there). Shipped to preview 2026.10.29.2134 (PR #51); the real-terminal acceptance on that preview passes every TUI row of the matrix at 120x40 and 80x24 ([receipts](../.prd/v0-2-tui/loop.done.md)). | [action table](../src/tui/actions.rs), [state](../src/tui/app.rs), [terminal tests](../tests/tui.rs), [work units](../.prd/v0-2-tui/units.md) |
+
+**Pending, owner only:** the owner's own acceptance of the TUI and the Tron send on preview
+2026.10.29.2134, and the funded mainnet TRX/USDT send (TR23).
 
 ## Planned features
 

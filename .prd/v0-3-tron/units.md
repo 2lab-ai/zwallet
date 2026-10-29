@@ -52,7 +52,7 @@ excluded. The EVM modules these mirror measure, code + tests (`src/chains/evm/`,
   every request body. Its clock is the head block it serves; tests set it apart from the local
   clock.
 - No test searches for anything at gate time; every vector is fixed in the test.
-- The gate of [`loop.md`](loop.md) §Build facts, then an outside review, then merge.
+- The gate of [`loop.done.md`](loop.done.md) R1 (Build facts), then an outside review, then merge.
 
 | Work item | Scope | Closes | PR | Est. lines (information) |
 |---|---|---|---|---|

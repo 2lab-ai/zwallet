@@ -1,6 +1,9 @@
 # Review hardening
 
-Status: in-progress, 2026-10-29. Implemented on the review branch; not shipped or merged.
+Status: **shipped** (PR #29, merged 2026-10-29 as 99fff4e; CI 40814597506 Linux/macOS pass at
+its head 21b3a8c). This page is the as-built contract of R1–R6, not a future target. #26 and #27
+stay design-only ([`08-cumulative-budget-design.md`](08-cumulative-budget-design.md),
+[`09-policy-freshness-design.md`](09-policy-freshness-design.md)).
 
 ## Problem and goals
 

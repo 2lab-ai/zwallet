@@ -75,3 +75,26 @@ Local Linux lint regression repaired. Remote CI remains the mandatory delivery g
 - macOS ARM fmt, strict Clippy and full tests pass: 505 passed, 11 live-RPC tests ignored.
 - The user's correction makes remote CI success on the current PR head part of delivery.
   Push and inspect both platform results; the PR body is the final remote receipt.
+
+## R4 — closed 2026-10-30 (delivery: PR #29 merged)
+
+- result: the delivery gate passed and the owner merged [PR #29](https://github.com/2lab-ai/zwallet/pull/29) on 2026-10-29 (06:17Z) as 99fff4e; [CI 40814597506](https://github.com/2lab-ai/zwallet/actions/runs/40814597506) Linux and macOS success at its head 21b3a8c; #21–#25 and #28 closed completed; #26 and #27 stay open, design only. Recorded at the 2026-10-30 closeout of the TUI and Tron work.
+
+### Closed rows
+
+None: this round was the remote delivery gate, with no ID rows.
+
+### Round section (as it was in loop.md)
+
+Status: local validation complete, 2026-10-29.
+
+Local repair evidence: `validation.txt` and `loop.done.md` R3. The macOS ARM-only
+stdin helper owns its Read import; Rust 1.95.0 strict Clippy passes on both local
+macOS ARM and Linux ARM, and the full macOS suite passes.
+
+Delivery gate: Linux and macOS CI must both succeed for the current head of
+[PR #29](https://github.com/2lab-ai/zwallet/pull/29). Inspect and resolve failures;
+record the successful run and head in the PR body before reporting completion.
+This local snapshot is not a substitute for that remote receipt.
+
+Do not merge or deploy. Design issues #26 and #27 remain open by user decision.
