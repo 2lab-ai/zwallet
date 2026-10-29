@@ -1495,3 +1495,35 @@ async fn tools_message_review_survives_a_tab_round_trip_and_signs_once() {
     tool_jobs(&mut app, effects, f.dir.path()).await;
     assert_eq!(daemon.received.lock().unwrap().len(), 1);
 }
+
+/// Round-2 audit: a review left open while the chain changes elsewhere is dropped on return,
+/// and the screen says so instead of showing an empty menu.
+#[tokio::test]
+async fn tools_review_dropped_by_a_chain_change_says_so_on_return() {
+    let mut f = Fixture::new(true);
+    f.router();
+    let node = Node::new("ethereum");
+    let (signer, _) = TxSigner::new(f.dir.path(), false);
+    let mut app = opened_app(&f, &node);
+    let effects = app.update(Msg::Key(Key::Char('d')));
+    tool_jobs(&mut app, effects, f.dir.path()).await;
+    app.update(Msg::Key(Key::Enter));
+    paste(&mut app, "0x414bf389");
+    app.update(Msg::Key(Key::Enter));
+    let effects = app.update(Msg::Key(Key::Enter));
+    tool_jobs(&mut app, effects, f.dir.path()).await;
+    assert_eq!(app.tools().stage, ToolStage::InvokeReview);
+    app.update(Msg::Key(Key::Char('2')));
+    app.update(Msg::Key(Key::Char('c')));
+    app.update(Msg::Key(Key::Down));
+    app.update(Msg::Key(Key::Enter));
+    assert_ne!(app.chain().key, "ethereum");
+    app.update(Msg::Key(Key::Char('6')));
+    assert_eq!(app.tools().stage, ToolStage::Menu);
+    assert!(
+        screen(&app).contains("the open review was for another key, chain or RPC"),
+        "{}",
+        screen(&app)
+    );
+    assert_eq!(signer.count(), 0);
+}

@@ -325,7 +325,14 @@ impl App {
             self.net().rpc_url.clone(),
         );
         if self.tools.context.as_ref() != Some(&context) {
+            let dropped = self.tools.stage != Stage::Menu;
             self.tools_reset();
+            if dropped {
+                // Never a silent dead end: the review belonged to another key, chain or RPC.
+                self.tools.notice = Some(Outside::detail(
+                    "the open review was for another key, chain or RPC; nothing was signed",
+                ));
+            }
         }
         Vec::new()
     }
@@ -551,11 +558,17 @@ impl App {
         if self.tools.field.is_some() {
             return Some(self.tools_input(super::navigation::input(key)));
         }
+        // A tab key leaves the review where it is, for the return (as the send, replacement and
+        // whitelist reviews stay); confirming re-checks everything before any signature.
+        if self.tools.stage != Stage::Signing
+            && super::navigation::switches_tab(&super::navigation::input(key))
+        {
+            return None;
+        }
         if self.tools.stage != Stage::Signing
             && matches!(
                 key,
-                Key::Char('L' | 'q' | '?' | 'u' | 'V' | 'c' | '1'..='7' | '[' | ']')
-                    | Key::Interrupt
+                Key::Char('L' | 'q' | '?' | 'u' | 'V' | 'c') | Key::Interrupt
             )
         {
             self.tools_reset();
