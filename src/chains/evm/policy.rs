@@ -26,32 +26,7 @@ use crate::core::whitelist::{EntryKind, Whitelist};
 use alloy::hex;
 use alloy::primitives::{Address, U256};
 
-/// Why a wallet without a whitelist refuses: its first edit creates one.
-pub const NO_WHITELIST: &str = "this wallet has no whitelist yet; the first `zwallet whitelist add \
-                                <nick> <addr> --chains <chain>` creates it";
-
-/// The command that lets `sign-message` sign.
-pub const MESSAGE_SIGNING_COMMAND: &str = "zwallet whitelist allow-message-signing on";
-
-/// What a human runs when the list cannot be trusted: it shows whether it verifies, and why not.
-pub const VERIFY_COMMAND: &str = "zwallet whitelist list --verify";
-
-/// The list a signature is checked against.
-#[derive(Debug)]
-pub enum ListView<'a> {
-    /// A list that verified against the sealed anchor (the daemon), or the unverified list the CLI
-    /// explains a dry-run with.
-    Usable(&'a Whitelist),
-    /// This wallet has no whitelist yet (wallet.json seals no anchor). Only a native transfer to
-    /// the signing key's own address is signed, under the built-in fee cap. Refusals name the edit
-    /// that would allow the request; that first edit creates the list.
-    NoList,
-    /// There is a list or an anchor, but nothing that can be trusted, and why: it does not
-    /// verify, cannot be read (in time), or the sealed anchor is malformed. Nothing is signed,
-    /// self-transfers included. Refusals name no edit (one would rebuild the list around whatever
-    /// the request asks for); they point to [`VERIFY_COMMAND`].
-    Unusable(String),
-}
+pub use crate::chains::policy::{ListView, MESSAGE_SIGNING_COMMAND, NO_WHITELIST, VERIFY_COMMAND};
 
 /// Decides one decoded unsigned transaction against the list. `Ok(())` = may sign.
 ///
@@ -360,7 +335,10 @@ fn check_fee(
 
 /// The action table (`.prd/04-whitelist.md` §Daemon enforcement).
 fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Result<(), Denial> {
-    let chain_id = config(chain).chain_id;
+    let chain_id = match config(chain) {
+        Ok(c) => c.chain_id,
+        Err(e) => return Err(Denial::never(&target(action), e.message)),
+    };
     match action {
         Action::NativeTransfer { to, .. } => payee(list, chain, to),
         Action::TransferCall { token, to, .. } => {
@@ -486,7 +464,7 @@ fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Resu
 /// `to` must be an address entry that covers `chain`.
 fn payee(list: &Whitelist, chain: &Chain, to: &Address) -> std::result::Result<(), Denial> {
     let addr = to.to_checksum(None);
-    if list.payee(&addr, chain.key).is_some() {
+    if list.payee(&addr, chain.key, true).is_some() {
         return Ok(());
     }
     Err(match list.by_address(&addr) {
@@ -574,7 +552,9 @@ mod tests {
         gas: u64,
         max_fee: u64,
     ) -> DecodedUnsigned {
-        let chain_id = crate::chains::evm::config(find(chain).unwrap()).chain_id;
+        let chain_id = crate::chains::evm::config(find(chain).unwrap())
+            .unwrap()
+            .chain_id;
         let t = UnsignedEvmTx {
             chain_id,
             nonce: 3,
@@ -692,7 +672,9 @@ mod tests {
     /// A legacy (EIP-155) transaction on `chain`.
     fn legacy(chain: &str, to: &str, value: u64, gas: u64, price: u64) -> DecodedUnsigned {
         let t = UnsignedEvmTx {
-            chain_id: crate::chains::evm::config(find(chain).unwrap()).chain_id,
+            chain_id: crate::chains::evm::config(find(chain).unwrap())
+                .unwrap()
+                .chain_id,
             nonce: 0,
             gas_limit: gas,
             fees: EvmFees::Legacy {
@@ -825,6 +807,13 @@ mod tests {
     }
 
     /// A chain zwallet has no built-in fee cap for (every real chain has one).
+    /// The EVM chains among [`crate::chains::CHAINS`]: what this policy decides.
+    fn evm_chains() -> impl Iterator<Item = &'static Chain> {
+        crate::chains::CHAINS
+            .iter()
+            .filter(|c| crate::chains::evm::config(c).is_ok())
+    }
+
     const NO_DEFAULT: Chain = Chain {
         key: "nodefault",
         name: "No default",
@@ -841,7 +830,7 @@ mod tests {
     #[test]
     fn self_transfers_are_always_under_a_fee_cap() {
         // No list yet: the compiled-in default cap applies to the key's own address.
-        for c in crate::chains::CHAINS {
+        for c in evm_chains() {
             let gas = 100_000;
             let at = default_cap(c.key) / gas;
             let v = ListView::NoList;
@@ -935,12 +924,12 @@ mod tests {
         verified.validate(&registry::WHITELIST_RULES).unwrap();
         let untrusted = ListView::Unusable("whitelist.json: does not verify".into());
         let (mut cases, mut allowed, mut fee_refused, mut fee_refused_to_others) = (0, 0, 0, 0);
-        let mut chains: Vec<&Chain> = crate::chains::CHAINS.iter().collect();
+        let mut chains: Vec<&Chain> = evm_chains().collect();
         chains.push(&NO_DEFAULT);
         for c in chains {
             let gas = 100_000;
             let cap = default_fee_cap(c.key).map_or(GWEI, |d| d.to::<u64>() / gas);
-            let id = crate::chains::evm::config(c).chain_id;
+            let id = crate::chains::evm::config(c).unwrap().chain_id;
             let mut targets = vec![SIGNER, BOB, ROUTER, USDC_ETH, WETH_BASE];
             targets.extend(
                 registry::TOKENS

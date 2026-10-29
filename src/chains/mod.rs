@@ -1,12 +1,14 @@
 //! Chain registry and the chain-family boundary.
 //!
-//! A family (EVM today; Solana and TON later) owns key derivation from the shared seed, signing,
+//! A family (EVM and Tron today) owns key derivation from the shared seed, signing,
 //! and its chain I/O. The split is deliberate: [`FamilyKeys`] is everything the unlock daemon may
 //! do (no network), [`ChainFamily`] adds what the one-shot CLI does over RPC.
 
 pub mod evm;
+pub mod policy;
+pub mod tron;
 
-use crate::chains::evm::policy::ListView;
+use crate::chains::policy::ListView;
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
 use crate::core::store;
@@ -22,16 +24,72 @@ use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Default signed fee caps: wei on EVM, sun on Tron. Historical field names stay stable.
+pub const DEFAULT_FEE_CAPS_WEI: &[(&str, &str)] = &[
+    ("ethereum", "3000000000000000"),
+    ("base", "500000000000000"),
+    ("arbitrum", "500000000000000"),
+    ("optimism", "500000000000000"),
+    ("polygon", "2000000000000000000"),
+    ("bsc", "3000000000000000"),
+    ("avalanche", "50000000000000000"),
+    ("sepolia", "10000000000000000"),
+    ("tron", "30000000"),
+];
+
+/// Family-aware facts used to validate a list before it is signed.
+pub const WHITELIST_RULES: crate::core::whitelist::ChainRules =
+    crate::core::whitelist::ChainRules {
+        chain_known: |key| CHAINS.iter().any(|c| c.key == key),
+        family_of: |key| {
+            CHAINS
+                .iter()
+                .find(|c| c.key == key)
+                .map_or("", |c| c.family.name())
+        },
+        is_registry_token: is_registry_token_body,
+        registry_token_on_chain: registry_token_body_on_chain,
+        default_fee_caps_wei: DEFAULT_FEE_CAPS_WEI,
+    };
+
+fn tron_payload(body: &str) -> Option<[u8; 21]> {
+    let body = body.parse::<alloy::primitives::Address>().ok()?;
+    let mut payload = [0u8; 21];
+    payload[0] = tron::address::PREFIX;
+    payload[1..].copy_from_slice(body.as_slice());
+    Some(payload)
+}
+
+fn is_registry_token_body(body: &str) -> bool {
+    body.parse::<alloy::primitives::Address>()
+        .is_ok_and(|a| evm::registry::is_token_anywhere(&a))
+        || tron_payload(body).is_some_and(|a| tron::registry::is_token(&a))
+}
+
+fn registry_token_body_on_chain(key: &str, body: &str) -> bool {
+    let Some(chain) = CHAINS.iter().find(|c| c.key == key) else {
+        return false;
+    };
+    match chain.family {
+        Family::Evm(c) => body
+            .parse::<alloy::primitives::Address>()
+            .is_ok_and(|a| evm::registry::lookup(c.chain_id, &a).is_some()),
+        Family::Tron(_) => tron_payload(body).is_some_and(|a| tron::registry::is_token(&a)),
+    }
+}
+
 /// Family plus its family-specific configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     Evm(evm::EvmChain),
+    Tron(tron::TronChain),
 }
 
 impl Family {
     pub fn name(&self) -> &'static str {
         match self {
             Family::Evm(_) => "evm",
+            Family::Tron(_) => "tron",
         }
     }
 
@@ -39,6 +97,7 @@ impl Family {
     pub fn keys(&self) -> &'static dyn FamilyKeys {
         match self {
             Family::Evm(_) => &evm::Evm,
+            Family::Tron(_) => &tron::Tron,
         }
     }
 }
@@ -73,6 +132,13 @@ const fn evm_chain(
         }),
     }
 }
+
+/// Keyless history endpoints explicitly supported by this build. No user input changes them.
+pub const EXPLORERS: &[(&str, &str)] = &[
+    ("ethereum", "https://eth.blockscout.com"),
+    ("optimism", "https://explorer.optimism.io"),
+    ("sepolia", "https://eth-sepolia.blockscout.com"),
+];
 
 pub const CHAINS: &[Chain] = &[
     evm_chain(
@@ -131,6 +197,18 @@ pub const CHAINS: &[Chain] = &[
         "https://avalanche-c-chain-rpc.publicnode.com",
         "https://snowtrace.io",
     ),
+    // Tron mainnet (`.prd/05-tron.md` §Family and registry row): TRX has 6 decimals (sun).
+    Chain {
+        key: "tron",
+        name: "Tron",
+        symbol: "TRX",
+        decimals: 6,
+        family: Family::Tron(tron::TronChain {
+            default_rpc: "https://tron-rpc.publicnode.com",
+            explorer: "https://tronscan.org/#",
+            genesis: tron::MAINNET_GENESIS,
+        }),
+    },
     evm_chain(
         "sepolia",
         "Sepolia",
@@ -172,6 +250,7 @@ impl Chain {
     pub fn default_rpc(&self) -> &'static str {
         match &self.family {
             Family::Evm(c) => c.default_rpc,
+            Family::Tron(c) => c.default_rpc,
         }
     }
 
@@ -186,22 +265,25 @@ impl Chain {
             .to_string()
     }
 
-    /// Family-specific chain id for display (`1` for Ethereum).
+    /// Family-specific chain id for display (`1` for Ethereum, 728126428 for Tron).
     pub fn chain_id_json(&self) -> Value {
         match &self.family {
             Family::Evm(c) => Value::from(c.chain_id),
+            Family::Tron(c) => Value::from(c.chain_id()),
         }
     }
 
     pub fn explorer_tx_url(&self, tx_hash: &str) -> String {
         match &self.family {
             Family::Evm(c) => format!("{}/tx/{tx_hash}", c.explorer),
+            Family::Tron(c) => format!("{}/transaction/{tx_hash}", c.explorer),
         }
     }
 
     pub fn explorer_address_url(&self, address: &str) -> String {
         match &self.family {
             Family::Evm(c) => format!("{}/address/{address}", c.explorer),
+            Family::Tron(c) => format!("{}/address/{address}", c.explorer),
         }
     }
 }
@@ -630,9 +712,9 @@ pub struct SignedTx {
 pub enum Broadcast {
     /// The node accepted it and answered with the transaction's own hash.
     Accepted,
-    /// The send call failed or answered another hash (`warning` says how), but the node reports
-    /// the transaction by its own hash, so it was sent. `rpc_tx_hash` is the other hash, if the
-    /// node answered one.
+    /// The send call failed but the node reports the computed hash, or the node explicitly
+    /// accepted the send while answering another hash (`warning` explains which).
+    /// `rpc_tx_hash` is the other hash, if the node answered one.
     KnownDespite {
         warning: String,
         rpc_tx_hash: Option<String>,
@@ -656,7 +738,7 @@ impl SendLock {
         let path = home.join(format!(
             "nonce-{}-{}.lock",
             chain.chain_id_json(),
-            address.to_ascii_lowercase()
+            journal_address(chain, address)
         ));
         match store::try_lock_exclusive(&path)? {
             Some(file) => Ok(Self { _file: file }),
@@ -710,6 +792,12 @@ const SEND_KINDS: [&str; 3] = ["transfer", "token-transfer", "invoke"];
 /// A journal entry's `txHash` when it is a transaction hash (32 bytes of hex), as alloy writes
 /// one; anything else in that field is not shown, nor made into a lookup command.
 fn entry_hash(e: &Value) -> Option<String> {
+    if e["chain"] == "tron" {
+        return e["txHash"]
+            .as_str()
+            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(str::to_ascii_lowercase);
+    }
     e["txHash"]
         .as_str()
         .and_then(|h| h.parse::<alloy::primitives::B256>().ok())
@@ -718,7 +806,8 @@ fn entry_hash(e: &Value) -> Option<String> {
 
 /// `0x` and 40 hex digits: an address as zwallet writes one.
 fn is_address(s: &str) -> bool {
-    s.len() == 42 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
+    (s.len() == 42 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit()))
+        || tron::address::is_address(s)
 }
 
 /// `<digits>[.<digits>] <symbol>`, as zwallet writes a journal amount (`format_units`, a space,
@@ -749,6 +838,7 @@ fn is_amount_value(s: &str) -> bool {
 /// time re-rendered from the instant it names, never the file's bytes.
 struct EntryText {
     hash: String,
+    expires: Option<String>,
     nonce: String,
     ts: String,
     kind: String,
@@ -766,7 +856,20 @@ impl EntryText {
                 .map_or_else(|| INVALID.to_string(), str::to_string)
         };
         Self {
-            hash: entry_hash(e).unwrap_or_else(|| "?".to_string()),
+            hash: entry_hash(e).unwrap_or_else(|| {
+                if e["chain"] == "tron" {
+                    INVALID.to_string()
+                } else {
+                    "?".to_string()
+                }
+            }),
+            expires: (e["chain"] == "tron").then(|| {
+                e["expiresAt"]
+                    .as_str()
+                    .and_then(tron::send::parse_expiration)
+                    .map(tron::send::expires_at)
+                    .unwrap_or_else(|| INVALID.to_string())
+            }),
             nonce: e["nonce"]
                 .as_u64()
                 .map_or_else(|| "?".to_string(), |n| n.to_string()),
@@ -810,6 +913,17 @@ fn entries_shown(entries: &[Value], text: impl Fn(&EntryText) -> (String, usize)
 /// A journal entry as a message names it: `0xab.. (nonce 6, sent 2026-10-20T04:05:06Z: transfer
 /// 0.01 ETH to 0x..)`, and how many of its characters are the journal's.
 fn describe_entry(e: &EntryText) -> (String, usize) {
+    if let Some(expires) = &e.expires {
+        let line = format!(
+            "{} (expiresAt {expires}, sent {}: {} {} to {})",
+            e.hash, e.ts, e.kind, e.value, e.to
+        );
+        let size = [&e.hash, expires, &e.ts, &e.kind, &e.value, &e.to]
+            .iter()
+            .map(|s| s.chars().count())
+            .sum();
+        return (line, size);
+    }
     let line = format!(
         "{} (nonce {}, sent {}: {} {} to {})",
         e.hash, e.nonce, e.ts, e.kind, e.value, e.to
@@ -857,12 +971,37 @@ pub struct SendSummary {
 }
 
 /// Where [`SendJournal`] keeps `address`'s sends on `chain` in `home`.
+fn journal_address(chain: &Chain, address: &str) -> String {
+    match chain.family {
+        Family::Tron(_) => tron::address::parse(address)
+            .map(|a| tron::address::hex41(&a))
+            .unwrap_or_else(|_| "invalid-address".into()),
+        Family::Evm(_) => address.to_ascii_lowercase(),
+    }
+}
 fn journal_path(home: &Path, chain: &Chain, address: &str) -> PathBuf {
     home.join(format!(
         "sends-{}-{}.jsonl",
         chain.chain_id_json(),
-        address.to_ascii_lowercase()
+        journal_address(chain, address)
     ))
+}
+
+/// One shaped local history claim, never an authorization or an authenticated signing intent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalRow {
+    pub chain: &'static str,
+    pub tx_hash: String,
+    pub from: String,
+    pub to: String,
+    pub nonce: Option<u64>,
+    /// Milliseconds since epoch for expiring transactions (Tron); absent for EVM.
+    pub expiration_ms: Option<u64>,
+    pub timestamp: u64,
+    pub kind: &'static str,
+    pub amount_raw: Option<U256>,
+    pub value: String,
+    pub token: Option<String>,
 }
 
 impl SendJournal {
@@ -872,6 +1011,114 @@ impl SendJournal {
             chain,
             address: address.to_string(),
         }
+    }
+
+    /// Known expiration from this account's journal. The file is an observation aid, not policy.
+    pub fn expiration(&self, hash: &str) -> Option<u64> {
+        self.entries().ok()?.iter().rev().find_map(|e| {
+            (e["chain"] == self.chain.key && entry_hash(e).as_deref() == Some(hash))
+                .then(|| {
+                    e["expiresAt"]
+                        .as_str()
+                        .and_then(tron::send::parse_expiration)
+                })
+                .flatten()
+        })
+    }
+
+    /// Shaped history from the bounded journal tail, newest first. Wrong-chain/owner and
+    /// malformed records are ignored; file failures remain errors. Symbols are chosen from
+    /// this build's registry/chain, never from the locally mutable human-readable value.
+    pub fn recent(&self) -> Result<Vec<JournalRow>> {
+        if matches!(self.chain.family, Family::Tron(_)) {
+            return Ok(self
+                .entries()?
+                .iter()
+                .rev()
+                .filter_map(|entry| tron::journal::row(self.chain, &self.address, entry))
+                .collect());
+        }
+        use alloy::primitives::Address;
+        let owner = self.address.parse::<Address>().ok();
+        let mut rows = Vec::new();
+        for e in self.entries()?.iter().rev() {
+            let shaped = || -> Option<JournalRow> {
+                if e["chain"].as_str()? != self.chain.key {
+                    return None;
+                }
+                let hash = e["txHash"].as_str()?;
+                if hash.len() != 66 || !hash.starts_with("0x") {
+                    return None;
+                }
+                let addr = |key: &str| {
+                    let s = e[key].as_str()?;
+                    is_address(s).then(|| s.parse::<Address>().ok()).flatten()
+                };
+                let from = addr("from")?;
+                if Some(from) != owner {
+                    return None;
+                }
+                let to = addr("to")?;
+                let kind = *SEND_KINDS
+                    .iter()
+                    .find(|&&k| Some(k) == e["kind"].as_str())?;
+                let token = if kind == "token-transfer" {
+                    let a = addr("token")?;
+                    Some(evm::registry::lookup(
+                        self.chain.chain_id_json().as_u64()?,
+                        &a,
+                    )?)
+                } else {
+                    None
+                };
+                let (symbol, decimals) = token
+                    .map_or((self.chain.symbol, self.chain.decimals), |t| {
+                        (t.symbol, t.decimals)
+                    });
+                let amount_raw = match e.get("amountRaw") {
+                    Some(Value::String(raw))
+                        if !raw.is_empty()
+                            && raw.len() <= AMOUNT_DIGITS
+                            && raw.bytes().all(|b| b.is_ascii_digit()) =>
+                    {
+                        U256::from_str_radix(raw, 10).ok()
+                    }
+                    None | Some(Value::Null) => {
+                        let value = e["value"].as_str()?;
+                        if !is_amount_value(value) {
+                            return None;
+                        }
+                        let (number, old_symbol) = value.split_once(' ')?;
+                        (old_symbol == symbol)
+                            .then(|| crate::core::amount::parse_units(number, decimals).ok())
+                            .flatten()
+                    }
+                    _ => return None,
+                }?;
+                Some(JournalRow {
+                    chain: self.chain.key,
+                    tx_hash: entry_hash(e)?,
+                    from: from.to_checksum(None),
+                    to: to.to_checksum(None),
+                    nonce: Some(e["nonce"].as_u64()?),
+                    expiration_ms: None,
+                    timestamp: e["ts"]
+                        .as_str()
+                        .and_then(crate::core::time::parse_rfc3339_utc)?,
+                    kind,
+                    amount_raw: Some(amount_raw),
+                    value: format!(
+                        "{} {symbol}",
+                        crate::core::amount::format_units(amount_raw, decimals)
+                    ),
+                    token: token.map(|t| t.address.to_string()),
+                })
+            };
+            if let Some(row) = shaped() {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 
     pub fn path(&self) -> &Path {
@@ -1067,7 +1314,10 @@ impl SendJournal {
     /// is an error that says nothing was signed: without it a repeat would go unnoticed.
     pub fn recent_duplicates(&self, send: &SendSummary, now: u64) -> Result<Vec<Value>> {
         let same_addr = |v: &Value, want: Option<&str>| match (v.as_str(), want) {
-            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            (Some(a), Some(b)) => match self.chain.family {
+                Family::Tron(_) => a == b,
+                Family::Evm(_) => a.eq_ignore_ascii_case(b),
+            },
             (None, None) => v.is_null(),
             _ => false,
         };
@@ -1119,6 +1369,10 @@ impl SendJournal {
     /// The refusal of a send without `--nonce` that repeats `duplicates` (from
     /// [`Self::recent_duplicates`], not empty): nothing was signed.
     pub fn duplicate_error(&self, duplicates: Vec<Value>) -> WalletError {
+        if matches!(self.chain.family, Family::Tron(_)) {
+            return WalletError::validation(format!("this looks like a repeat of a recent send: {}; if it was included, this is a second payment; look it up first (`zwallet tx --chain tron <txid>`). Only for an intended second payment, pass --allow-duplicate; nothing was signed", self.entries_text(&duplicates)))
+                .with_detail("duplicateSends", inert_entries(&duplicates)).with_detail("journal", self.display());
+        }
         let shown = entries_shown(&duplicates, |e| {
             let line = format!("{} (nonce {}, sent {})", e.hash, e.nonce, e.ts);
             let len = [&e.hash, &e.nonce, &e.ts]
@@ -1191,6 +1445,9 @@ impl SendRecord {
             "value": send.value,
             "kind": send.kind,
         });
+        if signed.nonce.is_none() {
+            entry.as_object_mut().unwrap().remove("nonce");
+        }
         if let Some(raw) = &send.amount_raw {
             entry["amountRaw"] = json!(raw);
         }
@@ -1497,6 +1754,8 @@ pub trait ChainFamily: FamilyKeys {
 pub fn require_contract_calls(chain: &Chain) -> Result<()> {
     let supported = match &chain.family {
         Family::Evm(_) => evm::Evm.supports_contract_calls(),
+        // No `call` or `invoke` on Tron (`.prd/05-tron.md` §Non-goals).
+        Family::Tron(_) => false,
     };
     if supported {
         Ok(())
@@ -2562,19 +2821,58 @@ mod tests {
     }
 
     #[test]
-    fn every_evm_chain_shares_one_address() {
+    fn every_evm_chain_shares_one_address_and_tron_has_its_own() {
         let seed = Seed::from_phrase(Zeroizing::new(TEST_MNEMONIC.into())).unwrap();
-        let addrs = derive_addresses(&seed, 0).unwrap();
-        assert_eq!(addrs.len(), CHAINS.len());
-        for a in addrs.values() {
-            assert_eq!(a, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+        for (index, evm, tron) in [
+            (
+                0,
+                "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
+            ),
+            (
+                1,
+                "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+            ),
+        ] {
+            let addrs = derive_addresses(&seed, index).unwrap();
+            assert_eq!(addrs.len(), CHAINS.len());
+            for (chain, a) in &addrs {
+                let want = match find(chain).unwrap().family {
+                    Family::Evm(_) => evm,
+                    Family::Tron(_) => tron,
+                };
+                assert_eq!(a, want, "{chain}");
+            }
         }
-        let second = derive_addresses(&seed, 1).unwrap();
-        assert!(
-            second
-                .values()
-                .all(|a| a == "0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
-        );
         assert!(require_contract_calls(find("ethereum").unwrap()).is_ok());
+        let e = require_contract_calls(find("tron").unwrap()).unwrap_err();
+        assert_eq!(e.code, ErrorCode::CapabilityUnsupported);
+    }
+
+    #[test]
+    fn the_tron_row() {
+        let tron = find("tron").unwrap();
+        assert_eq!(
+            (tron.name, tron.symbol, tron.decimals, tron.family.name()),
+            ("Tron", "TRX", 6, "tron")
+        );
+        assert_eq!(tron.chain_id_json(), Value::from(728126428u64));
+        assert_eq!(tron.default_rpc(), "https://tron-rpc.publicnode.com");
+        assert_eq!(tron.rpc_env_var(), "ZWALLET_RPC_TRON");
+        assert!(!tron.is_testnet());
+        assert_eq!(
+            tron.explorer_address_url("TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6"),
+            "https://tronscan.org/#/address/TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6"
+        );
+        // EVM code never runs on it.
+        assert_eq!(
+            evm::config(tron).unwrap_err().code,
+            ErrorCode::ValidationError
+        );
+        // After Avalanche, before the testnet.
+        let keys: Vec<&str> = CHAINS.iter().map(|c| c.key).collect();
+        let at = keys.iter().position(|k| *k == "tron").unwrap();
+        assert_eq!((keys[at - 1], keys[at + 1]), ("avalanche", "sepolia"));
     }
 }

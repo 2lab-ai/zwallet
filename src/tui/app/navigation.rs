@@ -36,6 +36,7 @@ impl fmt::Debug for RpcChoice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldPurpose {
     Duration,
+    TxHash,
     Rpc(&'static str),
 }
 pub enum Popup {
@@ -67,6 +68,7 @@ pub struct Navigation {
     pub home: Outside,
     pub allow_ptrace_scope_0: bool,
     nets: BTreeMap<&'static str, Net>,
+    pub(super) family_reads: BTreeMap<(String, &'static str), (String, Trust)>,
     family_pins: BTreeMap<(String, &'static str), String>,
     rpc_request: u64,
     pending_rpc: Option<u64>,
@@ -91,6 +93,7 @@ impl Navigation {
             allow_ptrace_scope_0: false,
             nets,
             family_pins: BTreeMap::new(),
+            family_reads: BTreeMap::new(),
             rpc_request: 0,
             pending_rpc: None,
         }
@@ -123,6 +126,11 @@ const IMPLEMENTED: &[ActionId] = &[
     ActionId::AllowPending,
     ActionId::AllowDuplicate,
     ActionId::GasCap,
+    ActionId::Tx,
+    ActionId::TronAddress,
+    ActionId::TronBalance,
+    ActionId::TronTransfer,
+    ActionId::TronTx,
 ];
 
 impl App {
@@ -177,6 +185,7 @@ impl App {
             })
     }
     pub(super) fn check_family_pin(&self, key: &str, chain: &Chain, address: &str) -> Result<()> {
+        super::addresses::validate_family_address(chain, address)?;
         if let Some(pinned) = self.family_pin(key, chain) {
             let matches = if chain.family.name() == "evm" {
                 pinned.eq_ignore_ascii_case(address)
@@ -294,7 +303,18 @@ impl App {
                 }
                 match result {
                     Ok(read) => {
-                        if let Err(error) = self.check_family_pin(&key, read.chain, &read.address) {
+                        if read.chain.key != self.chain.key || read.key != key {
+                            self.fail_pane(WalletError::validation(
+                                "balance reply belongs to another chain or key",
+                            ));
+                            return std::ops::ControlFlow::Continue(Vec::new());
+                        }
+                        if let Err(error) = self.observe_family_address(
+                            &key,
+                            read.chain,
+                            &read.address,
+                            read.trust.clone(),
+                        ) {
                             self.fail_pane(error);
                             return std::ops::ControlFlow::Continue(Vec::new());
                         }
@@ -319,6 +339,23 @@ impl App {
                                 ))),
                                 _ => {}
                             }
+                        }
+                        if read.activated == Some(false) {
+                            lines.push(Outside::detail("not activated"));
+                        }
+                        if let Some(warning) = read.warning {
+                            lines.push(Outside::detail(if warning.contains("do not fund") {
+                                "Account warning: do not fund; Tab then j/k for details"
+                            } else {
+                                "Account warning: Tab then j/k for details"
+                            }));
+                            let warning = Outside::warning(&warning);
+                            let chars: Vec<_> = warning.text().chars().collect();
+                            lines.extend(
+                                chars.chunks(76).take(7).map(|chunk| {
+                                    Outside::warning(&chunk.iter().collect::<String>())
+                                }),
+                            );
                         }
                         if lines.len() == 1 {
                             lines.push(Outside::detail("No non-zero balance on this network."));
@@ -353,12 +390,23 @@ impl App {
                         let mut lines = Vec::new();
                         for network in read.networks {
                             let text = match network.balances {
-                                Ok((native, tokens)) => {
+                                Ok(wallet::read::NetworkRead {
+                                    native,
+                                    tokens,
+                                    activated,
+                                    warning,
+                                }) => {
                                     let mut amounts = vec![format!(
                                         "{} {}",
                                         format_units(native.raw, native.decimals),
                                         native.symbol
                                     )];
+                                    if activated == Some(false) {
+                                        amounts.push("not activated".into());
+                                    }
+                                    if let Some(warning) = warning {
+                                        amounts.push(format!("warning: {warning}"));
+                                    }
                                     let mut any = !native.raw.is_zero();
                                     for token in tokens {
                                         match token.raw {
@@ -411,6 +459,9 @@ impl App {
                 match result {
                     Ok(read) => {
                         for row in &read.rows {
+                            if row.error.is_some() {
+                                continue;
+                            }
                             if let Err(error) = self.check_family_pin(&key, row.chain, &row.address)
                             {
                                 self.fail_pane(error);
@@ -420,6 +471,15 @@ impl App {
                         let mut lines = Vec::new();
                         if let Some(row) = read.rows.iter().find(|r| r.chain.key == self.chain.key)
                         {
+                            if let Err(error) = self.observe_family_address(
+                                &key,
+                                row.chain,
+                                &row.address,
+                                read.trust.clone(),
+                            ) {
+                                self.fail_pane(error);
+                                return std::ops::ControlFlow::Continue(Vec::new());
+                            }
                             lines.push(Outside::detail(&format!("{} / {}", self.chain.name, key)));
                             lines.push(Outside::address(&row.address));
                             let trust = if matches!(read.trust, Trust::Unverified(Some(_))) {
@@ -435,10 +495,11 @@ impl App {
                         }
                         lines.push(Outside::detail("Addresses by network:"));
                         for row in read.rows {
-                            lines.push(Outside::detail(&format!(
-                                "{}: {}",
-                                row.chain.key, row.address
-                            )));
+                            let value = match row.error {
+                                Some(error) => format!("error: {}", wallet::brief(&error.message)),
+                                None => row.address,
+                            };
+                            lines.push(Outside::detail(&format!("{}: {}", row.chain.key, value)));
                         }
                         if let Some(warning) = read.trust.warning() {
                             lines.push(Outside::detail(&format!("warning: {warning}")));
@@ -496,16 +557,21 @@ impl App {
             return Vec::new();
         };
         self.nav.lines = Pane::Loading;
-        vec![match self.nav.tab {
+        let mut work = vec![match self.nav.tab {
             Tab::Wallet if self.nav.every => Effect::LoadEveryBalances(self.generation, key),
             Tab::Wallet => Effect::LoadBalances(self.generation, key),
             Tab::Receive => Effect::LoadAddresses(self.generation, key),
             _ => return Vec::new(),
-        }]
+        }];
+        work.extend(self.load_history_owner());
+        work
     }
 
     pub(super) fn navigation_key(&mut self, key: Key) -> Option<Vec<Effect>> {
         if let Some(work) = self.popup_input(input(key)) {
+            return Some(work);
+        }
+        if let Some(work) = self.history_key(key) {
             return Some(work);
         }
         if let Key::Char(c @ '1'..='7') = key {
@@ -524,6 +590,22 @@ impl App {
             Key::Char('?') | Key::Char(':') => {
                 self.nav.popup_scroll = 0;
                 self.nav.popup = Some(Popup::Menu(Menu::new()));
+                Some(Vec::new())
+            }
+            Key::Char('/') if self.nav.tab == Tab::Wallet => {
+                if self.nav.every {
+                    return Some(self.run_action(ActionId::Tx));
+                }
+                self.nav.popup = Some(Popup::Field {
+                    purpose: FieldPurpose::TxHash,
+                    field: Field::new(
+                        if matches!(self.chain.family, crate::chains::Family::Tron(_)) {
+                            Kind::TronTxHash
+                        } else {
+                            Kind::TxHash
+                        },
+                    ),
+                });
                 Some(Vec::new())
             }
             Key::Char('c') => {
@@ -661,6 +743,14 @@ impl App {
             Popup::Field { purpose, mut field } => {
                 match field.edit(input) {
                     Edit::Submit => match purpose {
+                        FieldPurpose::TxHash => {
+                            if self.history.scope.is_some() {
+                                return Some(self.open_transaction(field.value()));
+                            }
+                            self.nav.popup_notice = Some(Outside::detail(
+                                "wait for the selected key's address, then press Enter",
+                            ));
+                        }
                         FieldPurpose::Duration => match parse_duration(field.value()) {
                             Ok(ttl) => {
                                 return Some(self.begin_password(PasswordPurpose::Unlock(ttl)));
@@ -721,6 +811,24 @@ impl App {
     }
 
     fn run_action(&mut self, action: ActionId) -> Vec<Effect> {
+        let tron_alias = match action {
+            ActionId::TronAddress => Some(ActionId::Address),
+            ActionId::TronBalance => Some(ActionId::Balance),
+            ActionId::TronTransfer => Some(ActionId::Transfer),
+            ActionId::TronTx => Some(ActionId::Tx),
+            _ => None,
+        };
+        let action = if let Some(action) = tron_alias {
+            // The Tron coverage rows use the explicit chain picker and ordinary tabs.
+            // An alias never changes the endpoint or the key behind the human's review.
+            if !self.on_tron() {
+                self.nav.popup_notice = Some(Outside::detail("select Tron with c"));
+                return Vec::new();
+            }
+            action
+        } else {
+            action
+        };
         if let Some(work) = self.transfer_action(action) {
             return work;
         }
@@ -756,6 +864,22 @@ impl App {
             ActionId::Chains | ActionId::Rpc => {
                 self.chain_picker();
                 return Vec::new();
+            }
+            ActionId::Tx => {
+                self.nav.tab = Tab::Wallet;
+                self.nav.every = false;
+                let work = self.reload();
+                self.nav.popup = Some(Popup::Field {
+                    purpose: FieldPurpose::TxHash,
+                    field: Field::new(
+                        if matches!(self.chain.family, crate::chains::Family::Tron(_)) {
+                            Kind::TronTxHash
+                        } else {
+                            Kind::TxHash
+                        },
+                    ),
+                });
+                return work;
             }
             ActionId::Version => {
                 self.nav.popup = Some(Popup::Lines {

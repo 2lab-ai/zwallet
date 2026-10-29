@@ -3,7 +3,9 @@
 //! pane is wrapped there, 03-tui.md §Display integrity rule 4); the chrome is ASCII; every style
 //! is one of `style`'s. [`draw`] returns where it put each outside value, for the tests.
 
+pub(crate) mod history;
 mod transfer;
+mod tron_transfer;
 
 use crate::tui::actions::{Availability, Tab};
 use crate::tui::app::{
@@ -116,6 +118,8 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         transfer::pane(frame, pane, app, &mut placed);
     } else if app.tab() == Tab::Keys {
         keys_pane(frame, pane, app, &mut placed);
+    } else if app.tab() == Tab::Wallet && !app.navigation().every {
+        history::draw(frame, pane, app, &mut placed);
     } else {
         data_pane(frame, pane, app, &mut placed);
     }
@@ -157,7 +161,9 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
     } else {
         let words = match app.tab() {
             Tab::Keys => "Enter open  V verify  A repair  s active  u unlock  ? actions",
-            Tab::Wallet => "a all networks  c chain  r refresh  L lock  q quit  ? actions",
+            Tab::Wallet => {
+                "Tab focus  j/k  Enter detail  / hash  a networks  c chain  r  ? actions"
+            }
             Tab::Receive => "V verify  Q QR hint  c chain  r refresh  q quit  ? actions",
             Tab::Session => "u unlock  L lock all  r refresh  q quit  ? actions",
             _ => "1 keys  c chain  L lock all  q quit  ? actions",
@@ -232,6 +238,10 @@ fn popup_pane(frame: &mut Frame, area: Rect, app: &App, popup: &Popup, placed: &
             purpose: FieldPurpose::Rpc(_),
             ..
         } => "session RPC endpoint".to_string(),
+        Popup::Field {
+            purpose: FieldPurpose::TxHash,
+            ..
+        } => "transaction hash".to_string(),
         Popup::CheckingRpc => "checking endpoint".to_string(),
         Popup::Error(_) => "refused".to_string(),
         Popup::Lines { title, .. } => title.to_string(),
@@ -332,6 +342,7 @@ fn popup_pane(frame: &mut Frame, area: Rect, app: &App, popup: &Popup, placed: &
         }
         Popup::Field { purpose, field } => {
             let label = match purpose {
+                FieldPurpose::TxHash => "Transaction hash: 0x followed by 64 hexadecimal digits",
                 FieldPurpose::Duration => "Duration, e.g. 10m or 1h:",
                 FieldPurpose::Rpc(_) => "HTTP(S) endpoint; credentials and suffix are hidden:",
             };
@@ -469,19 +480,32 @@ fn keys_pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>)
 /// a key the bar shows verified by session: then it names the other keys and what checks them,
 /// and with no other key it says nothing.
 fn key_note(app: &App, list: &KeyList) -> Option<&'static str> {
-    if list.rows.iter().all(|k| app.pinned(&k.key)) {
+    if list
+        .rows
+        .iter()
+        .all(|k| app.family_pinned(&k.key, app.chain()))
+    {
         return None;
     }
-    if list.rows.iter().any(|k| app.pinned(&k.key)) {
+    if list
+        .rows
+        .iter()
+        .any(|k| app.family_pinned(&k.key, app.chain()))
+    {
         return Some("not verified: other keys; `zwallet list --verify` checks them");
     }
-    match app.status() {
-        Pane::Ready(bar) if bar.trust == Some(TrustLine::Session) => {
-            let verified = bar.key.as_ref().map(Outside::text);
-            let others = list.rows.iter().any(|k| Some(k.name.text()) != verified);
-            others.then_some(OTHER_KEYS)
-        }
-        _ => Some(NOT_VERIFIED),
+    let sessions = list
+        .rows
+        .iter()
+        .filter(|key| {
+            app.displayed_address(&key.key)
+                .is_some_and(|(_, trust)| trust == TrustLine::Session)
+        })
+        .count();
+    if sessions > 0 {
+        (sessions < list.rows.len()).then_some(OTHER_KEYS)
+    } else {
+        Some(NOT_VERIFIED)
     }
 }
 
@@ -507,8 +531,9 @@ fn key_rows(
     {
         let style = if i == selected { SELECTED } else { NORMAL };
         let index = format!(" {:>3}  ", key.index);
-        let address = key.address.as_ref().map_or(1, |a| a.text().len());
-        let verified = if app.pinned(&key.key) {
+        let family_address = app.displayed_address(&key.key).map(|(address, _)| address);
+        let address = family_address.as_ref().map_or(1, |a| a.text().len());
+        let verified = if app.family_pinned(&key.key, app.chain()) {
             " verified"
         } else {
             ""
@@ -532,7 +557,7 @@ fn key_rows(
                 style,
             )
             .text(&index, style);
-        match &key.address {
+        match &family_address {
             Some(address) => row.outside(address, style),
             None => row.text("-", style),
         }
@@ -611,7 +636,13 @@ fn status_bar(frame: &mut Frame, [one, two]: [Rect; 2], app: &App, placed: &mut 
                 .outside(&error.cut(BAR_ERROR), ERROR)
         }
         Pane::Ready(bar) => {
-            key_line(first, app.chain().key, bar, usize::from(one.width)).draw(frame, one, placed);
+            key_line(
+                first,
+                app.chain().key,
+                &app.display_bar(bar),
+                usize::from(one.width),
+            )
+            .draw(frame, one, placed);
             lock_line(app, bar)
         }
     };

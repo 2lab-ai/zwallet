@@ -9,12 +9,13 @@ pub use read::{
 };
 
 pub mod send;
+pub mod tron_send;
 pub use send::{
     CheckedPayee, SendOutput, SendTransferOutcome, TransferInput, TransferOptions, TransferReview,
     parse_fee_ceiling, review_transfer, send_transfer, transfer_payees,
 };
 
-use crate::chains::evm::registry::WHITELIST_RULES;
+use crate::chains::WHITELIST_RULES;
 use crate::chains::{self, Chain, Net, PRIMARY_CHAIN};
 pub use crate::commands::Trust;
 use crate::commands::whitelist::FIRST_ADD;
@@ -379,6 +380,7 @@ pub fn check_password(home: &Path, password: &str, keys: Option<&[&str]>) -> Res
 }
 
 pub struct Repaired {
+    pub added: Vec<store::CacheAddition>,
     pub checked: PasswordCheck,
     /// Public metadata, used only to preserve the CLI's index-warning behavior.
     pub file: WalletFile,
@@ -387,11 +389,15 @@ pub struct Repaired {
 /// The shared address-repair path. It changes only the address cache and retains the sealed
 /// policy. Every returned address is derived from the password-opened seed.
 pub fn repair(home: &Path, password: &str) -> Result<Repaired> {
-    let (unsealed, file, repairs) =
+    let (unsealed, file, repairs, added) =
         store::unlock_repairing(home, password, &chains::derive_addresses)?;
     let mut checked = password_checked(&unsealed, &file, None)?;
     checked.repairs = repairs;
-    Ok(Repaired { checked, file })
+    Ok(Repaired {
+        checked,
+        file,
+        added,
+    })
 }
 
 /// The whitelist the password check verified ([`check_list`]).

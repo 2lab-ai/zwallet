@@ -26,6 +26,16 @@ use zwallet::tui::text::{Outside, Source};
 use zwallet::tui::ui::{self, Placed};
 use zwallet::wallet::{self, KeyRow, Keys, Serving, StatusView, Trust};
 
+fn family_address(chain: &chains::Chain, address: &str) -> String {
+    if matches!(chain.family, chains::Family::Tron(_))
+        && let Ok(body) = chains::evm::parse_address(address)
+    {
+        chains::tron::address::from_body(&body.into_array())
+    } else {
+        address.into()
+    }
+}
+
 type Screen = Terminal<FilteredBackend<TestBackend>>;
 
 /// A `width` x `height` terminal the TUI can only write to through the write point.
@@ -432,8 +442,22 @@ fn line_1_fits_80_columns_for_every_chain_and_every_trust_with_a_32_character_ke
             app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
             let mut status = open_status(now() + 3600);
             status.active = Some(name.clone());
-            status.address = Some((Some(B.into()), trust));
+            status.address = Some((Some(B.into()), trust.clone()));
             app.update(Msg::Status(app.generation(), Ok(status)));
+            // Status is primary-EVM metadata. Tron needs its own current-family observation.
+            let address = family_address(chain, B);
+            if matches!(chain.family, chains::Family::Tron(_)) {
+                app.update(Msg::Address(
+                    app.generation(),
+                    name.clone(),
+                    Ok((address.clone(), trust)),
+                ));
+            }
+            let expected_address = if matches!(chain.family, chains::Family::Tron(_)) {
+                format!("{}...{}", &address[..6], &address[address.len() - 4..])
+            } else {
+                "0x3C44...93BC".into()
+            };
             let (rows, _) = checked_frame(&mut screen(80, 24), &app);
             let line = rows[22].trim_end();
             let case = format!("{} {words:?}", chain.key);
@@ -442,7 +466,7 @@ fn line_1_fits_80_columns_for_every_chain_and_every_trust_with_a_32_character_ke
                 .strip_prefix(&format!("{} | ", chain.key))
                 .unwrap_or_else(|| panic!("{case}: {line:?}"));
             let (shown_name, rest) = rest
-                .split_once(" 0x3C44...93BC | ")
+                .split_once(&format!(" {expected_address} | "))
                 .unwrap_or_else(|| panic!("{case}: {line:?}"));
             assert!(
                 whole_or_cut(shown_name, &name, BAR_NAME_MIN),
@@ -1727,7 +1751,8 @@ mod navigation {
                 .iter()
                 .map(|chain| wallet::AddressRow {
                     chain,
-                    address: address.into(),
+                    error: None,
+                    address: family_address(chain, address),
                 })
                 .collect(),
         }
@@ -1816,6 +1841,8 @@ mod navigation {
             app.generation(),
             "a".into(),
             Ok(wallet::ChainBalances {
+                activated: None,
+                warning: None,
                 chain: chains::find("ethereum").unwrap(),
                 key: "a".into(),
                 address: A.into(),
@@ -1842,9 +1869,14 @@ mod navigation {
             .enumerate()
             .map(|(i, chain)| wallet::NetworkBalance {
                 chain,
-                address: Some(A.into()),
+                address: Some(family_address(chain, A)),
                 balances: if i < 2 {
-                    Ok((native(1), vec![]))
+                    Ok(wallet::read::NetworkRead {
+                        native: native(1),
+                        tokens: vec![],
+                        activated: None,
+                        warning: None,
+                    })
                 } else {
                     Err(WalletError::rpc("unavailable"))
                 },

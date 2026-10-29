@@ -22,6 +22,7 @@ pub enum Kind {
     Duration,
     EvmAddress,
     TxHash,
+    TronTxHash,
     Selector,
     Calldata,
     Signature,
@@ -41,7 +42,7 @@ impl Kind {
             Self::Amount | Self::LimitAmount | Self::Bump => 128,
             Self::LimitBytes => 10,
             Self::EvmAddress => 42,
-            Self::TxHash => 66,
+            Self::TxHash | Self::TronTxHash => 66,
             Self::Selector => 10,
             Self::Calldata => 4096,
             Self::Signature => 256,
@@ -84,6 +85,14 @@ impl Kind {
                         .strip_prefix("0x")
                         .is_some_and(|s| s.bytes().all(|b| b.is_ascii_hexdigit()))
             }
+            Self::TronTxHash => {
+                value.strip_prefix("0x").unwrap_or(value).len() <= 64
+                    && value
+                        .strip_prefix("0x")
+                        .unwrap_or(value)
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit())
+            }
             Self::WordCount => ["12", "15", "18", "21", "24"]
                 .iter()
                 .any(|n| n.starts_with(value)),
@@ -108,6 +117,7 @@ impl Kind {
             Self::EvmAddress | Self::TxHash | Self::Selector | Self::TronAddress => {
                 value.len() == self.max_len()
             }
+            Self::TronTxHash => chains::tron::lookup::parse_hash(value).is_ok(),
             Self::Calldata => value.len() >= 2 && value.len().is_multiple_of(2),
             Self::Duration => parse_duration(value).is_ok(),
             Self::WordCount => ["12", "15", "18", "21", "24"].contains(&value),

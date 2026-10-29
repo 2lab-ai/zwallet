@@ -1,6 +1,7 @@
 //! The transfer flow holds its reviewed intent until a separate nickname confirmation.
 //! Workers own requests; UI effects carry only a unique id, so cloning an effect cannot send twice.
 use super::*;
+pub mod tron;
 use crate::chains::{self, ChainFamily, evm::Evm};
 use crate::core::{amount::format_units, error::ErrorCode, whitelist};
 use crate::tui::actions::ActionId;
@@ -13,6 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
+use tron::{TronJob, TronMsg, TronTransfer};
 
 pub const SEND_WAIT: Duration = Duration::from_secs(90);
 
@@ -44,11 +46,14 @@ pub enum ReceiptState {
     Success,
     Reverted,
     Unknown,
+    MinedUnknown,
+    ExpiredUnseen,
 }
 #[derive(Debug)]
 pub struct SendStatus {
     pub hash: String,
-    pub nonce: u64,
+    pub nonce: Option<u64>,
+    pub expiration: Option<u64>,
     pub journal: Outside,
     pub state: ReceiptState,
     pub wait: Duration,
@@ -58,6 +63,7 @@ pub struct SendStatus {
 }
 #[derive(Debug)]
 pub enum TransferMsg {
+    Tron(TronMsg),
     Assets(Result<Vec<Asset>>),
     Payees(Result<Vec<CheckedPayee>>),
     Review(Result<Box<TransferReview>>),
@@ -71,6 +77,7 @@ pub enum TransferMsg {
 }
 
 pub struct Transfer {
+    pub tron: TronTransfer,
     pub stage: Stage,
     pub assets: Vec<Asset>,
     pub payees: Vec<CheckedPayee>,
@@ -93,6 +100,7 @@ pub struct Transfer {
 impl Default for Transfer {
     fn default() -> Self {
         Self {
+            tron: TronTransfer::default(),
             stage: Stage::Inactive,
             assets: Vec::new(),
             payees: Vec::new(),
@@ -117,6 +125,7 @@ impl Default for Transfer {
 
 /// Owned work extracted once by the event loop. `run` is also the mock integration-test seam.
 pub enum TransferJob {
+    Tron(TronJob),
     Assets {
         net: Net,
         from: String,
@@ -139,6 +148,7 @@ pub enum TransferJob {
     Receipt {
         net: Net,
         hash: String,
+        expiration: Option<u64>,
         timeout: Duration,
         cancel: tokio::sync::watch::Receiver<bool>,
     },
@@ -150,6 +160,7 @@ fn unchanged(home: &Path, checked: &CheckedList) -> Result<()> {
 impl TransferJob {
     pub async fn run(self, id: u64, home: &Path, tx: &UnboundedSender<Msg>) {
         let event = match self {
+            Self::Tron(job) => job.run(id, home, tx).await,
             Self::Assets { net, from, checked } => {
                 let result = async {
                     unchanged(home, &checked)?;
@@ -175,9 +186,19 @@ impl TransferJob {
                 .await;
                 TransferMsg::Assets(result)
             }
-            Self::Payees { net, checked } => TransferMsg::Payees(
-                unchanged(home, &checked).map(|()| wallet::transfer_payees(&checked, net.chain)),
-            ),
+            Self::Payees { net, checked } => {
+                if matches!(net.chain.family, chains::Family::Tron(_)) {
+                    TransferMsg::Tron(TronMsg::Payees(
+                        unchanged(home, &checked)
+                            .map(|()| wallet::tron_send::tron_transfer_payees(&checked)),
+                    ))
+                } else {
+                    TransferMsg::Payees(
+                        unchanged(home, &checked)
+                            .map(|()| wallet::transfer_payees(&checked, net.chain)),
+                    )
+                }
+            }
             Self::Review {
                 net,
                 checked,
@@ -221,13 +242,25 @@ impl TransferJob {
             Self::Receipt {
                 net,
                 hash,
+                expiration,
                 timeout,
                 mut cancel,
             } => {
                 // The deadline includes connecting to the RPC, not only the polling loop.
                 let deadline = tokio::time::Instant::now().checked_add(timeout);
                 let poll = async {
-                    let future = Evm.wait_for_receipt(&net, &hash, timeout);
+                    let future = async {
+                        match net.chain.family {
+                            chains::Family::Evm(_) => {
+                                Evm.wait_for_receipt(&net, &hash, timeout).await
+                            }
+                            chains::Family::Tron(_) => {
+                                crate::chains::tron::lookup::wait(&net, &hash, expiration, timeout)
+                                    .await
+                                    .map(|v| Some(Value::Object(v)))
+                            }
+                        }
+                    };
                     match deadline {
                         Some(deadline) => tokio::time::timeout_at(deadline, future)
                             .await
@@ -282,12 +315,16 @@ impl App {
         id
     }
     /// Return to an invoke review that changed before signing. No broadcast was started.
-    pub fn return_external_review(&mut self, id: u64) {
+    pub fn return_external_review(&mut self, id: u64) -> Vec<Effect> {
         if self.transfer.active == Some(id) && self.transfer.status.is_none() {
             self.transfer.active = None;
             self.transfer.stage = Stage::Inactive;
             self.nav.tab = Tab::Tools;
+            if std::mem::take(&mut self.transfer.lock_after_send) {
+                return vec![Effect::LockAll];
+            }
         }
+        Vec::new()
     }
     pub fn transfer(&self) -> &Transfer {
         &self.transfer
@@ -357,6 +394,7 @@ impl App {
             }
         }
         self.transfer.context = Some(context);
+        self.transfer.tron = TronTransfer::default();
         self.transfer.review = None;
         self.transfer.draft = None;
         self.transfer.field = None;
@@ -392,6 +430,7 @@ impl App {
         {
             self.checked_list = None;
             self.transfer.payees.clear();
+            self.transfer.tron = TronTransfer::default();
             self.transfer.review = None;
             self.transfer.draft = None;
             self.list_reason = Some(Outside::detail(
@@ -403,6 +442,9 @@ impl App {
         self.transfer.active = None;
     }
     fn review_draft(&mut self) -> Vec<Effect> {
+        if self.on_tron() {
+            return self.review_tron_draft();
+        }
         let (_, _, _, checked) = match self.transfer_ready() {
             Ok(v) => v,
             Err(e) => {
@@ -446,8 +488,12 @@ impl App {
         } else if self.transfer.active != Some(id) {
             return std::ops::ControlFlow::Continue(Vec::new());
         }
-        let send_finished = matches!(&event, TransferMsg::Sent(_));
+        let send_finished = matches!(
+            &event,
+            TransferMsg::Sent(_) | TransferMsg::Tron(TronMsg::Changed(_))
+        );
         let mut work = match event {
+            TransferMsg::Tron(event) => self.tron_transfer_message(event),
             TransferMsg::Assets(Ok(rows)) => {
                 self.transfer.active = None;
                 self.transfer.assets = rows;
@@ -480,7 +526,8 @@ impl App {
             } => {
                 self.transfer.status = Some(SendStatus {
                     hash,
-                    nonce,
+                    nonce: Some(nonce),
+                    expiration: None,
                     journal: Outside::home(&journal.to_string_lossy()),
                     state: ReceiptState::Pending,
                     wait: SEND_WAIT,
@@ -536,6 +583,31 @@ impl App {
             TransferMsg::Receipt(result) => {
                 if let Some(status) = &mut self.transfer.status {
                     status.state = match result {
+                        Ok(Some(receipt))
+                            if matches!(status.net.chain.family, chains::Family::Tron(_)) =>
+                        {
+                            if let Some(hint) = receipt.get("hint").and_then(Value::as_str) {
+                                status.note = Some(Outside::warning(hint));
+                            }
+                            match receipt.get("status").and_then(Value::as_str) {
+                                Some("mined") => {
+                                    match receipt.get("success").and_then(Value::as_bool) {
+                                        Some(true) => ReceiptState::Success,
+                                        Some(false) => ReceiptState::Reverted,
+                                        None => ReceiptState::MinedUnknown,
+                                    }
+                                }
+                                Some("expired-unseen") => ReceiptState::ExpiredUnseen,
+                                _ => {
+                                    if status.note.is_none() {
+                                        status.note = Some(Outside::warning(
+                                            crate::chains::tron::lookup::SECOND_PAYMENT,
+                                        ));
+                                    }
+                                    ReceiptState::Unknown
+                                }
+                            }
+                        }
                         Ok(Some(receipt)) => {
                             match receipt.get("success").and_then(Value::as_bool) {
                                 Some(true) => ReceiptState::Success,
@@ -543,7 +615,14 @@ impl App {
                                 None => ReceiptState::Unknown,
                             }
                         }
-                        Ok(None) => ReceiptState::Unknown,
+                        Ok(None) => {
+                            if matches!(status.net.chain.family, chains::Family::Tron(_)) {
+                                status.note = Some(Outside::warning(
+                                    crate::chains::tron::lookup::SECOND_PAYMENT,
+                                ));
+                            }
+                            ReceiptState::Unknown
+                        }
                         Err(error) => {
                             status.note = Some(Outside::error(&error));
                             ReceiptState::Unknown
@@ -572,6 +651,7 @@ impl App {
         let job = TransferJob::Receipt {
             net: status.net.clone(),
             hash: status.hash.clone(),
+            expiration: status.expiration,
             timeout,
             cancel: receiver,
         };
@@ -613,6 +693,11 @@ impl App {
             return Some(self.transfer_input(super::navigation::input(key)));
         }
         self.transfer.notice = None;
+        if self.on_tron()
+            && let Some(work) = self.tron_transfer_key(key)
+        {
+            return Some(work);
+        }
         let work = match (self.transfer.stage, key) {
             (Stage::Assets | Stage::Payees, Key::Up | Key::Char('k')) => {
                 self.transfer.selected = self.transfer.selected.saturating_sub(1);
@@ -622,7 +707,11 @@ impl App {
                 let len = if self.transfer.stage == Stage::Assets {
                     self.transfer.assets.len()
                 } else {
-                    self.transfer.payees.len()
+                    if self.on_tron() {
+                        self.transfer.tron.payees.len()
+                    } else {
+                        self.transfer.payees.len()
+                    }
                 };
                 self.transfer.selected = (self.transfer.selected + 1).min(len.saturating_sub(1));
                 Vec::new()
@@ -746,6 +835,9 @@ impl App {
         Some(work)
     }
     fn transfer_input(&mut self, input: Input<'_>) -> Vec<Effect> {
+        if self.on_tron() && self.transfer.stage != Stage::Wait {
+            return self.tron_transfer_input(input);
+        }
         let Some(mut field) = self.transfer.field.take() else {
             return Vec::new();
         };
@@ -828,10 +920,12 @@ impl App {
             }
             Stage::Loading => "reading...  q quit  ? actions",
             Stage::Sending => "sending... q quits when done; do not resend  ? actions",
+            Stage::Review if self.on_tron() => "Enter confirm  d allow repeat  Esc edit  ? actions",
             Stage::Review => "Enter confirm  p allow pending  d allow repeat  g fee  ? actions",
             Stage::Payees | Stage::Assets => {
                 "arrows choose  Enter select  Esc back  q quit  ? actions"
             }
+            Stage::Status if self.on_tron() => "w wait longer  2 wallet  q quit  ? actions",
             Stage::Status => "w wait longer  n new payment  2 wallet  q quit  ? actions",
             _ => "V verify  u warm-up  r retry  q quit  ? actions",
         }

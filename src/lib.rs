@@ -8,6 +8,7 @@ pub mod cli;
 pub mod commands;
 pub mod core;
 pub mod daemon;
+pub mod history;
 mod qr;
 pub mod tui;
 pub mod wallet;

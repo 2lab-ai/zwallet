@@ -142,6 +142,16 @@ mod tests {
     }
 
     #[test]
+    fn a_tron_address_is_a_version_3_code_too_and_scans_to_its_exact_case() {
+        // 34 base58 characters, case included: byte mode at level M needs version 3 (29 x 29 =
+        // 841 modules), as an EVM address does (`.prd/05-tron.md` §CLI surface).
+        const TRON: &str = "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6";
+        let rows = modules(&render(TRON, true).unwrap(), true);
+        assert_eq!(rows[0].len(), 29 + 2 * 4);
+        assert_eq!(scan(&rows, true), TRON);
+    }
+
+    #[test]
     fn text_too_long_for_a_code_is_none() {
         assert_eq!(render(&"x".repeat(3000), true), None);
     }

@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 pub mod executable;
+pub mod tron;
 
 use serde_json::Value;
 use std::cell::Cell;
@@ -613,7 +614,37 @@ impl FakeDaemon {
         Self::bind_with_reply(path, bytes)
     }
 
+    /// [`FakeDaemon::answering`] with `result` for every request but an `address` request on
+    /// chain `tron`, which gets the same result with `address` = `tron` and `chain` = `tron`: a
+    /// squatter that answers each chain family with an address of its own shape.
+    pub fn answering_per_family(path: &Path, result: Value, tron: &str) -> Self {
+        let reply = |result: &Value| {
+            let mut r =
+                serde_json::to_vec(&serde_json::json!({ "v": 2, "ok": true, "result": result }))
+                    .unwrap();
+            r.push(b'\n');
+            r
+        };
+        let mut on_tron = result.clone();
+        on_tron["address"] = Value::from(tron);
+        on_tron["chain"] = Value::from("tron");
+        let (evm, tron) = (reply(&result), reply(&on_tron));
+        Self::bind_with(path, move |request| {
+            let asked: Value = serde_json::from_slice(request).unwrap_or(Value::Null);
+            if asked["op"] == "address" && asked["chain"] == "tron" {
+                tron.clone()
+            } else {
+                evm.clone()
+            }
+        })
+    }
+
     fn bind_with_reply(path: &Path, reply: Vec<u8>) -> Self {
+        Self::bind_with(path, move |_| reply.clone())
+    }
+
+    /// Answers each request with what `reply` makes of its bytes.
+    pub fn bind_with(path: &Path, reply: impl Fn(&[u8]) -> Vec<u8> + Send + 'static) -> Self {
         let listener = UnixListener::bind(path).expect("bind fake daemon");
         listener.set_nonblocking(true).unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -627,8 +658,9 @@ impl FakeDaemon {
                         s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                         let mut buf = Vec::new();
                         let _ = s.read_to_end(&mut buf);
+                        let answer = reply(&buf);
                         rx.lock().unwrap().push(buf);
-                        let _ = s.write_all(&reply);
+                        let _ = s.write_all(&answer);
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(5)),
                 }
@@ -752,12 +784,20 @@ static void logev(const char *ev, long n) {
 }
 /* One connection, in its own process: read what the client sends (bounded by SO_RCVTIMEO so a
    client that is slow to send its request or its EOF never blocks us), then answer. */
-static void handle(int s, const char *reply) {
+static void handle(int s, const char *reply, const char *reply_tron) {
   struct timeval to; to.tv_sec = 2; to.tv_usec = 0;
   setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+  /* The request's first 4 KiB, to tell an address request on tron from any other. */
+  char req[4096]; size_t kept = 0;
   char b[1024]; ssize_t n; long got = 0;
-  while ((n = read(s, b, sizeof b)) > 0) got += n;
+  while ((n = read(s, b, sizeof b)) > 0) {
+    got += n;
+    size_t take = (size_t)n < sizeof req - 1 - kept ? (size_t)n : sizeof req - 1 - kept;
+    memcpy(req + kept, b, take); kept += take;
+  }
+  req[kept] = 0;
   logev(n == 0 ? "eof" : "read-stop", got);
+  if (strstr(req, "\"op\":\"address\"") && strstr(req, "\"chain\":\"tron\"")) reply = reply_tron;
   size_t len = strlen(reply), off = 0;
   while (off < len) { ssize_t w = write(s, reply + off, len - off); if (w <= 0) break; off += w; }
   logev("replied", got);
@@ -789,14 +829,21 @@ int main(int argc, char **argv) {
   if (!wl) wl = "null";
   const char *raw = getenv("ATTACKER_REPLY");
   size_t cap = (raw ? strlen(raw) : strlen(exp) + strlen(wl)) + 512;
-  char *reply = malloc(cap);
-  if (!reply) return 4;
-  if (raw) snprintf(reply, cap, "%s\n", raw);
-  else snprintf(reply, cap,
-    "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
-    "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"ethereum\",\"index\":0,"
-    "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n",
-    (int)getpid(), exp, wl);
+  char *reply = malloc(cap), *reply_tron = malloc(cap);
+  if (!reply || !reply_tron) return 4;
+  if (raw) { snprintf(reply, cap, "%s\n", raw); snprintf(reply_tron, cap, "%s\n", raw); }
+  else {
+    snprintf(reply, cap,
+      "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
+      "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"ethereum\",\"index\":0,"
+      "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n",
+      (int)getpid(), exp, wl);
+    snprintf(reply_tron, cap,
+      "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
+      "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"tron\",\"index\":0,"
+      "\"active\":\"main\",\"address\":\"TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C\"}}\n",
+      (int)getpid(), exp, wl);
+  }
   logev("listening", 0);
   for (;;) {
     int s = accept(l, 0, 0);
@@ -805,7 +852,7 @@ int main(int argc, char **argv) {
     /* Each connection is served in its own child, so a client that is slow on one connection
        never keeps us from accepting and answering another. */
     pid_t pid = fork();
-    if (pid == 0) { close(l); handle(s, reply); _exit(0); }
+    if (pid == 0) { close(l); handle(s, reply, reply_tron); _exit(0); }
     close(s);
   }
 }

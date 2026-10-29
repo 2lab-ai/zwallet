@@ -26,7 +26,7 @@ src/
 transfer; sign (in the daemon); broadcast; sign a message. `call`/`invoke` are an EVM capability.
 A family without a capability returns `CAPABILITY_UNSUPPORTED`. Registry rows carry
 `family: Evm` plus EVM config (chainId, default RPC, explorer). Later rows will carry `Solana` or
-`Ton` with their own config. `Tron` ![WIP](https://img.shields.io/badge/status-WIP-yellow) (default RPC, explorer, genesis block id) is planned for v0.3:
+`Ton` with their own config. `Tron` (default RPC, explorer, genesis block id) implements the Tron family:
 [`05-tron.md`](05-tron.md).
 
 **Extension points (not implemented)** ![WIP](https://img.shields.io/badge/status-WIP-yellow): Solana = ed25519 SLIP-0010 `m/44'/501'/0'/0'`.
@@ -42,7 +42,7 @@ seed, so the wallet file and the daemon protocol do not change.
   `keys: [{ name, index, createdAt, addresses: { <chain>: addr } }]` and `active`.
 - **Keys**: a key = an index `i` under the master, assigned in creation order and never reused.
   Each family maps `i` to its own path. EVM uses `m/44'/60'/0'/0/i` (the standard BIP44 Ethereum account order).
-  Solana will use `m/44'/501'/i'/0'` and TON `m/44'/607'/i'`. Tron will use `m/44'/195'/0'/0/i`
+  Solana will use `m/44'/501'/i'/0'` and TON `m/44'/607'/i'`. Tron uses `m/44'/195'/0'/0/i`
   ([`05-tron.md`](05-tron.md) §Derivation). Every command acts on the active key
   unless `--key <name>` is given. `create <name>` on an existing master derives the next index
   through the unlocked daemon, or through a one-off password prompt.
@@ -380,3 +380,7 @@ RPC endpoint precedence: `--rpc` flag, then `ZWALLET_RPC_<KEY>` env, then the de
 See [`06-review-hardening.md`](06-review-hardening.md) for the in-progress validation and
 I/O isolation contracts. Unlock wire framing and progress parsing live in
 `core/protocol/unlock_channel.rs`; the parent retains process identity and lifecycle coordination.
+
+Tron send safety uses the same per-account lock and fsynced journal, with `expiresAt` instead
+of a nonce; see [Tron send safety](05-tron.md#send-safety-without-a-nonce) for broadcast
+classification and the limits of `expired-unseen` observations.

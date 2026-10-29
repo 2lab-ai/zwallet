@@ -9,6 +9,15 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let state = app.transfer();
+    if app.on_tron()
+        && matches!(
+            state.stage,
+            Stage::Payees | Stage::Amount | Stage::Review | Stage::Confirm
+        )
+    {
+        super::tron_transfer::draw(frame, inner, app, placed);
+        return;
+    }
     let row = |frame: &mut Frame,
                y: u16,
                label: &str,
@@ -421,7 +430,16 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                     frame,
                     3,
                     "",
-                    Some(Outside::detail(&format!("Nonce: {}", status.nonce))),
+                    Some(Outside::detail(&match status.nonce {
+                        Some(n) => format!("Nonce: {n}"),
+                        None => format!(
+                            "Expires: {}",
+                            status
+                                .expiration
+                                .map(crate::chains::tron::send::expires_at)
+                                .unwrap_or_else(|| "unknown".into())
+                        ),
+                    })),
                     NORMAL,
                     placed,
                 );
@@ -433,7 +451,14 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                     match status.state {
                         ReceiptState::Pending => "pending; checking the receipt every 3 seconds",
                         ReceiptState::Success => "mined: success",
+                        ReceiptState::Reverted if app.on_tron() => {
+                            "mined: failed (fees may have burned)"
+                        }
                         ReceiptState::Reverted => "mined: reverted",
+                        ReceiptState::MinedUnknown => "mined: execution result unknown",
+                        ReceiptState::ExpiredUnseen => {
+                            "expired-unseen at this node; another node may have it"
+                        }
                         ReceiptState::Unknown => "unknown - run zwallet tx; do not resend blindly",
                     },
                     None,
@@ -458,20 +483,43 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 row(
                     frame,
                     10,
-                    "Speed-up / cancel / retry: in a later version.",
+                    if app.on_tron() {
+                        "Tron has no nonce replacement."
+                    } else {
+                        "Speed-up / cancel / retry: in a later version."
+                    },
                     None,
                     HINT,
                     placed,
                 );
                 if let Some(note) = &status.note {
-                    row(
-                        frame,
-                        12,
-                        "",
-                        Some(note.cut(usize::from(inner.width))),
-                        ERROR,
-                        placed,
-                    );
+                    if app.on_tron() {
+                        let chars: Vec<_> = note.text().chars().collect();
+                        let rows = if state.stage == Stage::Wait { 3 } else { 6 };
+                        for (i, chunk) in chars
+                            .chunks(usize::from(inner.width).max(1))
+                            .take(rows)
+                            .enumerate()
+                        {
+                            row(
+                                frame,
+                                12 + i as u16,
+                                "",
+                                Some(Outside::warning(&chunk.iter().collect::<String>())),
+                                WARNING,
+                                placed,
+                            );
+                        }
+                    } else {
+                        row(
+                            frame,
+                            12,
+                            "",
+                            Some(note.cut(usize::from(inner.width))),
+                            ERROR,
+                            placed,
+                        );
+                    }
                 }
             }
             if state.stage == Stage::Wait {

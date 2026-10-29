@@ -128,6 +128,7 @@ pub enum Requirement {
 pub enum Family {
     Any,
     Evm,
+    Tron,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +182,9 @@ impl Action {
         }
         if self.family == Family::Evm && context.is_tron {
             return Disabled("not supported on Tron");
+        }
+        if self.family == Family::Tron && !context.is_tron {
+            return Disabled("select Tron with c");
         }
         match self.requirement {
             Requirement::FirstWallet if context.has_wallet => {
@@ -295,10 +299,10 @@ pub static ACTIONS: [Action; 55] = [
     action!(Startup, 46, "tui", "start flags", Session, "initial chain and warm-up duration", StartupInfo, Any),
     action!(SelectKey, 47, "--key", "Enter", Keys, "open a key here", Wallet, Any),
     action!(Version, 48, "--version", "?", Session, "version and help", Always, Any),
-    action!(TronAddress, 49, "tron address", "4", Receive, "receive on Tron", OpenKey, Any),
-    action!(TronBalance, 50, "tron balance", "2", Wallet, "TRX and USDT balances", OpenKey, Any),
-    action!(TronTransfer, 51, "tron transfer", "3", Send, "send TRX or USDT", Signing, Any),
-    action!(TronTx, 52, "tron tx", "/", Wallet, "look up a Tron transaction", Always, Any),
+    action!(TronAddress, 49, "tron address", "4", Receive, "receive on Tron", OpenKey, Tron),
+    action!(TronBalance, 50, "tron balance", "2", Wallet, "TRX and USDT balances", OpenKey, Tron),
+    action!(TronTransfer, 51, "tron transfer", "3", Send, "send TRX or USDT", Signing, Tron),
+    action!(TronTx, 52, "tron tx", "/", Wallet, "look up a Tron transaction", Always, Tron),
     action!(NativeCap, 60, "whitelist native-cap", "native-cap", Whitelist, "change the native amount limit", Wallet, Any),
     action!(TokenCap, 61, "whitelist token-cap", "token-cap", Whitelist, "change a token amount limit", Wallet, Any),
     action!(CalldataCap, 62, "whitelist calldata-cap", "calldata-cap", Whitelist, "change the calldata byte limit", Wallet, Any),

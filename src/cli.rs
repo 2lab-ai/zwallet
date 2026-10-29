@@ -291,7 +291,7 @@ pub struct TransferArgs {
     /// Amount in whole units (e.g. 0.5); exact, no floating point.
     #[arg(long)]
     pub amount: String,
-    /// ERC-20 token contract. Omit for the native coin.
+    /// EVM token contract, or usdt on Tron. Omit for the native coin.
     #[arg(long)]
     pub token: Option<String>,
     /// Allow a recipient that is almost always a mistake: the zero address, or the token
@@ -313,6 +313,11 @@ pub struct TxArgs {
     /// The transaction hash (0x and 64 hex digits).
     #[arg(value_name = "TXHASH")]
     pub tx_hash: String,
+    /// Wait for a Tron receipt or a final node observation (default 90 seconds).
+    #[arg(long)]
+    pub wait: bool,
+    #[arg(long, value_name = "DURATION", requires = "wait", value_parser = duration_arg)]
+    pub wait_timeout: Option<std::time::Duration>,
     /// RPC URL (overrides ZWALLET_RPC_<CHAIN> and the default).
     #[arg(long)]
     pub rpc: Option<String>,
@@ -351,7 +356,8 @@ pub enum WhitelistCommand {
     Add(WhitelistAddArgs),
     /// Remove the entry NICKNAME.
     Remove(WhitelistRemoveArgs),
-    /// Set CHAIN's fee cap, in its coin: the most gasLimit × max price may cost.
+    /// Set CHAIN's fee cap, in its coin: EVM gas cost or Tron contract fee_limit.
+    /// Tron bandwidth and activation fees are outside this signed cap.
     FeeCap(WhitelistFeeCapArgs),
     /// Cap native value per transaction in CHAIN's coin; `none` removes the cap.
     NativeCap(WhitelistNativeCapArgs),
@@ -396,10 +402,10 @@ pub struct WhitelistAddArgs {
     /// 1-32 of a-z 0-9 _ -, starting with a letter or digit; `@NICKNAME` then works as
     /// `transfer --to` and `invoke --to`.
     pub nickname: String,
-    /// The 0x address (mixed case must be a valid EIP-55 checksum).
+    /// An EVM 0x address (mixed case needs EIP-55), or a Tron T... base58check address.
     pub address: String,
-    /// Chain keys the entry applies on, comma-separated, or "*" (quoted) for every chain (not
-    /// for a contract). Default: ethereum.
+    /// Chain keys, comma-separated, or "*" (quoted) for every EVM chain (not a contract).
+    /// Default: ethereum for 0x addresses; tron for T... addresses. Tron must stand alone.
     #[arg(
         long,
         visible_alias = "chain",
@@ -484,9 +490,17 @@ pub enum Toggle {
 pub struct Out {
     pub value: Value,
     pub text: Option<String>,
-    /// zwallet's own QR code of a verified address, printed after `text` as it is (block glyphs
-    /// and colour codes); never part of `text`, which the write point filters.
-    pub qr: Option<String>,
+    /// zwallet's own QR codes of verified addresses, printed after `text` in order, each under
+    /// its caption.
+    pub qr: Vec<Qr>,
+}
+
+/// One QR code of a verified address: `caption` (zwallet's lines, printed through the write
+/// point like `text`), then `code` printed as it is (block glyphs and colour codes), never
+/// filtered and never part of `text`.
+pub struct Qr {
+    pub caption: String,
+    pub code: String,
 }
 
 impl Out {
@@ -494,7 +508,7 @@ impl Out {
         Self {
             value,
             text: None,
-            qr: None,
+            qr: Vec::new(),
         }
     }
 
@@ -502,7 +516,7 @@ impl Out {
         Self {
             value,
             text: Some(text),
-            qr: None,
+            qr: Vec::new(),
         }
     }
 
@@ -510,7 +524,7 @@ impl Out {
         Self {
             value: Value::Null,
             text: Some(String::new()),
-            qr: None,
+            qr: Vec::new(),
         }
     }
 }
@@ -658,7 +672,7 @@ fn human_error(e: &WalletError) -> String {
 
 /// Every result zwallet prints, through the write point ([`crate::core::terminal`]): `--json` as
 /// printable ASCII, the human text filtered, then the QR code (zwallet's own rendering of a
-/// verified address, the one thing printed as it is).
+/// verified address under its caption, the one thing printed as it is).
 fn print_out(json: bool, out: &Out) {
     use crate::core::terminal::{print_json, print_line};
     if json {
@@ -672,9 +686,10 @@ fn print_out(json: bool, out: &Out) {
         Some(t) => print_line(t),
         None => print_line(&render_human(&out.value)),
     }
-    if let Some(qr) = &out.qr {
+    for qr in &out.qr {
         use std::io::Write;
-        let _ = writeln!(std::io::stdout().lock(), "{qr}");
+        print_line(&qr.caption);
+        let _ = writeln!(std::io::stdout().lock(), "{}", qr.code);
     }
 }
 

@@ -116,12 +116,13 @@ impl Outside {
         Self::inert(Source::Address, address)
     }
 
-    /// An address as the status bar shortens it: `0x1234...abcd`.
+    /// Only the status bar shortens addresses: six leading and four trailing characters.
     pub fn short_address(address: &str) -> Self {
         let full = Self::address(address).text;
-        let text = match (full.get(..6), full.get(38..)) {
-            (Some(head), Some(tail)) if full.len() == 42 => format!("{head}...{tail}"),
-            _ => full,
+        let text = if full.len() == 42 || full.len() == 34 && full.starts_with('T') {
+            format!("{}...{}", &full[..6], &full[full.len() - 4..])
+        } else {
+            full
         };
         Self {
             source: Source::Address,

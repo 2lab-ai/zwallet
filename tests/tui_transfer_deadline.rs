@@ -65,6 +65,7 @@ async fn receipt_result_resumed_after_the_connect_inclusive_deadline_is_unknown(
     let (cancel, receiver) = tokio::sync::watch::channel(false);
     let job = TransferJob::Receipt {
         net,
+        expiration: None,
         hash: format!("0x{}", "0".repeat(64)),
         timeout: Duration::from_millis(500),
         cancel: receiver,

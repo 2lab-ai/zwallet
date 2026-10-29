@@ -1,0 +1,63 @@
+2026-10-29 macOS arm64, Rust1.95.0
+Command: cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+Exit: 0
+test result: ok. 313 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.34s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 117 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 220.87s
+test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.41s
+test result: ok. 0 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.01s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.80s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.49s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Total passed: 541
+Independent review: no blocking runtime findings; stale implementation-status intro corrected.
+Exact-head CI and historical extra PTY/x86 gates remain pending.
+
+
+2026-10-29 PR #37 Linux CI follow-up (base 88a59b0)
+Observed failure: https://github.com/2lab-ai/zwallet/actions/runs/40833705089/job/123313481602
+ubuntu-latest cargo test --locked: CLI 117 passed, 1 failed; exit 101.
+s4_a_byte_copy_runs_the_same_code_so_it_may_verify_by_session failed at
+  tests/common/mod.rs:469:33
+  spawn zwallet: Os { code: 26, kind: ExecutableFileBusy, message: "Text file busy" }
+
+Cause addressed: a parallel fork can inherit fs::copy's writable descriptor. Closing
+it in the test thread does not close the inherited copy before that child's exec.
+The exact fork was not identified by the CI trace; this is the known mechanism at
+https://github.com/rust-lang/rust/issues/114554 and the harness has parallel pre_exec
+PTY/fd-inheritance children. O_CLOEXEC is too late to prevent the transient ETXTBSY.
+
+Fix: the three executable-copy fixtures now use a shared helper. It locks the new
+writer, copies bytes and permissions, closes that writer without explicitly unlocking,
+and obtains a shared lock on an independent read-only descriptor before returning.
+Fork/dup share the writer's open-file description and lock, so the barrier cannot pass
+until all inherited writers close. No spawn retry, fixed delay or suite serialization
+was added. Existing destination files are refused rather than truncated.
+
+Observed regression on macOS arm64, Rust 1.95.0:
+  cargo test --locked --test executable_copy
+  RED without the writer-lock/read-lock barrier: 1 passed, 1 failed,
+      "copy returned while an inherited writer was still open".
+  GREEN with the barrier: 2 passed, 0 failed (0.34s).
+  cargo fmt --check: passed.
+  git diff --check: passed.
+  cargo clippy --all-targets --locked -- -D warnings: passed (2.52s).
+The test holds a duplicate writer deterministically, releases it after checking that
+copy cannot return, and then checks bytes, permissions and execution of /usr/bin/true.
+On Linux the same test also requires ETXTBSY while that writer is held. That Linux-only
+assertion has not been run on this macOS worker; it remains an exact-head CI gate.
+No wallet or daemon is created by these two tests. No full CLI/PTY suite was run by
+this worker while the parent was running another work unit's integration gate.
+
+Required integration validation after this patch:
+  cargo fmt --check
+  cargo clippy --all-targets --locked -- -D warnings
+  cargo test --locked
+  exact-head ubuntu-latest and macos-latest CI
+The full gate includes s4, k5, and s5 (macOS) on the new executable-copy helper.
+
+PR37 fixture repair gate, 2026-10-29: Rust 1.95.0 fmt --check, clippy --all-targets --locked -- -D warnings and cargo test --locked all passed. Local macOS: 543 passed, 0 failed, 13 live tests ignored; CLI117 including s4 and both executable-copy regressions passed. Linux-only ETXTBSY assertion and exact-head CI pending after push.

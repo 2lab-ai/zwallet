@@ -1,7 +1,9 @@
 //! Review without signing; confirm the held intent before the shared signing/broadcast tail.
 use super::CheckedList;
 use crate::chains::evm::{self, Evm, policy, tx};
-use crate::chains::{self, Broadcast, Chain, ChainFamily, Net, PreparedTx, TransferRequest};
+use crate::chains::{
+    self, Broadcast, Chain, ChainFamily, Family, Net, PreparedTx, TransferRequest, tron,
+};
 use crate::commands::whitelist;
 use crate::core::error::{Result, WalletError};
 use crate::core::protocol::{self, Request, SIGN_TIMEOUT};
@@ -10,7 +12,7 @@ use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// A send's public result. No signature or raw signed transaction escapes this boundary.
 #[derive(Debug)]
@@ -127,9 +129,19 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
         SIGN_TIMEOUT,
     )
     .await?;
-    let signed = fam.inspect_signed(net.chain, &signed_value)?;
-    tx::verify_signed_payload(&signed.raw, &payload(&unsigned)?)?;
-    if !signed.signer.eq_ignore_ascii_case(from) {
+    let signed = match net.chain.family {
+        Family::Tron(_) => tron::send::inspect_signed(&signed_value, Some(&unsigned))?,
+        Family::Evm(_) => {
+            let signed = fam.inspect_signed(net.chain, &signed_value)?;
+            tx::verify_signed_payload(&signed.raw, &payload(&unsigned)?)?;
+            signed
+        }
+    };
+    let same_signer = match net.chain.family {
+        Family::Tron(_) => tron::address::same(&signed.signer, from),
+        Family::Evm(_) => signed.signer.eq_ignore_ascii_case(from),
+    };
+    if !same_signer {
         return Err(WalletError::validation(format!(
             "the key daemon signed as {}, expected {from}; not broadcasting",
             signed.signer
@@ -141,7 +153,12 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
     }
     out.insert("dryRun".into(), json!(send.dry_run));
     // What the key holder decoded from the bytes it signed (not what this process intended).
-    if let Some(view) = signed_value.get("decoded") {
+    if matches!(net.chain.family, Family::Tron(_)) {
+        out.insert(
+            "signerDecoded".into(),
+            tron::tx::decode_raw(&payload(&unsigned)?)?.to_json()?,
+        );
+    } else if let Some(view) = signed_value.get("decoded") {
         out.insert(
             "signerDecoded".into(),
             crate::commands::signer_decoded(view),
@@ -162,7 +179,10 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
             duplicates_text,
         });
     }
-    let record = chains::SendRecord::new(journal, &signed, &summary).with_progress(progress);
+    let mut record = chains::SendRecord::new(journal, &signed, &summary).with_progress(progress);
+    if matches!(net.chain.family, Family::Tron(_)) {
+        record.entry["expiresAt"] = out.get("expiresAt").cloned().unwrap_or(Value::Null);
+    }
     let outcome = fam
         .broadcast(net, &signed, send.nonce.is_some(), &record)
         .await?;
@@ -178,9 +198,13 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
     {
         out.insert(
             "broadcastWarning".into(),
-            json!(format!(
-                "{warning}; the node reports the transaction by its own hash, so it was sent"
-            )),
+            json!(if matches!(net.chain.family, Family::Tron(_)) {
+                warning
+            } else {
+                format!(
+                    "{warning}; the node reports the transaction by its own hash, so it was sent"
+                )
+            }),
         );
         if let Some(h) = rpc_tx_hash {
             out.insert("rpcTxHash".into(), json!(h));
@@ -188,8 +212,32 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
     }
     if send.wait {
         let timeout = send.wait_timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT);
-        let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
-        chains::record_receipt(&mut out, net.chain, receipt);
+        if matches!(net.chain.family, Family::Tron(_)) {
+            let expiration = out
+                .get("expiresAt")
+                .and_then(Value::as_str)
+                .and_then(tron::send::parse_expiration);
+            match tron::lookup::wait(net, &signed.tx_hash, expiration, timeout).await {
+                Ok(observed) => {
+                    out.extend(observed);
+                }
+                Err(e) => {
+                    out.insert("status".into(), json!("unknown"));
+                    out.insert("receiptError".into(), json!(e.message));
+                    out.insert(
+                        "hint".into(),
+                        json!(format!(
+                            "look it up with `zwallet tx --chain tron {}`. {}",
+                            signed.tx_hash,
+                            tron::lookup::SECOND_PAYMENT
+                        )),
+                    );
+                }
+            }
+        } else {
+            let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
+            chains::record_receipt(&mut out, net.chain, receipt);
+        }
     }
     Ok(SendOutput {
         fields: out,
@@ -414,7 +462,7 @@ fn assemble_review(
     prepared: PreparedTx,
 ) -> Result<TransferReview> {
     let decoded = tx::decode_unsigned(&payload(&prepared.unsigned)?)?;
-    if decoded.chain_id() != evm::config(net.chain).chain_id {
+    if decoded.chain_id() != evm::config(net.chain)?.chain_id {
         return Err(WalletError::validation(
             "prepared transaction has a different chainId",
         ));
@@ -424,7 +472,7 @@ fn assemble_review(
     let payee = evm::parse_address(&input.payee.address)?;
     let expected = if let Some(token) = &input.token {
         let token = evm::parse_address(token)?;
-        let registry = evm::registry::lookup(evm::config(net.chain).chain_id, &token)
+        let registry = evm::registry::lookup(evm::config(net.chain)?.chain_id, &token)
             .ok_or_else(|| WalletError::validation("the token is not in this chain's registry"))?;
         let amount = crate::core::amount::parse_units(&input.amount, registry.decimals)?;
         tx::Action::TransferCall {
@@ -445,7 +493,7 @@ fn assemble_review(
     }
     // An absent OP estimate cannot establish a reviewed upper bound. Never silently count it
     // as zero; a retry may obtain it. This is an estimate, not a cap on the eventual L1 charge.
-    if evm::config(net.chain).op_stack && prepared.l1_fee.is_none() {
+    if evm::config(net.chain)?.op_stack && prepared.l1_fee.is_none() {
         return Err(WalletError::validation(
             "L1 data fee estimate unavailable; review again before sending",
         ));
@@ -529,7 +577,7 @@ pub async fn review_transfer(
     }
     if let Some(token) = &input.token {
         let address = evm::parse_address(token)?;
-        if evm::registry::lookup(evm::config(net.chain).chain_id, &address).is_none() {
+        if evm::registry::lookup(evm::config(net.chain)?.chain_id, &address).is_none() {
             return Err(WalletError::validation(
                 "the token is not in this chain's registry",
             ));

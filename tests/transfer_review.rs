@@ -101,7 +101,7 @@ impl Node {
                         serve(stream, move |m, args| {
                             let base = u128::from(b.load(Ordering::SeqCst));
                             match m {
-                                "eth_chainId" => hex(evm::config(chain).chain_id.into()),
+                                "eth_chainId" => hex(evm::config(chain).unwrap().chain_id.into()),
                                 "eth_getBalance" => hex(funds.load(Ordering::SeqCst).into()),
                                 "eth_getTransactionCount" => {
                                     hex(if args[1] == "latest" && p.load(Ordering::SeqCst) {

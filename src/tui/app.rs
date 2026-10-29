@@ -2,8 +2,11 @@
 //! work it asks for ([`Effect`]). Drawing is `ui`'s, reading the terminal and running the work is
 //! the loop's (`tui::run`). What comes in from outside is made [`Outside`] here, where it arrives.
 
+mod addresses;
+pub mod history;
 mod navigation;
 pub mod transfer;
+use history::{DetailRead, DetailRequest, HistoryRead, HistoryScope, HistoryTarget, HistoryView};
 pub use navigation::{FieldPurpose, Navigation, Popup, RpcChoice, UserText};
 
 use crate::chains::{Chain, Net};
@@ -39,6 +42,10 @@ pub enum Key {
 #[derive(Debug)]
 pub enum Msg {
     Transfer(u64, transfer::TransferMsg),
+    HistoryOwner(HistoryTarget, Result<(String, Trust)>),
+    History(HistoryScope, Result<HistoryRead>),
+    Transaction(Box<DetailRequest>, Result<DetailRead>),
+    HistoryList(u64, crate::core::whitelist::Fingerprint, Result<()>),
     Key(Key),
     Paste(UserText),
     Verified(
@@ -75,6 +82,10 @@ pub enum Msg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Transfer(u64),
+    HistoryOwner(HistoryTarget),
+    LoadHistory(HistoryScope),
+    LoadTransaction(Box<DetailRequest>),
+    CheckHistoryList(u64, crate::core::whitelist::Fingerprint),
     /// `wallet::keys`, then [`Msg::Keys`] with this generation: a lock starts a new one, and a
     /// read from an older one is dropped.
     LoadKeys(u64),
@@ -187,6 +198,7 @@ pub enum PasswordPurpose {
 pub struct App {
     transfer: transfer::Transfer,
     nav: Navigation,
+    history: HistoryView,
     password_purpose: PasswordPurpose,
     activating: bool,
     chain: &'static Chain,
@@ -223,6 +235,7 @@ impl App {
         Self {
             transfer: transfer::Transfer::default(),
             nav: Navigation::new(net),
+            history: HistoryView::default(),
             password_purpose: PasswordPurpose::Warm,
             activating: false,
             chain: net.chain,
@@ -259,6 +272,10 @@ impl App {
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
         let msg = match self.transfer_update(msg) {
+            std::ops::ControlFlow::Continue(effects) => return effects,
+            std::ops::ControlFlow::Break(msg) => msg,
+        };
+        let msg = match self.history_update(msg) {
             std::ops::ControlFlow::Continue(work) => return work,
             std::ops::ControlFlow::Break(msg) => msg,
         };
@@ -272,7 +289,11 @@ impl App {
                 self.key(key)
             }
             Msg::Resize => Vec::new(),
-            Msg::Tick => self.load_status(),
+            Msg::Tick => {
+                let mut work = self.load_status();
+                work.extend(self.history_tick());
+                work
+            }
             Msg::Prepared(Ok(())) => {
                 self.password = PasswordState::Input {
                     characters: 0,
@@ -395,11 +416,20 @@ impl App {
             }
             Msg::Address(generation, _, _) if generation != self.generation => Vec::new(),
             Msg::Address(_, key, result) => {
-                if self.open_key.as_ref() != Some(&key) {
+                let selected = self.open_key.as_ref().or_else(|| {
+                    self.nav
+                        .session
+                        .as_ref()
+                        .and_then(|status| status.active.as_ref())
+                });
+                if selected != Some(&key) {
                     return Vec::new();
                 }
                 match result.and_then(|(address, trust)| {
-                    self.check_family_pin(&key, self.chain, &address)?;
+                    self.observe_family_address(&key, self.chain, &address, trust.clone())?;
+                    if self.history.scope.as_ref().is_some_and(|scope| scope.target.key == key && scope.owner != address) {
+                        return Err(WalletError::validation("selected key's address changed during the history read; verify it again"));
+                    }
                     Ok((address, trust))
                 }) {
                     Ok((address, trust)) => {
@@ -443,16 +473,46 @@ impl App {
                 self.status_pending = false;
                 match status {
                     Ok(status) => {
+                        for (_, trust) in self.nav.family_reads.values_mut() {
+                            if let Some((_, Trust::Unverified(Some(warning)))) = &status.address {
+                                *trust = Trust::Unverified(Some(warning.clone()));
+                            } else if *trust == Trust::Session {
+                                // Fresh negative session evidence revokes a previous read's
+                                // session claim. Password-derived pins are stored separately.
+                                if status.locked
+                                    || matches!(&status.address, Some((_, Trust::Locked)))
+                                {
+                                    *trust = Trust::Locked;
+                                } else if status.serving.is_none()
+                                    || matches!(&status.address, Some((_, Trust::Unverified(None))))
+                                {
+                                    *trust = Trust::Unverified(None);
+                                }
+                            }
+                        }
+                        // An address refusal must not hide fresh process-table lock evidence.
+                        // Retain the error until the new status and expiry have replaced the bar.
+                        let observation_error = if let (Some(key), Some((Some(address), trust))) =
+                            (&status.active, &status.address)
+                        {
+                            let primary = crate::chains::find(crate::chains::PRIMARY_CHAIN)
+                                .expect("primary chain");
+                            self.observe_family_address(key, primary, address, trust.clone())
+                                .err()
+                        } else {
+                            None
+                        };
                         self.nav.session = Some(status.clone());
                         if self.nav.tab == Tab::Session {
                             self.render_session();
                         }
-                        let mismatch = match (&status.active, &status.address) {
-                            (Some(key), Some((Some(address), _))) => {
-                                self.check_pin(key, address).err()
-                            }
-                            _ => None,
-                        };
+                        let mismatch =
+                            observation_error.or_else(|| match (&status.active, &status.address) {
+                                (Some(key), Some((Some(address), _))) => {
+                                    self.check_pin(key, address).err()
+                                }
+                                _ => None,
+                            });
                         let shown_key = self.open_key.clone().or_else(|| status.active.clone());
                         let mut next = bar(status);
                         if let Some(key) = shown_key {
@@ -464,7 +524,9 @@ impl App {
                                 }
                             } else if self.open_key.is_some() {
                                 next.address = None;
-                                next.trust = None;
+                                if !matches!(&next.trust, Some(TrustLine::Impostor(_))) {
+                                    next.trust = None;
+                                }
                             }
                         }
                         // Pinning an address never pins lock certainty: fresh process-table
@@ -479,10 +541,10 @@ impl App {
                         let pinned = self
                             .open_key
                             .as_ref()
-                            .is_some_and(|key| self.pins.contains_key(key))
+                            .is_some_and(|key| self.family_pinned(key, self.chain))
                             || (self.open_key.is_none()
                                 && matches!(&self.status, Pane::Ready(bar)
-                                if bar.key.as_ref().is_some_and(|key| self.pins.contains_key(key.text()))));
+                                if bar.key.as_ref().is_some_and(|key| self.family_pinned(key.text(), self.chain))));
                         if pinned && let Pane::Ready(bar) = &mut self.status {
                             bar.lock = LockLine::Unknown(Outside::error(&e));
                         } else {
@@ -494,6 +556,16 @@ impl App {
                 }
                 self.open_key
                     .clone()
+                    .or_else(|| {
+                        matches!(self.chain.family, crate::chains::Family::Tron(_))
+                            .then(|| {
+                                self.nav
+                                    .session
+                                    .as_ref()
+                                    .and_then(|status| status.active.clone())
+                            })
+                            .flatten()
+                    })
                     .map(|key| vec![Effect::LoadAddress(self.generation, key)])
                     .unwrap_or_default()
             }
@@ -528,6 +600,10 @@ impl App {
             }
             // The navigation dispatcher consumes these variants before this match.
             Msg::Transfer(..)
+            | Msg::HistoryOwner(..)
+            | Msg::History(..)
+            | Msg::Transaction(..)
+            | Msg::HistoryList(..)
             | Msg::Paste(_)
             | Msg::Verified(_)
             | Msg::Balances(..)
@@ -540,6 +616,8 @@ impl App {
     /// The key list and the status read again in a new generation: a read started before (a
     /// lock, a new active key) is dropped when it lands.
     fn invalidate_reads(&mut self) {
+        self.nav.family_reads.clear();
+        self.history = HistoryView::default();
         self.generation += 1;
         self.status_pending = false;
         self.keys_pending = false;
@@ -551,7 +629,9 @@ impl App {
         self.nav.lines = Pane::Failed(Outside::error(&error));
         self.keys = Pane::Failed(Outside::error(&error));
         if self.quit {
-            self.quit_error = Some(error);
+            // Reads can finish while a submitted operation waits for its deferred lock.
+            // Keep that operation's original error and recovery details for the exit.
+            self.quit_error.get_or_insert(error);
         }
     }
 
