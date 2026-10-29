@@ -680,10 +680,14 @@ The moved text follows.
   shell. The phrase stays a CLI pointer: `B` shows B1's line naming `zwallet backup`. B2 is built
   by no unit unless the owner picks it (03-tui.md §Open trade-offs B), and then with its
   conditions.
-- **Entry points added:** `wallet::create(home, name, words, password, ttl) -> Created`, from
-  `create` and `add_subkey` (commands.rs:683-845), returning the reminder to run the backup
-  instead of printing it (commands.rs:773-776; 03-tui.md rule 6). The CLI's `create` calls it and
-  prints the reminder as before. `Created` carries no phrase. Only if the owner picks B2:
+- **Entry points added:** `wallet::prepare_create(home, name, words, ttl, allow_ptrace_scope_0)`
+  returns a `CreatePlan` before the password is prompted, binding the master envelope and
+  pinning an optional daemon. `wallet::create(plan, owned_password) -> Created` moves the
+  caller's zeroizing password owner into its worker without cloning; the TUI can pass its
+  fixed `PasswordBuf`. It returns the backup reminder instead of printing it. The CLI's
+  `create` calls it and prints the reminder as before. `Created` carries no phrase. Once
+  submitted, the TUI waits for this confirmed mutation on quit; dropping the future cannot
+  cancel a worker already publishing a wallet. Only if the owner picks B2:
   `wallet::recovery_phrase(home, password) -> Zeroizing<Vec<String>>`, from `backup`
   (commands.rs:1970-1995) without its terminal check, which `zwallet tui`'s own check
   (src/tui/mod.rs:38-43) stands in for.
@@ -927,3 +931,7 @@ unanimous APPROVE on e7d896d, no must-fix. Four non-blocking points were applied
 ### TUI-3+4 handoff receipt — 2026-10-29
 
 Implementation and remaining process gates: [`../research/handoff-tui-navigation-2026-10-29.md`](../research/handoff-tui-navigation-2026-10-29.md). The 52 original aliases retain their row numbers; cap aliases at rows 60–62 bring the action menu to 55.
+
+### TUI-10 creation UI handoff — 2026-10-29
+
+Reachable first-wallet and named-key flows are implemented in `handoff/tui-create`; see [`../research/handoff-tui-create-ui-2026-10-29.md`](../research/handoff-tui-create-ui-2026-10-29.md) for isolated gates and the pending parent-coordinated T30/T31 process gate. B1 remains the only backup UI.

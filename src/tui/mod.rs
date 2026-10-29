@@ -6,6 +6,7 @@
 
 pub mod actions;
 pub mod app;
+mod create_runtime;
 pub mod form;
 pub mod password;
 pub mod style;
@@ -66,6 +67,7 @@ pub async fn run(
     let stop = Arc::new(AtomicBool::new(false));
     let secret = Arc::new(Mutex::new(None));
     let plan = Arc::new(Mutex::new(None));
+    let create_plan = Arc::new(Mutex::new(None));
     let (ack_tx, ack_rx) = sync::sync_channel(1);
     let input = read_input(tx.clone(), stop.clone(), ack_rx, secret.clone());
     let mut input_waiting = false;
@@ -74,8 +76,20 @@ pub async fn run(
     // The first tick is now, and the state reads the status at the start already.
     tick.tick().await;
     let mut work = app.start();
+    let mut terminal_failure = None;
     let result = loop {
         for effect in work.drain(..) {
+            if let Effect::Create(effect) = effect {
+                create_runtime::start(
+                    effect,
+                    &home,
+                    &tx,
+                    allow_ptrace_scope_0,
+                    &create_plan,
+                    &secret,
+                );
+                continue;
+            }
             start(
                 effect,
                 &home,
@@ -88,10 +102,21 @@ pub async fn run(
                 app.nets(),
             );
         }
-        if let Err(e) = terminal.draw(|f| {
-            ui::draw(f, &app);
+        if let Err(error) = terminal_frame(&app, &mut terminal_failure, || {
+            terminal
+                .draw(|f| {
+                    ui::draw(f, &app);
+                })
+                .map(|_| ())
         }) {
-            break Err(terminal_error(e));
+            break Err(error);
+        }
+        if terminal_failure.is_some() {
+            // The screen can no longer show a review. Stop input and clear any owned secret
+            // before draining worker outcomes; queued input must not start another operation.
+            stop.store(true, Ordering::SeqCst);
+            let _ = ack_tx.try_send(InputMode::Discard);
+            input_waiting = false;
         }
         if app.quitting() {
             break Ok(());
@@ -100,7 +125,11 @@ pub async fn run(
         // preceding one. In particular Enter's preparation finishes before typeahead is read.
         if input_waiting && app.password_state() != PasswordState::Preparing {
             let mode = if matches!(app.password_state(), PasswordState::Input { .. }) {
-                InputMode::Password
+                match app.creation().stage {
+                    app::create::CreateStage::PasswordFirst => InputMode::NewPassword,
+                    app::create::CreateStage::PasswordAgain => InputMode::ConfirmPassword,
+                    _ => InputMode::Password,
+                }
             } else if app.password_state() == PasswordState::Failed {
                 InputMode::Discard
             } else {
@@ -113,7 +142,7 @@ pub async fn run(
             Some(msg) = rx.recv() => msg,
             _ = tick.tick() => Msg::Tick,
         };
-        input_waiting |= matches!(
+        let from_input = matches!(
             &msg,
             Msg::Key(_)
                 | Msg::Paste(_)
@@ -121,7 +150,15 @@ pub async fn run(
                 | Msg::PasswordLength(..)
                 | Msg::PasswordSubmitted
                 | Msg::PasswordCancelled
+                | Msg::Create(
+                    app::create::CreateMsg::PasswordAgain
+                        | app::create::CreateMsg::PasswordMismatch
+                )
         );
+        if terminal_failure.is_some() && from_input {
+            continue;
+        }
+        input_waiting |= from_input;
         work = app.update(msg);
     };
     stop.store(true, Ordering::SeqCst);
@@ -130,6 +167,27 @@ pub async fn run(
     match app.take_quit_error() {
         Some(e) => result.and(Err(e)),
         None => result,
+    }
+}
+
+fn terminal_frame(
+    app: &App,
+    failure: &mut Option<WalletError>,
+    draw: impl FnOnce() -> std::io::Result<()>,
+) -> Result<()> {
+    if failure.is_none()
+        && let Err(error) = draw()
+    {
+        *failure = Some(WalletError::validation(format!("terminal: {error}")));
+    }
+    // Already-submitted writes and optional session starts are not cancellable. Their
+    // outcome may schedule a deferred lock, so wait for that mutation too, without redrawing.
+    if app.mutation_pending() {
+        return Ok(());
+    }
+    match failure.take() {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -152,6 +210,7 @@ fn start(
         other => other,
     };
     match effect {
+        Effect::Create(_) => unreachable!("creation worker handled first"),
         Effect::PrepareDuration(ttl) => {
             let plan = plan.clone();
             tokio::task::spawn_blocking(move || {
@@ -288,6 +347,8 @@ fn start_check(
 enum InputMode {
     Normal,
     Password,
+    NewPassword,
+    ConfirmPassword,
     Discard,
 }
 
@@ -300,6 +361,7 @@ fn read_input(
     std::thread::spawn(move || {
         let mut mode = InputMode::Normal;
         let mut password = PasswordBuf::default();
+        let mut first_password = password::PasswordPair::default();
         while !stop.load(Ordering::SeqCst) {
             let event = event::poll(INPUT_POLL).and_then(|ready| {
                 if ready {
@@ -318,47 +380,81 @@ fn read_input(
                         }
                         _ => None,
                     },
-                    InputMode::Password => match k.code {
-                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            password = PasswordBuf::default();
-                            Some(Msg::Key(Key::Interrupt))
-                        }
-                        KeyCode::Esc => {
-                            password = PasswordBuf::default();
-                            Some(Msg::PasswordCancelled)
-                        }
-                        KeyCode::Enter if password.characters() == 0 => {
-                            Some(Msg::PasswordLength(0, true))
-                        }
-                        KeyCode::Enter => {
-                            *submitted.lock().expect("secret handoff lock") =
-                                Some(std::mem::take(&mut password));
-                            Some(Msg::PasswordSubmitted)
-                        }
-                        KeyCode::Tab => {
-                            let accepted = password.push('\t');
-                            if !accepted {
+                    InputMode::Password | InputMode::NewPassword | InputMode::ConfirmPassword => {
+                        match k.code {
+                            KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                                 password = PasswordBuf::default();
+                                Some(Msg::Key(Key::Interrupt))
                             }
-                            Some(Msg::PasswordLength(password.characters(), !accepted))
-                        }
-                        KeyCode::Backspace => {
-                            password.backspace();
-                            Some(Msg::PasswordLength(password.characters(), false))
-                        }
-                        KeyCode::Char(c)
-                            if !k
-                                .modifiers
-                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                        {
-                            let accepted = password.push(c);
-                            if !accepted {
+                            KeyCode::Esc => {
                                 password = PasswordBuf::default();
+                                Some(Msg::PasswordCancelled)
                             }
-                            Some(Msg::PasswordLength(password.characters(), !accepted))
+                            KeyCode::Enter if password.characters() == 0 => {
+                                Some(password_edit_result(
+                                    mode,
+                                    false,
+                                    &mut password,
+                                    &mut first_password,
+                                ))
+                            }
+                            KeyCode::Enter => match mode {
+                                InputMode::NewPassword => {
+                                    if password.characters() < 12 {
+                                        password = PasswordBuf::default();
+                                        Some(Msg::PasswordLength(0, true))
+                                    } else {
+                                        first_password.remember(std::mem::take(&mut password));
+                                        Some(Msg::Create(app::create::CreateMsg::PasswordAgain))
+                                    }
+                                }
+                                InputMode::ConfirmPassword => {
+                                    match first_password.confirm(std::mem::take(&mut password)) {
+                                        Some(first) => {
+                                            *submitted.lock().expect("secret handoff lock") =
+                                                Some(first);
+                                            Some(Msg::PasswordSubmitted)
+                                        }
+                                        None => Some(Msg::Create(
+                                            app::create::CreateMsg::PasswordMismatch,
+                                        )),
+                                    }
+                                }
+                                _ => {
+                                    *submitted.lock().expect("secret handoff lock") =
+                                        Some(std::mem::take(&mut password));
+                                    Some(Msg::PasswordSubmitted)
+                                }
+                            },
+                            KeyCode::Tab => {
+                                let accepted = password.push('\t');
+                                Some(password_edit_result(
+                                    mode,
+                                    accepted,
+                                    &mut password,
+                                    &mut first_password,
+                                ))
+                            }
+                            KeyCode::Backspace => {
+                                password.backspace();
+                                Some(Msg::PasswordLength(password.characters(), false))
+                            }
+                            KeyCode::Char(c)
+                                if !k
+                                    .modifiers
+                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                            {
+                                let accepted = password.push(c);
+                                Some(password_edit_result(
+                                    mode,
+                                    accepted,
+                                    &mut password,
+                                    &mut first_password,
+                                ))
+                            }
+                            _ => None,
                         }
-                        _ => None,
-                    },
+                    }
                 },
                 Ok(Some(Event::Paste(mut text))) => match mode {
                     InputMode::Normal => Some(Msg::Paste(UserText(zeroize::Zeroizing::new(text)))),
@@ -367,12 +463,14 @@ fn read_input(
                         text.zeroize();
                         None
                     }
-                    InputMode::Password => {
+                    InputMode::Password | InputMode::NewPassword | InputMode::ConfirmPassword => {
                         let accepted = password.paste(&mut text);
-                        if !accepted {
-                            password = PasswordBuf::default();
-                        }
-                        Some(Msg::PasswordLength(password.characters(), !accepted))
+                        Some(password_edit_result(
+                            mode,
+                            accepted,
+                            &mut password,
+                            &mut first_password,
+                        ))
                     }
                 },
                 Ok(Some(Event::Resize(..))) => Some(Msg::Resize),
@@ -391,7 +489,10 @@ fn read_input(
                     Ok(next) => mode = next,
                     Err(_) => return,
                 }
-                if matches!(mode, InputMode::Normal) {
+                if !matches!(mode, InputMode::ConfirmPassword) {
+                    first_password.clear();
+                }
+                if matches!(mode, InputMode::Normal | InputMode::Discard) {
                     password = PasswordBuf::default();
                 }
             }
@@ -417,4 +518,153 @@ fn key(k: KeyEvent) -> Option<Key> {
         KeyCode::Esc => Key::Esc,
         _ => return None,
     })
+}
+
+fn password_edit_result(
+    mode: InputMode,
+    accepted: bool,
+    password: &mut PasswordBuf,
+    first: &mut password::PasswordPair,
+) -> Msg {
+    if !accepted {
+        password.wipe();
+        if matches!(mode, InputMode::ConfirmPassword) {
+            first.clear();
+            return Msg::Create(app::create::CreateMsg::PasswordMismatch);
+        }
+    }
+    Msg::PasswordLength(password.characters(), !accepted)
+}
+
+#[cfg(test)]
+mod creation_input_tests {
+    use super::*;
+    #[test]
+    fn rejected_confirmation_clears_both_owners_before_the_next_event() {
+        let mut first = password::PasswordPair::default();
+        let mut original = PasswordBuf::default();
+        assert!(original.append("fixture-password"));
+        first.remember(original);
+        let mut second = PasswordBuf::default();
+        assert!(second.append("wrong-input"));
+        assert!(matches!(
+            password_edit_result(InputMode::ConfirmPassword, false, &mut second, &mut first),
+            Msg::Create(app::create::CreateMsg::PasswordMismatch)
+        ));
+        assert_eq!(second.characters(), 0);
+        let mut retry = PasswordBuf::default();
+        assert!(retry.append("fixture-password"));
+        assert!(first.confirm(retry).is_none());
+    }
+}
+
+#[cfg(test)]
+mod terminal_failure_tests {
+    use super::*;
+    use app::create::{CreateEffect, CreateMsg, CreateStage};
+
+    fn submitted_create() -> (App, u64) {
+        let net = Net {
+            chain: crate::chains::find("ethereum").unwrap(),
+            rpc_url: "http://127.0.0.1:1".into(),
+        };
+        let mut app = App::new(&net, Duration::from_secs(600));
+        app.update(Msg::Key(Key::Char('n')));
+        for text in ["main", "", "10m", "main"] {
+            app.update(Msg::Paste(UserText(zeroize::Zeroizing::new(text.into()))));
+            let effects = app.update(Msg::Key(Key::Enter));
+            if let Some(Effect::Create(CreateEffect::Prepare { id, .. })) = effects.first() {
+                let id = *id;
+                app.update(Msg::Create(CreateMsg::Prepared(id, Ok(true))));
+                app.update(Msg::Create(CreateMsg::PasswordAgain));
+                assert_eq!(
+                    app.update(Msg::PasswordSubmitted),
+                    vec![Effect::Create(CreateEffect::Submit { id })]
+                );
+                return (app, id);
+            }
+        }
+        panic!("fixture must reach submission without secret bytes");
+    }
+
+    fn created() -> wallet::Created {
+        wallet::Created {
+            name: "main".into(),
+            index: 0,
+            addresses: crate::chains::CHAINS
+                .iter()
+                .map(|chain| {
+                    (
+                        chain.key.into(),
+                        "0x1111111111111111111111111111111111111111".into(),
+                    )
+                })
+                .collect(),
+            active: "main".into(),
+            master_created: true,
+            verified: true,
+            session: None,
+            backup_reminder: Some("Back up before funding."),
+        }
+    }
+
+    #[test]
+    fn broken_terminal_waits_for_create_outcome_and_any_requested_lock() {
+        for lock in [false, true] {
+            let (mut app, id) = submitted_create();
+            let mut failure = None;
+            assert!(
+                terminal_frame(&app, &mut failure, || Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "fixture terminal closed"
+                )))
+                .is_ok(),
+                "submitted creation must finish before returning terminal failure"
+            );
+            assert!(failure.is_some());
+            if lock {
+                app.update(Msg::Key(Key::Char('L')));
+            }
+            assert!(
+                terminal_frame(&app, &mut failure, || panic!(
+                    "must not redraw broken terminal"
+                ))
+                .is_ok()
+            );
+            let work = app.update(Msg::Create(CreateMsg::Finished(id, Ok(created()))));
+            assert!(matches!(app.creation().stage, CreateStage::Done(_)));
+            assert!(app.family_pinned("main", crate::chains::find("ethereum").unwrap()));
+            if lock {
+                assert!(work.contains(&Effect::LockAll));
+                assert!(terminal_frame(&app, &mut failure, || panic!("no redraw")).is_ok());
+                app.update(Msg::Locked(Ok(vec![])));
+            }
+            let error = terminal_frame(&app, &mut failure, || panic!("no redraw")).unwrap_err();
+            assert!(error.message.contains("fixture terminal closed"));
+        }
+    }
+
+    #[test]
+    fn broken_terminal_releases_after_create_failure_and_refresh() {
+        let (mut app, id) = submitted_create();
+        let mut failure = None;
+        assert!(
+            terminal_frame(&app, &mut failure, || Err(std::io::Error::from(
+                std::io::ErrorKind::BrokenPipe
+            )))
+            .is_ok()
+        );
+        let work = app.update(Msg::Create(CreateMsg::Finished(
+            id,
+            Err(WalletError::validation(
+                "optional unlock failed after creation",
+            )),
+        )));
+        assert!(
+            work.iter()
+                .any(|effect| matches!(effect, Effect::LoadKeys(_)))
+        );
+        assert!(app.creation().mutation_failed);
+        assert!(terminal_frame(&app, &mut failure, || panic!("no redraw")).is_err());
+    }
 }

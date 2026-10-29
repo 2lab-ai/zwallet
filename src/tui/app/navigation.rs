@@ -67,7 +67,7 @@ pub struct Navigation {
     pub home: Outside,
     pub allow_ptrace_scope_0: bool,
     nets: BTreeMap<&'static str, Net>,
-    family_pins: BTreeMap<(String, &'static str), String>,
+    pub(super) family_pins: BTreeMap<(String, &'static str), String>,
     rpc_request: u64,
     pending_rpc: Option<u64>,
 }
@@ -98,6 +98,10 @@ impl Navigation {
 }
 
 const IMPLEMENTED: &[ActionId] = &[
+    ActionId::CreateFirst,
+    ActionId::CreateKey,
+    ActionId::CreateUnlock,
+    ActionId::Backup,
     ActionId::List,
     ActionId::VerifyKeys,
     ActionId::SetActive,
@@ -705,6 +709,10 @@ impl App {
 
     fn run_action(&mut self, action: ActionId) -> Vec<Effect> {
         match action {
+            ActionId::CreateFirst | ActionId::CreateKey | ActionId::CreateUnlock => {
+                return self.begin_create();
+            }
+            ActionId::Backup => return self.backup_hint(),
             ActionId::List => self.nav.tab = Tab::Keys,
             ActionId::VerifyKeys => {
                 return self.begin_password(PasswordPurpose::Verify { all: true });
@@ -825,7 +833,7 @@ impl App {
     }
 }
 
-fn input(key: Key) -> Input<'static> {
+pub(super) fn input(key: Key) -> Input<'static> {
     match key {
         Key::Char(c) => Input::Char(c),
         Key::Up => Input::Up,

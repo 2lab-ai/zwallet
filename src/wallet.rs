@@ -2,6 +2,12 @@
 //! values out. Nothing here reads `/dev/tty` or prints; the CLI command that used the code calls
 //! the function here and prints what it returns, and the TUI draws it.
 
+mod create;
+pub(crate) use create::create_via_daemon;
+#[cfg(test)]
+pub(crate) use create::relocked;
+pub use create::{CreatePlan, Created, create, prepare_create};
+
 pub mod read;
 pub use read::{
     AddressRow, Addresses, ChainBalances, EveryBalance, NetworkBalance, addresses, balance,

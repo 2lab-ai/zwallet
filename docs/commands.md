@@ -86,6 +86,14 @@ Commands that act on a key take `--key <name>` (default: the active key).
   ptrace flag cannot be changed by any TUI key. History, transfer, whitelist forms and tools
   remain ![WIP](https://img.shields.io/badge/status-WIP-yellow).
   See [feature status](features.md#planned-features).
+  On `1 keys`, `n` creates another key; an empty wallet home opens the first-wallet form.
+  Enter a key name, choose 12/15/18/21/24 seed words on first creation (Left/Right), optionally
+  enter an unlock duration, then type the name again to confirm. Preparation precedes the
+  password field. A new wallet asks for the new password twice; another key asks once.
+  The created key becomes active for the agent. A submitted creation finishes before quitting
+  or locking; a failed unlock may follow a successful file write, so the key list is refreshed.
+  `B` points to `zwallet backup` in a shell; the TUI never displays a recovery phrase.
+
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
   reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's
