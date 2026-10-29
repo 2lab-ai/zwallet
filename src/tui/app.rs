@@ -2,8 +2,11 @@
 //! work it asks for ([`Effect`]). Drawing is `ui`'s, reading the terminal and running the work is
 //! the loop's (`tui::run`). What comes in from outside is made [`Outside`] here, where it arrives.
 
+pub mod history;
 mod navigation;
+pub mod replacement;
 pub mod transfer;
+use history::{DetailRead, DetailRequest, HistoryRead, HistoryScope, HistoryTarget, HistoryView};
 pub use navigation::{FieldPurpose, Navigation, Popup, RpcChoice, UserText};
 
 use crate::chains::{Chain, Net};
@@ -38,7 +41,12 @@ pub enum Key {
 /// Everything that changes the state: a key, the refresh timer, or the result of work.
 #[derive(Debug)]
 pub enum Msg {
+    Replacement(u64, replacement::Event),
     Transfer(u64, transfer::TransferMsg),
+    HistoryOwner(HistoryTarget, Result<(String, Trust)>),
+    History(HistoryScope, Result<HistoryRead>),
+    Transaction(Box<DetailRequest>, Result<DetailRead>),
+    HistoryList(u64, crate::core::whitelist::Fingerprint, Result<()>),
     Key(Key),
     Paste(UserText),
     Verified(
@@ -74,7 +82,12 @@ pub enum Msg {
 /// Work the state asks for; its result comes back as a [`Msg`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
+    Replacement(u64),
     Transfer(u64),
+    HistoryOwner(HistoryTarget),
+    LoadHistory(HistoryScope),
+    LoadTransaction(Box<DetailRequest>),
+    CheckHistoryList(u64, crate::core::whitelist::Fingerprint),
     /// `wallet::keys`, then [`Msg::Keys`] with this generation: a lock starts a new one, and a
     /// read from an older one is dropped.
     LoadKeys(u64),
@@ -185,8 +198,10 @@ pub enum PasswordPurpose {
 }
 
 pub struct App {
+    replacement: replacement::Replacement,
     transfer: transfer::Transfer,
     nav: Navigation,
+    history: HistoryView,
     password_purpose: PasswordPurpose,
     activating: bool,
     chain: &'static Chain,
@@ -221,8 +236,10 @@ impl App {
     /// The TUI on `net`'s chain and endpoint; `warm` is how long a warm-up unlocks for.
     pub fn new(net: &Net, warm: Duration) -> Self {
         Self {
+            replacement: replacement::Replacement::default(),
             transfer: transfer::Transfer::default(),
             nav: Navigation::new(net),
+            history: HistoryView::default(),
             password_purpose: PasswordPurpose::Warm,
             activating: false,
             chain: net.chain,
@@ -258,7 +275,15 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        let msg = match self.replacement_update(msg) {
+            std::ops::ControlFlow::Continue(work) => return work,
+            std::ops::ControlFlow::Break(msg) => msg,
+        };
         let msg = match self.transfer_update(msg) {
+            std::ops::ControlFlow::Continue(work) => return work,
+            std::ops::ControlFlow::Break(msg) => msg,
+        };
+        let msg = match self.history_update(msg) {
             std::ops::ControlFlow::Continue(work) => return work,
             std::ops::ControlFlow::Break(msg) => msg,
         };
@@ -272,7 +297,11 @@ impl App {
                 self.key(key)
             }
             Msg::Resize => Vec::new(),
-            Msg::Tick => self.load_status(),
+            Msg::Tick => {
+                let mut work = self.load_status();
+                work.extend(self.history_tick());
+                work
+            }
             Msg::Prepared(Ok(())) => {
                 self.password = PasswordState::Input {
                     characters: 0,
@@ -400,6 +429,9 @@ impl App {
                 }
                 match result.and_then(|(address, trust)| {
                     self.check_family_pin(&key, self.chain, &address)?;
+                    if self.history.scope.as_ref().is_some_and(|scope| scope.target.key == key && scope.owner != address) {
+                        return Err(WalletError::validation("selected key's address changed during the history read; verify it again"));
+                    }
                     Ok((address, trust))
                 }) {
                     Ok((address, trust)) => {
@@ -528,18 +560,24 @@ impl App {
             }
             // The navigation dispatcher consumes these variants before this match.
             Msg::Transfer(..)
+            | Msg::HistoryOwner(..)
+            | Msg::History(..)
+            | Msg::Transaction(..)
+            | Msg::HistoryList(..)
             | Msg::Paste(_)
             | Msg::Verified(_)
             | Msg::Balances(..)
             | Msg::EveryBalances(..)
             | Msg::Addresses(..)
-            | Msg::RpcChecked(..) => unreachable!("navigation message"),
+            | Msg::RpcChecked(..)
+            | Msg::Replacement(..) => unreachable!("navigation or replacement message"),
         }
     }
 
     /// The key list and the status read again in a new generation: a read started before (a
     /// lock, a new active key) is dropped when it lands.
     fn invalidate_reads(&mut self) {
+        self.history = HistoryView::default();
         self.generation += 1;
         self.status_pending = false;
         self.keys_pending = false;
@@ -592,6 +630,9 @@ impl App {
                 }
                 _ => Vec::new(),
             };
+        }
+        if let Some(work) = self.replacement_key(key) {
+            return work;
         }
         if let Some(work) = self.transfer_key(key) {
             return work;

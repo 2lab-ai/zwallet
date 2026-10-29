@@ -36,6 +36,7 @@ impl fmt::Debug for RpcChoice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldPurpose {
     Duration,
+    TxHash,
     Rpc(&'static str),
 }
 pub enum Popup {
@@ -123,6 +124,10 @@ const IMPLEMENTED: &[ActionId] = &[
     ActionId::AllowPending,
     ActionId::AllowDuplicate,
     ActionId::GasCap,
+    ActionId::SpeedUp,
+    ActionId::Cancel,
+    ActionId::Retry,
+    ActionId::Tx,
 ];
 
 impl App {
@@ -146,6 +151,7 @@ impl App {
         self.nav.allow_ptrace_scope_0 = allow_ptrace_scope_0;
     }
     pub fn menu_context(&self) -> Context<'static> {
+        let (pending_send, retryable_send) = self.replacement_available();
         Context {
             implemented: IMPLEMENTED,
             has_wallet: matches!(&self.status, Pane::Ready(bar) if bar.configured),
@@ -156,7 +162,8 @@ impl App {
                 .is_some_and(|key| self.family_pinned(key, self.chain)),
             unlocked: matches!(&self.status, Pane::Ready(bar) if matches!(bar.lock, LockLine::Open(_))),
             is_tron: self.chain.key == "tron",
-            ..Context::default()
+            pending_send,
+            retryable_send,
         }
     }
     pub fn family_pinned(&self, key: &str, chain: &Chain) -> bool {
@@ -496,16 +503,21 @@ impl App {
             return Vec::new();
         };
         self.nav.lines = Pane::Loading;
-        vec![match self.nav.tab {
+        let mut work = vec![match self.nav.tab {
             Tab::Wallet if self.nav.every => Effect::LoadEveryBalances(self.generation, key),
             Tab::Wallet => Effect::LoadBalances(self.generation, key),
             Tab::Receive => Effect::LoadAddresses(self.generation, key),
             _ => return Vec::new(),
-        }]
+        }];
+        work.extend(self.load_history_owner());
+        work
     }
 
     pub(super) fn navigation_key(&mut self, key: Key) -> Option<Vec<Effect>> {
         if let Some(work) = self.popup_input(input(key)) {
+            return Some(work);
+        }
+        if let Some(work) = self.history_key(key) {
             return Some(work);
         }
         if let Key::Char(c @ '1'..='7') = key {
@@ -524,6 +536,16 @@ impl App {
             Key::Char('?') | Key::Char(':') => {
                 self.nav.popup_scroll = 0;
                 self.nav.popup = Some(Popup::Menu(Menu::new()));
+                Some(Vec::new())
+            }
+            Key::Char('/') if self.nav.tab == Tab::Wallet => {
+                if self.nav.every {
+                    return Some(self.run_action(ActionId::Tx));
+                }
+                self.nav.popup = Some(Popup::Field {
+                    purpose: FieldPurpose::TxHash,
+                    field: Field::new(Kind::TxHash),
+                });
                 Some(Vec::new())
             }
             Key::Char('c') => {
@@ -661,6 +683,14 @@ impl App {
             Popup::Field { purpose, mut field } => {
                 match field.edit(input) {
                     Edit::Submit => match purpose {
+                        FieldPurpose::TxHash => {
+                            if self.history.scope.is_some() {
+                                return Some(self.open_transaction(field.value()));
+                            }
+                            self.nav.popup_notice = Some(Outside::detail(
+                                "wait for the selected key's address, then press Enter",
+                            ));
+                        }
                         FieldPurpose::Duration => match parse_duration(field.value()) {
                             Ok(ttl) => {
                                 return Some(self.begin_password(PasswordPurpose::Unlock(ttl)));
@@ -721,6 +751,9 @@ impl App {
     }
 
     fn run_action(&mut self, action: ActionId) -> Vec<Effect> {
+        if let Some(work) = self.replacement_action(action) {
+            return work;
+        }
         if let Some(work) = self.transfer_action(action) {
             return work;
         }
@@ -756,6 +789,16 @@ impl App {
             ActionId::Chains | ActionId::Rpc => {
                 self.chain_picker();
                 return Vec::new();
+            }
+            ActionId::Tx => {
+                self.nav.tab = Tab::Wallet;
+                self.nav.every = false;
+                let work = self.reload();
+                self.nav.popup = Some(Popup::Field {
+                    purpose: FieldPurpose::TxHash,
+                    field: Field::new(Kind::TxHash),
+                });
+                return work;
             }
             ActionId::Version => {
                 self.nav.popup = Some(Popup::Lines {

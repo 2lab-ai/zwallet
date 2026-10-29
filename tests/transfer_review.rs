@@ -796,6 +796,12 @@ async fn tui_end_to_end_confirm_progress_deadline_extend_and_mined() {
     );
     key(&mut app, Key::Backspace);
     type_text(&mut app, "1x");
+    // The cancel shortcut must not steal x from a focused wait-duration field.
+    assert_eq!(app.transfer().stage, Stage::Wait);
+    assert_eq!(
+        app.replacement().stage,
+        zwallet::tui::app::replacement::Stage::Idle
+    );
     assert!(key(&mut app, Key::Enter).is_empty());
     assert_eq!(
         app.transfer().status.as_ref().unwrap().wait,

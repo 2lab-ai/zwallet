@@ -51,12 +51,12 @@ Ubuntu 499 and macOS 505 tests, zero failures. Completed fixes are not rebuilt f
 | TUI3+4 navigation/read/receive | [PR #39](https://github.com/2lab-ai/zwallet/pull/39), f0b2b25 | Local566, TUI60; actual T14/T19 PTY; independent review | CI40838788105 Linux/macOS pass; upstream merge unavailable |
 | Tron B1 codec | [PR #40](https://github.com/2lab-ai/zwallet/pull/40), 8df04af | Local557, independent codec review, Intel library-test build; CI40840314282 both pass | Upstream merge unavailable |
 | Tron B2 policy | [PR #41](https://github.com/2lab-ai/zwallet/pull/41), 6f7f18b | Local570; decoded-byte/daemon corpus and CLI whitelist tests; CI40841286260 both pass | Upstream merge unavailable |
-| Tron C lifecycle | [PR #42](https://github.com/2lab-ai/zwallet/pull/42), deda723 | Local591;19 Tron send tests; real daemon+CLI+local node TRX/USDT passes | CI40842932300 macOS pass/Linux timing regression failed; repair in progress |
-| TUI5 transfer | parent integration | Local597; independent reviews, malicious token decimals, deadline/quit regressions and actual PTY2 pass | Fork PR and exact-head CI next |
+| Tron C lifecycle | [PR #42](https://github.com/2lab-ai/zwallet/pull/42), 1a4f36f | Local595;19 Tron send tests; real isolated daemon+CLI+loopback TRX/USDT passes; deterministic deadline repair | CI40847935216 Linux/macOS pass; remains draft, readiness transition denied by approval review |
+| TUI5 transfer | [PR #44](https://github.com/2lab-ai/zwallet/pull/44), 685a363 | Local597; independent reviews, malicious token decimals, deadline/quit regressions and actual PTY2 pass | CI40846478124 Linux/macOS pass; upstream merge unavailable |
 | TUI6 whitelist | handoff-tui-whitelist | Reviewed API, generic owned password, forms under validation | UI integration, real process gates, review/CI |
-| TUI7+8 history/detail | handoff-tui-history | Pending-null and metadata-conflict fixes independently reviewed; ten UI scenarios | Family adapter, whole integration gates/review/CI |
-| TUI9 replacements | handoff-tui-replacement | Two cryptographic proof tests and nine focused mocks | UI wiring, independent signing-boundary review, full gates/CI |
-| TUI10 creation | [PR #43](https://github.com/2lab-ai/zwallet/pull/43), 54fe8c1 | Local591; independent reviews; actual T30/T31 PTY pass | Exact-head CI pending |
+| TUI7+8 history/detail | [PR #45](https://github.com/2lab-ai/zwallet/pull/45), 18b2f8e | Local598; independent review; ten UI scenarios; bounded test-server writes | Frame-style assertions verified; CI40851168894 both pass; Tron adapter follows |
+| TUI9 replacements | handoff-tui-replacement-pr | Two cryptographic proof tests;17 replacement tests; independent backend and UI review clear | Actual PTY2/full gate then fork PR and latest-head CI; Tools invoke adapter remains H15 |
+| TUI10 creation | [PR #43](https://github.com/2lab-ai/zwallet/pull/43), 54fe8c1 | Local591; independent reviews; actual T30/T31 PTY pass | CI40845492673 Linux/macOS pass; upstream merge unavailable |
 | TUI11 tools | handoff-tui-tools | 13 exact-message/invoke/read mocks | Tools UI, replacement binding, full gates/review/CI |
 | TUI12 Tron UI | parent integration | Shared family pins; adapters identified | Complete selected-family status, send/history adapters and T38–T41 gates |
 

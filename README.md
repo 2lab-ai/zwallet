@@ -21,7 +21,7 @@ These capabilities describe the code in this revision. Published releases can la
 | Use contracts | Read-only ABI calls; writes using ABI arguments or raw calldata | Writes need an allowed contract and selector; token approvals are revoke-only |
 | Control an agent's signing | Timed unlock, immediate lock, signed recipient/contract whitelist, execution-fee caps and optional per-transaction amount/calldata limits | Limits must be configured; cumulative budgets remain WIP |
 | Integrate an agent | `--json`, structured error codes, send journal, pending/repeat guards and fixed-nonce replacement | A pending or unknown receipt is not permission to send the payment again |
-| Inspect from a terminal UI | Tabs/actions, one/all-network balances, receive addresses, verify/repair, timed unlock and session status | Transfer, history, whitelist forms and tools remain WIP |
+| Use a terminal wallet UI | Tabs/actions, balances, receive addresses, verify/repair, timed unlock, transfers, history and fixed-nonce recovery | Whitelist forms, key creation and tools remain WIP |
 
 ### Planned features
 
@@ -31,7 +31,7 @@ remain available where the corresponding TUI screen is WIP.
 
 | Feature | Status | What is still missing |
 |---|---|---|
-| Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Read/navigation and password warm-up are implemented. Send, history, whitelist editing, key creation and tools remain planned; their action rows explain that they are unavailable. |
+| Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Navigation, transfers, history and authenticated fixed-nonce recovery are implemented. Whitelist editing, key creation and tools remain planned; their action rows explain that they are unavailable. |
 | Tron | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | TRX and TRC20 USDT addresses, balances, signing, transfers and transaction lookup; currently a v0.3 design only |
 | Solana and TON | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Chain implementations; currently future extension plans |
 | Cumulative spending budgets | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Rolling 24-hour native and per-token budgets; optional per-transaction limits do not track total spending |
@@ -170,9 +170,12 @@ zwallet tui --chain sepolia
 ```
 
 Requires an interactive terminal of at least 80×24. Use `j`/`k` or arrow keys to
-browse, `r` to refresh, `L` to lock all sessions, and `q` or Ctrl-C to quit. The current
-UI shows keys and signing status; use the CLI for the remaining workflows. See
-[the planned UI](.prd/03-tui.md) ![WIP](https://img.shields.io/badge/status-WIP-yellow).
+browse, `r` to refresh, `L` to lock all sessions, and `q` or Ctrl-C to quit. The UI
+supports balances, receive addresses, password verification, transfers and transaction
+history. Pending EVM transactions expose speed-up/cancel only after original-intent
+verification; uncertain sends can be retried from their retained review in the same
+session. Whitelist forms, key creation and tools remain WIP. See the
+[TUI command reference](docs/commands.md#key-management-and-terminal-ui) and [UI specification](.prd/03-tui.md).
 
 ## Before funding a wallet
 

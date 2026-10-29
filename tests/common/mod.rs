@@ -614,6 +614,26 @@ impl FakeDaemon {
     }
 
     fn bind_with_reply(path: &Path, reply: Vec<u8>) -> Self {
+        Self::bind_with_responder(path, move |_| reply.clone())
+    }
+
+    /// Count wire requests while forwarding to a controlled mock signer fixture.
+    /// Never relocate a production daemon socket: its integrity guard must stop the session.
+    pub fn proxy(path: &Path, upstream: PathBuf) -> Self {
+        Self::bind_with_responder(path, move |request| {
+            let mut socket = UnixStream::connect(&upstream).expect("test daemon upstream");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            socket.write_all(request).unwrap();
+            socket.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut reply = Vec::new();
+            socket.read_to_end(&mut reply).unwrap();
+            reply
+        })
+    }
+
+    fn bind_with_responder(path: &Path, reply: impl Fn(&[u8]) -> Vec<u8> + Send + 'static) -> Self {
         let listener = UnixListener::bind(path).expect("bind fake daemon");
         listener.set_nonblocking(true).unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -627,8 +647,9 @@ impl FakeDaemon {
                         s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                         let mut buf = Vec::new();
                         let _ = s.read_to_end(&mut buf);
+                        let response = reply(&buf);
                         rx.lock().unwrap().push(buf);
-                        let _ = s.write_all(&reply);
+                        let _ = s.write_all(&response);
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(5)),
                 }

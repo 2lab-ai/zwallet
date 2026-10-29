@@ -77,6 +77,15 @@ pub async fn run(
     let mut terminal_failure = None;
     let result = loop {
         for effect in work.drain(..) {
+            if let Effect::Replacement(id) = effect {
+                if let Some(job) = app.take_replacement_job(id) {
+                    let (home, tx) = (home.clone(), tx.clone());
+                    tokio::spawn(async move {
+                        job.run(id, &home, &tx).await;
+                    });
+                }
+                continue;
+            }
             if let Effect::Transfer(id) = effect {
                 if let Some(job) = app.take_transfer_job(id) {
                     let (home, tx) = (home.clone(), tx.clone());
@@ -209,7 +218,36 @@ fn start(
         other => other,
     };
     match effect {
-        Effect::Transfer(_) => unreachable!("transfer jobs are moved out of App by the loop"),
+        Effect::Transfer(_) | Effect::Replacement(_) => {
+            unreachable!("send jobs are moved out of App by the loop")
+        }
+        Effect::HistoryOwner(target) => {
+            tokio::spawn(async move {
+                let result = match target.net() {
+                    Ok(net) => wallet::address(&home, &target.key, net.chain).await,
+                    Err(error) => Err(error),
+                };
+                let _ = tx.send(Msg::HistoryOwner(target, result));
+            });
+        }
+        Effect::LoadHistory(scope) => {
+            tokio::spawn(async move {
+                let result = app::history::read_history(&home, &scope).await;
+                let _ = tx.send(Msg::History(scope, result));
+            });
+        }
+        Effect::LoadTransaction(request) => {
+            tokio::spawn(async move {
+                let result = app::history::read_transaction(&home, &request).await;
+                let _ = tx.send(Msg::Transaction(request, result));
+            });
+        }
+        Effect::CheckHistoryList(generation, fingerprint) => {
+            tokio::task::spawn_blocking(move || {
+                let result = crate::core::whitelist::check_unchanged(&home, &fingerprint);
+                let _ = tx.send(Msg::HistoryList(generation, fingerprint, result));
+            });
+        }
         Effect::PrepareDuration(ttl) => {
             let plan = plan.clone();
             tokio::task::spawn_blocking(move || {

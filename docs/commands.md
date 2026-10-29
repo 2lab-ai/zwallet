@@ -83,9 +83,18 @@ Commands that act on a key take `--key <name>` (default: the active key).
   repairs cached addresses and shows old/new values. `u` asks for a duration and then the wallet
   password before starting that signing session. `7 session` shows the home, expiry, daemon
   pids, and the daemon's reported whitelist generation/count as information only. The startup
-  ptrace flag cannot be changed by any TUI key. History, transfer, whitelist forms and tools
+  ptrace flag cannot be changed by any TUI key. Whitelist forms, key creation and tools
   remain ![WIP](https://img.shields.io/badge/status-WIP-yellow).
   See [feature status](features.md#planned-features).
+  On the wallet tab, `Tab` switches between balance scrolling and history selection, Enter opens
+  a transaction, and `/` accepts a `0x` + 64-hex-digit EVM hash. The ten-row history combines this
+  home's selected-key journal with fixed Blockscout sources on Ethereum, Optimism and Sepolia;
+  other chains show journal coverage only. Source labels and unavailable-explorer notes remain
+  visible. Detail shows node claims, fee (including supported L1 fee), confirmations and only
+  registry-token receipt movements; `j`/`k` scroll, `r` refreshes and Esc returns. A missing receipt
+  with a consumed journal nonce is `dropped/replaced`, not proof that another payment is safe.
+  Nicknames appear only from a password-checked, unchanged whitelist.
+
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
   reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's
@@ -753,3 +762,26 @@ values, whole path and key-like host labels at any length, and its path segments
 of 8+ characters, each as written and percent-decoded; a part shorter than 8 characters only where
 it stands as a whole word. A JSON-RPC error's `data` is printed only when it is a string (revert
 data).
+
+
+## Fixed-nonce recovery in the TUI
+
+On a pending EVM send status or transaction detail, `s` reviews a speed-up and `x`
+reviews a cancel. Run `V` in this TUI session first. A restarted session enables
+these controls only after the signed original's hash and recovered owner are
+verified and its nonce, recipient, amount and asset match the local journal.
+The journal by itself cannot authorize a replacement. The review fixes the
+original hash and nonce; `b` changes the fee bump (default 1.25, range 1.1–3).
+Type the payee's nickname, the allowed contract's nickname for an invoke, or
+`cancel` for a zero-value native transfer to the verified own address.
+
+Confirmation rechecks the current policy, nonce, funds and total fee. A higher
+fee produces another review without requesting a signature. A cancel races the
+original: if the original is mined first, the original payment stands.
+
+After an uncertain broadcast, `R` is available only on that send's status while
+this session retains its immutable review. It retries the same intent at the
+same nonce, even if the journal has changed. After restarting, look the hash up
+with `/` or `zwallet tx`. An unknown hash does not prove failure: a fresh send at
+a new nonce may pay twice even without `d`, since the repeat check uses only a
+10-minute window in a journal editable by any process of this user.

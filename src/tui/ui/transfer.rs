@@ -455,18 +455,28 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                     HINT,
                     placed,
                 );
-                row(
-                    frame,
-                    10,
-                    "Speed-up / cancel / retry: in a later version.",
-                    None,
-                    HINT,
-                    placed,
-                );
-                if let Some(note) = &status.note {
+                row(frame, 10, app.replacement_hint(), None, HINT, placed);
+                for (offset, chunk) in app
+                    .replacement_status_notes()
+                    .into_iter()
+                    .flat_map(|note| note.as_bytes().chunks(72))
+                    .enumerate()
+                {
                     row(
                         frame,
-                        12,
+                        11 + offset as u16,
+                        "",
+                        Some(Outside::detail(&String::from_utf8_lossy(chunk))),
+                        WARNING,
+                        placed,
+                    );
+                }
+                if let Some(note) = &status.note
+                    && state.stage != Stage::Wait
+                {
+                    row(
+                        frame,
+                        17,
                         "",
                         Some(note.cut(usize::from(inner.width))),
                         ERROR,
@@ -475,7 +485,7 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 }
             }
             if state.stage == Stage::Wait {
-                field(frame, inner, 15, "Wait from now (e.g. 5m): ", app, placed);
+                field(frame, inner, 17, "Wait from now (e.g. 5m): ", app, placed);
             }
         }
         Stage::Failed => {

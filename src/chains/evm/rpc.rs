@@ -1,6 +1,11 @@
 //! EVM JSON-RPC: balances, contract reads, transaction preparation, broadcast, receipts.
 //! Runs in the CLI process only; the daemon never reaches this module.
 
+mod detail;
+pub use detail::{MovementsState, TxDetail, tx_detail, tx_state};
+mod replacement;
+pub use replacement::pending_original;
+
 use super::tx::{
     EvmFees, IERC20, IGasPriceOracle, UnsignedEvmTx, encoded_for_signing, erc20_transfer_calldata,
     gas_with_margin,
@@ -623,6 +628,31 @@ fn insufficient(shortfall: &[Value]) -> WalletError {
 /// Shared by `transfer` and `invoke`: nonce (pending), fees, gas estimate with margin, balance
 /// pre-check. Outside dry-run a shortfall is `INSUFFICIENT_FUNDS` before anything is signed.
 pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<PreparedTx> {
+    prepare_with_original(p, net, intent, None).await
+}
+
+/// The TUI supplies fees from a cryptographically checked original or its own immutable review.
+/// This allows an uncertain send to be retried at the same nonce even if this node lost its hash.
+pub(crate) async fn prepare_replacement(
+    p: &EvmProvider,
+    net: &Net,
+    intent: Intent,
+    original: OriginalFees,
+) -> Result<PreparedTx> {
+    if intent.nonce.is_none() || intent.replace.is_none() {
+        return Err(WalletError::validation(
+            "replacement needs the original nonce and hash",
+        ));
+    }
+    prepare_with_original(p, net, intent, Some(original)).await
+}
+
+async fn prepare_with_original(
+    p: &EvmProvider,
+    net: &Net,
+    intent: Intent,
+    authenticated_original: Option<OriginalFees>,
+) -> Result<PreparedTx> {
     let chain = net.chain;
     let native = native_balance(p, intent.from).await?;
     let token_balance = match &intent.token {
@@ -692,9 +722,12 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         }
     };
     let replacing = nonce < pending;
-    let original = match intent.replace {
-        Some(hash) => Some(original_fees(p, hash, intent.from, nonce, pending, journal).await?),
-        None => None,
+    let original = match (authenticated_original, intent.replace) {
+        (Some(checked), _) => Some(checked),
+        (None, Some(hash)) => {
+            Some(original_fees(p, hash, intent.from, nonce, pending, journal).await?)
+        }
+        (None, None) => None,
     };
     // `--replace` outbids the named transaction even where this node no longer counts it, and
     // an explicit `--bump` always applies: the agent asked for it, whatever this node holds.
@@ -1430,7 +1463,7 @@ async fn fetch_by_hash(
             return Err(WalletError::rpc(format!(
                 "{method} for {shown} answered about transaction {}, so the node says nothing \
                  about this one; look it up on {}",
-                got.unwrap_or("<none>"),
+                crate::core::text::ascii_inert(&p.net.redact(got.unwrap_or("<none>")), 128),
                 p.net.chain.explorer_tx_url(&shown)
             )));
         }

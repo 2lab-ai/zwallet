@@ -282,12 +282,16 @@ impl App {
         id
     }
     /// Return to an invoke review that changed before signing. No broadcast was started.
-    pub fn return_external_review(&mut self, id: u64) {
+    pub fn return_external_review(&mut self, id: u64) -> Vec<Effect> {
         if self.transfer.active == Some(id) && self.transfer.status.is_none() {
             self.transfer.active = None;
             self.transfer.stage = Stage::Inactive;
             self.nav.tab = Tab::Tools;
+            if std::mem::take(&mut self.transfer.lock_after_send) {
+                return vec![Effect::LockAll];
+            }
         }
+        Vec::new()
     }
     pub fn transfer(&self) -> &Transfer {
         &self.transfer
@@ -478,6 +482,11 @@ impl App {
                 nonce,
                 journal,
             } => {
+                if let Some(original) = self.transfer.retained.as_ref().and_then(|review| {
+                    crate::wallet::replacement::OriginalIntent::from_transfer(review).ok()
+                }) {
+                    self.register_retained_replacement(&hash, original);
+                }
                 self.transfer.status = Some(SendStatus {
                     hash,
                     nonce,
