@@ -22,7 +22,7 @@ These capabilities describe the code in this revision. Published releases can la
 | Use contracts | Read-only ABI calls; writes using ABI arguments or raw calldata | Writes need an allowed contract and selector; token approvals are revoke-only |
 | Control an agent's signing | Timed unlock, immediate lock, signed recipient/contract whitelist, execution-fee caps and optional per-transaction amount/calldata limits | Limits must be configured; cumulative budgets remain WIP |
 | Integrate an agent | `--json`, structured error codes, send journal, pending/repeat guards and EVM fixed-nonce replacement | A pending or unknown receipt is not permission to send the payment again |
-| Use the terminal UI | Tabs/actions, balances, receive addresses, verify/repair, timed unlock, checked-payee transfers, transaction lookup, whitelist/limit editing and key creation | Contract and message tools remain WIP in this tree; Tron incoming history is not indexed |
+| Use the terminal UI | Tabs/actions, balances, receive addresses, verify/repair, timed unlock, checked-payee transfers, transaction lookup, EVM fixed-nonce recovery (speed up, cancel, retry), whitelist/limit editing and key creation | Contract and message tools remain WIP in this tree; Tron incoming history is not indexed |
 
 ### Planned features
 
@@ -32,7 +32,7 @@ remain available where the corresponding TUI screen is WIP.
 
 | Feature | Status | What is still missing |
 |---|---|---|
-| Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Read/navigation, password warm-up, checked-payee sends (EVM and Tron), history/detail, password-authorized whitelist and limit editing, and wallet/key creation are implemented. Contract and message tools remain planned in this tree; their action rows explain that they are unavailable. |
+| Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Read/navigation, password warm-up, checked-payee sends (EVM and Tron), history/detail, authenticated EVM fixed-nonce recovery, password-authorized whitelist and limit editing, and wallet/key creation are implemented. Contract and message tools remain planned in this tree; their action rows explain that they are unavailable. |
 | Solana and TON | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Chain implementations; currently future extension plans |
 | Cumulative spending budgets | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Rolling 24-hour native and per-token budgets; optional per-transaction limits do not track total spending |
 | User-added tokens | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Adding transfer tokens outside the built-in registry |
@@ -192,9 +192,12 @@ zwallet tui --chain sepolia
 ```
 
 Requires an interactive terminal of at least 80×24. Use `j`/`k` or arrow keys to
-browse, `r` to refresh, `L` to lock all sessions, and `q` or Ctrl-C to quit. The current
-UI shows keys and signing status; use the CLI for the remaining workflows. See
-[the planned UI](.prd/03-tui.md) ![WIP](https://img.shields.io/badge/status-WIP-yellow).
+browse, `r` to refresh, `L` to lock all sessions, and `q` or Ctrl-C to quit. The UI
+supports balances, receive addresses, password verification, transfers and transaction
+history. Pending EVM transactions expose speed-up/cancel only after original-intent
+verification; uncertain sends can be retried from their retained review in the same
+session. Whitelist forms, key creation and tools remain WIP. See the
+[TUI command reference](docs/commands.md#key-management-and-terminal-ui) and [UI specification](.prd/03-tui.md).
 
 ## Before funding a wallet
 

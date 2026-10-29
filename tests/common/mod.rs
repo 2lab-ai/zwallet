@@ -643,6 +643,22 @@ impl FakeDaemon {
         Self::bind_with(path, move |_| reply.clone())
     }
 
+    /// Count wire requests while forwarding to a controlled mock signer fixture.
+    /// Never relocate a production daemon socket: its integrity guard must stop the session.
+    pub fn proxy(path: &Path, upstream: PathBuf) -> Self {
+        Self::bind_with(path, move |request| {
+            let mut socket = UnixStream::connect(&upstream).expect("test daemon upstream");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            socket.write_all(request).unwrap();
+            socket.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut reply = Vec::new();
+            socket.read_to_end(&mut reply).unwrap();
+            reply
+        })
+    }
+
     /// Answers each request with what `reply` makes of its bytes.
     pub fn bind_with(path: &Path, reply: impl Fn(&[u8]) -> Vec<u8> + Send + 'static) -> Self {
         let listener = UnixListener::bind(path).expect("bind fake daemon");

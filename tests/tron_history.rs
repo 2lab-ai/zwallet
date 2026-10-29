@@ -955,6 +955,8 @@ async fn t41_app_slash_drives_real_tron_lookup_and_keeps_scope_and_execution_unc
             }
             for action in ['s', 'x', 'R'] {
                 assert!(app.update(Msg::Key(Key::Char(action))).is_empty());
+                let shown = frame(&app, 80, 24);
+                assert!(shown.contains("no nonce replacement"), "{shown}");
             }
             assert_eq!(node.calls("/wallet/gettransactionbyid").len(), 1);
         }

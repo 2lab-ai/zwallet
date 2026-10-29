@@ -524,6 +524,11 @@ impl App {
                 nonce,
                 journal,
             } => {
+                if let Some(original) = self.transfer.retained.as_ref().and_then(|review| {
+                    crate::wallet::replacement::OriginalIntent::from_transfer(review).ok()
+                }) {
+                    self.register_retained_replacement(&hash, original);
+                }
                 self.transfer.status = Some(SendStatus {
                     hash,
                     nonce: Some(nonce),

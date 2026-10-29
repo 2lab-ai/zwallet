@@ -142,6 +142,9 @@ const IMPLEMENTED: &[ActionId] = &[
     ActionId::AllowPending,
     ActionId::AllowDuplicate,
     ActionId::GasCap,
+    ActionId::SpeedUp,
+    ActionId::Cancel,
+    ActionId::Retry,
     ActionId::Tx,
     ActionId::TronAddress,
     ActionId::TronBalance,
@@ -171,6 +174,7 @@ impl App {
         self.nav.allow_ptrace_scope_0 = allow_ptrace_scope_0;
     }
     pub fn menu_context(&self) -> Context<'static> {
+        let (pending_send, retryable_send) = self.replacement_available();
         Context {
             implemented: IMPLEMENTED,
             has_wallet: matches!(&self.status, Pane::Ready(bar) if bar.configured),
@@ -181,7 +185,8 @@ impl App {
                 .is_some_and(|key| self.family_pinned(key, self.chain)),
             unlocked: matches!(&self.status, Pane::Ready(bar) if matches!(bar.lock, LockLine::Open(_))),
             is_tron: self.chain.key == "tron",
-            ..Context::default()
+            pending_send,
+            retryable_send,
         }
     }
     pub fn family_pinned(&self, key: &str, chain: &Chain) -> bool {
@@ -856,6 +861,9 @@ impl App {
             action
         };
         if let Some(work) = self.whitelist_action(action) {
+            return work;
+        }
+        if let Some(work) = self.replacement_action(action) {
             return work;
         }
         if let Some(work) = self.transfer_action(action) {

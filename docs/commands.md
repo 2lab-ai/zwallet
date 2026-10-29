@@ -864,3 +864,26 @@ values, whole path and key-like host labels at any length, and its path segments
 of 8+ characters, each as written and percent-decoded; a part shorter than 8 characters only where
 it stands as a whole word. A JSON-RPC error's `data` is printed only when it is a string (revert
 data).
+
+
+## Fixed-nonce recovery in the TUI
+
+On a pending EVM send status or transaction detail, `s` reviews a speed-up and `x`
+reviews a cancel. Run `V` in this TUI session first. A restarted session enables
+these controls only after the signed original's hash and recovered owner are
+verified and its nonce, recipient, amount and asset match the local journal.
+The journal by itself cannot authorize a replacement. The review fixes the
+original hash and nonce; `b` changes the fee bump (default 1.25, range 1.1–3).
+Type the payee's nickname, the allowed contract's nickname for an invoke, or
+`cancel` for a zero-value native transfer to the verified own address.
+
+Confirmation rechecks the current policy, nonce, funds and total fee. A higher
+fee produces another review without requesting a signature. A cancel races the
+original: if the original is mined first, the original payment stands.
+
+After an uncertain broadcast, `R` is available only on that send's status while
+this session retains its immutable review. It retries the same intent at the
+same nonce, even if the journal has changed. After restarting, look the hash up
+with `/` or `zwallet tx`. An unknown hash does not prove failure: a fresh send at
+a new nonce may pay twice even without `d`, since the repeat check uses only a
+10-minute window in a journal editable by any process of this user.

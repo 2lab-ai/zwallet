@@ -803,6 +803,11 @@ async fn t40_first_observation_deadline_stays_unknown_with_second_payment_warnin
         ReceiptState::Unknown
     );
     assert!(screen(&app).contains("second payment"));
+    // Tron has no nonce replacement: the EVM speed-up, cancel and retry keys sign nothing.
+    for k in ['s', 'x', 'R'] {
+        assert!(key(&mut app, Key::Char(k)).is_empty());
+        assert!(screen(&app).contains("second payment"));
+    }
     assert_eq!(f.count(), 1);
 }
 

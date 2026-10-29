@@ -6,6 +6,7 @@ mod addresses;
 pub mod create;
 pub mod history;
 mod navigation;
+pub mod replacement;
 pub mod transfer;
 pub mod whitelist;
 use create::{CreateEffect, CreateMsg, CreateUi};
@@ -47,6 +48,7 @@ pub enum Msg {
     WhitelistRead(u64, Result<whitelist::Read>),
     WhitelistPrepared(u64, Result<String>),
     WhitelistApplied(u64, whitelist::Applied),
+    Replacement(u64, replacement::Event),
     Transfer(u64, transfer::TransferMsg),
     HistoryOwner(HistoryTarget, Result<(String, Trust)>),
     History(HistoryScope, Result<HistoryRead>),
@@ -92,6 +94,7 @@ pub enum Effect {
     PrepareWhitelist(whitelist::EditRequest),
     ApplyWhitelist(u64),
     DiscardWhitelist(u64),
+    Replacement(u64),
     Transfer(u64),
     HistoryOwner(HistoryTarget),
     LoadHistory(HistoryScope),
@@ -211,6 +214,7 @@ pub enum PasswordPurpose {
 
 pub struct App {
     whitelist: whitelist::WhitelistUi,
+    replacement: replacement::Replacement,
     transfer: transfer::Transfer,
     create: CreateUi,
     nav: Navigation,
@@ -250,6 +254,7 @@ impl App {
     pub fn new(net: &Net, warm: Duration) -> Self {
         Self {
             whitelist: whitelist::WhitelistUi::default(),
+            replacement: replacement::Replacement::default(),
             transfer: transfer::Transfer::default(),
             nav: Navigation::new(net),
             history: HistoryView::default(),
@@ -294,6 +299,10 @@ impl App {
             std::ops::ControlFlow::Break(msg) => msg,
         };
         let msg = match self.whitelist_update(msg) {
+            std::ops::ControlFlow::Continue(work) => return work,
+            std::ops::ControlFlow::Break(msg) => msg,
+        };
+        let msg = match self.replacement_update(msg) {
             std::ops::ControlFlow::Continue(work) => return work,
             std::ops::ControlFlow::Break(msg) => msg,
         };
@@ -647,7 +656,8 @@ impl App {
             | Msg::Balances(..)
             | Msg::EveryBalances(..)
             | Msg::Addresses(..)
-            | Msg::RpcChecked(..) => unreachable!("navigation message"),
+            | Msg::RpcChecked(..)
+            | Msg::Replacement(..) => unreachable!("navigation or replacement message"),
         }
     }
 
@@ -710,6 +720,9 @@ impl App {
                 }
                 _ => Vec::new(),
             };
+        }
+        if let Some(work) = self.replacement_key(key) {
+            return work;
         }
         if let Some(work) = self.transfer_key(key) {
             return work;

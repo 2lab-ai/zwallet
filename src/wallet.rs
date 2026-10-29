@@ -19,6 +19,7 @@ pub use read::{
     balances, brief, every_balance, every_balance_with, net_with, validate_rpc,
 };
 
+pub mod replacement;
 pub mod send;
 pub mod tron_send;
 pub use send::{

@@ -55,7 +55,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
             }
         }
         Row::default()
-            .text("s/x/R unavailable   r refresh   Esc history", HINT)
+            .text(app.history_replacement_hint(), HINT)
             .draw(frame, line(inner, inner.height - 1), placed);
         return;
     }

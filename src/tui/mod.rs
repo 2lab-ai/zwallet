@@ -80,6 +80,15 @@ pub async fn run(
     let mut terminal_failure = None;
     let result = loop {
         for effect in work.drain(..) {
+            if let Effect::Replacement(id) = effect {
+                if let Some(job) = app.take_replacement_job(id) {
+                    let (home, tx) = (home.clone(), tx.clone());
+                    tokio::spawn(async move {
+                        job.run(id, &home, &tx).await;
+                    });
+                }
+                continue;
+            }
             if let Effect::Transfer(id) = effect {
                 if let Some(job) = app.take_transfer_job(id) {
                     let (home, tx) = (home.clone(), tx.clone());
@@ -232,7 +241,9 @@ fn start(
         other => other,
     };
     match effect {
-        Effect::Transfer(_) => unreachable!("transfer jobs are moved out of App by the loop"),
+        Effect::Transfer(_) | Effect::Replacement(_) => {
+            unreachable!("send jobs are moved out of App by the loop")
+        }
         Effect::HistoryOwner(target) => {
             tokio::spawn(async move {
                 let result = match target.net() {

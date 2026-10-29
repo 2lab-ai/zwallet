@@ -19,6 +19,10 @@ use alloy::sol;
 use alloy::sol_types::SolCall;
 use serde_json::{Value, json};
 
+#[path = "tx_original.rs"]
+mod original;
+pub use original::decode_pending_original;
+
 sol! {
     interface IGasPriceOracle {
         function getL1Fee(bytes memory data) external view returns (uint256);

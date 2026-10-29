@@ -180,7 +180,7 @@ impl App {
                     Err(error) => Pane::Failed(Outside::error(&error)),
                 };
                 self.history.detail = Some((request, pane));
-                Vec::new()
+                self.prepare_detail_replacement()
             }
             Msg::HistoryList(generation, fingerprint, result) => {
                 if generation == self.generation {
@@ -253,11 +253,6 @@ impl App {
                 Key::Char('r') => {
                     let hash = request.hash.clone();
                     return Some(self.open_transaction(&hash));
-                }
-                Key::Char('s' | 'x' | 'R') => {
-                    self.notice = Some(Outside::detail(
-                        "speed up, cancel and retry are unavailable in this version",
-                    ))
                 }
                 _ => return None,
             }
@@ -447,6 +442,11 @@ pub fn detail_lines(
     let Pane::Ready(detail) = pane else {
         return lines;
     };
+    if let Some(note) = app.history_replacement_note() {
+        for chunk in note.as_bytes().chunks(72) {
+            lines.push(Outside::detail(&String::from_utf8_lossy(chunk)));
+        }
+    }
     let mut push = |line: String| lines.push(Outside::detail(&line));
     match detail {
         TransactionDetail::Evm(d) => {

@@ -233,7 +233,7 @@ fn detail_shows_node_fields_registry_movements_and_read_only_controls() {
         "Included L1 fee: 0.001 ETH",
         "Confirmations: 5",
         "Nonce: 7",
-        "s/x/R unavailable",
+        "needs: V   r refresh   Esc history",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -243,8 +243,12 @@ fn detail_shows_node_fields_registry_movements_and_read_only_controls() {
     let text = frame(&app, 80, 24);
     assert!(text.contains("1.234567 USDC"), "{text}");
     assert!(text.contains("2 token movements not shown"), "{text}");
-    assert!(app.update(Msg::Key(Key::Char('s'))).is_empty());
-    assert!(frame(&app, 120, 30).contains("unavailable"));
+    for key in ['s', 'x', 'R'] {
+        assert!(app.update(Msg::Key(Key::Char(key))).is_empty());
+    }
+    let text = frame(&app, 120, 30);
+    assert!(!text.contains("s speed up"), "{text}");
+    assert!(!text.contains("x cancel"), "{text}");
 }
 #[test]
 fn previous_hash_chain_key_and_endpoint_results_never_replace_the_current_view() {
