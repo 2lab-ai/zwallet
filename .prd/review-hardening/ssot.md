@@ -33,3 +33,12 @@ Rebase PR #29 onto upstream main `51b4a51b4fae511c726f7f1be0d009c0360fe264`.
 Preserve the README / docs split and WIP labels from PR #30; reconcile command,
 security, feature-status and development documentation with this PR's implementation.
 The existing fork, no-merge/no-deploy and co-author instructions still apply.
+
+## CI completion correction (verbatim, 2026-10-29)
+
+> 야 니가 알아서 해야지 실패 났잖아 ㄴ시발 이걸 내가 말해줘야함?
+
+Complete PR delivery by inspecting failed checks, fixing their cause, and verifying
+both Linux and macOS CI on the updated PR head before reporting completion.
+Local success or a queued run is not the delivery gate. Existing fork, attribution,
+and no-merge/no-deploy instructions remain in force.

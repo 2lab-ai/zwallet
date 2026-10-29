@@ -2171,7 +2171,6 @@ fn process_argvs() -> Result<Vec<(i32, Vec<OsString>)>> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd};
 
     #[test]
@@ -2855,6 +2854,8 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn child_running_this_build_waits_for_stdin() {
+        use std::io::Read;
+
         if std::env::var_os(CHILD_WAITS).is_some() {
             let _ = std::io::stdin().read_to_end(&mut Vec::new());
         }

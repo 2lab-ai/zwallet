@@ -53,3 +53,25 @@ Local documentation reconciliation converged on main `51b4a51`; PR #29 publicati
 - re-verified ✅: WU1–WU5 · full gate on the resolved main `51b4a51` rebase tree.
 - Upstream main and fork head were rechecked before publication: `51b4a51` and `3c745ce`.
   Remote publication follows this validated snapshot; the PR is the delivery receipt.
+
+## R3 — closed 2026-10-29
+
+Local Linux lint regression repaired. Remote CI remains the mandatory delivery gate.
+
+### Closed rows
+
+| ID | Source | Scope | Status | Verification Evidence | Last Measured |
+|---|---|---|---|---|---|
+| WU7 | regression:WU5 | Scope macOS ARM test-only Read import to its sole caller | ✅ | Linux ARM Rust 1.95.0 strict Clippy exit 0; macOS full gate: 505 passed, 11 ignored | 2026-10-29 |
+
+### Round section (as recorded at close)
+
+- CI run 40812668867, Ubuntu job 123246519143 failed strict Clippy at
+  `src/core/protocol.rs:2174`: the shared test-module Read import was unused on Linux.
+- The only synchronous Read caller is gated to macOS ARM. Move the import into that
+  test function, preserving behavior and keeping warnings denied on both platforms.
+- Direct Linux ARM validation used the existing Docker runtime and a source-only copy
+  without `.git`, host credentials or a real wallet. Rust 1.95.0 Clippy: exit 0.
+- macOS ARM fmt, strict Clippy and full tests pass: 505 passed, 11 live-RPC tests ignored.
+- The user's correction makes remote CI success on the current PR head part of delivery.
+  Push and inspect both platform results; the PR body is the final remote receipt.

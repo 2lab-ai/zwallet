@@ -37,6 +37,11 @@ Reuse the existing chain-specific decoder and signed whitelist; do not trust CLI
 
 Fork: ai-insightquest/zwallet. PR base: 2lab-ai/zwallet main. Do not merge or deploy; user direction overrides using-dotprd Phase 3.
 
+PR delivery is complete only after the Linux and macOS CI jobs succeed for the current
+PR head. Inspect failed job logs, repair the cause and repeat that gate; local passes,
+a successful push or queued checks alone do not complete delivery. The PR body records
+the final run and commit as the remote receipt.
+
 ## Validation and operational limits
 
 The gate uses Rust 1.95.0; `.github/workflows/validate.yml` checks the caller-supplied exact
