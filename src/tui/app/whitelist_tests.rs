@@ -775,3 +775,49 @@ fn prepare_refuses_a_list_rewritten_between_the_check_and_the_plan_read() {
         assert!(prepare(home.path(), request, false).is_ok());
     }
 }
+
+/// Enter opens the password field only after every summary row has been drawn at least once.
+/// End must not count the rows it jumps over.
+#[test]
+fn the_password_opens_only_after_every_summary_row_was_on_screen() {
+    const ROWS: usize = 40;
+    let summary = (0..ROWS)
+        .map(|n| format!("summary row {n:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut app = new_app();
+    prepare_add(
+        &mut app,
+        "0x3333333333333333333333333333333333333333",
+        false,
+    );
+    review(&mut app, &summary);
+    let mut drawn = std::collections::BTreeSet::new();
+    let look = |app: &App, drawn: &mut std::collections::BTreeSet<usize>| {
+        let shown = frame(app, "summary-paging");
+        drawn.extend((0..ROWS).filter(|n| shown.contains(&format!("summary row {n:02}"))));
+    };
+    look(&app, &mut drawn);
+    // The app counts a page as 10 rows; at 80x24 the frame draws at least that many.
+    assert!(drawn.len() >= 10, "{drawn:?}");
+    key(&mut app, Key::End);
+    look(&app, &mut drawn);
+    key(&mut app, Key::Enter);
+    assert!(
+        !matches!(app.password_state(), PasswordState::Input { .. }),
+        "End then Enter opened the password with rows never drawn: {drawn:?}"
+    );
+    look(&app, &mut drawn);
+    let mut presses = 0;
+    loop {
+        let before = drawn.len();
+        key(&mut app, Key::Enter);
+        if matches!(app.password_state(), PasswordState::Input { .. }) {
+            assert_eq!(before, ROWS, "the password opened with rows never drawn");
+            break;
+        }
+        look(&app, &mut drawn);
+        presses += 1;
+        assert!(presses < ROWS, "Enter never reached the password");
+    }
+}
