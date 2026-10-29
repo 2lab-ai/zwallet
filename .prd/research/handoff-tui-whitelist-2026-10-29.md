@@ -123,3 +123,31 @@ again. Logs: `/tmp/zwallet-h14-warm-sync-pty.log` and
 `/tmp/zwallet-h14-warm-sync-full-gate.log`. The final combined tree uses its
 history-enabled Wallet hint with the same event-order regression. Fresh final-head
 CI follows this commit; the earlier failed CI is not counted as green.
+
+## Expanded-suite CI job budget — 2026-10-29
+
+At head `b2ccb22`, CI run 40862519617 passed Linux. The macOS job
+123409041135 also passed the complete test suite, including the repaired combined
+warm/send/edit/re-warm PTY. Its doctests finished at 11:24:22 UTC, then the
+20-minute job deadline canceled the final version-line smoke build at 11:24:32 UTC.
+This run is therefore not a completed macOS validation despite its passing tests.
+
+The shared validation job budget is now 30 minutes to accommodate the expanded
+suite and build work on a cold runner, including the distinct version-line build.
+Only `jobs.check.timeout-minutes` changed in the workflow. Individual test and
+60-second PTY wait deadlines, all test commands, version-line assertions, exact
+revision checkout, pinned actions and permissions remain unchanged. This bounded
+job allowance does not convert a stalled test into a passing result.
+
+Evidence: https://github.com/2lab-ai/zwallet/actions/runs/40862519617/job/123409041135.
+Targeted workflow lint and a structural before/after comparison passed; the latter
+requires the job timeout to be the only workflow difference. The parent owns the
+next serial full gate and final-head CI; neither was run for this configuration
+delta by the delegated worker.
+
+Parent verification after the budget change: Rust 1.95.0 fmt, strict locked
+all-target Clippy and the complete debug suite passed again: **710 passed,
+0 failed, 13 ignored**. Log: `/tmp/zwallet-h14-ci-budget-full-gate.log`. The
+version-line smoke returned exactly `zwallet 0.1.0 (preview 0123456789ab)`
+(`/tmp/zwallet-h14-version-smoke.log`). Fresh exact-head Linux/macOS CI remains
+the external acceptance gate after this commit.
