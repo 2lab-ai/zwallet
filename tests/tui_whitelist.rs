@@ -179,7 +179,7 @@ fn t7_t11_whitelist_add_uses_real_worker_and_returns_verified_locked_or_explicit
         "0x4444444444444444444444444444444444444444",
         "10m",
     );
-    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], false);
+    home.assert_unlocked();
     let list = verified(&home);
     assert_eq!(list["gen"], 2);
     assert_eq!(list["entries"].as_array().unwrap().len(), 2);

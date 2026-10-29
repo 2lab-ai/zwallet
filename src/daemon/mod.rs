@@ -169,6 +169,34 @@ fn inspect_files(
     None
 }
 
+/// Test diagnostics, not a user feature: in a debug build, for a home under the test scope
+/// ([`protocol::TEST_SCOPE_ENV`]), appends `<pid> <unix ms> <what>` to
+/// [`protocol::TEST_END_NOTES`] in the home, so a test that finds a session gone can say why.
+/// `what` is a fixed reason with durations or a `WalletError` message, never a secret. A release
+/// build compiles this to nothing: its daemon writes no file.
+fn note_end(home: &Path, what: impl FnOnce() -> String) {
+    #[cfg(debug_assertions)]
+    if protocol::in_test_scope(home) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        let line = format!("{} {ms} {}\n", std::process::id(), what());
+        if let Ok(mut notes) = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(FILE_MODE)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(home.join(protocol::TEST_END_NOTES))
+        {
+            let _ = notes.write_all(line.as_bytes());
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = (home, what);
+}
+
 /// How long a request waits for the list to be read before deciding without it.
 const LIST_WAIT: Duration = Duration::from_secs(2);
 /// The most list reads in flight at once. A read holds its permit until it really returns, so
@@ -203,8 +231,12 @@ impl Shared {
             Some(s) if SystemTime::now() >= s.expires_at => Some("the unlock expired"),
             Some(_) => None,
         };
-        if reason.is_some() {
-            *session = None;
+        if let Some(reason) = reason {
+            // The seed is wiped (dropped) by the end of this statement.
+            let ended = session.take().is_some();
+            if ended {
+                note_end(&self.home, || format!("session ended: {reason}"));
+            }
         }
         reason
     }
@@ -221,8 +253,9 @@ impl Shared {
             }
             session.as_ref().unwrap().sealed.clone()
         };
-        let deadline = tokio::time::Instant::now()
-            + Duration::from_millis(self.inspect_wait_ms.load(Ordering::Relaxed));
+        let started = tokio::time::Instant::now();
+        let wait_ms = self.inspect_wait_ms.load(Ordering::Relaxed);
+        let deadline = started + Duration::from_millis(wait_ms);
         let inspect = async {
             let permit = self.inspectors.clone().acquire_owned().await.ok()?;
             let (home, sock, sock_id, inspector, marker) = (
@@ -257,9 +290,16 @@ impl Shared {
         } else {
             result
         };
-        if reason.is_some() {
+        if let Some(reason) = reason {
             *session = None;
             self.stop.notify_one();
+            drop(session);
+            note_end(&self.home, || {
+                format!(
+                    "session ended by an inspection after {} ms (limit {wait_ms} ms): {reason}",
+                    started.elapsed().as_millis()
+                )
+            });
         }
         reason
     }
@@ -326,6 +366,7 @@ pub async fn run(home: PathBuf) -> Result<()> {
         Ok(s) => s,
         Err(e) => {
             report_last(&Response::err(&e));
+            note_end(&home, || format!("exit: did not start: {}", e.message));
             return Err(e);
         }
     };
@@ -340,11 +381,13 @@ pub async fn run(home: PathBuf) -> Result<()> {
     if !report_last(&Response::ok(ready)) {
         *shared.session() = None;
         remove_own_socket(&shared).await;
+        note_end(&home, || "exit: the unlocking process went away".into());
         return Err(WalletError::validation("the unlocking process went away"));
     }
-    serve_until_done(listener, &shared).await;
+    let why = serve_until_done(listener, &shared).await;
     *shared.session() = None; // zeroizes the seed
     remove_own_socket(&shared).await;
+    note_end(&home, || format!("exit: {why}"));
     Ok(())
 }
 
@@ -539,7 +582,8 @@ async fn remove_own_socket(shared: &Shared) {
     }
 }
 
-async fn serve_until_done(listener: UnixListener, shared: &Arc<Shared>) {
+/// Serves until the session ends; returns why (for the test notes, [`note_end`]).
+async fn serve_until_done(listener: UnixListener, shared: &Arc<Shared>) -> &'static str {
     let fail = |e: std::io::Error| WalletError::validation(format!("signal setup: {e}"));
     let (Ok(mut term), Ok(mut int), Ok(_hup)) = (
         signal(SignalKind::terminate()).map_err(fail),
@@ -547,7 +591,7 @@ async fn serve_until_done(listener: UnixListener, shared: &Arc<Shared>) {
         // No controlling terminal after setsid, but ignore a stray SIGHUP rather than die.
         signal(SignalKind::hangup()).map_err(fail),
     ) else {
-        return;
+        return "signal setup failed";
     };
     let uid = protocol::current_uid();
     let monitor = async {
@@ -562,8 +606,8 @@ async fn serve_until_done(listener: UnixListener, shared: &Arc<Shared>) {
     loop {
         let wait = {
             let mut session = shared.session();
-            if shared.check(&mut session).is_some() {
-                return;
+            if let Some(reason) = shared.check(&mut session) {
+                return reason;
             }
             let expires_at = session.as_ref().map_or(SystemTime::now(), |s| s.expires_at);
             expires_at
@@ -578,10 +622,10 @@ async fn serve_until_done(listener: UnixListener, shared: &Arc<Shared>) {
                 }
             }
             _ = tokio::time::sleep(wait) => {}
-            _ = &mut monitor => return,
-            _ = shared.stop.notified() => return,
-            _ = term.recv() => return,
-            _ = int.recv() => return,
+            _ = &mut monitor => return "the tick's inspection ended the session",
+            _ = shared.stop.notified() => return "a request ended the session",
+            _ = term.recv() => return "SIGTERM",
+            _ = int.recv() => return "SIGINT",
         }
     }
 }
@@ -642,11 +686,15 @@ async fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
     };
     // Lock needs no filesystem evidence: erase the seed immediately, even if all workers hang.
     if matches!(req, Request::Lock) {
-        let mut session = shared.session();
-        if let Some(reason) = shared.check(&mut session) {
-            return ended(&req, reason);
-        }
-        return respond(&mut session, &req, None);
+        let answer = {
+            let mut session = shared.session();
+            if let Some(reason) = shared.check(&mut session) {
+                return ended(&req, reason);
+            }
+            respond(&mut session, &req, None)
+        };
+        note_end(&shared.home, || "session ended: a lock request".into());
+        return answer;
     }
     if let Some(reason) = shared.inspect().await {
         return ended(&req, reason);
@@ -674,7 +722,10 @@ async fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
     }
     if session.as_ref().is_none_or(|s| s.sealed != sealed) {
         *session = None;
-        return ended(&req, "the session changed while the whitelist was read");
+        drop(session);
+        let reason = "the session changed while the whitelist was read";
+        note_end(&shared.home, || format!("session ended: {reason}"));
+        return ended(&req, reason);
     }
     respond(&mut session, &req, Some(&loaded))
 }

@@ -109,6 +109,7 @@ fn bar(frame: &Frame) -> (&str, &str) {
     let len = frame.rows.len();
     (&frame.rows[len - 2], &frame.rows[len - 1])
 }
+#[track_caller]
 fn wait(tui: &mut PtyChild, text: &str) -> Frame {
     tui.wait_frame(WAIT, |f| contains(f, text))
 }

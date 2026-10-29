@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use zwallet::chains::evm::registry::WHITELIST_RULES;
-use zwallet::core::protocol::TEST_SCOPE_ENV;
+use zwallet::core::protocol::{TEST_END_NOTES, TEST_SCOPE_ENV};
 use zwallet::core::whitelist::{self, Entry, Whitelist};
 
 pub const PW: &str = "correct horse battery staple";
@@ -233,6 +233,20 @@ impl Home {
         v["daemonPid"].as_i64().map(|p| p as i32)
     }
 
+    /// `status --json` where the test expects this home's session to be live: panics with the
+    /// status and why the daemon ended it ([`daemon_end_notes`]) when it says `locked`.
+    #[track_caller]
+    pub fn assert_unlocked(&self) -> Value {
+        let status = self.run(&["status", "--json"]).ok();
+        assert_eq!(
+            status["locked"],
+            false,
+            "{status}; {}",
+            daemon_end_notes(self.path())
+        );
+        status
+    }
+
     /// Waits (bounded) until `status` reports this home locked: no daemon process for it.
     pub fn wait_locked(&self, limit: Duration) -> bool {
         let start = Instant::now();
@@ -336,6 +350,31 @@ impl Drop for Home {
                 }
             }
         }
+    }
+}
+
+/// Why the daemons of `home` ended their sessions or exited, as a debug daemon of a test home
+/// notes it ([`TEST_END_NOTES`]): for a failure message, one escaped line per note, at most the
+/// last 4 KB.
+pub fn daemon_end_notes(home: &Path) -> String {
+    match std::fs::read(home.join(TEST_END_NOTES)) {
+        Ok(bytes) => {
+            let tail = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(4096)..])
+                .lines()
+                .map(|line| {
+                    let inert = line.chars().map(|c| {
+                        if c.is_control() {
+                            c.escape_default().to_string()
+                        } else {
+                            c.to_string()
+                        }
+                    });
+                    format!("\n  {}", inert.collect::<String>())
+                })
+                .collect::<String>();
+            format!("daemon end notes ({TEST_END_NOTES}, `<pid> <unix ms> <why>`):{tail}")
+        }
+        Err(e) => format!("no daemon end notes ({TEST_END_NOTES}: {e})"),
     }
 }
 
@@ -1034,6 +1073,8 @@ pub struct PtyChild {
     shown: Vec<u8>,
     /// With [`PtyChild::spawn_full_screen`]: the thread reading the master all along.
     screen: Option<FullScreen>,
+    /// The child's `ZWALLET_HOME`, if it has one: a failed wait says why its daemons ended.
+    home: Option<PathBuf>,
 }
 
 /// What [`PtyChild::spawn_full_screen`] keeps: the grid frames are parsed on, every byte read from
@@ -1107,6 +1148,11 @@ impl PtyChild {
     /// Starts `cmd`, its stdio set, in a session of its own with `slave` as its controlling
     /// terminal.
     fn start(mut cmd: Command, master: File, slave: OwnedFd, out: Option<(File, OwnedFd)>) -> Self {
+        let home = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "ZWALLET_HOME")
+            .and_then(|(_, v)| v)
+            .map(PathBuf::from);
         // SAFETY: setsid and ioctl are async-signal-safe; fd 0 is the pty slave by now.
         unsafe {
             cmd.pre_exec(|| {
@@ -1125,7 +1171,15 @@ impl PtyChild {
             out,
             shown: Vec::new(),
             screen: None,
+            home,
         }
+    }
+
+    /// For a failure message: why the daemons of the child's home ended ([`daemon_end_notes`]).
+    fn end_notes(&self) -> String {
+        self.home
+            .as_deref()
+            .map_or_else(|| "no ZWALLET_HOME".into(), daemon_end_notes)
     }
 
     fn full_screen(&self) -> &FullScreen {
@@ -1148,6 +1202,7 @@ impl PtyChild {
     /// returns it. Panics with the frame (and the exit and stderr, once the child has exited) when
     /// the child has exited and the reader has every byte (it ends when the pty does, after the
     /// last one: this process holds no slave of a full-screen child's pty), or past `limit`.
+    #[track_caller]
     pub fn wait_output(&mut self, limit: Duration, until: impl Fn(&[u8]) -> bool) -> Vec<u8> {
         let start = Instant::now();
         loop {
@@ -1169,8 +1224,9 @@ impl PtyChild {
                     None => format!("still running after {limit:?}"),
                 };
                 panic!(
-                    "not shown; {exit}; the terminal showed:\n{}",
-                    Frame::parse(&output, size)
+                    "not shown; {exit}; the terminal showed:\n{}\n{}",
+                    Frame::parse(&output, size),
+                    self.end_notes()
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -1181,6 +1237,7 @@ impl PtyChild {
     /// A frame reaches the terminal in pieces (a pty read ends anywhere), so `until` should look
     /// for the last thing the test reads in it; whether the frame holds a stray byte is decided on
     /// the whole output ([`PtyChild::final_frame`]).
+    #[track_caller]
     pub fn wait_frame(&mut self, limit: Duration, until: impl Fn(&Frame) -> bool) -> Frame {
         let size = self.full_screen().size;
         Frame::parse(
@@ -1193,6 +1250,7 @@ impl PtyChild {
     /// before it gave the terminal back. All of it was written before the exit; the wait is for
     /// the reader to catch up, and fails once the reader has ended (the pty ended with the child)
     /// if the terminal was never given back.
+    #[track_caller]
     pub fn final_frame(&mut self, limit: Duration) -> Frame {
         assert!(
             matches!(self.child.try_wait(), Ok(Some(_))),
@@ -1227,6 +1285,7 @@ impl PtyChild {
 
     /// Waits (bounded) for the exit and returns its status and stderr; past `limit` the child is
     /// killed and this panics with the last frame.
+    #[track_caller]
     pub fn wait_exit(&mut self, limit: Duration) -> (std::process::ExitStatus, String) {
         let start = Instant::now();
         let status = loop {
@@ -1236,8 +1295,9 @@ impl PtyChild {
             if start.elapsed() > limit {
                 let _ = self.child.kill();
                 panic!(
-                    "still running after {limit:?}; the terminal showed:\n{}",
-                    self.frame()
+                    "still running after {limit:?}; the terminal showed:\n{}\n{}",
+                    self.frame(),
+                    self.end_notes()
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -1272,6 +1332,7 @@ impl PtyChild {
     }
 
     /// Waits (bounded) until the terminal shows `needle`, e.g. a password prompt.
+    #[track_caller]
     pub fn wait_for(&mut self, needle: &str, limit: Duration) {
         let start = Instant::now();
         loop {
@@ -1283,17 +1344,27 @@ impl PtyChild {
             }
             assert!(
                 start.elapsed() < limit,
-                "no {needle:?} on the terminal within {limit:?}; saw {:?}",
-                self.seen
+                "no {needle:?} on the terminal within {limit:?}; saw {}",
+                self.seen_tail()
             );
             if let Ok(Some(status)) = self.child.try_wait() {
                 panic!(
-                    "exited ({status}) before showing {needle:?}; saw {:?}",
-                    self.seen
+                    "exited ({status}) before showing {needle:?}; saw {}",
+                    self.seen_tail()
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// For a failure message: the last 4 KB of what the terminal showed, escaped, and why the
+    /// daemons of the child's home ended.
+    fn seen_tail(&self) -> String {
+        let from = self.seen.len().saturating_sub(4096);
+        let from = (from..=self.seen.len())
+            .find(|i| self.seen.is_char_boundary(*i))
+            .unwrap_or(0);
+        format!("{:?}; {}", &self.seen[from..], self.end_notes())
     }
 
     /// Reads what stdout's terminal holds, so the child never blocks on a full one.

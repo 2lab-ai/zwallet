@@ -1512,7 +1512,7 @@ fn a_cache_changed_after_unlock_fails_the_password_check_but_keeps_the_session()
     assert!(e.message.contains("zwallet address --verify"));
     app.update(Msg::Checked(Err(e)));
     assert!(app.checked_list().is_none() && !app.pinned("a"));
-    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], false);
+    home.assert_unlocked();
     let (_, placed) = checked_frame(&mut screen(80, 24), &app);
     assert!(
         placed
