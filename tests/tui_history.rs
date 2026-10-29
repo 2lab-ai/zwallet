@@ -66,6 +66,8 @@ fn opened() -> (App, zwallet::tui::app::history::HistoryScope) {
     (app, scope)
 }
 fn frame(app: &App, width: u16, height: u16) -> String {
+    use ratatui::buffer::Cell;
+    use zwallet::tui::style;
     let mut terminal =
         Terminal::new(FilteredBackend::new(TestBackend::new(width, height))).unwrap();
     let mut places = vec![];
@@ -82,6 +84,19 @@ fn frame(app: &App, width: u16, height: u16) -> String {
         }
     }
     let b = terminal.backend().inner().buffer();
+    let styles: Vec<_> = style::ALL
+        .iter()
+        .map(|style| {
+            let mut cell = Cell::default();
+            cell.set_style(*style);
+            cell.style()
+        })
+        .collect();
+    for cell in &b.content {
+        assert_eq!(cell.symbol().len(), 1, "not a single ASCII cell");
+        assert!(cell.symbol().bytes().all(|b| (0x20..=0x7e).contains(&b)));
+        assert!(styles.contains(&cell.style()), "style: {:?}", cell.style());
+    }
     for p in &places {
         let shown = (p.area.y..p.area.bottom())
             .flat_map(|y| (p.area.x..p.area.right()).map(move |x| b[(x, y)].symbol()))

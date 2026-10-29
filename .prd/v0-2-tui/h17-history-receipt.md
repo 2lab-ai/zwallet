@@ -1,8 +1,8 @@
 # H17 — history and transaction detail
 
-Status: in-progress, 2026-10-29. EVM implementation and focused checks complete;
-parent integration, independent review and full gates remain open. This is not a
-claim that all TUI workflows or Tron history are shipped.
+Status: in-progress, 2026-10-29. EVM implementation, independent review and the
+parent full gate are complete. PR #45 is published; a final frame-assertion update
+is under validation. This does not claim that all TUI workflows or Tron history shipped.
 
 ## Intent and scope
 
@@ -132,3 +132,16 @@ Only the test server now has a bounded write timeout. The existing transport reg
 again (0.13s), then the whole gate above passed. Production HTTP body/deadline limits are unchanged.
 Logs: /tmp/zwallet-history-transport-fix.log, /tmp/zwallet-tui-history-final-gate.log.
 Exact-head Linux/macOS CI remains required. No real wallet or funds were used.
+
+## Parent verification and PR delivery, 2026-10-29
+
+The parent ran Rust 1.95.0 fmt, all-target strict Clippy and the full locked suite:
+598 passed, zero failed, 12 explicit live-test skips. This includes real isolated
+CLI/PTY fixtures; no real wallet or signed public broadcast was used.
+The initial oversized-body test server could block writing after client rejection
+and then block its Drop join; a test-only 200ms write timeout removes that hang.
+Commit `9addb25b04b54ea0ef2405b3ed5b5a4db6d134f8` is published as
+[PR #45](https://github.com/2lab-ai/zwallet/pull/45). Its successor strengthens every
+history frame assertion with single ASCII cells and the exact style allowlist,
+in addition to existing source budgets, placement and zero replacement checks.
+The same whole gate is repeated before committing that test-only update.
