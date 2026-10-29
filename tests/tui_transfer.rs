@@ -131,7 +131,7 @@ fn warmup_complete(frame: &Frame) -> bool {
         && frame.rows[1].starts_with("+ wallet ")
         && contains(frame, "Ethereum balances")
         && frame.rows[frame.rows.len() - 3].trim_end()
-            == "a all networks  c chain  r refresh  L lock  q quit  ? actions"
+            == "Tab focus  j/k  Enter detail  / hash  a networks  c chain  r  ? actions"
 }
 
 mod warmup_sync {
