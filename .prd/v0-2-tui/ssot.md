@@ -1,6 +1,7 @@
 # v0.2 — TUI (and the v0.1 signed whitelist it builds on) — SSOT
 
-Status: **planned**, 2026-10-20. Fixed target; do not reinterpret it during the loop. Specs:
+Status: **planned**, 2026-10-20, extended 2026-10-28 by the owner's statement below. Fixed
+target; do not reinterpret it during the loop. Specs:
 - [`../03-tui.md`](../03-tui.md) — the TUI, v0.2.
 - [`../04-whitelist.md`](../04-whitelist.md) — the signed whitelist, v0.1 WU1b.
 
@@ -16,6 +17,28 @@ Status: **planned**, 2026-10-20. Fixed target; do not reinterpret it during the 
 > 밸런스를 선택하면 네이티브 코인과 usdt usdc등이 있으면 그것들을 출력홰주고 어셋을 선택하면 transfer를 할수 있도록 해줌
 > 먼저 whitelist를 추가할수 있도록 함 nickname -> 주소로 그리고 이 화이트리스트는 해당 월릿의 암호로 저장하고 시그니처를 박음. 그래서 이렇게 박은 시그니처가 아니면 전송 자체를 못하게 함 (이건 월릿 시드랑 별도키로 시그니처 박아서 인증할수 있는게 좋을 것 같음)
 > 트랜스퍼하고 tx번호로 확인할수 있도록 이를 간단한 tui로
+
+## User statement (verbatim, 2026-10-28)
+
+After the first preview (TUI-1b: the key list and the lock state):
+
+> tui로 시발 뭐 아무것도 못하는데 tui로 모든 기능 다 사용할수 있도록 ui에 대해서 리설치하고 tui로 모든 기능 사용할 수 있도록 구현
+
+("리설치" = research.) The same day he asked for a Tron family (a Tron address from the same
+seed, TRX and TRC20 USDT balance, transfer), specified in `../05-tron.md`. Standing constraints,
+verbatim, relayed by the dispatcher's brief of 2026-10-28:
+
+> 아니 맥키체인에 저장하지말고 씨발 그냥 너만 사용할수 있으면 된다고
+
+> 트러스트월릿 관련 ㅈ가업한거 다 걷어내
+
+> unlock을 한다음에는 zwallet address 하면 확인할필요 없어야지
+
+The password is held by the human only; the agent never prints a mnemonic, password or key.
+
+**Scope this adds:** every CLI function reachable from the TUI, or CLI-only for a security reason
+written out ([`../03-tui.md`](../03-tui.md) §Coverage matrix), and Tron on the same screens. It
+does not change the 2026-10-20 scope below; it extends it.
 
 ## Fixed scope
 
