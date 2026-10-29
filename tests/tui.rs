@@ -1788,6 +1788,38 @@ mod navigation {
         assert_eq!(app.tab(), Tab::Session);
     }
 
+    /// The Keys tab's hint names every key it acts on, `u unlock` included (#43's merge dropped
+    /// it), within 80 columns, and `u` there opens the duration field.
+    #[test]
+    fn nav_keys_idle_hint_names_unlock_and_u_opens_the_duration_field() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('1')));
+        assert_eq!(app.tab(), Tab::Keys);
+        let text = view(&app);
+        let hint = text.lines().nth(21).unwrap().trim_end();
+        assert!(hint.len() <= 80, "{hint}");
+        for control in [
+            "Enter open",
+            "n new",
+            "B backup",
+            "V verify",
+            "A repair",
+            "s active",
+            "u unlock",
+        ] {
+            assert!(hint.contains(control), "missing {control}: {hint}");
+        }
+        assert!(hint.ends_with("? actions"), "{hint}");
+        app.update(Msg::Key(Key::Char('u')));
+        assert!(matches!(
+            app.navigation().popup,
+            Some(Popup::Field {
+                purpose: FieldPurpose::Duration,
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn nav_tools_idle_hint_fits_and_opens_the_action_menu() {
         let mut app = locked_ab();
