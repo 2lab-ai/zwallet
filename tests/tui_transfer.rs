@@ -172,7 +172,7 @@ mod warmup_sync {
                 Source::Address => 42,
                 Source::Expiry | Source::Home => 64,
                 Source::Detail => 72,
-                Source::Input | Source::Error | Source::Warning => 512,
+                Source::Input | Source::Error | Source::Warning | Source::ListRow => 512,
             };
             assert!(p.outside.text().len() <= budget);
             assert!(p.outside.text().bytes().all(|b| (0x20..=0x7e).contains(&b)));

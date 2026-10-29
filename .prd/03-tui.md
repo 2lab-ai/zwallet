@@ -457,7 +457,11 @@ the function of its source above, and the tests assert, per source, that the dra
 that source's budget and appears only on the line or block of that source.
 
 **4. Placement.** In list panes and the status bar each outside value sits on one line, cut to
-the pane's width, never wrapped. Only an error view wraps text: the error detail view (Enter on
+the pane's width, never wrapped. The 5 whitelist list is such a pane (added 2026-10-30): one row
+per entry and per fee cap (`fee cap <chain> <amount>`), a chain's per-transaction limits as a
+heading and one row per limit, each cut with `...` at the pane's width (`Source::ListRow`, the
+CLI's prose budget); the selected entry shows its full address (EIP-55, or `T…` for Tron),
+chains and selectors on rows of their own. The change summary before the password still wraps. Only an error view wraps text: the error detail view (Enter on
 an error line), a pane whose whole content is one error (the keys pane when the key list
 cannot be read), or, added 2026-10-28, `call`'s result view (one result, nothing else in the
 pane):
@@ -1153,6 +1157,10 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 9. **A new payment after a mined Tron send** (D4). A Tron status had no `n`, and `3` or Enter on
    a balance row returned to it. A mined Tron status now offers `n new payment`, and Enter on a
    balance row starts a payment of that asset on both families (§Status of a send).
+10. **The whitelist list never wraps** (real-terminal acceptance). It cut every line into 72-byte
+    chunks, splitting rows and words even at 120x40, and ran the fee caps into one line. Rows are
+    now cut at the pane's width, the fee caps and limits get a row each, and the selected entry
+    shows its full fields (§Display integrity rule 4).
 
 ## Changes on 2026-10-28, v2, review round 3
 

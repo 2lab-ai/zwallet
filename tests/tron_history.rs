@@ -519,7 +519,7 @@ fn frame(app: &App, width: u16, height: u16) -> String {
             Source::Detail => 72,
             Source::Home | Source::Expiry => 64,
             Source::Address => 42,
-            Source::Input | Source::Error | Source::Warning => 512,
+            Source::Input | Source::Error | Source::Warning | Source::ListRow => 512,
         };
         assert!(p.outside.text().len() <= max);
         if p.area.height == 1 {

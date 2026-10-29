@@ -95,8 +95,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `B` points to `zwallet backup` in a shell; the TUI never displays a recovery phrase.
 
   `3 send` reviews and sends EVM native/registry-token transfers using the pinned open key.
-  `5 whitelist` lists the policy; `V` checks it locally with the password before selection or
-  a message toggle. `a` adds a payee, `C` adds an EVM contract with selectors, `d` removes the
+  `5 whitelist` lists the policy, one row per entry, fee cap and per-transaction limit, each
+  cut with `...` at the pane's width rather than wrapped; the selected entry's full address,
+  chains and selectors are shown above the list. `V` checks it locally with the password before
+  selection or a message toggle. `a` adds a payee, `C` adds an EVM contract with selectors, `d` removes the
   selected entry, `f` sets the fee cap, `n`/`t`/`b` set native/token/calldata transaction limits,
   `m` toggles message signing and `R` resets the policy. Every edit shows its exact scrollable
   summary before asking for the password: Enter (and End) page it one screen at a time, and

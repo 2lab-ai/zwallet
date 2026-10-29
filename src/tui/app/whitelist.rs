@@ -405,6 +405,56 @@ impl Form {
     }
 }
 /// A whole bounded ASCII line is retained across rows rather than cut with an ellipsis.
+/// The list pane's rows (rule 4): one row per line of the list text, never wrapped, cut to the
+/// pane's width when drawn. The fee caps get one row per chain instead of one run-on line, and a
+/// chain's per-transaction limits one row per limit instead of one line of JSON.
+pub fn list_rows(text: &str) -> Vec<Outside> {
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        if let Some(caps) = line.strip_prefix("fee caps: ") {
+            rows.extend(caps.split(", ").map(|cap| {
+                Outside::list_row(&if cap.starts_with("and ") {
+                    format!("fee caps: {cap}")
+                } else {
+                    format!("fee cap {cap}")
+                })
+            }));
+        } else if let Some(limits) = limit_rows(line) {
+            rows.extend(limits.iter().map(|row| Outside::list_row(row)));
+        } else {
+            rows.push(Outside::list_row(line));
+        }
+    }
+    rows
+}
+
+/// `per-transaction limits (native=<unit>, token=base units): <chain>: <json>`, the list text's
+/// line for one chain, as a heading and one row per limit; `None` for any other line (or one
+/// whose JSON does not read, which then stays one row, cut).
+fn limit_rows(line: &str) -> Option<Vec<String>> {
+    let rest = line.strip_prefix("per-transaction limits (")?;
+    let (units, rest) = rest.split_once("): ")?;
+    let (chain, json) = rest.split_once(": ")?;
+    let limits: serde_json::Value = serde_json::from_str(json).ok()?;
+    let limits = limits.as_object()?;
+    let mut rows = vec![format!("per-transaction limits on {chain} ({units}):")];
+    for (key, value) in limits {
+        let shown =
+            |v: &serde_json::Value| v.as_str().map_or_else(|| v.to_string(), str::to_string);
+        match (key.as_str(), value) {
+            ("maxNativeWei", v) => rows.push(format!("  native {}", shown(v))),
+            ("maxCalldataBytes", v) => rows.push(format!("  calldata {} bytes", shown(v))),
+            ("maxTokenBaseUnits", serde_json::Value::Object(tokens)) => rows.extend(
+                tokens
+                    .iter()
+                    .map(|(token, cap)| format!("  token {token}: {}", shown(cap))),
+            ),
+            (other, v) => rows.push(format!("  {other} {}", shown(v))),
+        }
+    }
+    Some(rows)
+}
+
 pub fn lines(text: &str) -> Vec<Outside> {
     text.lines()
         .flat_map(|line| {
@@ -790,7 +840,7 @@ impl App {
                     Ok(read) => {
                         self.checked_list = read.checked;
                         self.list_reason = read.reason.map(|s| Outside::warning(&s));
-                        self.whitelist.lines = Pane::Ready(lines(&read.text));
+                        self.whitelist.lines = Pane::Ready(list_rows(&read.text));
                     }
                     Err(error) => {
                         self.checked_list = None;

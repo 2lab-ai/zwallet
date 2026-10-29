@@ -48,6 +48,39 @@ fn draw_lines(
             .draw(frame, line(area, row as u16), placed);
     }
 }
+/// The selected entry's full fields, which its list row may cut at the pane's width: each on
+/// rows of its own, short enough for 80 columns (rule 4: list rows are cut, never wrapped).
+fn selected_fields(entry: &crate::core::whitelist::Entry) -> Vec<Outside> {
+    let address = if entry.chains == ["tron"] {
+        alloy::hex::decode(entry.address.trim_start_matches("0x"))
+            .ok()
+            .and_then(|body| <[u8; 20]>::try_from(body).ok())
+            .map(|body| crate::chains::tron::address::from_body(&body))
+            .unwrap_or_else(|| entry.address.clone())
+    } else {
+        crate::chains::evm::parse_address(&entry.address)
+            .map(|a| a.to_checksum(None))
+            .unwrap_or_else(|_| entry.address.clone())
+    };
+    let mut rows = vec![Outside::detail(&format!(
+        "  {} {address}",
+        entry.kind.as_str()
+    ))];
+    rows.extend(
+        entry
+            .chains
+            .chunks(5)
+            .map(|chains| Outside::detail(&format!("  chains {}", chains.join(", ")))),
+    );
+    if let Some(selectors) = &entry.selectors {
+        rows.extend(
+            selectors
+                .chunks(4)
+                .map(|s| Outside::detail(&format!("  selectors {}", s.join(", ")))),
+        );
+    }
+    rows
+}
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
     let block = Block::bordered().border_set(ASCII).title(" whitelist ");
     let inner = block.inner(area);
@@ -94,6 +127,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                             "locally verified"
                         }
                     )));
+                    header.extend(selected_fields(entry));
                 }
             }
             // This is fixed chrome, not a value supplied by a file or daemon.

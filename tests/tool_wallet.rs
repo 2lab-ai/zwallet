@@ -931,7 +931,7 @@ fn screen(app: &App) -> String {
             Source::Detail => 72,
             Source::Home | Source::Expiry => 64,
             Source::Address => 42,
-            Source::Input | Source::Error | Source::Warning => 512,
+            Source::Input | Source::Error | Source::Warning | Source::ListRow => 512,
         };
         assert!(
             p.outside.text().len() <= max,

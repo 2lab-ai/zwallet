@@ -17,6 +17,10 @@ pub enum Source {
     TransactionHash,
     /// A bounded read-only pane line, built from independently checked values.
     Detail,
+    /// One row of a list pane, from zwallet's own list text (`whitelist list`), whose fields
+    /// that text already shape-checked and escaped. Drawn on one line, cut to the pane's width
+    /// (rule 4); its budget is the CLI's prose budget for the whole list.
+    ListRow,
     /// Public wallet-home path.
     Home,
     /// A field's already alphabet-checked, redacted display value.
@@ -43,6 +47,7 @@ impl Source {
             Self::Quantity => 78,
             Self::TransactionHash => 66,
             Self::Detail => 72,
+            Self::ListRow => PROSE_MAX,
             Self::Home => 64,
             Self::Input => 512,
             Self::KeyName | Self::RpcHost => 32,
@@ -89,6 +94,9 @@ impl Outside {
     }
     pub fn detail(text: &str) -> Self {
         Self::inert(Source::Detail, text)
+    }
+    pub fn list_row(text: &str) -> Self {
+        Self::inert(Source::ListRow, text)
     }
     pub fn home(text: &str) -> Self {
         Self::inert(Source::Home, text)

@@ -109,6 +109,7 @@ fn budget(source: Source) -> usize {
         Source::Detail => 72,
         Source::Input => 512,
         Source::Error | Source::Warning => 512,
+        Source::ListRow => 512,
     }
 }
 

@@ -89,7 +89,7 @@ fn frame(app: &App, name: &str) -> String {
             Source::Detail => 72,
             Source::Home | Source::Expiry => 64,
             Source::Address => 42,
-            Source::Input | Source::Error | Source::Warning => 512,
+            Source::Input | Source::Error | Source::Warning | Source::ListRow => 512,
         };
         assert!(
             p.outside.text().len() <= max,
@@ -928,6 +928,23 @@ fn the_list_pane_never_wraps_and_the_selection_shows_full_fields() {
         // A row never starts with the rest of the previous one.
         for fragment in ["|ase", "|ia ", "|taBytes", "|x833589"] {
             assert!(!text.contains(fragment), "{width}x{height} wraps:\n{text}");
+        }
+        // A chain's limits: a heading and one row per limit, each whole within 78 columns
+        // (at 80x24 the pane scrolls to them).
+        let Pane::Ready(list) = &app.whitelist.lines else {
+            panic!("list not ready")
+        };
+        for row in [
+            "per-transaction limits on base (native=wei, token=base units):",
+            "  native 500000000000000000",
+            "  calldata 256 bytes",
+            "  token 0x833589fcd6edb6e08f4c7c32d4f71b54bda02913: 1000000",
+        ] {
+            assert!(list.iter().any(|r| r.text() == row), "{row:?}: {list:?}");
+            assert!(row.len() <= 78);
+            if width == 120 {
+                assert!(text.contains(row), "{width}x{height} {row:?}:\n{text}");
+            }
         }
         // One fee cap per chain, each on its own row.
         for chain in crate::chains::CHAINS {
