@@ -2,9 +2,9 @@
 
 ![WIP](https://img.shields.io/badge/status-WIP-yellow)
 
-Partial implementation: the key list, status bar, refresh and lock-all are available. The full workflows below are a design, not the current UI. See [feature status](../docs/features.md).
+Partial implementation: navigation/actions, balances, receive, verification/repair, warm-up and timed unlock, the session pane, refresh and lock-all have reachable handlers. The full workflows below are a design, not the current UI. See [feature status](../docs/features.md).
 
-Status: **planned** (v0.2), revised 2026-10-20 after two spec reviews, revised 2026-10-27 against
+Status: **in-progress** (v0.2), revised 2026-10-20 after two spec reviews, revised 2026-10-27 against
 PRs #6–#12 (`origin/main` c7d3f13) and after review rounds 1 and 2 the same day, on 2026-10-28
 for TUI-1b (§Changes on 2026-10-28), and the same day, against `origin/main` 24f4b5b, to cover
 every CLI function (§Changes on 2026-10-28, v2: the coverage matrix, the re-decided non-goals,
@@ -108,9 +108,9 @@ Every CLI command and every user-meaningful flag (README.md §Commands, src/cli.
 24f4b5b), and the Tron functions the owner asked for on 2026-10-28. "Screen" is the tab (§Screens
 and keys). Mockups: [`03-tui-screens.md`](03-tui-screens.md).
 
-**Alias.** Each of rows 1–52 is one row of the action menu, and the Alias column is that row's
+**Alias.** Each of rows 1–52 and 60–62 is one row of the action menu, and the Alias column is that row's
 alias token, spelled exactly as here (two menu rows may share a token: rows 3 and 4, rows 33 and
-35). So the menu has exactly 52 rows, and T12 compares the menu's alias tokens with this column,
+35). So the menu has exactly 55 rows, and T12 compares the menu's alias tokens with this column,
 row for row. Rows 53–59 have no menu row. A **start flag** or **env var** in the Key(s) column is
 read when `zwallet tui` starts; each such row also names its path inside the TUI, except row 8,
 which stays a start flag for the security reason written in it (review round 2).
@@ -176,6 +176,9 @@ which stays a start flag for the security reason written in it (review round 2).
 | 57 | `--json`, `--password-stdin`, `--no-qr` | (none) | none | none | **not applicable**: the TUI is the human's surface (`tui --json` is refused, [README.md:85](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L85)), it has its own password field (§Password handling), and it draws a QR only on `Q` | none | none |
 | 58 | `daemon` (hidden) | (none) | none | none | **not applicable**: `unlock` starts it | none | none |
 | 59 | `sign-message` with a message longer than 512 characters, or with a character outside printable ASCII (a multi-line SIWE message) | (none) | none | none | **CLI-only, security**: the review must show the whole message the key signs, in rule 4's message block (512 characters in 7 rows of 76 at 80x24); a newline or a non-ASCII character would show as a `\u{…}` escape the human cannot read back as the bytes signed. Row 36 covers every other message | T36 (refused at the field) | TUI-11 (the refusal) |
+| 60 | `whitelist native-cap` | `whitelist native-cap` | 5 whitelist | action menu | chain, per-transaction native amount ceiling or `none`, summary, password, outcome; the chain's units are explicit | T45 | TUI-6 |
+| 61 | `whitelist token-cap` | `whitelist token-cap` | 5 whitelist | action menu | chain, registry token, per-transaction amount ceiling in integer base units or `none`, summary, password, outcome; token decimals and units are explicit | T46 | TUI-6 |
+| 62 | `whitelist calldata-cap` | `whitelist calldata-cap` | 5 whitelist | action menu | chain, per-transaction calldata byte ceiling or `none`, summary, password, outcome | T47 | TUI-6 |
 
 **TUI functions with no CLI command** (from [`v0-2-tui/ssot.md`](v0-2-tui/ssot.md), 2026-10-20):
 the history of the last 10 transactions (T3, T3b), the transaction detail with its fee,
@@ -189,11 +192,12 @@ and the TUI's address fields (rule 3) gain that alphabet. Inputs, outputs and er
 49–52 come from 05-tron.md; the screens are the EVM ones with Tron's values. T38–T41 stay
 conditional on it.
 
-**Count.** 59 rows:
+**Count.** 62 rows; rows 60–62 preserve the earlier row IDs and add the signed limits merged in PR #29:
 
 | Kind | Rows | How many |
 |---|---|---|
 | Reachable in the TUI, EVM | 1–48 except 8, 11 and 14 | 45 |
+| Signed transaction limits, reachable with TUI-6 | 60–62 | 3 |
 | A start flag only, with a security reason (no key in the TUI) | 8 | 1 |
 | CLI pointer until the owner picks (B1, Q1 are built; B2, Q3 are not) | 11, 14 | 2 |
 | Tron, reachable once 05-tron.md and its library land | 49–52 | 4 |
@@ -298,7 +302,7 @@ zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
    text equals an alias exactly, the menu shows only the rows with that alias (so `whitelist add`
    leaves one row, not `whitelist add --contract` too); otherwise every row whose words or alias
    contain it, exact matches first. The menu has
-   exactly one row per §Coverage matrix row 1–52 (its title says `actions (52)`); the navigation
+   exactly one row per §Coverage matrix row 1–52 and 60–62 (its title says `actions (55)`); the navigation
    keys (tabs, `[` `]`, `j`/`k`, `r`, Esc, `q`) are listed on its last lines, with
    `zwallet --version`'s line, and are not counted as actions. It is the help screen: there is no
    other.
@@ -318,7 +322,15 @@ state outside the TUI (`L`, `R` reset or retry, `A` repair) or asks for the pass
 secret or a code (`V`, `B`, `Q`). Added in review round 1: `e` on the chain picker (an RPC URL for
 the highlighted chain, this session only), `w` on the send status (keep waiting for a typed
 duration); in round 2: `b` on a replacement's review (the bump). No key lowers a protection:
-`ptrace_scope` 0 is accepted only by the start flag (§Coverage matrix row 8).
+`ptrace_scope` 0 is accepted only by the start flag (§Coverage matrix row 8). "Outside a text
+field" includes every list, review and outcome: the send asset and payee lists (EVM and Tron),
+the chain picker, a read-only popup (`Q`, `B`), the whitelist list, summary and outcome, the tools
+menu and contract list, and a replacement review. There `1`–`7`, `[` and `]` switch tabs; a popup
+closes first, and a review or outcome is still there on return (added 2026-10-30, D1) and
+still completes: the whitelist plan is applied by the id that prepared it, not by the list-read
+counter a return moves on; the send, replacement and tools reviews confirm as before (a tools
+review that the key, chain or RPC no longer matches is dropped, and the screen says so). Creation
+is a modal: its fields keep the digits and its result stays until Enter or Esc.
 
 **Text fields.** While a field has the focus every key goes to it (within its alphabet, rule 3)
 except Enter, Esc, Tab, the arrows and Ctrl-C; so `q`, `?` and the digits are typed, not acted on.
@@ -433,6 +445,7 @@ environment, and what the human types.
 | what the human types | input fields | each field takes only its own alphabet at the key event: an amount `0-9` and one `.`; a nickname `a-z 0-9 _ -`, at most 32 (`validate_nickname`, core/whitelist.rs:455); an address `0x` then `0-9 a-f A-F`, at most 42; a duration `0-9` and one of `s m h d w y`; the password any byte, shown only as `*`. Any other key changes nothing and nothing else is echoed. Added 2026-10-28: a key name as `create` takes it (`validate_key_name`, core/store.rs:176); a tx hash `0x` and 64 hex digits; a selector `0x` and 8 hex digits; calldata `0x` and hex digits, at most 4096; a function signature and its arguments printable ASCII, at most 256 and 512; a message to sign printable ASCII, at most 512 (a paste holding anything else is refused whole, §Coverage matrix row 59); a word count one of `12 15 18 21 24`; a bump factor `0-9` and one `.`; a Tron address per 05-tron.md; an RPC URL printable ASCII, at most 512, drawn as its scheme and host as typed and every character after them as `*` (a path or query may hold an API key, [README.md:694-700](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L694-L700)), and once taken only as the RPC host row below draws it |
 | `call`'s result | 6 tools | the CLI's `render_human` of the decoded result and the returned bytes as hex cut to 512 (commands.rs:1424-1435); drawn as a result view, rule 4 |
 | a token's own `symbol()` and `decimals()` | 6 tools, token | escaped, the symbol at most 32 (`erc20_meta`, chains/evm/rpc.rs:209; [README.md:212-213](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L212-L213)) |
+| assembled read-only pane text | balances, receive, session and repair rows | printable ASCII, at most 72 per line; fields are checked/redacted before assembly; no wrapping or input-selected style |
 | the home path (`ZWALLET_HOME` or `HOME`) | 7 session | escaped, at most 64, cut with `...` |
 | `status`'s pids | 7 session | numbers only; at most 8 of another home's pids, then how many more |
 | `address --verify`'s `repaired` list | 1 keys after `A` | key names as above; `was` escaped at most 64, `now` derived from the seed ([README.md:119-123](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L119-L123)) |
@@ -448,7 +461,11 @@ the function of its source above, and the tests assert, per source, that the dra
 that source's budget and appears only on the line or block of that source.
 
 **4. Placement.** In list panes and the status bar each outside value sits on one line, cut to
-the pane's width, never wrapped. Only an error view wraps text: the error detail view (Enter on
+the pane's width, never wrapped. The 5 whitelist list is such a pane (added 2026-10-30): one row
+per entry and per fee cap (`fee cap <chain> <amount>`), a chain's per-transaction limits as a
+heading and one row per limit, each cut with `...` at the pane's width (`Source::ListRow`, the
+CLI's prose budget); the selected entry shows its full address (EIP-55, or `T…` for Tron),
+chains and selectors on rows of their own. The change summary before the password still wraps. Only an error view wraps text: the error detail view (Enter on
 an error line), a pane whose whole content is one error (the keys pane when the key list
 cannot be read), or, added 2026-10-28, `call`'s result view (one result, nothing else in the
 pane):
@@ -520,7 +537,20 @@ The TUI shows an address's trust as the CLI's `verified` and `verifiedBy` say it
 The last line replaces the trust state, cut to the bar's width; Enter on it shows the whole
 warning (within its own budget, §Display integrity rule 4). A cache that the daemon's answer
 contradicts stops the pane with the CLI's `VALIDATION_ERROR` (commands.rs:520-536): fund neither
-address.
+address. That includes `s`: a key whose cache is contradicted is not made active, and the whole
+error stops the key pane, wrapped, never a notice line cut before its warning (TUI-2a).
+
+**The note under the key list** follows the trust state (A1, the dispatcher's scope addition of
+2026-10-28; the owner: "unlock을 한다음에는 zwallet address 하면 확인할필요 없어야지"). No output
+asks to verify a key whose address the same output shows verified. The rows are never marked
+verified (T1), so the note flags them, except the key the bar shows `verified by session`: then it
+reads ``not verified: the other keys' addresses; `zwallet list --verify` checks them``, and with
+no other key there is no note. Locked, unverified (Linux), or with another process answering,
+it is the CLI's ``not verified: run `zwallet address --verify` before funding``, and the
+impostor's warning line keeps its place. `zwallet list` does the same while this build's session
+derived its rows (`wallet::keys` returns their `Trust`). TUI-2b names the TUI's own check instead
+(Enter and the password), and once that check has derived every named key's address, there is no
+note.
 
 **Pinned for the session.** The addresses the password check derived (the open key's, and the
 active key's) are kept for the life of the TUI. If a later session read (`Daemon::address`,
@@ -542,12 +572,12 @@ keeps drawing. Two entry points do it, in one blocking task:
    `VALIDATION_ERROR`, which says to run `zwallet address --verify`. Then the named keys' (the
    open key's and the active key's) addresses are derived from the seed (`derive_checked`,
    commands.rs:647): `verified by password`, pinned (§Address trust). The seed is dropped before
-   it returns. It returns `Opened { addresses, anchor, salted }` and nothing else: `anchor` is the
+   it returns. It returns `Opened { keys, active, warning, anchor, salted }` and nothing else: `anchor` is the
    sealed `WhitelistAnchor` (public key, generation, digest; core/store.rs:419), read through
    `sealed_whitelist` (:255), and `salted` says whether a salt is sealed with it. The salt itself
    (the private field of `SealedWhitelist`, core/store.rs:461-467) never leaves the blocking task
    and is never in the checked list.
-2. `wallet::check_list(home, anchor, salted)`: an anchor sealed without a salt (zwallet 0.1.0)
+2. `wallet::check_list(home, anchor)` (§Changes on 2026-10-28 item 8): an anchor sealed without a salt (zwallet 0.1.0)
    gets `list --verify`'s message (commands/whitelist.rs:1353-1360). Both list files are read once
    (`ListFiles::read`, core/whitelist.rs:987) and the list the seal names is picked from those
    bytes (`pick_base_from`, :1097, which verifies the signature, generation and digest, `verify`,
@@ -573,8 +603,11 @@ started and before the password check (a process of this user racing the TUI) is
 1: the session stays, the pane shows the error, and no list is checked and no address is pinned.
 
 What the checked list is used for, on macOS and Linux alike:
-- the payee picker offers its address entries that apply on this chain (`Entry::covers_chain`,
-  core/whitelist.rs:141), and nothing else;
+- the payee picker offers its address entries that apply on this chain, and nothing else: on an
+  EVM chain those naming it or `*` (`Entry::covers_chain`, core/whitelist.rs:145;
+  `wallet::transfer_payees`), on Tron only those scoped exactly to `tron`, shown as their
+  T-address (`tron_send::tron_transfer_payees`); `*` never covers Tron, and the EVM list offers
+  nothing on Tron (added 2026-10-30, T6b);
 - T7's `verified` state is the checked list's;
 - T4 labels a from or to address with a nickname only from it.
 
@@ -597,6 +630,30 @@ trusted: `protocol::status` is a plain request with no peer check (core/protocol
 (commands.rs:1884-1903), which a process of this user can choose.
 
 ## Whitelist edits
+
+The shared backend is implemented in `src/wallet/whitelist.rs`; TUI forms and rendering use it
+through `src/tui/app/whitelist.rs` and `src/tui/ui/whitelist.rs`. `Change` has validated constructors for add/remove, fee cap,
+native/token/calldata per-transaction limits, message signing and reset. `WhitelistPlan` owns
+the exact bounded summary and both-file fingerprint. The CLI uses the same plan/apply/view
+functions. `checked_payees` checks that fingerprint and excludes contracts and zero-address
+entries; Tron requires exact scope, while `*` remains EVM-only. The send pickers apply the same
+rule: `transfer_payees` is EVM-only and `tron_transfer_payees` lists Tron-only entries as
+T-addresses (§Address trust).
+
+The forms bound every field and validate before preparation. The exact prepared summary wraps
+and scrolls before the password is accepted, and the password field opens only after every
+summary row has been on screen once: Enter shows the first rows not yet shown, End pages one
+screen at a time (it no longer jumps to the last page, which skipped the rows between), and only
+an Enter with nothing left unseen opens the field (added 2026-10-30). Removal and message toggles use only a locally
+password-checked list. Every edit prepared while a checked list is held compares the plan's own
+fingerprint, taken when the plan read the files, with that list's; a difference refuses with
+`list changed; cancel and verify it again` (added 2026-10-30: the worker had checked the files,
+then let the plan read them again). The owned password
+and prepared plan move once into a blocking worker for authentication, stop/write, optional
+session start and local recheck. While that worker runs, lock is queued after optional session
+start and quit waits for the mutation and any queued lock; navigation, cancellation and
+repeated submission cannot abandon or duplicate the mutation. A terminal draw failure
+also waits for its outcome. Only a successful local recheck can replace the checked-list cache.
 
 Every change in the TUI runs the edit protocol of 04-whitelist.md §Edits, through the two entry
 points flow.md §T7 names, and nothing else:
@@ -632,8 +689,11 @@ points flow.md §T7 names, and nothing else:
    locked**, unless the human typed a duration with the change (`--unlock <dur>`), when a new
    session runs for that duration from now. No duration or expiry is taken from the session that
    was running.
-4. With the same password the TUI runs the password check again (§Password check), so the
-   checked list is the new one, then clears the password.
+4. The shared `wallet::whitelist_apply` takes one owned zeroizing password (`PasswordBuf` in the
+   TUI), runs the local password check again (§Password check) after the edit, and returns the new `CheckedList`
+   in its outcome before dropping the password. No password is retained by the UI. If the
+   recheck fails or the list changed, the outcome still reports the landed edit and carries
+   the check error instead of a verified list.
 5. The TUI shows the outcome (generation, entries, stopped daemons, warning, session) and every
    pane reloads: the old session has ended.
 
@@ -641,10 +701,18 @@ points flow.md §T7 names, and nothing else:
 
 Sources:
 1. **The send journal.** This is a *local claim*. Every row from it is looked up on chain (`tx`)
-   before it shows a status.
+   before it shows a status: when the list lands, each shown journal row without a status (at
+   most the 10 shown) gets its own background lookup, the same one Enter runs (Tron: by id); the
+   row says `checking` until it lands, then the node's status, or `unknown` if the lookup failed.
+   A reply for an older key, chain, endpoint or list is dropped (added 2026-10-30, D2).
 2. **A keyless explorer**, where one answers a non-browser client: `eth.blockscout.com`,
    `explorer.optimism.io` and `eth-sepolia.blockscout.com`. Base, arbitrum and polygon Blockscout
    return a Cloudflare challenge (HTTP 403); bsc and avalanche have no Blockscout instance.
+   `ZWALLET_EXPLORER_<CHAIN>` (added 2026-10-30) names another Blockscout v2 API base for an EVM
+   chain, in place of the built-in one or where there is none: an http(s) URL with a host, never
+   printed (an unusable value reads, for ethereum, `explorer unavailable (ZWALLET_EXPLORER_ETHEREUM
+   is not an http(s) URL with a host)`). The test harness sets it to a closed loopback port for every
+   chain, so no test reaches a public explorer.
 
 **Reachability, measured 2026-10-27 11:53:24Z** with `curl 8.7.1`, no key, `GET
 /api/v2/addresses/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045/transactions`; rechecked by 11:54:29Z
@@ -722,11 +790,14 @@ address), writes what it returns. So it is read like `d.sock` or an RPC endpoint
   <code>)` or `(not JSON)`: zwallet's own text and the status code, never a byte of the body (T3b).
 - **Fields kept, each with its shape; an item with any field out of shape is dropped whole.**
   - a transaction: `hash` (`0x` and 64 hex digits); `block_number` (at most 20 decimal digits, or
-    `null` while pending); `position` (at most 10 digits); `nonce` (at most 20 digits);
+    `null` while pending); `position` (at most 10 digits, or `null` while pending); `nonce` (at most 20 digits);
     `from.hash` and `to.hash` (`0x` and 40 hex digits; `to` may be `null`, shown as "contract
-    creation"); `value` and `fee.value` (at most 78 digits); `status` (`ok`, `error` or `null`);
-    `timestamp` (RFC 3339, parsed and written again by zwallet, as the journal's time is,
-    chains/mod.rs:769-772).
+    creation"); `value` and `fee.value` (at most 78 digits; only `fee.value` may be `null` while
+    pending); `status` (`ok`, `error` or `null`); `timestamp` (RFC 3339, parsed and written again
+    by zwallet, as the journal's time is, chains/mod.rs:769-772; or `null` while pending).
+    These nullable pending fields must still be present; malformed non-null values are rejected,
+    and mined transactions require the numeric position/fee and timestamp. This matches the
+    Blockscout serializer's unmined transaction fields (2026-10-29 review).
   - a token transfer: `transaction_hash`, `block_number`, `log_index`, `from.hash`, `to.hash` in
     the shapes above; `token.address_hash` (`0x` and 40 hex digits), which must be a registry
     token on this chain (`registry::lookup`, chains/evm/registry.rs:109); `total.value` (at most
@@ -780,6 +851,15 @@ use `record_receipt`, which reports a receipt that did not come in time as `pend
 (chains/mod.rs:1396-1399). `w` and a typed duration (the rule of `--wait-timeout`, cli.rs:249-251)
 keep polling that long from now, as `--wait --wait-timeout` does (T43). Leaving the screen never
 cancels anything; the journal has already recorded the send.
+
+**A new payment from the status (added 2026-10-30, D4).** `n` on the status starts a new
+payment, and so does Enter on a balance row of 2 wallet (with the balances focused by Tab, the
+top row drawn is the chosen one): that one selects the row's asset and goes on to the payees.
+A new payment runs its own review, with the repeat check. On EVM `n` is offered on every status.
+On Tron, which has no nonce to replace, only a mined status (success, reverted or outcome
+unknown) offers it; a pending, unknown or `expired-unseen` one keeps its second-payment warning
+and offers nothing that reads as a resend (TR25), and Enter on a balance row returns to it. A
+send in flight keeps its screen.
 
 **Review and confirm.** The review runs `prepare` as a dry-run, the duplicate check and the
 whitelist check; it takes no send lock and asks the daemon to sign nothing. The whitelist verdict
@@ -854,7 +934,15 @@ and one rule covers every one of them.
   review runs; the contract's nickname is typed at confirm. A cancel, of a transfer or an invoke,
   is 0 of the chain's coin to the pinned own address, needs no entry, and takes `cancel`. Where
   the checked list no longer allows a speed-up or a retry, its review refuses and nothing is
-  signed.
+  signed. The kind comes from (a) the session's review or (b) the bytes of the node's verified
+  transaction, never from the journal row, which must only agree with them (added 2026-10-30):
+  a row rewritten to another kind is refused, never judged by the rule it names. Under (b), a
+  registry token's `transfer` with no value is the same bytes as an invoke of that token, so its
+  speed-up is refused: the stricter rule, the invoke's, cannot be met, because a registry token is
+  never a contract entry (`Whitelist::validate`). `s` is still offered and its review refuses
+  (zero `SignTx`); `x` signs as for any original. The refusal says so
+  and names the CLI's `transfer --token` with `--nonce` and `--replace`, where the human states
+  the intent. Under (a) it keeps its review's kind (T27 (i)).
 - **Review and confirm as any send.** The review holds nonce N and the replaced hash with the
   intent; confirm re-prepares with them and signs only on the exact intent with a fee at most the
   reviewed one. The checked list's fee cap applies to the bumped fee and to a cancel's 0-value
@@ -870,12 +958,27 @@ and one rule covers every one of them.
 **Invoke and sign-message (added 2026-10-28).** An invoke's review holds chainId, from, the
 contract (from the checked list), the calldata, the value and the nonce, and shows zwallet's own
 decode of the unsigned transaction (`tx::decode_unsigned`, chains/evm/tx.rs:378); confirm follows
-the same exact-intent rule. A message's review shows the whole message in rule 4's message block
+the same exact-intent rule. Like the transfer review it shows the send guards' verdicts before
+the nickname is asked for, `pending N <verdict> | repeats N <verdict>`, each `clear` (nothing to
+block), `blocked` (something, no override) or `OVERRIDE` (both reviews alike), so `p` and
+`d` are chosen knowingly (added 2026-10-30, D3). The repeat key is the CLI `invoke`'s (chain,
+kind, contract, value, token; `send_summary`, wallet/send.rs): another calldata to the same
+contract with the same value is a repeat in both. A message's review shows the whole message in rule 4's message block
 and holds its bytes, the key and the chain, and the list's message-signing flag from the checked
 list; an edit drops the review; confirm sends exactly those bytes (`message_hex` of
 `Request::SignMessage`, commands.rs:1799-1803), and the signature is checked against the key's
 address (`verify_message`, chains/evm/mod.rs:193), as `sign-message` does
 (commands.rs:1792-1818).
+
+### Input authority while editing an RPC URL
+
+An incomplete authority such as `https://user:password` can become userinfo when the next
+character is `@`. The input field therefore masks the whole unfinished authority until `/`,
+`?` or `#` ends it. Once it is complete, the display uses the same parsed, redacted origin as
+other RPC output: userinfo is omitted, key-like host labels are redacted, and every suffix
+character is `*`. Incomplete or malformed input never falls back to its raw text. This narrows
+"host as typed" in T42 to a completed authority and closes the typeahead disclosure case.
+The submitted endpoint still goes through normal URL and chain-id validation.
 
 ## Password handling
 
@@ -946,7 +1049,7 @@ address (`verify_message`, chains/evm/mod.rs:193), as `sign-message` does
   the merge `history::merge`.
 - Added 2026-10-28: `src/tui/actions.rs` holds the action table: one row per §Coverage matrix
   row 1–52, with its key, its words, its alias token (the matrix's Alias column), its tab and when
-  it can run. The menu, the hint lines and T12 read that one table. The entry points of the new functions are named per unit in
+  it can run. The menu, the hint lines and T12 read that one table. The three signed-limit rows 60–62 follow rows 1–52 in this table; CLI-only rows 53–59 have no menu entries. The entry points of the new functions are named per unit in
   [`v0-2-tui/units.md`](v0-2-tui/units.md) (`wallet::balances` for every network, `wallet::create`,
   `wallet::repair`, `wallet::call`, `wallet::review_invoke`, `wallet::sign_message`,
   `wallet::token_balance`, a replacement in `wallet::review_transfer` with
@@ -961,7 +1064,8 @@ dispatcher reads the frames. Behaviour is checked against fixed fixtures on the 
 Every `TestBackend` frame of every test is drawn through `FilteredBackend` with zero replacements
 and passes the style assertion (§Display integrity rules 1 and 2). T3 and T3b are checked on
 `TestBackend` frames of the `App` built in the test with a fixture explorer server, because the
-binary's explorer URLs are fixed (§History); a live test (`cargo test -- --ignored`) reads
+binary reaches an explorer only at a built-in URL or at `ZWALLET_EXPLORER_<CHAIN>`, which the test
+harness points at a closed loopback port (§History); a live test (`cargo test -- --ignored`) reads
 `eth.blockscout.com` through the same parser.
 
 T12–T44 were added on 2026-10-28 for the functions of §Coverage matrix (T42–T44 after review round 1); the unit that closes
@@ -972,19 +1076,19 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T1 | 2 keys, `b` globally active | both listed, `b` marked; lock state only in the status bar |
 | T2 | Enter on `a` (locked), type the password | bar shows `signing (agent too) until` ≈ now+1h and `verified by password` for `a`; `zwallet status` agrees; the global active key is still `b` |
 | T2b | `s` on `a`, confirm | `zwallet list` shows `a` active |
-| T3 | fixture: 14 txs, the same hash in the journal and in Blockscout, 2 pending | exactly 10 rows; pending rows first; that hash appears once with both sources; coverage note shown |
+| T3 | fixture: 14 txs, the same hash in the journal and in Blockscout, 2 pending; then 12 journal-only rows, explorer unavailable, on EVM and on Tron | exactly 10 rows; pending rows first; that hash appears once with both sources; coverage note shown; each shown journal row says `checking` with one lookup, then the node's status (`mined`, `dropped/replaced`), or `unknown` when its lookup failed; a reply for another hash or an older scope changes nothing |
 | T3b | explorer unavailable (fixture 403) | journal rows only; the note says so; no error banner covering the list |
 | T4 | Enter on a row | fields equal the fixture's expected values, token movements from the receipt included |
 | T5 | USDC fixture balance | native + USDC rows; zero-balance tokens hidden |
 | T6 | asset → `alice` → amount → review → type `alice` | hash shown at once; status reaches mined on the mock; journal line written |
-| T6b | the payee picker | lists only the checked list's address entries valid on this chain; a non-listed address cannot be entered |
+| T6b | the payee picker; on Tron, a checked list with a `*` EVM entry and a Tron entry | lists only the checked list's address entries valid on this chain; a non-listed address cannot be entered; on Tron only the Tron entry, as its T-address, never the `*` entry |
 | T6c | nonce mined by another hash (fixture) | status `dropped/replaced` |
 | T7 | add `bob` while warm | the change and its outcomes are shown above the password field; `whitelist list --verify` shows `bob` at gen+1; the wallet is locked afterwards, or warm for the duration chosen with the change |
 | T8 | `c` → base | every pane reloads for base; the RPC host shown redacted |
 | T9 | 80×24 resize; 79×24; `q`; forced panic | layout fits at 80×24; one `terminal too small` line at 79×24; the terminal is restored after both |
 | T10 | `zwallet lock` from another shell | the TUI shows `locked` within two refreshes (10 s) |
 | T11 | pty test across T2 and T7 | no echo; the password appears in no captured frame; cancel mid-entry, then a retry, works |
-| T12 | `?`; type `whitelist add`; Enter | the menu's title says `actions (52)` and it has exactly 52 rows, whose alias tokens equal §Coverage matrix's Alias column for rows 1–52, row for row (the test holds that column as a list: a matrix row without a menu row fails, and the other way); the filter leaves one row (key `a`, tab 5), and Enter opens the add form; a row that cannot run now shows its reason (`needs: …`, `in a later version`, `start flag`), and Enter on it starts no `Effect` |
+| T12 | `?`; type `whitelist add`; Enter | the menu's title says `actions (55)` and it has exactly 55 rows, whose alias tokens equal §Coverage matrix's Alias column for rows 1–52 then 60–62, row for row (the test holds that column as a list: a matrix row without a menu row fails, and the other way); the filter leaves one row (key `a`, tab 5), and Enter opens the add form; a row that cannot run now shows its reason (`needs: …`, `in a later version`, `start flag`), and Enter on it starts no `Effect` |
 | T13 | from the start: `1` … `7`, `[`, `]`, Esc in a popup and in a sub-screen; each frame the TUI-3+4 PR draws, at 80x24 | each tab reached; the hint rule of §Screens and keys holds (a frame whose focus is not a text field, a menu or a popup ends its hint line with `? actions`; one whose focus is shows no `? actions`); Esc closes the popup, then returns to the tab; each of those frames fits 80x24 (`TestBackend`); a tab whose screens a later unit brings says `in a later version`. Each later unit runs the same size and hint checks on the frames it adds (units.md §Every unit) |
 | T14 | 7 session, `u`, `10m`, the password | the bar says `signing (agent too) until` ≈ now+10m; `zwallet status --json` has the same `expiresAt` |
 | T15 | 2 wallet, `a`, with all 8 `ZWALLET_RPC_<CHAIN>` set: two to mock nodes that answer, one to a mock that refuses, the other five to a closed port (`http://127.0.0.1:1`) | one line per network, testnet last; each failed one `error: … [CODE]` cut to 72 (`brief`); `2 of 8 networks have a balance; 6 did not answer`; zero tokens hidden; no test reaches a public RPC |
@@ -999,7 +1103,7 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T24 | `a`, kind contract, `router`, ethereum, `0x414bf389` | the outcome has `warning: a listed contract may forward value or act on its arguments`; `whitelist list --verify` shows the contract entry with its selector |
 | T25 | `m` (off → on) | the summary shows the old and the new value (off, on); `whitelist list --verify` has `allowMessageSigning: true` |
 | T26 | 2 wallet `/`, a hash on the mock; a hash the node does not know | the transaction screen (T4's fields); `not found` with the CLI's hint; a 63-digit hash cannot be entered (the field's alphabet and length) |
-| T27 | (a) this session's own send pending at nonce N, `s`, the payee's nickname typed; (b) the same from a history row after a restart, the node's pending transaction equal to the journal row; (c) the journal row rewritten (the amount raised, or `to` another listed payee), the node's transaction unchanged; (d) no password check in this session; (e) the bumped fee over the checked list's cap; (f) the fee rising past the reviewed maximum between review and confirm; (g) after a restart, the mock's pending transaction for the hash has `from` the pinned address but a signature that recovers to another key; (h) its fields do not hash to the replaced hash | (a), (b): one `SignTx` with nonce N and the same `to`, `value` and `input` as the review's (a) or the node's (b) transaction, fees at least 1.25x the replaced transaction's (`--bump`, [README.md:615-617](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L615-L617)); the journal line; the status follows the new hash. (c): `s` and `x` are not offered; the screen says the journal and the node disagree. (d): `s` shows `needs: V`. (e), (f): zero `SignTx`. Every `SignTx` is counted at `FakeDaemon.received` (tests/common/mod.rs:586-587). (g), (h): `s` and `x` are not offered; zero `SignTx` |
+| T27 | (a) this session's own send pending at nonce N, `s`, the payee's nickname typed; (b) the same from a history row after a restart, the node's pending transaction equal to the journal row; (c) the journal row rewritten (the amount raised, or `to` another listed payee), the node's transaction unchanged; (d) no password check in this session; (e) the bumped fee over the checked list's cap; (f) the fee rising past the reviewed maximum between review and confirm; (g) after a restart, the mock's pending transaction for the hash has `from` the pinned address but a signature that recovers to another key; (h) its fields do not hash to the replaced hash | (a), (b): one `SignTx` with nonce N and the same `to`, `value` and `input` as the review's (a) or the node's (b) transaction, fees at least 1.25x the replaced transaction's (`--bump`, [README.md:615-617](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L615-L617)); the journal line; the status follows the new hash. (c): `s` and `x` are not offered; the screen says the journal and the node disagree. (d): `s` shows `needs: V`. (e), (f): zero `SignTx`. Every `SignTx` is counted at `FakeDaemon.received` (tests/common/mod.rs:586-587). (g), (h): `s` and `x` are not offered; zero `SignTx`. (i) after a restart, the node's pending transaction is a registry token's `transfer` with no value and its journal row says `token-transfer` (also when rewritten from `invoke`), under a list with the recipient's address entry: `s` refuses at its review, zero `SignTx`; `x` signs T28's self-transfer; in the session that sent it, `s` signs once with the review's bytes |
 | T28 | the same send, `x`, type `cancel`; again with no password check in this session; with the cancel's fee over the checked list's cap; with the fee rising past the reviewed maximum at confirm | one `SignTx`: nonce N, `to` the key's own pinned address, `value` 0, no calldata, and the review says the cancel races the original and may lose; without the check `x` shows `needs: V`; over the cap or past the maximum: zero `SignTx` (counted as in T27) |
 | T29 | (a) in this session, the mock times out `eth_sendRawTransaction` after accepting it, then `R` and the nickname; (b) the journal row rewritten (amount raised, or `to` another listed payee) before `R` in the same session; (c) a restart, the node not knowing the hash, then again with the journal row aged past 10 minutes and with it deleted; (d) a restart, the node knowing the hash and matching the journal | (a): `BROADCAST_UNCERTAIN` and `R`; one `SignTx` at nonce N with the review's `to`, `value` and `input` and `--replace` the first hash. (b): the same, the review's intent, not the journal's. (c): `R` is not offered; the screen shows the warning of §Status of a send (Retry after `BROADCAST_UNCERTAIN`) that a new send can pay twice even without `d`, also with the journal row older than 10 minutes and with the row deleted; zero `SignTx`. (d): `R` is not offered, `s` and `x` are (T27 (b)). No action on that screen reaches a send without a nonce. Counted at `FakeDaemon.received` (tests/common/mod.rs:586-587) |
 | T30 | 1 keys `n`, `trading`, the password; again with `10m` | `zwallet list --json` has `trading` active and verified; with `10m`, unlocked until about now+10m |
@@ -1018,6 +1122,10 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T43 | send status of a pending send after 90 s (`unknown`), `w`, `5m`; then `w` and `0` or `1x` | polling every 3 s resumes for 5 minutes from now and the status reaches mined on the mock; a duration the CLI's parser refuses leaves the status as it was |
 | T44 | `whitelist add z 0x0000000000000000000000000000000000000000` in the CLI, and `a` with that address in the TUI; then a signed list seeded with an entry `z` at the zero address (`common::seed_whitelist`, tests/common/mod.rs:275) | the add is refused before the password, nothing stopped, nothing written; the seeded list still parses and verifies (a self-transfer is still signed under it); 5 whitelist flags `z`, the payee picker does not offer it, and `d` removes it; `transfer --to @z` without `--force` is still `INVALID_ADDRESS` |
 
+| T45 | 5 whitelist, `whitelist native-cap`, a chain and amount, summary, password | the same signed per-transaction ceiling as the CLI is saved; its units and impact are shown before the password; `none` explicitly removes the amount limit, and invalid input writes nothing |
+| T46 | 5 whitelist, `whitelist token-cap`, a chain, registry token and amount, summary, password | the signed token ceiling matches CLI verification in integer base units (`none` removes it); a token outside the registry is refused before the password |
+| T47 | 5 whitelist, `whitelist calldata-cap`, a chain and byte count, summary, password | the signed calldata ceiling matches CLI verification; zero bytes is a deliberate empty-data limit, `none` removes it, and an overflow is refused before the password |
+
 **Tests:**
 - `TestBackend` buffer assertions for each screen, through `FilteredBackend`, with the style and
   per-source budget assertions.
@@ -1026,6 +1134,53 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 - At least one counter-example per unit ([`v0-2-tui/units.md`](v0-2-tui/units.md)): an outside
   string with a control character or a QR glyph, a 600-character name, a forged explorer row, a
   rewritten whitelist.json, a forged session view, a password in a frame.
+
+## Changes on 2026-10-30, integration fix round (PR #51)
+
+1. **The journal never picks a replacement's kind** (review of #46). The node-recovered original's
+   kind comes from its bytes; the journal row must agree or the action is refused. A registry
+   token's `transfer` recovered from the node is refused for speed-up (an invoke has the same
+   bytes and the invoke's rule cannot be met); `x` stays (§Status of a send, Replacements, judged
+   by kind; T27 (i)).
+2. **The whitelist plan is the checked list** (review of #47, NB1). The prepare worker compares
+   `plan.fingerprint()` with the checked list's after the plan's own read, not before it
+   (§Whitelist edits).
+3. **The Tron payee picker never offers `*`** (review of #47, NB2). It already used
+   `tron_transfer_payees` on this branch; `transfer_payees`, which counts `*` and shows 0x, now
+   offers nothing outside EVM (§Address trust; T6b).
+4. **Every summary row is on screen before the password** (review of #47, NB3). End pages one
+   screen at a time instead of jumping to the last page; Enter opens the password only once
+   every row has been shown (§Whitelist edits).
+5. **The Keys tab's hint names `u unlock` again** (review of merge #43). The merge kept `n new`
+   and `B backup` and dropped `u unlock`, which still opens the duration field there; the hint is
+   78 columns ([`03-tui-screens.md`](03-tui-screens.md) §1 keys).
+6. **Tab keys act on every list step** (real-terminal acceptance D1). The send payee list
+   swallowed every character, and the chain picker, read-only popups, the whitelist summary and
+   outcome and the replacement review kept `1`–`7`, `[`, `]`; only a focused text field keeps
+   them now (§Screens and keys).
+7. **Journal rows show the node's status** (D2). The history list looked nothing up and said
+   `unknown` for every journal row; each shown one is now looked up in the background and says
+   `checking` until then. The status column is 16 wide, so `dropped/replaced` reads in full
+   (§History; T3).
+8. **The invoke review shows the guards' verdicts** (D3). The invoke and raw-invoke reviews said
+   only `pending override false / duplicate override false`; they now show `pending N` and
+   `repeats N`, blocked or overridden, before the nickname (§Status of a send, Invoke and
+   sign-message).
+9. **A new payment after a mined Tron send** (D4). A Tron status had no `n`, and `3` or Enter on
+   a balance row returned to it. A mined Tron status now offers `n new payment`, and Enter on a
+   balance row starts a payment of that asset on both families (§Status of a send).
+10. **The whitelist list never wraps** (real-terminal acceptance). It cut every line into 72-byte
+    chunks, splitting rows and words even at 120x40, and ran the fee caps into one line. Rows are
+    now cut at the pane's width, the fee caps and limits get a row each, and the selected entry
+    shows its full fields (§Display integrity rule 4).
+11. **No test reaches a public explorer** (gate audit). History's explorer base can be named by
+    `ZWALLET_EXPLORER_<CHAIN>`, and `tests/common` sets it to a closed loopback port for every
+    process it starts (§History, source 2).
+12. **A review left with a tab key still completes** (round 2, review of fix 7). Returning to 5
+    moved the list-read counter and the password applied the wrong plan id; the review now keeps
+    the id that prepared it. Tools reviews no longer reset on a tab key. Each screen that holds a
+    review is tested by leaving with a key, returning with a key and completing it (§Screens and
+    keys). The send and tools guard labels read `clear`, `blocked` or `OVERRIDE`.
 
 ## Changes on 2026-10-28, v2, review round 3
 
@@ -1144,6 +1299,14 @@ Decisions of the dispatcher when TUI-1 was split into three PRs
    four digits or more.
 7. After TUI-1b's review round 3: line 1's key name is sized from the trust words drawn in each
    state (at least 8), so an impostor's warning words are never lost to a long name.
+8. TUI-2a: `wallet::check_list(home, anchor)` takes the anchor result `open_with_password`
+   returns and no `salted` flag: an anchor zwallet 0.1.0 sealed (no salt) or a malformed one
+   arrives as that result's error, with `list --verify`'s message built from
+   `SealedWhitelist::salt`'s own error, so the cause's text is written once; `Opened.salted`
+   stays for the edits (TUI-6). `open_with_password(home, password, keys)` takes `None` for
+   every key (`list --verify`) and returns the named keys as `KeyRow`s with the active key and
+   the index warning, so `list --verify` reads wallet.json once, as before.
+9. TUI-2a: §Address trust, the key list's note (A1) and a refused `s` in the pane.
 
 ## Changes on 2026-10-27
 

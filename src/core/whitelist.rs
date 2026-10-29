@@ -54,23 +54,25 @@ pub const WHITELIST_FILE: &str = "whitelist.json";
 pub const NEXT_FILE: &str = "whitelist.next.json";
 /// The list format this zwallet reads and signs.
 pub const LIST_VERSION: u32 = 1;
-/// The chains of an address entry usable on every chain (never a contract entry's).
+/// Legacy wildcard: accepted by EVM policy only (never a contract entry's).
 pub const ANY_CHAIN: &str = "*";
 /// Prefixed to the canonical bytes before signing, so a signature from this key can never be
 /// read as one over anything else.
 const SIGNING_DOMAIN: &[u8] = b"zwallet/whitelist/v1\n";
 
 /// What the list's validation needs to know about chains, supplied by the chains layer
-/// (`chains::evm::registry::WHITELIST_RULES`) so core stays chain-agnostic.
+/// (`chains::WHITELIST_RULES`) so core stays chain-agnostic.
 #[derive(Debug, Clone, Copy)]
 pub struct ChainRules {
     /// Whether `key` is exactly a supported chain key (`"base"`).
     pub chain_known: fn(&str) -> bool,
+    /// The family of a known chain, or an empty string for an unknown chain.
+    pub family_of: fn(&str) -> &'static str,
     /// Whether the `0x` address is a registry token on any chain.
     pub is_registry_token: fn(&str) -> bool,
     /// Whether an address is a registry token on the specified chain.
     pub registry_token_on_chain: fn(&str, &str) -> bool,
-    /// The fee caps a new list starts with: chain key → wei, as a decimal string.
+    /// The fee caps a new list starts with: chain key → native base units, as a decimal string.
     pub default_fee_caps_wei: &'static [(&'static str, &'static str)],
 }
 
@@ -139,7 +141,7 @@ impl Entry {
         }
     }
 
-    /// Whether this entry applies on chain `key` (`"*"` covers every chain).
+    /// Low-level membership including `"*"`; family policy decides whether a wildcard applies.
     pub fn covers_chain(&self, key: &str) -> bool {
         self.chains.iter().any(|c| c == key || c == ANY_CHAIN)
     }
@@ -166,6 +168,7 @@ pub struct Policy {
     /// signatures as spending authority).
     pub allow_message_signing: bool,
     /// Optional stateless limits per chain; absence preserves the original signed encoding.
+    /// Historical `*Wei` names carry sun for Tron.
     #[serde(
         default,
         skip_serializing_if = "BTreeMap::is_empty",
@@ -315,9 +318,13 @@ impl Whitelist {
     }
 
     /// The address entry for `address` that applies on chain `key`: a payee.
-    pub fn payee(&self, address: &str, key: &str) -> Option<&Entry> {
-        self.by_address(address)
-            .filter(|e| e.kind == EntryKind::Address && e.covers_chain(key))
+    pub fn payee(&self, address: &str, key: &str, wildcard: bool) -> Option<&Entry> {
+        self.by_address(address).filter(|e| {
+            e.kind == EntryKind::Address
+                && e.chains
+                    .iter()
+                    .any(|c| c == key || (wildcard && c == ANY_CHAIN))
+        })
     }
 
     /// The contract entry for `address` that applies on chain `key`.
@@ -361,6 +368,16 @@ impl Whitelist {
                 if !(rules.chain_known)(c) {
                     return Err(entry_error(e, &format!("unknown chain {}", quote(c))));
                 }
+            }
+            if e.chains
+                .iter()
+                .any(|c| c != ANY_CHAIN && (rules.family_of)(c) != "evm")
+                && (e.chains.len() != 1 || e.kind != EntryKind::Address)
+            {
+                return Err(entry_error(
+                    e,
+                    "a non-EVM payee must name exactly one chain and cannot be a contract entry",
+                ));
             }
             if e.kind == EntryKind::Contract && (rules.is_registry_token)(&e.address) {
                 return Err(entry_error(
@@ -1649,6 +1666,31 @@ fn transact(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wildcard_is_only_used_when_the_signing_family_explicitly_allows_it() {
+        let body = "0xe2e1a54926527fbb4e4420de4c6bab82beaee24d";
+        let mut list = super::Whitelist::empty(&RULES);
+        list.add(super::Entry::new_address("bob", body, &["*"]))
+            .unwrap();
+        assert!(list.payee(body, "base", true).is_some());
+        assert!(list.payee(body, "tron", false).is_none());
+    }
+
+    #[test]
+    fn tron_entries_cannot_mix_families_or_delegate_contract_calls() {
+        use crate::chains::evm::registry::WHITELIST_RULES;
+        let body = "0xe2e1a54926527fbb4e4420de4c6bab82beaee24d";
+        for entry in [
+            super::Entry::new_address("bob", body, &["tron", "base"]),
+            super::Entry::new_contract("bob", body, &["tron"], &["0xa9059cbb"]),
+        ] {
+            let mut list = super::Whitelist::empty(&WHITELIST_RULES);
+            list.generation = 1;
+            list.add(entry).unwrap();
+            assert!(list.validate(&WHITELIST_RULES).is_err());
+        }
+    }
+
     use super::*;
     use crate::core::seed::Seed;
     use crate::core::store::{KDF_MIN_LOG_N, KdfParams, MasterOptions};
@@ -1675,6 +1717,7 @@ mod tests {
     /// Stand-in chain facts so these tests do not depend on the chains layer.
     const RULES: ChainRules = ChainRules {
         chain_known: known,
+        family_of: |_| "evm",
         is_registry_token: is_token,
         registry_token_on_chain: |chain, address| known(chain) && is_token(address),
         default_fee_caps_wei: &[
@@ -3714,10 +3757,13 @@ mod tests {
                 .nickname,
             "alice"
         );
-        assert!(l.payee(ALICE, "base").is_some());
-        assert!(l.payee(ALICE, "polygon").is_none(), "chain scope");
-        assert!(l.payee(BOB, "polygon").is_some(), "\"*\"");
-        assert!(l.payee(ROUTER, "base").is_none(), "a contract is no payee");
+        assert!(l.payee(ALICE, "base", true).is_some());
+        assert!(l.payee(ALICE, "polygon", true).is_none(), "chain scope");
+        assert!(l.payee(BOB, "polygon", true).is_some(), "\"*\"");
+        assert!(
+            l.payee(ROUTER, "base", true).is_none(),
+            "a contract is no payee"
+        );
         assert!(l.contract(ROUTER, "base").is_some());
         assert!(l.contract(ROUTER, "ethereum").is_none());
         assert!(

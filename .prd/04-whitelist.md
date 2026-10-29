@@ -605,3 +605,15 @@ Human edits use `native-cap <chain> <coin amount|none>`,
 `calldata-cap <chain> <byte count|none>`. Reset removes all such limits with a warning.
 These are not cumulative budgets, general contract-argument constraints or L1 total-fee caps.
 Full acceptance and delivery status: [`06-review-hardening.md`](06-review-hardening.md).
+
+
+## Tron family policy
+
+Tron uses the same authenticated list format and canonical bytes; its payees store the
+20-byte body and exactly `chains: ["tron"]`. Legacy `*` entries cover EVM chains only.
+The Tron policy signs strict native transfers and the registry USDT's exact `transfer`
+encoding; it refuses self-TRX, approvals, arbitrary contracts and account-permission changes.
+The historical `maxFeeWei` and `maxNativeWei` fields are denominated in sun on Tron.
+Token limits use smallest token units, and calldata limits apply to TriggerSmartContract data.
+Bandwidth and activation fees are not bounded by signed fee_limit. The complete security
+contract, owner/expiration checks and fee limitations are in [05-tron.md](05-tron.md).

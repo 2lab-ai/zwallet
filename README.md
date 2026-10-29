@@ -40,8 +40,8 @@ are [future work](#where-this-goes-next).
 
 | You provide | Your agent can do | You can check |
 |---|---|---|
-| A funded, dedicated wallet | Read native and ERC-20 balances on eight EVM networks | Current balances and verified addresses |
-| Allowed payees and contract selectors | Transfer native coin / registry tokens; read and invoke contracts | Transaction hashes, receipts and the local send journal |
+| A funded, dedicated wallet | Read native and ERC-20 balances on eight EVM networks, and TRX and TRC20 USDT on Tron | Current balances and verified addresses |
+| Allowed payees and contract selectors | Transfer native coin / registry tokens (TRX and USDT to listed Tron payees); read and invoke EVM contracts | Transaction hashes, receipts and the local send journal. A pending or unknown receipt is not permission to send the payment again (EVM and Tron alike) |
 | Optional per-transaction limits | Execute within native-value, token-amount, calldata and execution-fee limits | A refused request returns a structured error |
 | A time-limited unlock | Request signatures without a fresh password per transaction | Expiry and immediate lock-all |
 
@@ -52,7 +52,13 @@ identity: processes under the same OS user share the session's access boundary.
 
 For tokens, transfer support is the built-in registry's exact deployments:
 USDC, USDT, DAI and WETH where listed. It is not every token on every chain. Native
-coin is still needed for gas. Tron USDT support is ![WIP](https://img.shields.io/badge/status-WIP-yellow).
+coin is still needed for gas (TRX on Tron). On Tron, zwallet sends only TRX and the
+registry USDT, and only to explicitly listed Tron payees; there are no Tron contract calls
+or message signing.
+
+A person at the keyboard can reach every CLI function from the [terminal UI](#terminal-ui)
+(`zwallet tui`), under the same password, session and signing policy; the recovery phrase
+and QR codes stay in the CLI.
 
 For the task prompt, retry rules and receipt-based report format, see
 [Using zwallet with an agent](docs/agent-workflow.md). zwallet is the wallet component;
@@ -170,6 +176,7 @@ For retry and replacement rules, see [send safety](docs/commands.md#send-journal
 | `polygon` | Polygon PoS | POL |
 | `bsc` | BNB Smart Chain | BNB |
 | `avalanche` | Avalanche C-Chain | AVAX |
+| `tron` | Tron | TRX |
 | `sepolia` | Sepolia testnet | ETH |
 
 Run `zwallet chains --json` for chain IDs and endpoints. RPC selection is
@@ -178,7 +185,28 @@ Run `zwallet chains --json` for chain IDs and endpoints. RPC selection is
 
 The same named key has the same address on all supported EVM networks. Balances and
 whitelist permissions are still network-specific. Registry-token support varies by
-network; BSC currently has no registry tokens for transfer.
+network; BSC currently has no registry tokens for transfer. The same seed also derives a
+separate Tron address. Use `zwallet address --chain tron --verify`,
+`zwallet balance --chain tron`, or `zwallet balance --chain tron --token usdt`.
+
+Tron sends only TRX and registry USDT to explicitly listed Tron payees:
+
+```sh
+zwallet whitelist add bob <T-address> --chains tron
+zwallet whitelist fee-cap tron 30
+zwallet transfer --chain tron --to @bob --amount 1 --token usdt --dry-run --json
+zwallet transfer --chain tron --to @bob --amount 1 --token usdt --wait
+zwallet tx --chain tron <txid> --wait --wait-timeout 30s
+```
+
+Omit `--token usdt` for TRX. The dry-run shows `fees.estimatedCostSun` and
+`fees.maxCostSun`; the balance check uses the maximum, at the prices of
+`fees.pricesAtBlock`. Bandwidth and account activation are outside the signed energy fee cap.
+Tron has no nonce or replacement flags. Its journal records `expiresAt` and the 64-digit txID;
+`expired-unseen` means only that this node returned no record as of its reported block.
+Sending this payment again is a second payment if this one was included.
+Funded live TRX/USDT sends remain an owner-run acceptance check; offline fixtures and unsigned
+public-node validation are covered by the [Tron evidence](.prd/v0-3-tron/c-evidence.md).
 
 ## Terminal UI
 
@@ -186,10 +214,17 @@ network; BSC currently has no registry tokens for transfer.
 zwallet tui --chain sepolia
 ```
 
-Requires an interactive terminal of at least 80×24. Use `j`/`k` or arrow keys to
-browse, `r` to refresh, `L` to lock all sessions, and `q` or Ctrl-C to quit. The current
-UI shows keys and signing status; use the CLI for the remaining workflows. See
-[the planned UI](.prd/03-tui.md) ![WIP](https://img.shields.io/badge/status-WIP-yellow).
+Requires an interactive terminal of at least 80×24. Tabs `1`–`7` are keys, wallet, send,
+receive, whitelist, tools and session; `?` opens the 55-action menu. Use `j`/`k` or arrow keys
+to browse, `r` to refresh, `L` to lock all sessions, and `q` or Ctrl-C to quit. The UI
+supports wallet and key creation, balances (EVM and Tron), receive addresses, password
+verification and repair, timed unlock, checked-payee transfers on EVM and Tron, transaction
+history and lookup, whitelist and per-transaction limit editing, and EVM contract and message
+tools. Pending EVM transactions expose speed-up/cancel only after original-intent
+verification; uncertain sends can be retried from their retained review in the same
+session. Tron has no nonce replacement. The TUI never shows the recovery phrase (`B` points
+to `zwallet backup`), and `Q` points to `zwallet address` for a QR code. See the
+[TUI command reference](docs/commands.md#key-management-and-terminal-ui) and [UI specification](.prd/03-tui.md).
 
 ## Before funding a wallet
 
@@ -227,7 +262,7 @@ defines the dependencies and acceptance criteria. The video labels these scenes
 ## Why another agent wallet?
 
 Choose zwallet when you want a local Rust CLI, a password-held signing session,
-daemon-enforced policy, and direct access to your chosen EVM RPC. Use it from any
+daemon-enforced policy, and direct access to the RPC endpoints you choose. Use it from any
 agent that can run shell commands; no zwallet service account or dedicated token is
 required. MIT licensing lets you inspect, modify and self-host the code.
 

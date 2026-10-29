@@ -1,6 +1,11 @@
 //! EVM JSON-RPC: balances, contract reads, transaction preparation, broadcast, receipts.
 //! Runs in the CLI process only; the daemon never reaches this module.
 
+mod detail;
+pub use detail::{MovementsState, TxDetail, tx_detail, tx_state};
+mod replacement;
+pub use replacement::pending_original;
+
 use super::tx::{
     EvmFees, IERC20, IGasPriceOracle, UnsignedEvmTx, encoded_for_signing, erc20_transfer_calldata,
     gas_with_margin,
@@ -165,7 +170,7 @@ fn timed_out(what: &str) -> WalletError {
 pub async fn connect(net: &Net) -> Result<EvmProvider> {
     let p = EvmProvider::new(net)?;
     let got = p.rpc("eth_chainId", p.get_chain_id()).await?;
-    let want = config(net.chain).chain_id;
+    let want = config(net.chain)?.chain_id;
     if got != want {
         return Err(WalletError::rpc(format!(
             "RPC {} serves chainId {got}, but {} is chainId {want}",
@@ -235,7 +240,7 @@ pub async fn erc20_meta(p: &EvmProvider, net: &Net, token: Address) -> Result<To
         .unwrap_or_else(|| "?".to_string());
     // The contract writes `symbol()`: escaped and cut where it enters the output, unless it is
     // the recorded symbol of this registry token.
-    let symbol = match super::registry::lookup(config(net.chain).chain_id, &token) {
+    let symbol = match super::registry::lookup(config(net.chain)?.chain_id, &token) {
         Some(t) if t.onchain_symbol == symbol => t.onchain_symbol.to_string(),
         _ => crate::core::text::ascii_inert(&symbol, SYMBOL_SHOWN),
     };
@@ -623,6 +628,31 @@ fn insufficient(shortfall: &[Value]) -> WalletError {
 /// Shared by `transfer` and `invoke`: nonce (pending), fees, gas estimate with margin, balance
 /// pre-check. Outside dry-run a shortfall is `INSUFFICIENT_FUNDS` before anything is signed.
 pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<PreparedTx> {
+    prepare_with_original(p, net, intent, None).await
+}
+
+/// The TUI supplies fees from a cryptographically checked original or its own immutable review.
+/// This allows an uncertain send to be retried at the same nonce even if this node lost its hash.
+pub(crate) async fn prepare_replacement(
+    p: &EvmProvider,
+    net: &Net,
+    intent: Intent,
+    original: OriginalFees,
+) -> Result<PreparedTx> {
+    if intent.nonce.is_none() || intent.replace.is_none() {
+        return Err(WalletError::validation(
+            "replacement needs the original nonce and hash",
+        ));
+    }
+    prepare_with_original(p, net, intent, Some(original)).await
+}
+
+async fn prepare_with_original(
+    p: &EvmProvider,
+    net: &Net,
+    intent: Intent,
+    authenticated_original: Option<OriginalFees>,
+) -> Result<PreparedTx> {
     let chain = net.chain;
     let native = native_balance(p, intent.from).await?;
     let token_balance = match &intent.token {
@@ -692,9 +722,12 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         }
     };
     let replacing = nonce < pending;
-    let original = match intent.replace {
-        Some(hash) => Some(original_fees(p, hash, intent.from, nonce, pending, journal).await?),
-        None => None,
+    let original = match (authenticated_original, intent.replace) {
+        (Some(checked), _) => Some(checked),
+        (None, Some(hash)) => {
+            Some(original_fees(p, hash, intent.from, nonce, pending, journal).await?)
+        }
+        (None, None) => None,
     };
     // `--replace` outbids the named transaction even where this node no longer counts it, and
     // an explicit `--bump` always applies: the agent asked for it, whatever this node holds.
@@ -724,7 +757,7 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     };
     let gas_limit = gas_with_margin(gas_estimate);
     let unsigned = UnsignedEvmTx {
-        chain_id: config(chain).chain_id,
+        chain_id: config(chain)?.chain_id,
         nonce,
         gas_limit,
         fees,
@@ -733,7 +766,7 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         input: intent.input.clone(),
     };
     // OP-stack L1 data fee. Best effort: without it the node still rejects an unfundable tx.
-    let l1_fee = if config(chain).op_stack {
+    let l1_fee = if config(chain)?.op_stack {
         op_l1_fee(p, &unsigned).await.ok()
     } else {
         None
@@ -809,6 +842,8 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     fields.insert("sufficientFunds".into(), json!(shortfall.is_empty()));
     fields.insert("shortfall".into(), Value::Array(shortfall));
     Ok(PreparedTx {
+        max_gas_cost,
+        l1_fee,
         // The daemon gets the signing payload bytes only and decodes them itself.
         unsigned: json!(format!(
             "0x{}",
@@ -816,6 +851,38 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         )),
         fields,
     })
+}
+
+/// Apply live-send guards to a freshly prepared dry-run after comparing its review. This
+/// lets an interactive confirmation return a changed funds verdict without asking for a
+/// signature, while keeping the CLI's pending/shortfall errors for unchanged reviews.
+pub(crate) fn check_transfer_sendable(
+    net: &Net,
+    req: &TransferRequest,
+    prepared: &PreparedTx,
+) -> Result<()> {
+    if req.nonce.is_none()
+        && !req.allow_pending
+        && let Some(range) = prepared
+            .fields
+            .get("pendingRange")
+            .and_then(Value::as_array)
+    {
+        let first = range.first().and_then(Value::as_u64);
+        let last = range.get(1).and_then(Value::as_u64);
+        if let (Some(first), Some(last)) = (first, last) {
+            return Err(pending_guard_error(net, first..=last, req.journal.as_ref()));
+        }
+    }
+    let shortfall = prepared
+        .fields
+        .get("shortfall")
+        .and_then(Value::as_array)
+        .ok_or_else(|| WalletError::validation("prepared transaction has no funds verdict"))?;
+    if !shortfall.is_empty() {
+        return Err(insufficient(shortfall));
+    }
+    Ok(())
 }
 
 /// Most pending nonces `pendingNonces` lists.
@@ -1396,7 +1463,7 @@ async fn fetch_by_hash(
             return Err(WalletError::rpc(format!(
                 "{method} for {shown} answered about transaction {}, so the node says nothing \
                  about this one; look it up on {}",
-                got.unwrap_or("<none>"),
+                crate::core::text::ascii_inert(&p.net.redact(got.unwrap_or("<none>")), 128),
                 p.net.chain.explorer_tx_url(&shown)
             )));
         }

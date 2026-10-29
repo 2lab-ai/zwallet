@@ -36,10 +36,10 @@ once. Every estimate of a unit not yet started is an estimate, not a measurement
 - At least one counter-example test: text or state from outside built to break the screen or to
   get an address shown as payable.
 - "Nothing signed" is checked by counting `SignTx` requests where the daemon side records them
-  (`FakeDaemon.received`, tests/common/mod.rs:586-587 at 24f4b5b), not only by the absence of
+  (`FakeDaemon.received`, tests/common/mod.rs:587), not only by the absence of
   `eth_sendRawTransaction` at the mock node.
 - Tests that reach `protocol::stop_all_daemons` (the `L` key, a whitelist change) take
-  `common::exclusive()` (tests/common/mod.rs:91), as the CLI's do (v0-1/loop.md:15).
+  `common::exclusive()` (tests/common/mod.rs:99), as the CLI's do (v0-1/loop.md:15).
 - No library entry point prints; the CLI command that used the code calls the new function and
   prints what it returns, so `tests/cli.rs` stays green unchanged.
 - From TUI-3 on: every action the unit adds is a row of `src/tui/actions.rs` (03-tui.md
@@ -59,7 +59,7 @@ once. Every estimate of a unit not yet started is an estimate, not a measurement
 | TUI-1b | see the keys and the lock state; lock | `zwallet tui`, the screens (keys list, status bar, size rule), the cell/style/budget helpers | T1 | TUI-1a | 800 |
 | TUI-1c | (the same, proven on a pty) | the pty runs (restore after `q`, `locked` within two refreshes), the argv-listed fake, the pty helpers | T9, T10 | TUI-1b | 350 |
 | TUI-2 | unlock from the TUI, see the open key verified, make a key active | warm-up, password field, the password check (checked list, pinned addresses), make active, address trust | T2, T2b | TUI-1 | 750 |
-| TUI-3 | see the balance on any chain and on every network, through any RPC; find every function from `?` | tab line, action menu (52 rows), hint lines, popups and fields; 2 wallet balances, every network, the chain picker and its session RPC | T5, T8, T12, T13, T15, T42 | TUI-2 | 900 |
+| TUI-3 | see the balance on any chain and on every network, through any RPC; find every function from `?` | tab line, action menu (55 rows), hint lines, popups and fields; 2 wallet balances, every network, the chain picker and its session RPC | T5, T8, T12, T13, T15, T42 | TUI-2 | 900 |
 | TUI-4 | receive: the address and its trust (Q1's pointer to the QR); verify and repair every key's address; unlock for a chosen time; see the session | 4 receive, `V` on every key, `A`, 7 session, `u`, the start flag `--allow-ptrace-scope-0` | T14, T16, T17, T18, T19, T20 | TUI-3 | 800 (+250 if the owner picks Q3) |
 | TUI-5 | send the coin or a registry token to a listed payee and see it mined, waiting as long as he likes | 3 send: asset, payee, amount, review with the overrides and the fee ceiling, exact-intent confirm, status, `w` | T6, T6b, T21, T22, T43 | TUI-3 | 850 |
 | TUI-6 | curate the whitelist: payees, contracts, fee caps, message signing, reset; never list the zero address | 5 whitelist: view, `V`, every change, the zero-address refusal at add (CLI and TUI); the pty run across T2, T6 and T7 | T7, T11, T23, T24, T25, T44 | TUI-5 | 850 |
@@ -118,7 +118,7 @@ tables below keep the old names.
   }`), `src/commands.rs` (`list` and `status` call `wallet::keys` and `wallet::status`; the `tui`
   dispatch), `src/wallet.rs` (new), `src/tui/mod.rs`, `app.rs`, `ui.rs`, `text.rs`, `style.rs`,
   `term.rs` (new), `tests/tui.rs` (new), `tests/common/mod.rs` (the argv-listed fake daemon below,
-  moved from `build_attacker`, tests/cli.rs:4163).
+  moved from tests/cli.rs with `build_attacker`, tests/common/mod.rs:815).
 - **RED tests:**
   - `FilteredBackend`, where it acts (unit): it wraps a recording inner backend (ratatui's
     `TestBackend`) and draws five bad cells, `█`, ESC, `┌` (box drawing), a two-character grapheme
@@ -136,7 +136,7 @@ tables below keep the old names.
     too small` line. (`Msg` sequence): `q` ends the app. (unit, `term.rs`): the restore guard
     writes the leave-alternate-screen and show-cursor sequences to a test writer on drop and from
     the panic hook (`catch_unwind`); the hook then writes its one fixed line, never the payload.
-    (pty, `PtyChild`, tests/common/mod.rs:637): `zwallet tui`, then `q`; the pty is back in
+    (pty, `PtyChild`, tests/common/mod.rs:941): `zwallet tui`, then `q`; the pty is back in
     canonical mode with echo.
   - T10 (`Msg` sequence): a status refresh that reports locked makes the bar say `locked`. (pty):
     with a test daemon unlocked, `zwallet lock` from a second process; within two refreshes
@@ -147,10 +147,10 @@ tables below keep the old names.
     CLI's `VALIDATION_ERROR` in place of the rows, the value escaped and cut at 64 (`shown`,
     commands.rs:195-200); no row shows it as an address; zero replaced cells.
   - A process started with argv `daemon --home <canonical home>`, so that `daemon_pids` lists it
-    and `status` uses its reply (commands.rs:1890-1900), as tests/cli.rs:3905-3912 starts one,
-    answers `status` with `locked: false`, its own pid, and an `expiresAt` of 600 characters of
-    ESC, `▀` and `▄`: the bar shows at most 64 escaped characters on one line (the budget
-    assertion), and the address is not marked verified.
+    and `status` uses its reply (commands.rs:1890-1900), as `common::daemon_argv_impostor`
+    (tests/common/mod.rs:834) starts one, answers `status` with `locked: false`, its own pid, and
+    an `expiresAt` of 600 characters of ESC, `▀` and `▄`: the bar shows at most 64 escaped
+    characters on one line (the budget assertion), and the address is not marked verified.
 
 ### TUI-1 split (2026-10-28)
 
@@ -163,7 +163,7 @@ each lands in the PR named below.
 |---|---|---|---|---|
 | TUI-1a | `feat/tui-1-shell` | `Cargo.toml`/`Cargo.lock` (ratatui 0.30.2, crossterm 0.29.0; kasuari 0.4.12 and num_threads 0.1.7 pinned to releases at least two weeks old); `src/tui/term.rs`: `FilteredBackend` and `Guard` with the panic hook (one guard per process; a panic while it holds the terminal restores it, writes the fixed line and ends the process with 101), with their RED tests, one of them a child process that panics inside `spawn_blocking`; `src/wallet.rs`: `keys`, `status`, `net`; `list` and `status` call them (no `list` or `status` assertion in `tests/cli.rs` changed; c14's lower bound tolerates a 2 s clock step, 5119e36). `Trust` is `pub`, re-exported as `wallet::Trust`; `Daemon` and its helpers stay in `src/commands.rs` as `pub(crate)` | none | in review |
 | TUI-1b | `feat/tui-1b-screens` | `Command::Tui { warm, chain }` and its dispatch; `src/tui/mod.rs`, `app.rs`, `ui.rs`, `text.rs`, `style.rs`; `tests/tui.rs` with the cell, style and budget helpers, T1, the T9 frames and the `q` `Msg` test, the T10 `Msg` test, the cached-address counter-example; the README `zwallet tui` section; 03-tui.md §Status bar, the 80x24 layout and rule 3's RPC host row (decisions 2 and 4), rule 4's error view (decision 1) and the locked trust wording (§Changes on 2026-10-28); after review rounds 1 to 5, `q` waits for `L`, reads carry a generation, the bar and the key rows keep every value whole or `...`-cut at 80x24, and `assert_placed` finds any stray copy of a shown value | T1 | approved after review round 5, 2026-10-28 |
-| TUI-1c | at dispatch | the T9 pty test (`q`, then canonical mode with echo), the T10 pty test (`zwallet lock` from a second process, `locked` within two refreshes), the argv-listed fake counter-example, the attacker moved into `tests/common`, the pty helpers (decision 5) | T9, T10 | planned |
+| TUI-1c | `feat/tui-1c-pty` | the T9 pty test (`q`, then canonical mode with echo; the 79x24 frame), the T10 pty test (`zwallet lock` from a second process, `locked` within two refreshes), the argv-listed fake counter-example, the attacker and its helpers moved into `tests/common`, the pty helpers (decision 5: `openpty_sized`, `PtyChild::spawn_full_screen`, `Frame`). The tests pass on TUI-1b's code: no `src` change | T9, T10 | in review, 2026-10-28 |
 
 Decisions (the dispatcher's, 2026-10-28):
 1. The keys pane's error is a single-source error view, rule 4's exception: the CLI's
@@ -179,7 +179,13 @@ Decisions (the dispatcher's, 2026-10-28):
 4. The RPC host is `redact_url`'s origin, the host only, at most 32 characters, cut with `...`;
    TUI-1b adds it to rule 3's table.
 5. TUI-1c extends `common::openpty` with a window size (default 120x40, settable), reading the
-   output while the child runs, and the slave's termios for the echo check.
+   output while the child runs, and the pty's termios for the echo check, read through the
+   master. The test keeps no slave of a full-screen child's pty once it is spawned, so the pty
+   ends with the child and the reader after the last byte on Linux too (whose master gives no
+   end while any slave is open); and on macOS the exit of the child, its session's leader,
+   revokes every open slave of its terminal (probes on 2026-10-28: `tcgetattr` on a slave failed
+   with `ENOTTY` after the exit; on the master it read the modes the child left, on macOS and
+   Linux; 25,603 bytes, then the end, 200 of 200 runs on both with no slave in the parent).
 6. Moving the argv-listed attacker from `tests/cli.rs` into `tests/common` is allowed: helper
    lines change in `tests/cli.rs`, no assertion does.
 
@@ -203,7 +209,7 @@ Decisions (the dispatcher's, 2026-10-28):
     "b"`.
   - T2b (pty): `s` on `a`, confirm: `zwallet list --json` has `active: "a"`.
   - (unit): `open_with_password` then `check_list` on a seeded whitelist
-    (`common::seed_whitelist`, tests/common/mod.rs:265) returns that list's entries, gen and the
+    (`common::seed_whitelist`, tests/common/mod.rs:275) returns that list's entries, gen and the
     fingerprint of the files as read; with a zwallet 0.1.0 anchor `check_list` returns `list
     --verify`'s message and no list. `open_with_password` reads no list file (the files are
     removed before the call and it still succeeds).
@@ -231,6 +237,23 @@ Decisions (the dispatcher's, 2026-10-28):
   - A process answers `address` with 600 `▀▄` characters: the pane shows the CLI's "not an
     address" error escaped; the bar never shows it as an address.
 
+### TUI-2 split (2026-10-28)
+
+The coding pass measured the nine RED tests above at 557 changed lines on their own, so it
+stopped at a clean point (the brief's rule past the cap) and TUI-2 is three PRs. TUI-2a, the
+entry points with the CLI on them, `s` and A1, is 790 changed lines by the counting rule (662
+insertions and 157 deletions against TUI-1c's tip, 29 lines moved into `src/wallet.rs` counted
+once; A1 about 160 of them); TUI-2b is about 800 and TUI-2c about 200. The tests above are unchanged; each lands in the PR below. The REDs
+written for TUI-2b and TUI-2c before any TUI-2 code are kept for them (on the dispatcher's machine,
+`~/.local/share/zwallet-epic/deferred/tui2b-deferred-tests.rs`). The dispatcher's A1 (2026-10-28: the not-verified note follows the
+trust state, 03-tui.md §Address trust) lands in TUI-2a, its rule 4 in TUI-2b.
+
+| PR | Branch | Scope | Closes | State |
+|---|---|---|---|---|
+| TUI-2a | `feat/tui-2-warmup` | the six entry points; `unlock`, `change`, `list --verify`, `whitelist list --verify` on them; the `open_with_password`/`check_list` unit test; `s` and its confirmation, the T2b pty run; a refused `s` stops the pane (counter-example); A1 in the TUI and `list` | T2b | in review, 2026-10-28 |
+| TUI-2b | `handoff/tui-unlock` | the password field (`src/tui/password.rs`), the warm-up, the password check in `spawn_blocking`; `zwallet tui --allow-ptrace-scope-0` (without Yama a session start refuses, as in the Docker gate); the T2 pty run, both `Msg` tests, the exact-order and password-in-a-frame counter-examples; A1 rule 4 | T2 | implemented 2026-10-29; integration/review pending |
+| TUI-2c | `handoff/tui-unlock` | pinned addresses checked on later reads, the open key's address and trust in the bar (`wallet::address`); the pinning and 600 `▀▄` counter-examples | none | implemented 2026-10-29; integration/review pending |
+
 ## TUI-3 — navigation, balances, every network, chain switch
 
 - **Closes:** T5, T8, T12, T13 (for the frames it draws), T15, T42.
@@ -252,9 +275,9 @@ Decisions (the dispatcher's, 2026-10-28):
   `tests/tui.rs`.
 - **Depends on:** TUI-2 (the open key).
 - **RED tests:**
-  - T12 (`TestBackend` and `Msg` sequence): `?`: the title says `actions (52)`. The test holds
-    the Alias column of 03-tui.md §Coverage matrix rows 1–52 as a list and asserts the menu's 52
-    rows carry exactly those tokens, row for row; `whitelist add` typed leaves one row (key `a`,
+  - T12 (`TestBackend` and `Msg` sequence): `?`: the title says `actions (55)`. The test holds
+    the Alias column of 03-tui.md §Coverage matrix rows 1–52 as a list and asserts the menu's first 52
+    rows carry exactly those tokens, row for row; rows 60–62 add the three amount/calldata cap aliases; `whitelist add` typed leaves one row (key `a`,
     tab 5); Enter on an action that cannot run shows its reason and starts no `Effect`.
   - T13 (`Msg` sequence and `TestBackend`), on the frames this PR draws: `1` … `7`, `[` and `]`
     reach each tab; the hint rule holds on each frame (focus not a field, a menu or a popup: the
@@ -343,6 +366,15 @@ Decisions (the dispatcher's, 2026-10-28):
 
 ## TUI-5 — transfer
 
+- **Library boundary (2026-10-29):** implemented in `src/wallet/send.rs`, with typed checked
+  payees, immutable reviews, held overrides, integer execution plus L1 fee comparison, and the
+  shared CLI signing/broadcast tail. `tests/transfer_review.rs` counts mock `SignTx` requests.
+  Screen wiring and bounded receipt polling are implemented in `src/tui/app/transfer.rs` and
+  `src/tui/ui/transfer.rs`; 21 focused mock tests pass. The worker owns each send once, reports
+  durable journal progress, and defers quit/lock until mutation finishes. Independent review,
+  actual PTY acceptance and the integrated full gate remain open at dispatcher handoff. See
+  [the current API](flow.md#transfer-library-boundary-added-on-2026-10-29) and
+  [the evidence](../research/handoff-tui-send-2026-10-29.md).
 - **Closes:** T6, T6b, T21, T22, T43.
 - **PR:** TUI-5 alone; TUI-6 merges right after it, in its own review (§PRs and previews).
 - **The owner can afterwards:** send the coin or a registry token to a listed payee, override
@@ -501,7 +533,7 @@ The moved text follows.
   explorer client reads the three Blockscout hosts of the table and nothing else.
 - **RED tests:**
   - Explorer fixture: a local HTTP server in the test, built like `tiny_rpc_reply`
-    (tests/common/mod.rs:926), serving single-line Blockscout bodies cut from the 2026-10-27
+    (tests/common/mod.rs:1561), serving single-line Blockscout bodies cut from the 2026-10-27
     captures to the kept fields plus a few dropped ones.
   - T3 (`TestBackend`, the `App` built with the fixture explorer and a fixture journal file): 14
     transactions, one hash in both the journal and the explorer, 2 pending: exactly 10 rows,
@@ -657,10 +689,14 @@ The moved text follows.
   shell. The phrase stays a CLI pointer: `B` shows B1's line naming `zwallet backup`. B2 is built
   by no unit unless the owner picks it (03-tui.md §Open trade-offs B), and then with its
   conditions.
-- **Entry points added:** `wallet::create(home, name, words, password, ttl) -> Created`, from
-  `create` and `add_subkey` (commands.rs:683-845), returning the reminder to run the backup
-  instead of printing it (commands.rs:773-776; 03-tui.md rule 6). The CLI's `create` calls it and
-  prints the reminder as before. `Created` carries no phrase. Only if the owner picks B2:
+- **Entry points added:** `wallet::prepare_create(home, name, words, ttl, allow_ptrace_scope_0)`
+  returns a `CreatePlan` before the password is prompted, binding the master envelope and
+  pinning an optional daemon. `wallet::create(plan, owned_password) -> Created` moves the
+  caller's zeroizing password owner into its worker without cloning; the TUI can pass its
+  fixed `PasswordBuf`. It returns the backup reminder instead of printing it. The CLI's
+  `create` calls it and prints the reminder as before. `Created` carries no phrase. Once
+  submitted, the TUI waits for this confirmed mutation on quit; dropping the future cannot
+  cancel a worker already publishing a wallet. Only if the owner picks B2:
   `wallet::recovery_phrase(home, password) -> Zeroizing<Vec<String>>`, from `backup`
   (commands.rs:1970-1995) without its terminal check, which `zwallet tui`'s own check
   (src/tui/mod.rs:38-43) stands in for.
@@ -900,3 +936,11 @@ unanimous APPROVE on e7d896d, no must-fix. Four non-blocking points were applied
 | (fable) the salt does not travel in the snapshot | `Opened { addresses, anchor: Option<WhitelistAnchor>, salted: bool }` (core/store.rs:419), never `SealedWhitelist` with its salt (:461-467); `CheckedList.policy` is the list's own policy, not `Unsealed.policy` | 03-tui.md §Password check; flow.md §Password check; TUI-2 |
 | (grok) the "fee falls, so it signs once" test also checks the signed body | the `SignTx` request's transaction is decoded and its `chain_id`, `to`, `value`, `input`, `nonce` must equal the held fields | TUI-5 |
 | (gpt-6-astra) one wording for the confirm rule | "the transfer intent is exactly equal, and the most the fee can cost is at most the reviewed one" | 03-tui.md §Changes item 8; this file, Review round 1 row B2 |
+
+### TUI-3+4 handoff receipt — 2026-10-29
+
+Implementation and remaining process gates: [`../research/handoff-tui-navigation-2026-10-29.md`](../research/handoff-tui-navigation-2026-10-29.md). The 52 original aliases retain their row numbers; cap aliases at rows 60–62 bring the action menu to 55.
+
+### TUI-10 creation UI handoff — 2026-10-29
+
+Reachable first-wallet and named-key flows are implemented in `handoff/tui-create`; see [`../research/handoff-tui-create-ui-2026-10-29.md`](../research/handoff-tui-create-ui-2026-10-29.md) for isolated gates and the pending parent-coordinated T30/T31 process gate. B1 remains the only backup UI.

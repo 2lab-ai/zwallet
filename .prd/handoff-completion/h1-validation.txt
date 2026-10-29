@@ -1,0 +1,18 @@
+2026-10-29 local macOS arm64, Rust 1.95.0
+Command: cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
+Exit: 0
+test result: ok. 296 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.79s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 112 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 245.96s
+test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 63.10s
+test result: ok. 0 passed; 0 failed; 11 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 46.17s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.02s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.14s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.55s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Total passed: 521
+
+Independent H1 review and follow-up: no remaining blocker after recorded fixes.
+Linux/macOS exact-head GitHub CI remains pending until the successor PR is published.

@@ -2,9 +2,9 @@
 
 ![WIP](https://img.shields.io/badge/status-WIP-yellow)
 
-Implementation plan only: the current chain registry supports EVM, not Tron. See [feature status](../../docs/features.md).
+Original implementation plan and acceptance ownership. The current source includes Tron A, B1, B2 and C; integration review/gates and owner-run acceptance are tracked separately. See [feature status](../../docs/features.md) and [C evidence](c-evidence.md).
 
-Status: **planned**, 2026-10-28; the PR plan was revised after review round 1 the same day (the
+Status: **in-progress**, 2026-10-29; the PR plan was revised after review round 1 the same day (the
 dispatcher's decision from the three reviews). Four PRs, merged in this order: A → B1 → B2 → C.
 Inside them are seven work items, TRON-1 … TRON-7, described below. Each PR closes the acceptance
 IDs of [`../05-tron.md`](../05-tron.md) §Acceptance listed for it; every ID TR1–TR25 is closed by

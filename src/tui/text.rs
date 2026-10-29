@@ -12,6 +12,19 @@ use crate::core::time::{parse_rfc3339_utc, rfc3339_utc};
 /// Where a value shown in the TUI comes from: one row of rule 3's table each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
+    WhitelistName,
+    Quantity,
+    TransactionHash,
+    /// A bounded read-only pane line, built from independently checked values.
+    Detail,
+    /// One row of a list pane, from zwallet's own list text (`whitelist list`), whose fields
+    /// that text already shape-checked and escaped. Drawn on one line, cut to the pane's width
+    /// (rule 4); its budget is the CLI's prose budget for the whole list.
+    ListRow,
+    /// Public wallet-home path.
+    Home,
+    /// A field's already alphabet-checked, redacted display value.
+    Input,
     /// A key name in wallet.json (checked by `validate_key_name` when parsed).
     KeyName,
     /// An address: wallet.json's cache or a reply on `d.sock`, address-shaped by the CLI's checks.
@@ -30,6 +43,13 @@ impl Source {
     /// The most characters a value of this source shows.
     pub const fn budget(self) -> usize {
         match self {
+            Self::WhitelistName => 32,
+            Self::Quantity => 78,
+            Self::TransactionHash => 66,
+            Self::Detail => 72,
+            Self::ListRow => PROSE_MAX,
+            Self::Home => 64,
+            Self::Input => 512,
             Self::KeyName | Self::RpcHost => 32,
             Self::Address => 42,
             Self::Expiry => 64,
@@ -49,6 +69,41 @@ pub struct Outside {
 const ONE_DAY: u64 = 86_400;
 
 impl Outside {
+    pub fn nickname(text: &str) -> Self {
+        Self::inert(Source::WhitelistName, text)
+    }
+    pub fn quantity(text: &str) -> Self {
+        Self::inert(
+            Source::Quantity,
+            if text.len() <= 78 && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+                text
+            } else {
+                "<invalid>"
+            },
+        )
+    }
+    pub fn transaction_hash(text: &str) -> Self {
+        Self::inert(
+            Source::TransactionHash,
+            if text.parse::<alloy::primitives::B256>().is_ok() {
+                text
+            } else {
+                "<invalid>"
+            },
+        )
+    }
+    pub fn detail(text: &str) -> Self {
+        Self::inert(Source::Detail, text)
+    }
+    pub fn list_row(text: &str) -> Self {
+        Self::inert(Source::ListRow, text)
+    }
+    pub fn home(text: &str) -> Self {
+        Self::inert(Source::Home, text)
+    }
+    pub fn input(text: &str) -> Self {
+        Self::inert(Source::Input, text)
+    }
     /// `text` from `source`: kept when it is printable ASCII already (as the CLI's escaping
     /// leaves it, so an escape is not escaped twice), escaped otherwise; then cut to the budget.
     fn inert(source: Source, text: &str) -> Self {
@@ -69,12 +124,13 @@ impl Outside {
         Self::inert(Source::Address, address)
     }
 
-    /// An address as the status bar shortens it: `0x1234...abcd`.
+    /// Only the status bar shortens addresses: six leading and four trailing characters.
     pub fn short_address(address: &str) -> Self {
         let full = Self::address(address).text;
-        let text = match (full.get(..6), full.get(38..)) {
-            (Some(head), Some(tail)) if full.len() == 42 => format!("{head}...{tail}"),
-            _ => full,
+        let text = if full.len() == 42 || full.len() == 34 && full.starts_with('T') {
+            format!("{}...{}", &full[..6], &full[full.len() - 4..])
+        } else {
+            full
         };
         Self {
             source: Source::Address,

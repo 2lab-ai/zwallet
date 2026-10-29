@@ -10,6 +10,43 @@ this page names the code that does it today, with `file:line`, what it returns, 
 call it as it is. Every line reference is to that commit, except §Functions added on 2026-10-28
 (24f4b5b). The units TUI-1 … TUI-12 in [`units.md`](units.md) close the gaps named here.
 
+## Transfer library boundary added on 2026-10-29
+
+`wallet::review_transfer(home, net, checked_list, TransferInput)` is implemented in
+`src/wallet/send.rs`. It uses the checked list in memory, takes no send lock and sends no
+`SignTx`. `transfer_payees` creates the typed payee choices; no raw-address constructor is
+exposed. A review owns the checked list, payee address, key, RPC and overrides, and exposes
+read-only decoded intent, integer execution/L1 fees, funds and policy verdicts.
+
+`wallet::send_transfer(review, progress)` rechecks the fingerprint before and after fresh
+preparation under the send lock. A fee increase or changed decoded intent returns
+`ReviewChanged` without signing; a decrease may proceed. An unavailable OP L1 estimate refuses
+review instead of treating the missing estimate as zero. The estimate can still rise after
+confirmation: it is not a cap on the sequencer's eventual L1 charge.
+
+CLI transfer/invoke and this boundary share `send_prepared`, including signature recovery,
+exact signing-payload verification, duplicate protection and journaling before broadcast.
+`SendRecord::write` returns the fsynced announcement and optionally calls a progress observer;
+only the CLI adapter prints it.
+
+`src/tui/app/transfer.rs` and `src/tui/ui/transfer.rs` now wire asset selection, checked payees,
+amount, immutable review, typed nickname confirmation and send status into the Send tab. The
+80×24 review shows full addresses, the exact base-unit amount, token contract, nonce, execution
+maximum, OP L1 estimate, total and policy execution cap. Registry units are checked independently
+of RPC token metadata. `p`, `d` and `g` rerun review with explicit held overrides.
+
+The worker owns each confirmed request once. Progress is emitted after the journal is durable,
+then the UI follows the computed hash for 90 seconds. `w` accepts a new bounded duration and
+cancels only the previous receipt poll. `q` waits for broadcast, and `L` requested during send
+runs after it. No signing request is cancelled by a navigation or receipt deadline.
+`App::verified_key` shares the lifetime password-derived index/address checks with other forms.
+`begin_external_send` allows reviewed invoke/replacement workers to reuse the same status path.
+
+Twenty-one local mock tests in `tests/transfer_review.rs` are green, including state transitions,
+TestBackend display budgets and signer request counts. Independent review, actual PTY acceptance
+and the integrated full gate remain assigned to the dispatcher; this receipt does not close those
+gates. See [the handoff evidence](../research/handoff-tui-send-2026-10-29.md).
+
 ## Labels
 
 - **exists**: a `pub` function the TUI can call as it is. It takes plain values (a home path, a
@@ -90,13 +127,13 @@ it keeps its own path.
 | Behaviour | Code today | Returns | Status | Split |
 |---|---|---|---|---|
 | Open wallet.json with the password and check every cached address | `store::unlock(home, password, derive)` (core/store.rs:643), as `open_with_password` (commands.rs:639-644) and `whitelist list --verify` (commands/whitelist.rs:1347) call it | `(Unsealed { seed, policy }, WalletFile)`; a modified cache is `VALIDATION_ERROR` | exists | none |
-| The open key's and the active key's addresses from the seed | `derive_checked(seed, key, chain)` (commands.rs:647-651, private) | the address, checked against the cache | exists, needs a library entry point | `wallet::open_with_password(home, password, keys) -> Opened { addresses, anchor: Option<WhitelistAnchor>, salted: bool }`: `store::unlock`, `derive_checked` for each named key, the sealed anchor (`WhitelistAnchor`, core/store.rs:419) and whether a salt is sealed with it; never `SealedWhitelist` with its salt (core/store.rs:461-467): the salt does not leave the blocking task; the seed dropped before it returns. `list --verify` calls it with every key (commands.rs:827-829, :839) |
+| The open key's and the active key's addresses from the seed | `derive_checked(seed, key, chain)` (commands.rs:647-651, private) | the address, checked against the cache | exists, needs a library entry point | `wallet::open_with_password(home, password, keys) -> Opened { keys: Vec<KeyRow>, active, warning, anchor: Result<Option<WhitelistAnchor>>, salted: bool }` (TUI-2a; `keys` `None` = every key): `store::unlock`, `derive_checked` for each named key, the sealed anchor (`WhitelistAnchor`, core/store.rs:419) and whether a salt is sealed with it; never `SealedWhitelist` with its salt (core/store.rs:461-467): the salt does not leave the blocking task; the seed dropped before it returns. `list --verify` calls it with every key (commands.rs:827-829, :839) |
 | The sealed anchor, and a zwallet 0.1.0 anchor's message | `Unsealed::sealed_whitelist` (core/store.rs:255); `list --verify`'s salt check and message (commands/whitelist.rs:1353-1360, `whitelist::without_salt`, core/whitelist.rs:1246) | `Option<SealedWhitelist { anchor, salt }>` | exists; the message needs a library entry point | the anchor: `wallet::open_with_password`; the message: `wallet::check_list` |
-| Read both list files once and pick the list the seal names, verified | `ListFiles::read` (core/whitelist.rs:987), `pick_base_from` (:1097), which runs `verify` (:766: format, generation, ed25519 signature by the sealed public key, digest); `verified_view` (commands/whitelist.rs:1373-1403) does this for `list --verify`, but reads the files itself and keeps no fingerprint | `Base { list, source, discarded }` (core/whitelist.rs:1078) | exists, needs a library entry point | `wallet::check_list(home, anchor, salted) -> Result<CheckedList, String>`; `whitelist list --verify` calls `open_with_password` then `check_list` |
+| Read both list files once and pick the list the seal names, verified | `ListFiles::read` (core/whitelist.rs:987), `pick_base_from` (:1097), which runs `verify` (:766: format, generation, ed25519 signature by the sealed public key, digest); `verified_view` (commands/whitelist.rs:1373-1403) does this for `list --verify`, but reads the files itself and keeps no fingerprint | `Base { list, source, discarded }` (core/whitelist.rs:1078) | exists, needs a library entry point | `wallet::check_list(home, anchor) -> Result<CheckedList, String>` (TUI-2a: a 0.1.0 anchor is `anchor`'s error, 03-tui.md §Changes on 2026-10-28 item 8); `whitelist list --verify` calls `open_with_password` then `check_list` |
 | The fingerprint of the bytes that verified | `ListFiles::fingerprint` (core/whitelist.rs:995): keccak-256 of each file's bytes (:970-975) | `Fingerprint` | exists | none |
-| The checked list, as the TUI keeps it | none | | **missing** | `CheckedList { list, entries, policy, gen, source, fingerprint }`, returned by `wallet::check_list` and kept by the TUI; `policy` is the list's own (`Whitelist.policy`, core/whitelist.rs:230: fee caps, message-signing flag), not the wallet's `Unsealed.policy` (core/store.rs:241-244); no salt |
+| The checked list, as the TUI keeps it | none | | **missing** | `CheckedList { list, source, fingerprint }` (entries, policy and gen are `list`'s), returned by `wallet::check_list` and kept by the TUI; `policy` is the list's own (`Whitelist.policy`, core/whitelist.rs:230: fee caps, message-signing flag), not the wallet's `Unsealed.policy` (core/store.rs:241-244); no salt |
 | Still the bytes that verified: when a pane that shows the checked list opens or refreshes, when the picker opens, before the review, at confirm | `whitelist::check_unchanged(home, &fingerprint)` (core/whitelist.rs:1022) | `VALIDATION_ERROR` naming the file that changed | exists | none |
-| The session's whitelist view, as information only | `protocol::status` (core/protocol.rs:434-436) is a plain `send(Status)`: no peer check. `live_daemons` keeps the reply of any pid `daemon_pids` lists for the home (commands.rs:1884-1903), found by argv (core/protocol.rs:1749), which a process of this user can choose (tests/cli.rs:3905-3912 starts such a process) | `{ gen, verified, entries }` (daemon/mod.rs:123-138) | exists, needs a library entry point (`wallet::status`) | never a source of an address or of the word "verified" (03-tui.md §Display integrity rule 7) |
+| The session's whitelist view, as information only | `protocol::status` (core/protocol.rs:434-436) is a plain `send(Status)`: no peer check. `live_daemons` keeps the reply of any pid `daemon_pids` lists for the home (commands.rs:1884-1903), found by argv (core/protocol.rs:1749), which a process of this user can choose (`common::daemon_argv_impostor`, tests/common/mod.rs:834, starts such a process) | `{ gen, verified, entries }` (daemon/mod.rs:123-138) | exists, needs a library entry point (`wallet::status`) | never a source of an address or of the word "verified" (03-tui.md §Display integrity rule 7) |
 
 ## Status bar
 
@@ -216,7 +253,7 @@ have. Read from `origin/main` 24f4b5b (TUI-1a and TUI-1b merged); `wallet.rs` no
 | Message-signing flag change | `Change::MessageSigning` (commands/whitelist.rs:112) | exists, needs a library entry point | `Change::message_signing` | TUI-6 |
 | Lookup by a typed hash | `tx` (commands.rs:1783) → `lookup_tx` (chains/evm/rpc.rs:1290) | exists | none (the detail is `rpc::tx_detail`, TUI-8) | TUI-8 |
 | Replacement at nonce N | `replacement` (commands.rs:1521-1531) reads `--nonce`, `--replace`, `--bump`; `transfer_with` (:1554) | exists, needs a library entry point | `Replacement` in `wallet::review_transfer` | TUI-9 |
-| Create the master seed or a key | `create` and `add_subkey` (commands.rs:683-845); the backup reminder printed (:773-776) | exists, needs a library entry point (reads the password, prints) | `wallet::create(...) -> Created` with the reminder as text | TUI-10 |
+| Create the master seed or a key | `wallet::prepare_create` and `wallet::create` (`src/wallet/create.rs`); CLI asks for the password and prints the returned backup reminder | shared backend and first-wallet/named-key TUI forms implemented; parent process gate pending | `CreatePlan` binds inputs/master and pins an optional daemon before prompting; `create(plan, owned_password) -> Created` returns public addresses and a reminder, never a phrase | TUI-10 |
 | The recovery phrase | `backup` (commands.rs:1970-1995) | exists; a TUI entry point only if trade-off B picks B2 | `wallet::recovery_phrase(home, password)` | TUI-10 |
 | `call` | `call` (commands.rs:1388-1436) | exists, needs a library entry point | `wallet::call` | TUI-11 |
 | `invoke` | `invoke` (commands.rs:1437-1508) and `sign_and_send` (:1647) | exists, needs a library entry point | `wallet::review_invoke`, `wallet::send_invoke` | TUI-11 |

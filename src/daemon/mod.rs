@@ -37,7 +37,7 @@
 //! process exists only while the wallet is unlocked (apart from bounded shutdown cleanup).
 
 use crate::chains;
-use crate::chains::evm::policy::{self, ListView};
+use crate::chains::policy::{self, ListView};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::password::into_password;
 use crate::core::protocol::{self, MAX_MESSAGE, Request, Response};
@@ -83,8 +83,8 @@ struct Session {
 #[derive(Debug, Clone)]
 enum Anchor {
     Sealed(WhitelistAnchor),
-    /// wallet.json seals no whitelist yet (`ListView::NoList`): the session signs only native
-    /// transfers to the key's own address, under the built-in fee cap.
+    /// wallet.json seals no whitelist yet (`ListView::NoList`): only EVM native transfers
+    /// to this key may sign under the built-in fee cap; Tron signs nothing.
     None,
     /// The sealed anchor is malformed (the reason): the session still serves (status, address,
     /// lock) but the list is untrusted (`ListView::Unusable`), so it signs nothing at all.
@@ -889,6 +889,238 @@ mod tests {
             tx: json!(payload),
         })
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tron_requests_are_decoded_and_denied_before_any_signature() {
+        use crate::chains::FamilyKeys;
+        use crate::chains::tron::{
+            self, address,
+            tx::{Contract, DecodedTron},
+        };
+        let mut allowed = Whitelist::empty(&WHITELIST_RULES);
+        allowed.generation = 1;
+        allowed
+            .add(Entry::new_address("bob", BOB, &["tron"]))
+            .unwrap();
+        let current = Arc::new(std::sync::Mutex::new(Ok(allowed.clone())));
+        let read = current.clone();
+        let f = fixture(
+            Arc::new(move |_, _| read.lock().unwrap().clone()),
+            GENEROUS,
+            Duration::from_secs(60),
+        );
+        let owner = {
+            let session = f.shared.session.lock().unwrap();
+            let seed = &session.as_ref().unwrap().seed;
+            address::parse(&tron::Tron.derive_address(seed, 0).unwrap()).unwrap()
+        };
+        let mut payee = [0u8; 21];
+        payee[0] = address::PREFIX;
+        payee[1..].copy_from_slice(&hex::decode(BOB).unwrap());
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let native = DecodedTron {
+            ref_block_bytes: [0, 1],
+            ref_block_hash: [1; 8],
+            timestamp: now,
+            expiration: now + 60_000,
+            owner,
+            contract: Contract::Transfer {
+                to: payee,
+                amount_sun: 1,
+            },
+            fee_limit: None,
+        };
+        let request = |tx: &DecodedTron| {
+            serde_json::to_vec(&Request::SignTx {
+                chain: "tron".into(),
+                index: 0,
+                tx: json!(format!(
+                    "0x{}",
+                    hex::encode(tron::tx::encode_raw(tx).unwrap())
+                )),
+            })
+            .unwrap()
+        };
+        let mut bad_owner = native.clone();
+        bad_owner.owner = payee;
+        let mut late = native.clone();
+        late.expiration = now + 301_000;
+        let mut self_send = native.clone();
+        self_send.contract = Contract::Transfer {
+            to: owner,
+            amount_sun: 1,
+        };
+        let mut unknown = native.clone();
+        unknown.contract = Contract::Transfer {
+            to: address::parse("TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6").unwrap(),
+            amount_sun: 1,
+        };
+        let mut approve = native.clone();
+        approve.contract = Contract::TriggerSmart {
+            contract_address: address::parse(tron::registry::TOKENS[0].address).unwrap(),
+            data: vec![0x09, 0x5e, 0xa7, 0xb3],
+        };
+        approve.fee_limit = Some(30_000_000);
+        let mut data = vec![0xa9, 0x05, 0x9c, 0xbb];
+        data.extend([0; 12]);
+        data.extend(&payee[1..]);
+        data.extend(U256::from(1).to_be_bytes::<32>());
+        let usdt = address::parse(tron::registry::TOKENS[0].address).unwrap();
+        let mut token = native.clone();
+        token.contract = Contract::TriggerSmart {
+            contract_address: usdt,
+            data,
+        };
+        token.fee_limit = Some(30_000_000);
+        let mut token_to_token = token.clone();
+        if let Contract::TriggerSmart { data, .. } = &mut token_to_token.contract {
+            data[16..36].copy_from_slice(&usdt[1..]);
+        }
+        let mut nonregistry = token.clone();
+        if let Contract::TriggerSmart {
+            contract_address, ..
+        } = &mut nonregistry.contract
+        {
+            *contract_address = payee;
+        }
+        let mut fee = token.clone();
+        fee.fee_limit = Some(30_000_001);
+        let before = tron::signature_attempts();
+        for (tx, code) in [
+            (bad_owner, ErrorCode::ValidationError),
+            (late, ErrorCode::ValidationError),
+            (self_send, ErrorCode::WhitelistDenied),
+            (unknown, ErrorCode::WhitelistDenied),
+            (approve, ErrorCode::WhitelistDenied),
+            (token_to_token, ErrorCode::WhitelistDenied),
+            (nonregistry, ErrorCode::WhitelistDenied),
+            (fee, ErrorCode::FeeCapExceeded),
+        ] {
+            let (response, stop) = handle(&f.shared, &request(&tx)).await;
+            assert!(!stop);
+            assert!(!response.ok, "{response:?}");
+            assert_eq!(response.error_code, Some(code));
+            assert_eq!(tron::signature_attempts(), before);
+        }
+        // Neither an EVM-only scope nor the legacy wildcard permits a Tron payment.
+        for scope in ["base", "*"] {
+            let mut changed = allowed.clone();
+            changed.entries[0].chains = vec![scope.into()];
+            *current.lock().unwrap() = Ok(changed);
+            for tx in [&native, &token] {
+                let response = handle(&f.shared, &request(tx)).await.0;
+                assert_eq!(response.error_code, Some(ErrorCode::WhitelistDenied));
+                assert!(!response.details.contains_key("command"));
+                assert_eq!(tron::signature_attempts(), before);
+            }
+        }
+        let mut no_cap = allowed.clone();
+        no_cap.policy.max_fee_wei.remove("tron");
+        *current.lock().unwrap() = Ok(no_cap);
+        for tx in [&native, &token] {
+            let response = handle(&f.shared, &request(tx)).await.0;
+            assert_eq!(response.error_code, Some(ErrorCode::FeeCapExceeded));
+            assert_eq!(
+                response.details["command"],
+                "zwallet whitelist fee-cap tron 30"
+            );
+            assert_eq!(tron::signature_attempts(), before);
+        }
+        *current.lock().unwrap() = Ok(allowed);
+        let malformed = serde_json::to_vec(&Request::SignTx {
+            chain: "tron".into(),
+            index: 0,
+            tx: json!("0x0a0200012208"),
+        })
+        .unwrap();
+        assert_eq!(
+            handle(&f.shared, &malformed).await.0.error_code,
+            Some(ErrorCode::ValidationError)
+        );
+        assert_eq!(tron::signature_attempts(), before);
+        let corpus = tron::policy::rejected_codec_corpus();
+        assert!(corpus.len() >= 100);
+        for raw in corpus {
+            assert!(
+                tron::tx::decode_raw(&raw).is_err(),
+                "fixture must fail decoding itself"
+            );
+            let malformed = serde_json::to_vec(&Request::SignTx {
+                chain: "tron".into(),
+                index: 0,
+                tx: json!(format!("0x{}", hex::encode(raw))),
+            })
+            .unwrap();
+            let response = handle(&f.shared, &malformed).await.0;
+            assert_eq!(response.error_code, Some(ErrorCode::ValidationError));
+            assert!(!response.details.contains_key("command"));
+            assert_eq!(tron::signature_attempts(), before);
+        }
+        // The same twenty bytes do not grant an EVM payment.
+        assert_eq!(
+            handle(&f.shared, &sign_tx(BOB)).await.0.error_code,
+            Some(ErrorCode::WhitelistDenied)
+        );
+        let erc20 = UnsignedEvmTx {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 80_000,
+            fees: EvmFees::Eip1559 {
+                max_fee_per_gas: U128::from(1),
+                max_priority_fee_per_gas: U128::from(1),
+            },
+            to: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+                .parse()
+                .unwrap(),
+            value: U256::ZERO,
+            input: match &token.contract {
+                Contract::TriggerSmart { data, .. } => data.clone().into(),
+                _ => unreachable!(),
+            },
+        };
+        let evm_token_request = serde_json::to_vec(&Request::SignTx {
+            chain: "ethereum".into(),
+            index: 0,
+            tx: json!(format!(
+                "0x{}",
+                hex::encode(tx::encoded_for_signing(&erc20))
+            )),
+        })
+        .unwrap();
+        let response = handle(&f.shared, &evm_token_request).await.0;
+        assert_eq!(response.error_code, Some(ErrorCode::WhitelistDenied));
+        assert!(!response.details.contains_key("command"));
+        // Controls: both exact allowed payloads reach the signer once each.
+        for tx in [&native, &token] {
+            let response = handle(&f.shared, &request(tx)).await.0;
+            assert!(response.ok, "{response:?}");
+        }
+        assert_eq!(tron::signature_attempts(), before + 2);
+        let anchor = {
+            let mut session = f.shared.session.lock().unwrap();
+            std::mem::replace(&mut session.as_mut().unwrap().anchor, Anchor::None)
+        };
+        for tx in [&native, &token] {
+            let response = handle(&f.shared, &request(tx)).await.0;
+            assert_eq!(response.error_code, Some(ErrorCode::WhitelistInvalid));
+            assert!(
+                response.details["command"]
+                    .as_str()
+                    .unwrap()
+                    .contains(" --chains tron")
+            );
+            assert_eq!(tron::signature_attempts(), before + 2);
+        }
+        f.shared.session.lock().unwrap().as_mut().unwrap().anchor = anchor;
+        // Invalid list state refuses the same previously allowed raw bytes.
+        *current.lock().unwrap() = Err(WalletError::validation("test signature does not verify"));
+        let (response, _) = handle(&f.shared, &request(&native)).await;
+        assert_eq!(response.error_code, Some(ErrorCode::WhitelistInvalid));
+        assert_eq!(tron::signature_attempts(), before + 2);
     }
 
     fn lock_request() -> Vec<u8> {

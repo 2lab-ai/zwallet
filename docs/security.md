@@ -45,8 +45,10 @@ processes running as the same OS user.
   1 MiB, so a FIFO or link planted in its place fails fast instead of hanging a reader.
 - **Keys**: named subkeys of the master by index, in creation order, never reused. EVM uses
   `m/44'/60'/0'/0/<index>` (the standard BIP44 Ethereum account order), so the phrase imports into standard
-  wallets with the same accounts. One address per key on every EVM chain. Indices stay below
-  2^31, where BIP32's hardened range starts (`VALIDATION_ERROR` at or above it).
+  wallets with the same accounts. One address per key on every EVM chain. Tron uses
+  `m/44'/195'/0'/0/<index>` (SLIP-44 coin 195; TronWeb's default path for index 0), one more
+  address per key. Indices stay below 2^31, where BIP32's hardened range starts
+  (`VALIDATION_ERROR` at or above it).
 - **Daemon**: `unlock` pins the zwallet binary before it asks for the password. On Linux that is
   the running image (`/proc/self/exe`), so a file swapped in at the binary's path while the human
   types is never started. On macOS it is the file's identity, checked again right before the
@@ -258,3 +260,24 @@ signs for such an agent. What it does not do:
   `gasLimit × maxFeePerGas`, and the L1 fee for calldata is charged on top. Calldata can be up
   to about 512 KB unless a lower signed byte limit is configured. A calldata limit bounds
   payload size; it does not cap the L1 fee or total transaction cost.
+
+The deferred cumulative-budget contract is recorded in [the budget design](../.prd/08-cumulative-budget-design.md).
+The boundary and future acceptance gates for joint policy rollback are in [the freshness design](../.prd/09-policy-freshness-design.md).
+These are design decisions, not additional runtime protections.
+
+### Tron send boundary
+
+Tron signs only a single canonical TRX transfer or registry USDT `transfer` to a payee whose
+entry explicitly names `tron`; `*` remains EVM-only. Owner, expiration and fee limit are
+checked by the daemon after independent protobuf decoding. The CLI compares the returned
+raw payload to its original intent and independently recovers the signature before journaling.
+Permission changes, extra protobuf fields, memos and arbitrary token calls are refused.
+
+The signed energy fee limit does not cap bandwidth, activation or a subsequent governance
+price change. CLI preflight checks the liquid TRX balance against the resource-independent
+maximum at the node's current prices. A changed account owner permission is refused before
+signing. A node can lie about state; these reads are not a light-client proof.
+
+Tron has no nonce replacement. The journal and send lock reduce accidental repeats but are
+writable by the same OS user. `expired-unseen` records one fresh node's observation, never a
+non-payment guarantee. Sending this payment again is a second payment if this one was included.

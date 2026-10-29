@@ -17,6 +17,9 @@ path = "src/main.rs"
 [dependencies]
 alloy = { version = "2.5", features = ["signer-mnemonic", "consensus", "network", "rlp", "eips", "sol-types", "dyn-abi", "json-abi", "k256"] }
 aes-gcm = "0.10"
+# Tron addresses are base58check (`.prd/05-tron.md` §Derivation); both are already in the build through
+# alloy's coins-bip32.
+bs58 = { version = "=0.5.1", features = ["check"] }
 clap = { version = "4.6", features = ["derive"] }
 crossterm = "0.29.0"
 ed25519-dalek = { version = "2.2", features = ["zeroize"] }
@@ -27,6 +30,7 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 scrypt = { version = "0.11", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "=0.10.9"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "macros", "time", "net", "io-util", "signal", "sync"] }
 zeroize = { version = "1", features = ["serde"] }

@@ -1,22 +1,23 @@
 //! Command handlers. Everything here runs in the one-shot CLI process; the only key access is
 //! through the daemon socket (or, for `create`/`backup`, a password typed by the human).
 
-use crate::chains::evm::{self, Evm, abi, rpc as evm_rpc};
+use crate::chains::evm::{self, Evm, rpc as evm_rpc};
+use crate::chains::tron;
 use crate::chains::{
-    self, Broadcast, CHAINS, Chain, ChainFamily, Family, Net, PRIMARY_CHAIN, PreparedTx,
-    TransferRequest, redact_url,
+    self, CHAINS, Chain, ChainFamily, Family, Net, PRIMARY_CHAIN, PreparedTx, TransferRequest,
+    redact_url,
 };
 use crate::cli::{
     AddressArgs, AddressesArgs, BalanceArgs, CallArgs, Cli, Command, CreateArgs, InvokeArgs,
-    KeyArg, Out, SendArgs, SignMessageArgs, TransferArgs, TxArgs, UnlockArgs, VerifyArgs,
+    KeyArg, Out, Qr, SendArgs, SignMessageArgs, TransferArgs, TxArgs, UnlockArgs, VerifyArgs,
     render_human,
 };
 use crate::core::amount::{format_units, parse_units};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::password::read_password;
-use crate::core::protocol::{self, DaemonExe, Peer, PeerCheck, Request, SIGN_TIMEOUT};
-use crate::core::seed::{DEFAULT_WORD_COUNT, Seed, VALID_WORD_COUNTS};
-use crate::core::store::{self, KeyEntry, MasterOptions, WalletFile};
+use crate::core::protocol::{self, Peer, PeerCheck, Request, SIGN_TIMEOUT};
+use crate::core::seed::Seed;
+use crate::core::store::{self, KeyEntry, WalletFile};
 use crate::core::time::parse_duration;
 use crate::daemon;
 use crate::qr;
@@ -28,13 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use zeroize::Zeroizing;
 
-mod whitelist;
-
-/// How long `--wait` polls for a receipt before reporting `status: "pending"`, unless
-/// `--wait-timeout` says otherwise.
-const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) mod whitelist;
 
 fn home() -> Result<PathBuf> {
     store::resolve_home(std::env::var_os("ZWALLET_HOME"), std::env::home_dir())
@@ -66,7 +62,11 @@ pub async fn run(cli: Cli) -> Result<Out> {
         Command::Unlock(a) => unlock(&home()?, a).await,
         Command::Lock => lock(),
         Command::Whitelist(w) => whitelist::run(&home()?, w).await,
-        Command::Tui { warm, chain } => tui(&home()?, &warm, &chain, json).await,
+        Command::Tui {
+            warm,
+            chain,
+            allow_ptrace_scope_0,
+        } => tui(&home()?, &warm, &chain, json, allow_ptrace_scope_0).await,
         Command::Daemon { home } => {
             daemon::run(home).await?;
             Ok(Out::silent())
@@ -89,7 +89,13 @@ pub(crate) fn net(chain: &'static Chain, flag: Option<&str>) -> Net {
 /// `zwallet tui`: the arguments are checked first, then the terminal ([`crate::tui::run`]).
 /// Its error (the terminal, or a lock that failed while `q` waited for it) is printed as every
 /// command's is, after the terminal is given back; a clean quit prints nothing.
-async fn tui(home: &Path, warm: &str, chain: &str, json: bool) -> Result<Out> {
+async fn tui(
+    home: &Path,
+    warm: &str,
+    chain: &str,
+    json: bool,
+    allow_ptrace_scope_0: bool,
+) -> Result<Out> {
     let chain = chains::find(chain)?;
     let warm = parse_duration(warm)?;
     if json {
@@ -97,7 +103,13 @@ async fn tui(home: &Path, warm: &str, chain: &str, json: bool) -> Result<Out> {
             "zwallet tui is interactive: --json does not apply",
         ));
     }
-    crate::tui::run(home.to_path_buf(), wallet::net(chain), warm).await?;
+    crate::tui::run(
+        home.to_path_buf(),
+        wallet::net(chain),
+        warm,
+        allow_ptrace_scope_0,
+    )
+    .await?;
     Ok(Out::silent())
 }
 
@@ -167,8 +179,9 @@ async fn key_address(home: &Path, key: &KeyEntry, chain: &Chain) -> Result<Strin
             ErrorCode::WalletLocked,
             format!(
                 "key '{}' has no cached {} address yet; unlock once (`zwallet unlock 24h`) to \
-                 derive it",
-                key.name, chain.key
+                 derive it, or run `zwallet address --chain {} --verify` (with the password) to \
+                 add it",
+                key.name, chain.key, chain.key
             ),
         )
     })?;
@@ -176,7 +189,7 @@ async fn key_address(home: &Path, key: &KeyEntry, chain: &Chain) -> Result<Strin
 }
 
 /// Derives every chain's address for key `index` through the unlocked daemon.
-async fn derive_via_daemon(home: &Path, index: u32) -> Result<BTreeMap<String, String>> {
+pub(crate) async fn derive_via_daemon(home: &Path, index: u32) -> Result<BTreeMap<String, String>> {
     let mut per_family: BTreeMap<&str, String> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for chain in CHAINS {
@@ -241,7 +254,7 @@ pub(crate) fn inert_whitelist(value: &Value) -> Value {
 /// What the key holder decoded from the bytes it signed, for `signerDecoded`: an object from a
 /// genuine daemon, made inert with its structure kept; anything else (whatever answers on `d.sock`
 /// may send a 1 MiB string) one string, made inert and cut as [`inert_whitelist`] does.
-fn signer_decoded(view: &Value) -> Value {
+pub(crate) fn signer_decoded(view: &Value) -> Value {
     use crate::core::text::{PROSE_MAX, ascii_inert, inert_json};
     if view.is_object() {
         inert_json(view)
@@ -251,7 +264,8 @@ fn signer_decoded(view: &Value) -> Value {
 }
 
 /// Whether `value` has the shape of an address on `chain`: for EVM, `0x` and 40 hex digits (any
-/// case). Says nothing about whose address it is.
+/// case); for Tron, 34 base58 characters whose checksum holds and whose payload starts `0x41`
+/// ([`tron::address::parse`]). Says nothing about whose address it is.
 fn address_shaped(chain: &Chain, value: &str) -> bool {
     match &chain.family {
         Family::Evm(_) => {
@@ -259,6 +273,16 @@ fn address_shaped(chain: &Chain, value: &str) -> bool {
                 && value.starts_with("0x")
                 && value[2..].bytes().all(|b| b.is_ascii_hexdigit())
         }
+        Family::Tron(_) => tron::address::is_address(value),
+    }
+}
+
+/// Whether `a` and `b` are the same address on chain key `chain`: EVM hex in any case, Tron byte
+/// for byte ([`tron::address::same`]: a case variant of a base58check string is another one).
+fn same_address(chain: &str, a: &str, b: &str) -> bool {
+    match chains::find(chain).map(|c| &c.family) {
+        Ok(Family::Tron(_)) => tron::address::same(a, b),
+        _ => a.eq_ignore_ascii_case(b),
     }
 }
 
@@ -367,7 +391,7 @@ fn cache_mismatch(key: &KeyEntry, chain: &str, derived: &str) -> Result<Option<S
     match key.addresses.get(chain) {
         Some(cached) => {
             let cached = cached_address(key, chain, cached)?;
-            Ok((!cached.eq_ignore_ascii_case(derived)).then_some(cached))
+            Ok((!same_address(chain, &cached, derived)).then_some(cached))
         }
         None => Ok(None),
     }
@@ -462,7 +486,11 @@ impl<'a> Daemon<'a> {
     /// cannot be read: the outer error must abort the command (an answer that is no address, a
     /// failed peer check: tampering, never a row), the inner one is that the socket could not be
     /// asked or relayed an error.
-    async fn fetch(&mut self, index: u32, chain: &Chain) -> Result<Result<Option<String>>> {
+    pub(crate) async fn fetch(
+        &mut self,
+        index: u32,
+        chain: &Chain,
+    ) -> Result<Result<Option<String>>> {
         let request = Request::Address {
             chain: chain.key.into(),
             index,
@@ -519,7 +547,7 @@ impl<'a> Daemon<'a> {
     /// `key`'s address on `chain` from `derived` (this command's derivation for the chain's
     /// family) checked against the cache, or without one the cache (the daemon's derivation for
     /// a chain added after the key).
-    async fn checked(
+    pub(crate) async fn checked(
         &mut self,
         key: &KeyEntry,
         chain: &Chain,
@@ -558,7 +586,7 @@ impl<'a> Daemon<'a> {
 
     /// `key`'s address on `chain`: derived and checked against the cache, or the cache while
     /// locked. A mismatch is `VALIDATION_ERROR`.
-    async fn address(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
+    pub(crate) async fn address(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
         let derived = self.derive(key.index, chain).await?;
         self.checked(key, chain, derived.as_ref()).await
     }
@@ -566,7 +594,7 @@ impl<'a> Daemon<'a> {
     /// The cache's address for `key` on `chain`, used when the daemon did not derive one (the
     /// wallet is locked, or the chain was added after the key). Marks the result as cached, so
     /// [`Trust`] does not read it as session-verified.
-    async fn cache_only(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
+    pub(crate) async fn cache_only(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
         self.cached = true;
         key_address(self.home, key, chain).await
     }
@@ -594,6 +622,11 @@ const BY_PASSWORD: &str = "password";
 /// verify it, as `list` and an agent's `create`).
 const UNVERIFIED_NOTE: &str = "not verified: run `zwallet address --verify` before funding";
 
+/// `list`'s note while this build's session verifies the active key: the other keys' addresses
+/// are not verified, and the password checks them.
+const OTHER_KEYS_NOTE: &str =
+    "not verified: the other keys' addresses; `zwallet list --verify` checks them";
+
 /// The note on an address shown while the wallet is locked.
 const LOCKED_NOTE: &str = "not verified: the wallet is locked; `zwallet unlock <dur>` or `zwallet \
                            address --verify` checks it";
@@ -608,32 +641,54 @@ fn with_note(value: Value, note: Option<&str>) -> Out {
     Out::with_text(value, text)
 }
 
-/// The line under `scan to send to <address>`: the code carries no chain. Two lines, so both fit
-/// an 80-column terminal.
+/// The line under `scan to send to <address>` for an EVM address: the code carries no chain.
+/// Two lines, so both fit an 80-column terminal.
 const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
 
-/// `out` with `address` as a QR code after its human text ([`Out::qr`]), for a phone wallet to
-/// scan, under the lines `scan to send to <address>` and [`EVERY_EVM_NETWORK`] (which are text). Only for an address
-/// reported `verified: true` (by the password or by the session), only with stdout on a
-/// terminal, and not with `--no-qr`: agents read zwallet through pipes, and `--json` prints no
-/// human text.
-fn with_qr(out: Out, verified: bool, address: Option<&str>, no_qr: bool) -> Out {
+/// The same line for a Tron address, which no EVM network takes (`.prd/05-tron.md` §CLI
+/// surface).
+const TRON_ONLY: &str = "(Tron only: TRX and TRC20 tokens; not an EVM address)";
+
+/// `out` with `address` (on `chain`) as a QR code after its human text and any code before it
+/// ([`Out::qr`]), for a phone wallet to scan, under the lines `scan to send to <address>` and
+/// [`EVERY_EVM_NETWORK`] or [`TRON_ONLY`]. Only for an address reported `verified: true` (by the
+/// password or by the session), only with stdout on a terminal, and not with `--no-qr`: agents
+/// read zwallet through pipes, and `--json` prints no human text.
+fn with_qr(mut out: Out, verified: bool, chain: &Chain, address: Option<&str>, no_qr: bool) -> Out {
     let Some(address) = address.filter(|_| verified && qr_shown(no_qr)) else {
         return out;
     };
     // No colours when NO_COLOR is set and not empty (no-color.org).
     let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
-    match qr::render(address, color) {
-        Some(code) => {
-            let mut out = with_line(
-                out,
-                &format!("scan to send to {address}\n{EVERY_EVM_NETWORK}"),
-            );
-            out.qr = Some(code);
-            out
-        }
-        None => out,
-    }
+    let Some(code) = qr::render(address, color) else {
+        return out;
+    };
+    let networks = match chain.family {
+        Family::Evm(_) => EVERY_EVM_NETWORK,
+        Family::Tron(_) => TRON_ONLY,
+    };
+    out.qr.push(Qr {
+        caption: format!("scan to send to {address}\n{networks}"),
+        code,
+    });
+    out
+}
+
+/// The chain whose address the key shows by default ([`PRIMARY_CHAIN`]).
+fn primary_chain() -> Result<&'static Chain> {
+    chains::find(PRIMARY_CHAIN)
+}
+
+/// `CAPABILITY_UNSUPPORTED` for what `chain`'s family does not do (in this version).
+fn unsupported(chain: &Chain, what: &str) -> WalletError {
+    WalletError::new(
+        ErrorCode::CapabilityUnsupported,
+        format!(
+            "{} ({} family) does not support {what}",
+            chain.key,
+            chain.family.name()
+        ),
+    )
 }
 
 /// Whether human output may end with a QR code: stdout on a terminal, and no `--no-qr`.
@@ -654,213 +709,91 @@ fn with_line(out: Out, line: &str) -> Out {
 const QR_AFTER_BACKUP: &str =
     "QR after backup: run `zwallet backup`, then `zwallet address --verify` (or unlock) to show it";
 
-/// Decrypts wallet.json in this process with the human's password and checks every key's cached
-/// addresses against the seed (a mismatch is `VALIDATION_ERROR`). Addresses derived from this
-/// seed are the ones reported `verified: true`: no other process or file can make them.
-fn open_with_password(home: &Path, password_stdin: bool) -> Result<(Seed, WalletFile)> {
-    store::read_wallet_file(home)?;
-    let pw = read_password(password_stdin, "Wallet password: ", false)?;
-    let (unsealed, file) = store::unlock(home, &pw, &chains::derive_addresses)?;
-    Ok((unsealed.seed, file))
-}
-
 /// `key`'s address on `chain` derived from `seed` here, checked against the cache.
-fn derive_checked(seed: &Seed, key: &KeyEntry, chain: &Chain) -> Result<String> {
+pub(crate) fn derive_checked(seed: &Seed, key: &KeyEntry, chain: &Chain) -> Result<String> {
     let derived = chain.family.keys().derive_address(seed, key.index)?;
     check_cache(key, chain.key, &derived)?;
     Ok(derived)
 }
 
-async fn start_session(
-    home: &Path,
-    exe: &DaemonExe,
-    password: &str,
-    ttl: Duration,
-) -> Result<Value> {
-    protocol::start_daemon(home, exe, password, ttl).await
-}
-
 async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
-    store::validate_key_name(&a.name)?;
     let ttl = a.unlock.as_deref().map(parse_duration).transpose()?;
-    if ttl.is_some() {
-        protocol::socket_path(home)?;
-        // Before the prompt and before anything is written: refused here, nothing was created.
-        protocol::check_ptrace_scope(a.allow_ptrace_scope_0)?;
-        protocol::check_daemons_findable()?;
-    }
-    // Pinned before any password prompt (see `DaemonExe`).
-    let exe = ttl.map(|_| DaemonExe::resolve()).transpose()?;
-    let (file, addresses, master, password, verified) = match store::read_wallet_file(home) {
-        Err(e) if e.code == ErrorCode::WalletNotFound => {
-            let words = a.words.unwrap_or(DEFAULT_WORD_COUNT);
-            if !VALID_WORD_COUNTS.contains(&words) {
-                return Err(WalletError::validation(format!(
-                    "--words must be one of {VALID_WORD_COUNTS:?}"
-                )));
-            }
-            let pw = read_password(a.password.password_stdin, "New wallet password: ", true)?;
-            store::validate_new_password(&pw)?;
-            let opts = MasterOptions {
-                words,
-                ..MasterOptions::default()
-            };
-            let file = store::create_master(home, &pw, &a.name, opts, &chains::derive_addresses)?;
-            // Derived from the seed create_master generated in memory (and verified on disk
-            // before publishing), not read back from the cache.
-            let addresses = file.key(Some(&a.name))?.addresses.clone();
-            (file, addresses, "created", Some(pw), true)
-        }
-        Err(e) => return Err(e),
-        Ok(_) => {
-            if a.words.is_some() {
-                return Err(WalletError::validation(
-                    "--words only applies when creating the master seed",
-                ));
-            }
-            let (file, addresses, pw) = add_subkey(home, &a, ttl.is_none()).await?;
-            // Derived here from the seed the password opened, or else by whatever daemon
-            // answered.
-            let verified = pw.is_some();
-            (file, addresses, "existing", pw, verified)
-        }
+    let plan = wallet::prepare_create(home, &a.name, a.words, ttl, a.allow_ptrace_scope_0)?;
+    let human = a.password.password_stdin || std::io::stdin().is_terminal();
+    let created = if !plan.creates_master() && ttl.is_none() && !human && unlocked(home).await? {
+        wallet::create_via_daemon(plan).await?
+    } else {
+        let first = plan.creates_master();
+        let prompt = if first {
+            "New wallet password: "
+        } else {
+            "Wallet password: "
+        };
+        let password = read_password(a.password.password_stdin, prompt, first)?;
+        wallet::create(plan, password).await?
     };
-    let key = file.key(Some(&a.name))?;
-    let address = addresses
-        .get(PRIMARY_CHAIN)
-        .or_else(|| addresses.values().next())
-        .cloned();
+    let address = created.address();
     let mut out = json!({
-        "name": key.name,
-        "index": key.index,
+        "name": created.name,
+        "index": created.index,
         "address": address,
-        "active": file.active,
-        "master": master,
+        "active": created.active,
+        "master": if created.master_created { "created" } else { "existing" },
         "home": home.display().to_string(),
         "chains": CHAINS.iter().map(|c| c.key).collect::<Vec<_>>(),
-        "verified": verified,
+        "verified": created.verified,
     });
-    if verified {
+    if created.verified {
         out["verifiedBy"] = json!(BY_PASSWORD);
     }
-    if let (Some(ttl), Some(exe), Some(pw)) = (ttl, &exe, password.as_deref()) {
-        let session = start_session(home, exe, pw, ttl).await?;
-        // The daemon derived the active key's address from the seed on its own; it must be the
-        // key this call just created.
-        let same = session["active"] == json!(a.name)
-            && session["address"]
-                .as_str()
-                .zip(address.as_deref())
-                .is_some_and(|(d, c)| d.eq_ignore_ascii_case(c));
-        if !same {
-            let mismatch = format!(
-                "after create the key daemon reports active key {} at {}, not '{}' at {}; \
-                 wallet.json changed meanwhile",
-                session["active"],
-                session["address"],
-                a.name,
-                address.as_deref().unwrap_or("-")
-            );
-            return Err(relocked(mismatch, protocol::stop_all_daemons()));
-        }
+    if let Some(session) = &created.session {
         out["locked"] = json!(false);
-        out["expiresAt"] = session["expiresAt"].clone();
-        out["daemonPid"] = session["pid"].clone();
-        // The whitelist this session signs under, as `unlock` shows it.
-        // Its reason can quote whitelist.json, a file anyone of this user can write.
-        out["whitelist"] = inert_whitelist(&session["whitelist"]);
+        out["expiresAt"] = session.ready["expiresAt"].clone();
+        out["daemonPid"] = session.ready["pid"].clone();
+        out["whitelist"] = session.whitelist.clone();
     }
-    if master == "created" && std::io::stderr().is_terminal() {
-        crate::core::terminal::eprint_line(
-            "Write down your recovery phrase now: run `zwallet backup` before funding this wallet.",
-        );
+    if let Some(reminder) = created.backup_reminder
+        && std::io::stderr().is_terminal()
+    {
+        crate::core::terminal::eprint_line(reminder);
     }
-    // Unverified only when derived through the daemon, so while unlocked.
-    let out = with_note(out, (!verified).then_some(UNVERIFIED_NOTE));
-    if master == "created" {
-        // The recovery phrase is not backed up yet, and funds sent before it is are at risk:
-        // no code to scan here, only how to get one.
+    let out = with_note(out, (!created.verified).then_some(UNVERIFIED_NOTE));
+    if created.master_created {
         return Ok(if qr_shown(a.qr.no_qr) {
             with_line(out, QR_AFTER_BACKUP)
         } else {
             out
         });
     }
-    Ok(with_qr(out, verified, address.as_deref(), a.qr.no_qr))
-}
-
-/// The error for a `create --unlock` whose new session shows another key: says whether locking
-/// again worked, never claims it when it did not.
-fn relocked(mismatch: String, relock: Result<Vec<i32>>) -> WalletError {
-    match relock {
-        Ok(_) => WalletError::validation(format!("{mismatch}, so the wallet was locked again")),
-        Err(e) => WalletError::validation(format!(
-            "{mismatch}, and locking the wallet again failed: {}. The wallet may still be \
-             unlocked: run `zwallet lock`",
-            e.message
-        )),
-    }
-}
-
-/// Adds key `a.name` to an existing master. With a terminal or `--password-stdin` (a human), or
-/// without `may_use_daemon`, it is derived here from the seed decrypted with a one-off password,
-/// and the password is returned. Otherwise (an agent, while unlocked) it is derived through
-/// whatever key daemon answers, and nothing proves which seed that is. The password and scrypt
-/// run before the writer lock is taken, so a slow human never blocks other writers; the index is
-/// planned, derived and published under the lock, so concurrent creates get distinct indices.
-async fn add_subkey(
-    home: &Path,
-    a: &CreateArgs,
-    may_use_daemon: bool,
-) -> Result<(
-    WalletFile,
-    BTreeMap<String, String>,
-    Option<Zeroizing<String>>,
-)> {
-    let human = a.password.password_stdin || std::io::stdin().is_terminal();
-    let local = if may_use_daemon && !human && unlocked(home).await? {
-        None
-    } else {
-        let pw = read_password(a.password.password_stdin, "Wallet password: ", false)?;
-        let (unsealed, file) = store::unlock(home, &pw, &chains::derive_addresses)?;
-        Some((unsealed.seed, file.crypto.ciphertext, pw))
-    };
-    let lock = store::MetaLock::acquire(home)?;
-    let file = lock.read()?;
-    if let Some((_, sealed, _)) = &local
-        && file.crypto.ciphertext != *sealed
-    {
-        return Err(WalletError::validation(
-            "wallet.json's master changed while the password was checked; retry",
-        ));
-    }
-    let index = store::plan_new_key(&file, &a.name)?;
-    let addresses = match &local {
-        None => derive_via_daemon(home, index).await?,
-        Some((seed, ..)) => chains::derive_addresses(seed, index)?,
-    };
-    let file = lock.add_key(&a.name, index, addresses.clone())?;
-    Ok((file, addresses, local.map(|(.., pw)| pw)))
+    Ok(with_qr(
+        out,
+        created.verified,
+        primary_chain()?,
+        address,
+        a.qr.no_qr,
+    ))
 }
 
 async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
-    let primary = chains::find(PRIMARY_CHAIN)?;
-    let (active, rows, warning, verified) = if v.verify {
-        let (seed, file) = open_with_password(home, v.password_stdin)?;
-        let mut rows = Vec::new();
-        for k in &file.keys {
-            rows.push(wallet::KeyRow {
-                name: k.name.clone(),
-                index: k.index,
-                address: Some(derive_checked(&seed, k, primary)?),
-                active: k.name == file.active,
-            });
-        }
-        let warning = index_warning(&file, &file.keys.iter().collect::<Vec<_>>());
-        (file.active, rows, warning, true)
+    let (active, rows, warning, verified, note) = if v.verify {
+        store::read_wallet_file(home)?;
+        let pw = read_password(v.password_stdin, "Wallet password: ", false)?;
+        // Addresses derived from this seed are the ones reported `verified: true`: no other
+        // process or file can make them.
+        let opened = wallet::open_with_password(home, &pw, None)?;
+        drop(pw);
+        (opened.active, opened.keys, opened.warning, true, None)
     } else {
         let keys = wallet::keys(home).await?;
-        (keys.active, keys.rows, keys.warning, false)
+        // A session of this build verifies the active key (`status` and `address` say so):
+        // nothing asks to verify it, and the other keys stay flagged.
+        let note = match keys.trust {
+            Trust::Session if keys.rows.iter().all(|k| k.active) => None,
+            Trust::Session => Some(OTHER_KEYS_NOTE),
+            _ => Some(UNVERIFIED_NOTE),
+        };
+        let warning = keys.trust.warning().map(str::to_string);
+        (keys.active, keys.rows, warning, false, note)
     };
     let keys: Vec<Value> = rows
         .iter()
@@ -895,9 +828,9 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
         text.push_str(&format!("\nwarning: {w}"));
         out["warning"] = json!(w);
     }
-    if !verified {
+    if let Some(note) = note {
         text.push('\n');
-        text.push_str(UNVERIFIED_NOTE);
+        text.push_str(note);
     }
     Ok(Out::with_text(out, text))
 }
@@ -906,7 +839,7 @@ async fn list(home: &Path, v: VerifyArgs) -> Result<Out> {
 /// the list was edited: one of `shown` at or past `nextIndex`, or an index below the highest of
 /// `shown` that no key uses. The address is still this seed's, but where it sits matters for a
 /// wallet restored from the recovery phrase, which lists accounts in index order.
-fn index_warning(file: &WalletFile, shown: &[&KeyEntry]) -> Option<String> {
+pub(crate) fn index_warning(file: &WalletFile, shown: &[&KeyEntry]) -> Option<String> {
     let mut notes: Vec<String> = shown
         .iter()
         .filter(|k| k.index >= file.next_index)
@@ -944,19 +877,13 @@ fn index_warning(file: &WalletFile, shown: &[&KeyEntry]) -> Option<String> {
 }
 
 async fn change(home: &Path, name: &str, no_qr: bool) -> Result<Out> {
-    let primary = chains::find(PRIMARY_CHAIN)?;
-    // Check the target before switching to it, so a cache the daemon contradicts never becomes
-    // active.
-    let file = store::read_wallet_file(home)?;
-    let mut daemon = Daemon::new(home);
-    let address = daemon.address(file.key(Some(name))?, primary).await?;
-    let file = store::set_active(home, name)?;
-    let trust = daemon.trust();
-    let mut out = json!({ "active": file.active, "address": address });
+    let (address, trust) = wallet::set_active(home, name).await?;
+    let mut out = json!({ "active": name, "address": address });
     trust.mark(&mut out);
     Ok(with_qr(
         with_note(out, trust.note()),
         trust.verified(),
+        primary_chain()?,
         Some(&address),
         no_qr,
     ))
@@ -969,12 +896,19 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         // repaired, loudly, instead of refused.
         store::read_wallet_file(home)?;
         let pw = read_password(a.verify.password_stdin, "Wallet password: ", false)?;
-        let (unsealed, file, repairs) =
-            store::unlock_repairing(home, &pw, &chains::derive_addresses)?;
+        let repaired = wallet::repair(home, &pw)?;
         drop(pw);
-        let seed = unsealed.seed;
+        let file = repaired.file;
+        let repairs = repaired.checked.repairs;
+        let added = repaired.added;
         let key = file.key(a.key.key.as_deref())?;
-        let address = derive_checked(&seed, key, chain)?;
+        let address = repaired
+            .checked
+            .addresses
+            .iter()
+            .find(|row| row.key == key.name && row.chain == chain.key)
+            .map(|row| row.address.clone())
+            .ok_or_else(|| WalletError::validation("verified address missing"))?;
         let mut out = json!({
             "chain": chain.key,
             "key": key.name,
@@ -983,6 +917,16 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
             "verified": true,
             "verifiedBy": BY_PASSWORD,
         });
+        // Chains this build derives that the cache lacked (added to zwallet after the key was
+        // made): filled in from the seed, which is no sign of tampering.
+        if !added.is_empty() {
+            out["added"] = json!(
+                added
+                    .iter()
+                    .map(|a| json!({ "key": a.key, "chain": a.chain, "now": a.now }))
+                    .collect::<Vec<_>>()
+            );
+        }
         let mut warnings: Vec<String> = Vec::new();
         if !repairs.is_empty() {
             out["repaired"] = json!(
@@ -1018,6 +962,7 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         let mut shown_out = out.clone();
         if let Some(o) = shown_out.as_object_mut() {
             o.remove("repaired");
+            o.remove("added");
         }
         let mut text = render_human(&shown_out);
         for r in &repairs {
@@ -1029,9 +974,13 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
                 r.now
             ));
         }
+        for a in &added {
+            text.push_str(&format!("\nadded: key '{}' {}: {}", a.key, a.chain, a.now));
+        }
         return Ok(with_qr(
             Out::with_text(out, text),
             true,
+            chain,
             Some(&address),
             a.qr.no_qr,
         ));
@@ -1046,6 +995,7 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
     Ok(with_qr(
         with_note(out, trust.note()),
         trust.verified(),
+        chain,
         Some(&address),
         a.qr.no_qr,
     ))
@@ -1054,31 +1004,26 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
 async fn addresses(home: &Path, a: AddressesArgs) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
-    // One daemon derivation per family (EVM chains share an address), checked per chain.
-    let mut daemon = Daemon::new(home);
-    let mut derived: BTreeMap<&str, Option<String>> = BTreeMap::new();
-    let mut rows = Vec::new();
-    let mut primary = None;
-    for chain in CHAINS {
-        let family = chain.family.name();
-        if !derived.contains_key(family) {
-            derived.insert(family, daemon.derive(key.index, chain).await?);
-        }
-        let address = daemon.checked(key, chain, derived[family].as_ref()).await?;
-        if chain.key == PRIMARY_CHAIN {
-            primary = Some(address.clone());
-        }
-        rows.push(json!({ "chainId": chain.key, "address": address }));
-    }
-    let trust = daemon.trust();
+    let addresses = wallet::addresses(home, &key.name).await?;
+    let mut codes: Vec<(&'static Chain, String)> = Vec::new();
+    let rows:Vec<Value>=addresses.rows.iter().map(|row| {
+        if let Some(e)=&row.error {return json!({"chainId":row.chain.key,"error":e.message,"errorCode":e.code.as_str()});}
+        if !codes.iter().any(|(chain,_)|chain.family.name()==row.chain.family.name()) {codes.push((row.chain,row.address.clone()));}
+        json!({"chainId":row.chain.key,"address":row.address})
+    }).collect();
+    let trust = addresses.trust;
     let mut text = rows
         .iter()
         .map(|r| {
-            format!(
-                "{:<10} {}",
-                r["chainId"].as_str().unwrap_or(""),
-                r["address"].as_str().unwrap_or("")
-            )
+            let shown = match r["address"].as_str() {
+                Some(a) => a.to_string(),
+                None => format!(
+                    "error: {} [{}]",
+                    brief(r["error"].as_str().unwrap_or("")),
+                    r["errorCode"].as_str().unwrap_or("")
+                ),
+            };
+            format!("{:<10} {shown}", r["chainId"].as_str().unwrap_or(""))
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1094,13 +1039,12 @@ async fn addresses(home: &Path, a: AddressesArgs) -> Result<Out> {
     }
     let mut out = json!({ "key": key.name, "addresses": rows });
     trust.mark(&mut out);
-    // One code: the address is the same on every EVM chain.
-    Ok(with_qr(
-        Out::with_text(out, text),
-        trust.verified(),
-        primary.as_deref(),
-        a.qr.no_qr,
-    ))
+    // One code per family: the address is the same on every EVM chain, Tron's is its own.
+    let mut out = Out::with_text(out, text);
+    for (chain, address) in &codes {
+        out = with_qr(out, trust.verified(), chain, Some(address), a.qr.no_qr);
+    }
+    Ok(out)
 }
 
 async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
@@ -1117,17 +1061,11 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
     };
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
-    // While unlocked, the daemon's derivation, checked against the cache before any RPC.
-    let mut daemon = Daemon::new(home);
-    let owner = daemon.address(key, chain).await?;
-    let trust = daemon.trust();
     let net = net(chain, a.rpc.as_deref());
-    let bal = match &chain.family {
-        Family::Evm(_) => match &a.token {
-            Some(token) => Evm.token_balance(&net, &owner, token).await?,
-            None => Evm.native_balance(&net, &owner).await?,
-        },
-    };
+    let (owner, trust, read) =
+        wallet::read::balance_detail(home, &key.name, &net, a.token.as_deref()).await?;
+    let bal = read.balance;
+    let warning = read.warning;
     let mut out = json!({
         "chain": chain.key,
         "key": key.name,
@@ -1137,33 +1075,36 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
         "balance": format_units(bal.raw, bal.decimals),
         "raw": bal.raw.to_string(),
     });
+    if let Some(active) = read.activated {
+        out["activated"] = json!(active);
+    }
+    if let Some(token) = read.token {
+        out["token"] = json!(token);
+    }
+    if let Some(source) = read.symbol_source {
+        out["symbolSource"] = json!(source);
+    }
     trust.mark(&mut out);
-    if let Some(token) = &a.token {
-        out["token"] = json!(Evm.normalize_address(token)?);
+    // The account's own warning (a Tron owner permission held by other keys) after any about
+    // what answered on the socket.
+    if let Some(w) = warning {
+        let joined = match out["warning"].as_str() {
+            Some(first) => format!("{first}. {w}"),
+            None => w,
+        };
+        out["warning"] = json!(joined);
     }
     Ok(with_qr(
         Out::json(out),
         trust.verified(),
+        chain,
         Some(&owner),
         a.qr.no_qr,
     ))
 }
 
-/// How long `balance` without `--chain` waits for one network: its chain id check and every
-/// balance read on it, together.
-const NETWORK_TIMEOUT: Duration = Duration::from_secs(8);
-
-/// The most characters of an error a network's line shows in `balance` without `--chain`
-/// (`--json` has the whole message), and of each network's error in the message when none
-/// answered (`--json` has each whole in `networks`).
-const BRIEF_ERROR_CHARS: usize = 72;
-
-/// One network's balances for `balance` without `--chain`: the native coin and every registry
-/// token there.
-type NetworkBalances = Result<(chains::Balance, Vec<chains::TokenBalance>)>;
-
 /// `balance` without `--chain`: the native coin and every registry token on every chain,
-/// mainnets first. The networks are read at once, each within [`NETWORK_TIMEOUT`], through
+/// mainnets first. The networks are read at once, each within [`wallet::read::NETWORK_TIMEOUT`], through
 /// `ZWALLET_RPC_<CHAIN>` or the default RPC. A network whose endpoint, chain id or native balance
 /// fails is a row with `error` and `errorCode` instead of `native` and `tokens`; a token whose
 /// read fails is a token row with them instead of `balance` and `raw`. Only when no network
@@ -1173,78 +1114,37 @@ type NetworkBalances = Result<(chains::Balance, Vec<chains::TokenBalance>)>;
 async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
     let key = file.key(k.key.as_deref())?;
-    let mut order: Vec<&'static Chain> = CHAINS.iter().collect();
-    order.sort_by_key(|c| c.is_testnet());
-    // The address on each chain first, as `balance --chain` finds it: the daemon's derivation,
-    // or while locked the cache (the daemon's for a chain added after the key). A cache the
-    // daemon contradicts aborts the whole command here with `VALIDATION_ERROR` (a tamper signal,
-    // via `check_cache`'s `?`), before any RPC; a daemon that cannot be reached for a chain
-    // family becomes that family's chains' error rows (fail closed per chain, with `read_network`
-    // below). The two are told apart by their source, not by matching the error's text.
-    let mut daemon = Daemon::new(home);
-    let mut derived: BTreeMap<&str, Result<Option<String>>> = BTreeMap::new();
-    let mut owners = Vec::with_capacity(order.len());
-    for chain in &order {
-        let family = chain.family.name();
-        if !derived.contains_key(family) {
-            // An answer that is no address aborts (tampering); a socket that could not be asked
-            // is this family's rows.
-            derived.insert(family, daemon.fetch(key.index, chain).await?);
-        }
-        owners.push(match &derived[family] {
-            // Derived: the cache must agree, or the command fails now (naming an impostor on
-            // `d.sock`, if one answered).
-            Ok(Some(d)) => {
-                daemon.check_cache(key, chain, d)?;
-                Ok(d.clone())
-            }
-            // Locked (or a chain added after the key): the cache, a per-chain failure if absent.
-            Ok(None) => daemon.cache_only(key, chain).await,
-            // The daemon could not be reached for this family: a per-chain error row.
-            Err(e) => Err(e.clone()),
-        });
-    }
-    let trust = daemon.trust();
-    // The same on every EVM chain; a row names its own only where it differs. (When no chain
-    // has one, every row fails and this is never shown.)
-    let address = owners
-        .iter()
-        .find_map(|o| o.as_ref().ok())
-        .cloned()
-        .unwrap_or_default();
-    let reads: Vec<_> = order
-        .iter()
-        .zip(owners)
-        .map(|(chain, owner)| {
-            owner.map(|owner| {
-                let read = tokio::spawn(read_network(net(chain, None), owner.clone()));
-                (owner, read)
-            })
-        })
-        .collect();
+    let all = wallet::every_balance(home, &key.name).await?;
+    let address = all.address;
+    let trust = all.trust;
+    let order: Vec<_> = all.networks.iter().map(|row| row.chain).collect();
     let mut rows = Vec::with_capacity(order.len());
     let mut lines = vec![format!("key: {}", key.name), format!("address: {address}")];
     let mut failed: Vec<(&str, WalletError)> = Vec::new();
     let mut held = 0;
     let mut failed_tokens = 0;
-    for (chain, read) in order.iter().zip(reads) {
+    for network in all.networks {
+        let chain = network.chain;
         let mut row = json!({ "chain": chain.key, "chainId": chain.chain_id_json() });
         let mut own = String::new();
-        let result = match read {
-            Ok((owner, read)) => {
-                if owner != address {
-                    own = format!(" ({owner})");
-                    row["address"] = json!(owner);
-                }
-                read.await.unwrap_or_else(|_| {
-                    Err(WalletError::rpc("the balance read stopped unexpectedly"))
-                })
-            }
-            Err(e) => Err(e),
-        };
+        if let Some(owner) = network.address
+            && owner != address
+        {
+            own = format!(" ({owner})");
+            row["address"] = json!(owner);
+        }
+        let result = network.balances;
         match result {
-            Ok((native, tokens)) => {
+            Ok(wallet::read::NetworkRead {
+                native,
+                tokens,
+                activated,
+                warning,
+            }) => {
                 lines.push(format!("{:<10} {}{own}", chain.key, amount_text(&native)));
+                if let Some(a) = activated {
+                    row["activated"] = json!(a);
+                }
                 let mut any = !native.raw.is_zero();
                 let mut token_rows = Vec::with_capacity(tokens.len());
                 for t in tokens {
@@ -1281,6 +1181,10 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
                 }
                 row["native"] = amount_json(&native);
                 row["tokens"] = Value::Array(token_rows);
+                if let Some(w) = warning {
+                    lines.push(format!("{:<10} warning: {w}", ""));
+                    row["warning"] = json!(w);
+                }
             }
             Err(e) => {
                 lines.push(format!("{:<10} {}", chain.key, error_text(&e)));
@@ -1331,20 +1235,15 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     }
     let mut out = json!({ "key": key.name, "address": address, "chains": rows });
     trust.mark(&mut out);
-    // The code after the networks.
+    // The code after the networks: the top-level address's (an EVM one; `balance --chain tron`
+    // shows Tron's).
     Ok(with_qr(
         Out::with_text(out, lines.join("\n")),
         trust.verified(),
+        primary_chain()?,
         Some(&address),
         no_qr,
     ))
-}
-
-/// One network's [`NetworkBalances`], read within [`NETWORK_TIMEOUT`].
-async fn read_network(net: Net, owner: String) -> NetworkBalances {
-    match &net.chain.family {
-        Family::Evm(_) => Evm.wallet_balances(&net, &owner, NETWORK_TIMEOUT).await,
-    }
 }
 
 /// `{ symbol, decimals, balance, raw }`.
@@ -1367,14 +1266,9 @@ fn error_text(e: &WalletError) -> String {
     format!("error: {} [{}]", brief(&e.message), e.code)
 }
 
-/// The first line of an error message, cut to [`BRIEF_ERROR_CHARS`] characters.
+/// One inert, bounded network error line, shared with the TUI.
 fn brief(message: &str) -> String {
-    let line = message.lines().next().unwrap_or_default();
-    if line.chars().count() <= BRIEF_ERROR_CHARS {
-        return line.to_string();
-    }
-    let cut: String = line.chars().take(BRIEF_ERROR_CHARS - 3).collect();
-    format!("{cut}...")
+    wallet::brief(message)
 }
 
 /// Returns (from, index) of the selected key on `chain`.
@@ -1388,9 +1282,13 @@ async fn signing_key(home: &Path, key: &KeyArg, chain: &Chain) -> Result<(String
 async fn call(home: &Path, a: CallArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
     chains::require_contract_calls(chain)?;
-    let to = evm::parse_address(&a.to)?;
-    let func = abi::parse_function(&a.sig)?;
-    let data = abi::encode_call(&func, &a.args)?;
+    let mut input = wallet::CallInput {
+        from: None,
+        to: a.to,
+        sig: a.sig,
+        args: a.args,
+    };
+    input.validate()?;
     // eth_call from the wallet's address when there is one; reads work without a wallet too.
     let from = match store::read_wallet_file(home) {
         Ok(file) => {
@@ -1401,37 +1299,10 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
         Err(e) => return Err(e),
     };
     let net = net(chain, a.rpc.as_deref());
-    let p = evm_rpc::connect(&net).await?;
-    let raw = evm_rpc::eth_call(&p, from, to, data).await?;
-    let result = if func.outputs.is_empty() {
-        Value::Null
-    } else {
-        Value::Array(abi::decode_output(&func, &raw)?)
-    };
-    let sig = if func.outputs.is_empty() {
-        func.signature()
-    } else {
-        func.signature_with_outputs()
-    };
-    let out = json!({
-        "chain": chain.key,
-        "from": from.map(|f| f.to_checksum(None)),
-        "to": to.to_checksum(None),
-        "sig": sig,
-        "args": a.args,
-        "result": result,
-        "raw": format!("0x{}", hex::encode(&raw)),
-    });
-    // A decoded `string` is data the caller asked for: `--json` keeps it exactly as the contract
-    // returned it; `render_human` makes the `result` and every other nested value inert and
-    // bounded, since a contract chose that text. The human text also cuts `raw` (the returned
-    // bytes as hex, whatever their length) to a prose budget; `--json` keeps it whole.
-    let mut shown = out.clone();
-    shown["raw"] = json!(crate::core::text::ascii_inert(
-        out["raw"].as_str().unwrap_or_default(),
-        crate::core::text::PROSE_MAX
-    ));
-    Ok(Out::with_text(out, render_human(&shown)))
+    input.from = from.map(|f| f.to_checksum(None));
+    let result = wallet::call(&net, &input).await?;
+    let text = result.cli_text();
+    Ok(Out::with_text(result.fields, text))
 }
 
 async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
@@ -1440,17 +1311,18 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     let (to, nickname) = whitelist::recipient(home, &a.to)?;
     let to = evm::parse_address(&to)?;
     let (input, sig) = match (&a.sig, &a.data) {
-        (Some(sig), None) => {
-            let func = abi::parse_function(sig)?;
-            (abi::encode_call(&func, &a.args)?, Some(func.signature()))
+        (Some(sig), None) => wallet::InvokeData::Signature {
+            sig: sig.clone(),
+            args: a.args.clone(),
         }
+        .encode()?,
         (None, Some(data)) => {
             if !a.args.is_empty() {
                 return Err(WalletError::validation(
                     "positional arguments need --sig; --data is the complete calldata",
                 ));
             }
-            (abi::parse_calldata(data)?, None)
+            wallet::InvokeData::Raw(data.clone()).encode()?
         }
         _ => {
             return Err(WalletError::validation(
@@ -1530,17 +1402,10 @@ fn replacement(send: &SendArgs) -> Result<(Option<u128>, Option<B256>)> {
 
 /// `--max-fee-gwei` in wei (gwei = 10^9 wei), validated before any RPC.
 fn max_fee_wei(send: &SendArgs) -> Result<Option<u128>> {
-    let Some(gwei) = send.max_fee_gwei.as_deref() else {
-        return Ok(None);
-    };
-    let bad = |why: String| WalletError::validation(format!("--max-fee-gwei: {why}"));
-    let wei = parse_units(gwei, 9).map_err(|e| bad(e.message))?;
-    if wei.is_zero() {
-        return Err(bad("must be greater than zero".into()));
-    }
-    u128::try_from(wei)
-        .map(Some)
-        .map_err(|_| bad(format!("'{gwei}' is too large")))
+    send.max_fee_gwei
+        .as_deref()
+        .map(wallet::parse_fee_ceiling)
+        .transpose()
 }
 
 async fn transfer(home: &Path, a: TransferArgs) -> Result<Out> {
@@ -1548,6 +1413,20 @@ async fn transfer(home: &Path, a: TransferArgs) -> Result<Out> {
     let net = net(chain, a.rpc.as_deref());
     match &chain.family {
         Family::Evm(_) => transfer_with(&Evm, home, &net, a).await,
+        Family::Tron(_) => {
+            if a.send.nonce.is_some()
+                || a.send.bump.is_some()
+                || a.send.replace.is_some()
+                || a.send.allow_pending
+                || a.send.max_fee_gwei.is_some()
+            {
+                return Err(WalletError::validation(
+                    "Tron has no nonce; --nonce, --replace, --bump, --allow-pending and --max-fee-gwei do not apply",
+                ));
+            }
+            tron::send::validate_token(a.token.as_deref())?;
+            transfer_with(&tron::Tron, home, &net, a).await
+        }
     }
 }
 
@@ -1558,10 +1437,12 @@ async fn transfer_with<F: ChainFamily>(
     a: TransferArgs,
 ) -> Result<Out> {
     let chain = net.chain;
-    let (to, nickname) = whitelist::recipient(home, &a.to)?;
+    let (to, nickname) = whitelist::recipient_for_chain(home, &a.to, Some(chain))?;
     let to = fam.normalize_address(&to)?;
     if let Some(t) = &a.token {
-        fam.normalize_address(t)?;
+        if matches!(chain.family, Family::Evm(_)) {
+            fam.normalize_address(t)?;
+        }
     } else {
         parse_units(&a.amount, chain.decimals)?;
     }
@@ -1604,45 +1485,7 @@ async fn transfer_with<F: ChainFamily>(
     .await
 }
 
-/// What `out` (the command's fields merged with `prepare`'s) says the send does: the recipient
-/// (the contract for an invoke), the amount with its symbol (`amount` and the asset's `symbol`
-/// for a transfer, the native `value` for an invoke), the same amount in base units
-/// (`amountRaw` for a transfer, `valueRaw` for an invoke), and the token contract of a token
-/// transfer. The duplicate check keys on the base units, never on the symbol the node reported.
-fn send_summary(out: &Map<String, Value>, chain: &Chain, kind: &str) -> chains::SendSummary {
-    let text = |k: &str| out.get(k).and_then(Value::as_str);
-    chains::SendSummary {
-        kind: kind.to_string(),
-        to: text("to").unwrap_or("?").to_string(),
-        value: format!(
-            "{} {}",
-            text("amount").or_else(|| text("value")).unwrap_or("?"),
-            text("symbol").unwrap_or(chain.symbol)
-        ),
-        amount_raw: text("amountRaw")
-            .or_else(|| text("valueRaw"))
-            .map(str::to_string),
-        token: text("token").map(str::to_string),
-    }
-}
-
-/// Shared tail of `transfer` and `invoke`: refuse a likely repeat, sign through the daemon,
-/// check the raw bytes really come from `from`, then either report (dry-run) or broadcast (and
-/// optionally wait). Right before the broadcast the send is written to the account's journal and
-/// announced on stderr (`kind` names the command). `_lock` is held until this returns, through
-/// any `--wait`, so no other send from the key starts while this one's outcome is still being
-/// read.
-///
-/// A send without `--nonce` whose journal has the same send from the last 10 minutes is refused
-/// before signing (unless `--allow-duplicate`): a run cut off after the broadcast and run again
-/// once the first is mined passes the pending check and would pay twice. A dry-run reports the
-/// matches (`duplicateSends`) instead. A `--nonce` send is an explicit replacement or retry at a
-/// fixed nonce, so it cannot add a second payment and skips the check.
-///
-/// A dry-run first runs the daemon's whitelist check on whitelist.json as it is on disk, when
-/// there is one; if that refuses, it reports `whitelist: {allowed: false, …}` and asks the daemon
-/// for nothing. Without a whitelist.json the daemon decides, as for a live send, which is decided
-/// by the daemon alone.
+/// CLI adapter for the common signing, journaling and broadcast tail.
 #[allow(clippy::too_many_arguments)]
 async fn sign_and_send<F: ChainFamily>(
     fam: &F,
@@ -1652,115 +1495,32 @@ async fn sign_and_send<F: ChainFamily>(
     from: &str,
     prepared: PreparedTx,
     send: &SendArgs,
-    mut out: Map<String, Value>,
-    _lock: Option<chains::SendLock>,
+    out: Map<String, Value>,
+    lock: Option<chains::SendLock>,
     kind: &str,
 ) -> Result<Out> {
-    let PreparedTx { unsigned, fields } = prepared;
-    for (k, v) in fields {
-        out.entry(k).or_insert(v);
-    }
-    let journal = chains::SendJournal::new(home, net.chain, from);
-    let summary = send_summary(&out, net.chain, kind);
-    let mut duplicates_text = None;
-    if send.nonce.is_none() {
-        let now = crate::core::time::unix_secs(std::time::SystemTime::now());
-        let duplicates = journal.recent_duplicates(&summary, now)?;
-        if !duplicates.is_empty() && !send.dry_run && !send.allow_duplicate {
-            return Err(journal.duplicate_error(duplicates));
-        }
-        // The journal's own lines, which anyone of this user can write: escaped in `--json`,
-        // and for a human each field only in the shape zwallet writes it, within one budget.
-        out.insert(
-            "duplicateSends".into(),
-            duplicates
-                .iter()
-                .map(crate::core::text::inert_json)
-                .collect(),
-        );
-        if !duplicates.is_empty() {
-            duplicates_text = Some(journal.entries_text(&duplicates));
-        }
-    }
-    // A dry-run the whitelist on disk refuses is explained without asking the daemon to sign.
-    let checked = if send.dry_run {
-        whitelist::dry_run_check(home, net.chain, from, &unsigned)?
-    } else {
-        whitelist::DryRunCheck::NotChecked
+    let options = wallet::send::SendOptions {
+        dry_run: send.dry_run,
+        nonce: send.nonce,
+        allow_duplicate: send.allow_duplicate,
+        wait: send.wait,
+        wait_timeout: send.wait_timeout,
     };
-    if let whitelist::DryRunCheck::Denied(denied) = checked {
-        out.insert("dryRun".into(), json!(true));
-        out.insert("whitelist".into(), denied);
-        return Ok(send_out(out, duplicates_text.as_deref()));
-    }
-    let signed_value = protocol::send_unlocked(
+    let result = wallet::send::send_prepared(
+        fam,
+        net,
         home,
-        &Request::SignTx {
-            chain: net.chain.key.into(),
-            index,
-            tx: unsigned,
-        },
-        SIGN_TIMEOUT,
+        index,
+        from,
+        prepared,
+        &options,
+        out,
+        lock,
+        kind,
+        Some(std::sync::Arc::new(crate::core::terminal::eprint_line)),
     )
     .await?;
-    let signed = fam.inspect_signed(net.chain, &signed_value)?;
-    if !signed.signer.eq_ignore_ascii_case(from) {
-        return Err(WalletError::validation(format!(
-            "the key daemon signed as {}, expected {from}; not broadcasting",
-            signed.signer
-        )));
-    }
-    // The nonce the signed bytes actually consume.
-    if let Some(n) = signed.nonce {
-        out.insert("nonce".into(), json!(n));
-    }
-    out.insert("dryRun".into(), json!(send.dry_run));
-    // What the key holder decoded from the bytes it signed (not what this process intended).
-    if let Some(view) = signed_value.get("decoded") {
-        out.insert("signerDecoded".into(), signer_decoded(view));
-    }
-    // The hash is computed from the signed bytes, never taken from the node.
-    out.insert("txHash".into(), json!(signed.tx_hash));
-    if send.dry_run {
-        // Checked here against the list on disk, then by the daemon against the sealed one.
-        if matches!(checked, whitelist::DryRunCheck::Allowed) {
-            out.insert("whitelist".into(), json!({ "allowed": true }));
-        }
-        // No rawTx: a dry-run must not hand out a transaction that can be broadcast without
-        // zwallet.
-        out.insert("recoveredFrom".into(), json!(signed.signer));
-        return Ok(send_out(out, duplicates_text.as_deref()));
-    }
-    let record = chains::SendRecord::new(journal, &signed, &summary);
-    let outcome = fam
-        .broadcast(net, &signed, send.nonce.is_some(), &record)
-        .await?;
-    out.insert(
-        "explorerUrl".into(),
-        json!(net.chain.explorer_tx_url(&signed.tx_hash)),
-    );
-    out.insert("journal".into(), json!(record.journal.display()));
-    if let Broadcast::KnownDespite {
-        warning,
-        rpc_tx_hash,
-    } = outcome
-    {
-        out.insert(
-            "broadcastWarning".into(),
-            json!(format!(
-                "{warning}; the node reports the transaction by its own hash, so it was sent"
-            )),
-        );
-        if let Some(h) = rpc_tx_hash {
-            out.insert("rpcTxHash".into(), json!(h));
-        }
-    }
-    if send.wait {
-        let timeout = send.wait_timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT);
-        let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
-        chains::record_receipt(&mut out, net.chain, receipt);
-    }
-    Ok(send_out(out, duplicates_text.as_deref()))
+    Ok(send_out(result.fields, result.duplicates_text.as_deref()))
 }
 
 /// A send's result: `--json` as it is; the human text the same, but with `duplicateSends` as
@@ -1784,37 +1544,55 @@ async fn tx(a: TxArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
     let net = net(chain, a.rpc.as_deref());
     let found = match &chain.family {
-        Family::Evm(_) => Evm.lookup_tx(&net, &a.tx_hash).await?,
+        Family::Evm(_) => {
+            if a.wait {
+                return Err(WalletError::validation(
+                    "tx --wait is supported on Tron; EVM sends use transfer --wait",
+                ));
+            }
+            Evm.lookup_tx(&net, &a.tx_hash).await?
+        }
+        Family::Tron(_) => {
+            let hash = tron::lookup::parse_hash(&a.tx_hash)?;
+            let expiration = home().ok().and_then(|home| {
+                store::read_wallet_file(&home).ok().and_then(|file| {
+                    file.keys
+                        .iter()
+                        .filter_map(|key| key.addresses.get("tron"))
+                        .find_map(|address| {
+                            chains::SendJournal::new(&home, chain, address).expiration(&hash)
+                        })
+                })
+            });
+            if a.wait {
+                tron::lookup::wait(
+                    &net,
+                    &hash,
+                    expiration,
+                    a.wait_timeout.unwrap_or(wallet::send::DEFAULT_WAIT_TIMEOUT),
+                )
+                .await?
+            } else {
+                tron::lookup::lookup_tx(&net, &hash, expiration).await?
+            }
+        }
     };
     Ok(Out::json(Value::Object(found)))
 }
 
 async fn sign_message(home: &Path, a: SignMessageArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
+    // Before the wallet is read: no Tron message is ever signed (`.prd/05-tron.md` §Non-goals).
+    if let Family::Tron(_) = chain.family {
+        return Err(unsupported(chain, "message signing"));
+    }
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
     let expected = key_address(home, key, chain).await?;
-    let signed = protocol::send_unlocked(
-        home,
-        &Request::SignMessage {
-            chain: chain.key.into(),
-            index: key.index,
-            message_hex: hex::encode(a.message.as_bytes()),
-        },
-        SIGN_TIMEOUT,
-    )
-    .await?;
-    match &chain.family {
-        Family::Evm(_) => Evm.verify_message(a.message.as_bytes(), &signed, &expected)?,
-    }
-    Ok(Out::json(json!({
-        "chain": chain.key,
-        "key": key.name,
-        "address": expected,
-        "message": a.message,
-        "signature": signed["signature"],
-        "digest": signed["digest"],
-    })))
+    Ok(Out::json(
+        wallet::tools::sign_message_bytes(home, chain, key.index, &key.name, &expected, &a.message)
+            .await?,
+    ))
 }
 
 async fn status(home: &Path, no_qr: bool) -> Result<Out> {
@@ -1856,7 +1634,13 @@ async fn status(home: &Path, no_qr: bool) -> Result<Out> {
         ));
     }
     Ok(match shown {
-        Some((address, trust)) => with_qr(text, trust.verified(), address.as_deref(), no_qr),
+        Some((address, trust)) => with_qr(
+            text,
+            trust.verified(),
+            primary_chain()?,
+            address.as_deref(),
+            no_qr,
+        ),
         None => text,
     })
 }
@@ -1901,48 +1685,42 @@ pub(crate) async fn live_daemons(home: &Path) -> Result<(Vec<i32>, Option<Value>
 
 async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
     let ttl = parse_duration(&a.duration)?;
-    protocol::socket_path(home)?;
-    // Fail before prompting when there is nothing to unlock. Of this read only the key list's
-    // indices are used, for the index warning; the key, index and address shown are the ones the
-    // daemon derived from the decrypted seed.
-    let file = store::read_wallet_file(home)?;
-    protocol::check_ptrace_scope(a.allow_ptrace_scope_0)?;
-    protocol::check_daemons_findable()?;
-    // Pinned before the prompt, so a binary swapped in while the human types is never started.
-    let exe = DaemonExe::resolve()?;
+    // Fails before prompting when there is nothing to unlock.
+    let plan = wallet::prepare_unlock(home, ttl, a.allow_ptrace_scope_0)?;
     let pw = read_password(a.password.password_stdin, "Wallet password: ", false)?;
-    let session = start_session(home, &exe, &pw, ttl).await?;
+    let session = wallet::unlock(&plan, &pw).await?;
     drop(pw);
+    let ready = &session.ready;
     let mut out = json!({
         "locked": false,
         "duration": a.duration.trim(),
-        "expiresAt": session["expiresAt"],
-        "active": session["active"],
-        "index": session["index"],
-        "address": session["address"],
-        "daemonPid": session["pid"],
+        "expiresAt": ready["expiresAt"],
+        "active": ready["active"],
+        "index": ready["index"],
+        "address": ready["address"],
+        "daemonPid": ready["pid"],
         // Derived by this process's own daemon child from the seed this password opened.
         "verified": true,
         "verifiedBy": BY_PASSWORD,
         // The whitelist this session signs under, as its daemon verified it: the generation and
         // the entries, so a rolled-back list is visible.
-        // Its reason can quote whitelist.json, a file anyone of this user can write.
-        "whitelist": inert_whitelist(&session["whitelist"]),
+        "whitelist": session.whitelist,
     });
-    if let Some(w) = session_index_warning(&file, &session) {
+    if let Some(w) = session.warning {
         out["warning"] = json!(w);
     }
     Ok(with_qr(
         Out::json(out),
         true,
-        session["address"].as_str(),
+        primary_chain()?,
+        ready["address"].as_str(),
         a.qr.no_qr,
     ))
 }
 
 /// [`index_warning`] (as `address --verify` gives it) for the key a new session reports: its
 /// name and index as the daemon derived them, against `file`'s key list and `nextIndex`.
-fn session_index_warning(file: &WalletFile, session: &Value) -> Option<String> {
+pub(crate) fn session_index_warning(file: &WalletFile, session: &Value) -> Option<String> {
     let index = session["index"]
         .as_u64()
         .and_then(|i| u32::try_from(i).ok())?;
@@ -2093,13 +1871,13 @@ mod tests {
 
     #[test]
     fn relock_failure_is_reported_not_swallowed() {
-        let ok = relocked("mismatch".into(), Ok(vec![42]));
+        let ok = wallet::relocked("mismatch".into(), Ok(vec![42]));
         assert!(
             ok.message.ends_with("so the wallet was locked again"),
             "{}",
             ok.message
         );
-        let failed = relocked(
+        let failed = wallet::relocked(
             "mismatch".into(),
             Err(WalletError::validation(
                 "could not stop the key daemon process(es) 42",
@@ -2118,6 +1896,35 @@ mod tests {
             "{}",
             failed.message
         );
+    }
+
+    #[test]
+    fn the_cache_compares_tron_addresses_byte_for_byte_and_evm_ones_in_any_case() {
+        const TWER: &str = "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6";
+        const EVM: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+        let mut k = key("main", 0);
+        k.addresses.insert("tron".into(), TWER.into());
+        k.addresses
+            .insert("ethereum".into(), EVM.to_ascii_lowercase());
+        assert_eq!(cache_mismatch(&k, "tron", TWER).unwrap(), None);
+        // The comparison is `tron::address::same`: a case variant of the derived address is
+        // another address (it never gets this far: the shape check refuses it first).
+        assert!(!crate::chains::tron::address::same(
+            TWER,
+            &TWER.to_ascii_lowercase()
+        ));
+        assert_eq!(
+            cache_mismatch(&k, "tron", "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C").unwrap(),
+            Some(TWER.to_string())
+        );
+        // EVM hex is the same address in either case.
+        assert_eq!(cache_mismatch(&k, "ethereum", EVM).unwrap(), None);
+        // A Tron address is never the shape of an EVM one, nor the other way round.
+        let tron = chains::find("tron").unwrap();
+        let eth = chains::find("ethereum").unwrap();
+        assert!(address_shaped(tron, TWER) && !address_shaped(eth, TWER));
+        assert!(address_shaped(eth, EVM) && !address_shaped(tron, EVM));
+        assert!(!address_shaped(tron, "tWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6"));
     }
 
     #[test]

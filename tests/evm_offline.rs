@@ -1637,12 +1637,17 @@ fn failing_wallet_node(
     })
 }
 
-/// A [`wallet_node`] for every chain, keyed by chain key: 1.5 ETH on Base, nothing elsewhere.
+/// A [`wallet_node`] for every EVM chain, keyed by chain key: 1.5 ETH on Base, nothing
+/// elsewhere. ([`rpc_env`] adds a Tron node.)
 fn every_chain_node(delay: Duration) -> Vec<(&'static str, MockRpc)> {
     zwallet::chains::CHAINS
         .iter()
-        .map(|c| {
-            let id = zwallet::chains::evm::config(c).chain_id;
+        .filter_map(|c| {
+            zwallet::chains::evm::config(c)
+                .ok()
+                .map(|e| (c, e.chain_id))
+        })
+        .map(|(c, id)| {
             let native = if c.key == "base" {
                 15 * 10u128.pow(17)
             } else {
@@ -1654,21 +1659,41 @@ fn every_chain_node(delay: Duration) -> Vec<(&'static str, MockRpc)> {
 }
 
 /// `ZWALLET_RPC_<CHAIN>` for every chain: its node, or the URL `instead` gives for that chain
-/// key. Every chain is set, so none falls back to its public default RPC.
+/// key; Tron's is a Tron node ([`tron_node`]) unless `instead` names one. Every chain is set, so
+/// none falls back to its public default RPC.
 fn rpc_env(nodes: &[(&str, MockRpc)], instead: &[(&str, &str)]) -> Vec<(String, String)> {
-    nodes
+    let tron = tron_node();
+    let env: Vec<(String, String)> = nodes
         .iter()
-        .map(|(key, node)| {
+        .map(|(key, node)| (*key, node.url.as_str()))
+        .chain([("tron", tron.url.as_str())])
+        .map(|(key, url)| {
             let url = instead
                 .iter()
-                .find(|(k, _)| k == key)
-                .map_or(node.url.as_str(), |(_, u)| u);
+                .find(|(k, _)| *k == key)
+                .map_or(url, |(_, u)| u);
             (
                 format!("ZWALLET_RPC_{}", key.to_uppercase()),
                 url.to_string(),
             )
         })
-        .collect()
+        .collect();
+    env
+}
+
+/// A Tron node for the every-network reads: mainnet's genesis, an account it does not know (0
+/// TRX, not activated), 0 of every token. It serves until the test process ends.
+fn tron_node() -> common::tron::MockTron {
+    common::tron::MockTron::start(common::tron::node(json!({}), 0))
+}
+
+/// The Tron address `create` cached for the first key.
+fn cached_tron(home: &Home) -> String {
+    let v: Value = serde_json::from_slice(&std::fs::read(home.wallet_json()).unwrap()).unwrap();
+    v["keys"][0]["addresses"]["tron"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
@@ -1676,7 +1701,7 @@ fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
 }
 
 /// Every chain key in the order `balance` without `--chain` lists them: mainnets, then Sepolia.
-const ALL_CHAINS_ORDER: [&str; 8] = [
+const ALL_CHAINS_ORDER: [&str; 9] = [
     "ethereum",
     "base",
     "arbitrum",
@@ -1684,6 +1709,7 @@ const ALL_CHAINS_ORDER: [&str; 8] = [
     "polygon",
     "bsc",
     "avalanche",
+    "tron",
     "sepolia",
 ];
 
@@ -1709,10 +1735,23 @@ fn balance_without_chain_reads_every_network_and_its_registry_tokens() {
     let rows = v["chains"].as_array().unwrap();
     let keys: Vec<&str> = rows.iter().map(|r| r["chain"].as_str().unwrap()).collect();
     assert_eq!(keys, ALL_CHAINS_ORDER);
-    for row in rows {
+    // Tron: its own address on the row, its node's answer (tests/tron_offline.rs reads it in
+    // full).
+    let tron = cached_tron(&home);
+    let tron_row = rows.iter().find(|r| r["chain"] == "tron").unwrap();
+    assert_eq!(
+        (&tron_row["chainId"], &tron_row["address"]),
+        (&json!(728126428), &json!(tron)),
+        "{tron_row:#}"
+    );
+    assert_eq!(
+        tron_row["native"],
+        json!({ "symbol": "TRX", "decimals": 6, "balance": "0", "raw": "0" })
+    );
+    for row in rows.iter().filter(|r| r["chain"] != "tron") {
         let key = row["chain"].as_str().unwrap();
         let chain = zwallet::chains::find(key).unwrap();
-        let id = zwallet::chains::evm::config(chain).chain_id;
+        let id = zwallet::chains::evm::config(chain).unwrap().chain_id;
         assert_eq!(row["chainId"], id, "{row:#}");
         assert!(row.get("error").is_none(), "{row:#}");
         // The same address on every EVM chain: only the top-level one.
@@ -1786,8 +1825,9 @@ fn balance_without_chain_reads_every_network_and_its_registry_tokens() {
              polygon    0 POL\n\
              bsc        0 BNB\n\
              avalanche  0 AVAX\n\
+             tron       0 TRX ({tron})\n\
              sepolia    0 ETH\n\
-             2 of 8 networks have a balance\n"
+             2 of 9 networks have a balance\n"
         )
     );
 }
@@ -1856,7 +1896,7 @@ fn balance_without_chain_shows_the_networks_that_answer() {
     assert!(polygon.chars().count() <= 110, "{polygon}");
     assert_eq!(
         lines.last(),
-        Some(&"2 of 8 networks have a balance; 1 did not answer"),
+        Some(&"2 of 9 networks have a balance; 1 did not answer"),
         "{}",
         human.stdout
     );
@@ -1964,7 +2004,7 @@ fn balance_without_chain_shows_a_failed_token_read_on_its_row_only() {
     assert!(lines[op + 2].starts_with("polygon "), "{}", human.stdout);
     assert_eq!(
         lines.last(),
-        Some(&"2 of 8 networks have a balance; 2 token reads failed"),
+        Some(&"2 of 9 networks have a balance; 2 token reads failed"),
         "{}",
         human.stdout
     );
@@ -2006,9 +2046,16 @@ fn balance_without_chain_cuts_each_networks_error_short_when_none_answers() {
     home.create("t", &[]);
     let node =
         common::tiny_rpc_reply(|_, _| Err(json!({ "code": -32000, "message": "#".repeat(600) })));
+    // Tron's node answers java-tron's error object, as long.
+    let tron = common::tron::MockTron::start(|_, _| {
+        common::tron::Reply::Json(json!({ "Error": "#".repeat(600) }))
+    });
     let env: Vec<(String, String)> = zwallet::chains::CHAINS
         .iter()
-        .map(|c| (c.rpc_env_var(), node.clone()))
+        .map(|c| {
+            let url = if c.key == "tron" { &tron.url } else { &node };
+            (c.rpc_env_var(), url.clone())
+        })
         .collect();
     let run = home.run_env(&["balance", "--json"], &env_refs(&env));
     let msg = run.err("RPC_ERROR");
@@ -2037,8 +2084,13 @@ fn balance_without_chain_cuts_each_networks_error_short_when_none_answers() {
             "{n}"
         );
         let error = n["error"].as_str().unwrap_or_else(|| panic!("{n}"));
+        let node_said = if key == "tron" {
+            "the node answered an error: "
+        } else {
+            "error code -32000: "
+        };
         assert!(
-            error.contains("error code -32000: ") && error.contains(&whole),
+            error.contains(node_said) && error.contains(&whole),
             "{key}: {error}"
         );
     }
@@ -2189,7 +2241,7 @@ fn balance_after_unlock_is_verified_by_the_session_with_the_code_last() {
     }
     // Every field it had before is still there.
     assert_eq!(one["balance"], "1.5");
-    assert_eq!(every["chains"].as_array().unwrap().len(), 8);
+    assert_eq!(every["chains"].as_array().unwrap().len(), 9);
 
     // Human: into a pipe, the text it always had; on a terminal, that text and then the code,
     // after the networks. --no-qr leaves the code out.
@@ -2220,7 +2272,7 @@ fn balance_after_unlock_is_verified_by_the_session_with_the_code_last() {
     }
     let piped = home.run_env(&["balance"], &env_refs(&env));
     assert!(
-        piped.stdout.ends_with("2 of 8 networks have a balance\n"),
+        piped.stdout.ends_with("2 of 9 networks have a balance\n"),
         "{}",
         piped.stdout
     );
