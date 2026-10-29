@@ -33,10 +33,13 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0] [--no-qr]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, verifiedBy: "password", whitelist, warning? }` | - |
 | `lock` | `{ locked: true, wasUnlocked, stopped: [<pid>] }` | - |
 | `backup` | prints the recovery phrase; interactive terminal only | asks for the password |
-| `whitelist list [--verify [--password-stdin]]` | `{ gen, entries: [{ nickname, kind, address, chains, selectors? }], policy: { maxFeeWei, allowMessageSigning }, verified, source?, sealedGen?, reason? }` | works |
+| `whitelist list [--verify [--password-stdin]]` | `{ gen, entries: [{ nickname, kind, address, chains, selectors? }], policy: { maxFeeWei, allowMessageSigning, transactionLimits? }, verified, source?, sealedGen?, reason? }` | works |
 | `whitelist add <nick> <0x> [--chains <c1,c2>\|'*'] [--contract --selectors <0x…,0x…>] [--unlock <dur>]` | a change (see **The whitelist**) + `{ entry, warning? }` | asks for the password |
 | `whitelist remove <nick> [--unlock <dur>]` | a change + `{ entry }` | asks for the password |
 | `whitelist fee-cap <chain> <amount> [--unlock <dur>]` | a change + `{ feeCap: { chain, maxFeeWei, maxFee } }` | asks for the password |
+| `whitelist native-cap <chain> <coin amount\|none> [--unlock <dur>]` | a change + `{ transactionLimit: { chain, target, value, perTransaction: true }, policy }` | asks for the password |
+| `whitelist token-cap <chain> <token address> <integer base units\|none> [--unlock <dur>]` | a change + `{ transactionLimit: { chain, target, value, perTransaction: true }, policy }` | asks for the password |
+| `whitelist calldata-cap <chain> <byte count\|none> [--unlock <dur>]` | a change + `{ transactionLimit: { chain, target, value, perTransaction: true }, policy }` | asks for the password |
 | `whitelist allow-message-signing on\|off [--unlock <dur>]` | a change + `{ allowMessageSigning }` | asks for the password |
 | `whitelist reset [--unlock <dur>]` | a change + `{ dropped }` | asks for the password |
 | `tui [--chain <key>] [--warm <dur>]` | none: a terminal UI for a human (`--json` is refused) | works |
@@ -259,8 +262,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
       a token outside the registry are refused.
     - **Any other call** goes only to a contract entry on one of its chains, with one of its
       listed selectors (native value only then), and never to a registry token. A contract
-      entry delegates: the agent may call its listed selectors with any arguments and value, and
-      the contract may forward value or act on them. That holds for a token outside the registry
+      entry delegates: the agent may call its listed selectors with arbitrary arguments;
+      configured native-value and calldata limits still apply. The contract may forward value
+      or act on those arguments. That holds for a token outside the registry
       listed as a contract, too: its listed selectors (say `increaseAllowance`) are called like
       any listed contract's.
 
@@ -278,6 +282,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
     are ethereum 0.003 ETH; base, arbitrum and optimism 0.0005 ETH; polygon 2 POL; bsc 0.003
     BNB; avalanche 0.05 AVAX; sepolia 0.01 ETH, changed with `whitelist fee-cap <chain>
     <amount>`.
+  - **Optional transaction limits.** A verified list can also cap decoded native value,
+    direct registry-token amounts and calldata size per chain. Exceeding one is
+    `WHITELIST_DENIED`; no signature is produced. See [per-transaction limits](#per-transaction-limits)
+    for units, configuration and limits of enforcement.
   - **A list that cannot be trusted** (it does not verify: edited by hand, an older copy; it
     cannot be read, or not within the 2 s deadline; or the sealed anchor is malformed) refuses
     **every** transaction with `WHITELIST_INVALID`, a native self-transfer included: a broken
@@ -330,7 +338,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
     --unlock` and `status` show what the daemon trusts, read again on every `status`: `whitelist: {
     gen, verified: true, entries: [nicknames] }`, or `{ gen (null without a whitelist), verified:
     false, entries: [], reason }`.
-  - **Changes** (`add`, `remove`, `fee-cap`, `allow-message-signing on|off`, `reset`) ask for the
+  - **Changes** (`add`, `remove`, `fee-cap`, `native-cap`, `token-cap`, `calldata-cap`, `allow-message-signing on|off`, `reset`) ask for the
     password (terminal prompt, or `--password-stdin`). Before the password is read,
     `whitelist.json` and `whitelist.next.json` are read once and the change is printed where the
     password is read from (the terminal, or stderr with `--password-stdin`): the nickname, the
@@ -368,10 +376,12 @@ Commands that act on a key take `--key <name>` (default: the active key).
     an older `whitelist.json` (see [Known limits](security.md#known-limits-same-user)), so recovering from accidental damage to the
     list means restoring `wallet.json` if an older one went back, or a reset. `zwallet whitelist
     reset` starts over, at a cost the summary and the message spell out: every fee cap goes back to
-    the built-in default, and no payee and no contract is listed (native self-transfers under the
-    default caps and approve-0 revokes still sign), so set `whitelist fee-cap` again before
-    `--unlock`. A wrong password stops nothing; neither does a list an edit cannot build on (an
-    edit; a `reset` goes ahead), or a change the list refuses. Otherwise the change stops every
+    the built-in default, all optional transaction limits are removed, and no payee or contract
+    is listed (native self-transfers under the default fee caps and approve-0 revokes still sign).
+    Reset warns about removed transaction limits even when the old list cannot be read.
+    Configure fee caps and transaction limits again before `--unlock`. A wrong password stops
+    nothing; neither does a list an edit cannot build on (an edit; a `reset` goes ahead), or a
+    change the list refuses. Otherwise the change stops every
     zwallet daemon of this user (as `lock` does), signs the next generation and re-seals it into
     `wallet.json`, and the wallet stays locked unless `--unlock <duration>` starts a new session for
     that duration with the password just typed (with `unlock`'s checks, so on Linux it may need
@@ -409,6 +419,40 @@ Commands that act on a key take `--key <name>` (default: the active key).
   - **`@nick`**: `transfer --to @alice` and `invoke --to @router` take the address from
     `whitelist.json` as it is, unverified (the daemon decides anyway), and add `toNickname`. An
     unknown nickname is `VALIDATION_ERROR` naming `zwallet whitelist list`.
+
+## Per-transaction limits
+
+A human can add optional limits to the signed whitelist. These commands use the existing password
+prompt, end unlocked sessions, and support `--unlock <duration>` like other whitelist edits:
+
+```sh
+zwallet whitelist native-cap ethereum 0.01
+zwallet whitelist token-cap ethereum 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 1000000
+zwallet whitelist calldata-cap ethereum 4096
+zwallet whitelist list --verify
+```
+
+`native-cap` takes decimal native coin units (0.01 ETH above); `token-cap` takes **integer smallest
+token units** (1,000,000 = 1 USDC above), and accepts only a registry deployment on that chain.
+`calldata-cap` takes a byte count. Zero forbids positive value/amount or nonempty calldata;
+`none` removes that specific limit. Limits apply per chain to all keys/payees, and the native
+limit also applies to self-transfers and native value attached to allowed contract calls.
+The daemon enforces the limits on the decoded bytes it signs; hand-editing the file cannot raise them.
+
+Old lists without limits retain their original signatures and behavior. Old binaries reject lists
+containing the new fields, so keep this version when limits are configured. `whitelist reset`
+removes these limits and warns before the password prompt; configure them again before unlocking.
+The `--json` policy field `transactionLimits` is keyed by chain and exposes optional
+`maxNativeWei` as a decimal integer string, `maxTokenBaseUnits` as a map from token
+addresses to decimal integer strings, and `maxCalldataBytes` as an integer. It is omitted when
+no limits are configured.
+
+These limits do **not** enforce a cumulative budget, restrict arbitrary contract argument effects,
+constrain authority granted by message signatures, or cap OP-stack L1 data fees. A calldata limit
+only bounds payload size. Strong cumulative budgets and joint-rollback protection remain design
+issues [#26](https://github.com/2lab-ai/zwallet/issues/26) and
+[#27](https://github.com/2lab-ai/zwallet/issues/27); this implementation adds no external trust store.
+
 ## Balances
 
 - **`balance` without `--chain`** checks every network in [Chains](../README.md#chains), mainnets first and the
@@ -465,8 +509,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   that this one repeats (see below). Live: `{ ..., txHash, explorerUrl, journal, broadcastWarning?,
   rpcTxHash? }` plus `{ status, success, blockNumber, gasUsed, hint? }` with `--wait`.
 - **`--wait`** polls for the receipt for `--wait-timeout <dur>` (default `90s`; same units as
-  unlock durations). A receipt is `status: "success"` (`success: true`) when its status is
-  exactly `0x1`, `"reverted"` (`success: false`) when it is exactly `0x0`, and `"mined"` with
+  unlock durations). One deadline bounds both in-flight receipt RPC requests and polling sleeps;
+  a late response is not accepted after expiry. This budget starts after broadcast and does not
+  bound transaction preparation or broadcasting. A receipt is `status: "success"` (`success: true`)
+  when its status is exactly `0x1`, `"reverted"` (`success: false`) when it is exactly `0x0`, and `"mined"` with
   `success: null` otherwise (no status, as before Byzantium, or any other value): the execution
   outcome is unknown, never a failure, and a `hint` says "do not send this payment again; check
   the receipt on the explorer" with the explorer page. Not mined by then is `status: "pending"`,

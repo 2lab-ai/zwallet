@@ -68,6 +68,8 @@ pub struct ChainRules {
     pub chain_known: fn(&str) -> bool,
     /// Whether the `0x` address is a registry token on any chain.
     pub is_registry_token: fn(&str) -> bool,
+    /// Whether an address is a registry token on the specified chain.
+    pub registry_token_on_chain: fn(&str, &str) -> bool,
     /// The fee caps a new list starts with: chain key → wei, as a decimal string.
     pub default_fee_caps_wei: &'static [(&'static str, &'static str)],
 }
@@ -163,6 +165,66 @@ pub struct Policy {
     /// Whether `sign-message` may sign at all (off by default: some contracts take EIP-191
     /// signatures as spending authority).
     pub allow_message_signing: bool,
+    /// Optional stateless limits per chain; absence preserves the original signed encoding.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "unique_limit_keys"
+    )]
+    pub transaction_limits: BTreeMap<String, TransactionLimits>,
+}
+
+/// Per-transaction limits, not cumulative budgets. Token amounts are smallest base units.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TransactionLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_native_wei: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_calldata_bytes: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "unique_limit_keys"
+    )]
+    pub max_token_base_units: BTreeMap<String, String>,
+}
+
+impl TransactionLimits {
+    pub fn is_empty(&self) -> bool {
+        self.max_native_wei.is_none()
+            && self.max_calldata_bytes.is_none()
+            && self.max_token_base_units.is_empty()
+    }
+}
+
+fn unique_limit_keys<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Unique<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Unique<T> {
+        type Value = BTreeMap<String, T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an object with unique limit keys")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, T>()? {
+                if out.insert(key, value).is_some() {
+                    return Err(serde::de::Error::custom("duplicate transaction limit key"));
+                }
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_map(Unique(std::marker::PhantomData))
 }
 
 /// A JSON object of strings into a map, refusing a key that appears twice (a map would keep the
@@ -208,6 +270,7 @@ impl Policy {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             allow_message_signing: false,
+            transaction_limits: BTreeMap::new(),
         }
     }
 
@@ -307,12 +370,28 @@ impl Whitelist {
                 ));
             }
         }
-        for c in self.policy.max_fee_wei.keys() {
+        for c in self
+            .policy
+            .max_fee_wei
+            .keys()
+            .chain(self.policy.transaction_limits.keys())
+        {
             if !(rules.chain_known)(c) {
                 return Err(WalletError::validation(format!(
                     "whitelist fee cap for unknown chain {}",
                     quote(c)
                 )));
+            }
+        }
+        for (chain, limits) in &self.policy.transaction_limits {
+            if limits
+                .max_token_base_units
+                .keys()
+                .any(|token| !(rules.registry_token_on_chain)(chain, token))
+            {
+                return Err(WalletError::validation(
+                    "transaction token cap needs a registry token on its chain",
+                ));
             }
         }
         Ok(())
@@ -420,6 +499,24 @@ impl Whitelist {
                     e.message
                 ))
             })?;
+        }
+        for (chain, limits) in &self.policy.transaction_limits {
+            if !is_chain_key(chain) || limits.is_empty() {
+                return Err(WalletError::validation(
+                    "invalid or empty transaction limit chain",
+                ));
+            }
+            if let Some(amount) = &limits.max_native_wei {
+                parse_wei(amount)?;
+            }
+            for (token, amount) in &limits.max_token_base_units {
+                if !is_lower_hex(token, 20) {
+                    return Err(WalletError::validation(
+                        "transaction limit token must be a lower-case 20-byte hex address",
+                    ));
+                }
+                parse_wei(amount)?;
+            }
         }
         Ok(())
     }
@@ -544,7 +641,49 @@ pub fn canonical_bytes(list: &Whitelist) -> Vec<u8> {
         out.push(':');
         push_json_str(&mut out, v);
     }
-    out.push_str("}},\"version\":");
+    out.push('}');
+    if !list.policy.transaction_limits.is_empty() {
+        out.push_str(",\"transactionLimits\":{");
+        for (i, (chain, limits)) in list.policy.transaction_limits.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            push_json_str(&mut out, chain);
+            out.push_str(":{");
+            let mut comma = false;
+            if let Some(bytes) = limits.max_calldata_bytes {
+                out.push_str("\"maxCalldataBytes\":");
+                out.push_str(&bytes.to_string());
+                comma = true;
+            }
+            if let Some(amount) = &limits.max_native_wei {
+                if comma {
+                    out.push(',');
+                }
+                out.push_str("\"maxNativeWei\":");
+                push_json_str(&mut out, amount);
+                comma = true;
+            }
+            if !limits.max_token_base_units.is_empty() {
+                if comma {
+                    out.push(',');
+                }
+                out.push_str("\"maxTokenBaseUnits\":{");
+                for (j, (token, amount)) in limits.max_token_base_units.iter().enumerate() {
+                    if j > 0 {
+                        out.push(',');
+                    }
+                    push_json_str(&mut out, token);
+                    out.push(':');
+                    push_json_str(&mut out, amount);
+                }
+                out.push('}');
+            }
+            out.push('}');
+        }
+        out.push('}');
+    }
+    out.push_str("},\"version\":");
     out.push_str(&LIST_VERSION.to_string());
     out.push('}');
     out.into_bytes()
@@ -713,6 +852,29 @@ fn check_shapes(file: &ListFile) -> Result<()> {
         }
         if wei.is_empty() || wei.len() > WEI_DIGITS || !wei.bytes().all(|b| b.is_ascii_digit()) {
             return bad("the amount of a fee cap".to_string());
+        }
+    }
+    for (chain, limits) in &file.policy.transaction_limits {
+        if !is_chain_key(chain) {
+            return bad("the chain of a transaction limit".into());
+        }
+        if let Some(amount) = &limits.max_native_wei
+            && (amount.is_empty()
+                || amount.len() > WEI_DIGITS
+                || !amount.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return bad("the native amount of a transaction limit".into());
+        }
+        for (token, amount) in &limits.max_token_base_units {
+            if !is_lower_hex(token, 20) {
+                return bad("the token address of a transaction limit".into());
+            }
+            if amount.is_empty()
+                || amount.len() > WEI_DIGITS
+                || !amount.bytes().all(|b| b.is_ascii_digit())
+            {
+                return bad("the token amount of a transaction limit".into());
+            }
         }
     }
     Ok(())
@@ -1514,6 +1676,7 @@ mod tests {
     const RULES: ChainRules = ChainRules {
         chain_known: known,
         is_registry_token: is_token,
+        registry_token_on_chain: |chain, address| known(chain) && is_token(address),
         default_fee_caps_wei: &[
             ("base", "500000000000000"),
             ("ethereum", "3000000000000000"),
@@ -1593,6 +1756,7 @@ mod tests {
                     ("base".to_string(), "500000000000000".to_string()),
                 ]),
                 allow_message_signing: true,
+                transaction_limits: Default::default(),
             },
         }
     }

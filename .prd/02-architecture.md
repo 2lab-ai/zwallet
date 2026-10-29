@@ -117,12 +117,13 @@ seed, so the wallet file and the daemon protocol do not change.
   **It does no RPC.** Socket requests (protocol v2): `lock`, `status`, `address{chain,index}`,
   `sign_message{chain,index,msg}`, `sign_tx{chain,index,unsigned tx}`. These are family-agnostic.
   There is no `unlock` request.
-- On every tick (≤1 s) and on every request, the daemon checks:
-  - expiry;
-  - that `wallet.json`'s ciphertext is unchanged;
-  - that `d.sock` is still its own socket (dev/ino).
+- Expiry is checked independently on each tick (≤1 s) and request. Wallet ciphertext and socket
+  identity (dev/ino) are inspected by a separate monitor and before requests other than `lock`.
+  At most four secret-free workers perform that filesystem inspection outside the async loop
+  and session mutex, with a 2 s deadline including slot wait. A stalled worker cannot delay
+  lock or expiry; late results cannot revive an invalidated session.
 
-  Any failure wipes the seed and exits. Every `wallet.json` read opens with
+  Inspection failure or timeout wipes the seed and exits. Every `wallet.json` read opens with
   `O_NOFOLLOW|O_NONBLOCK` and requires a regular file of at most 1 MiB owned by our uid, so a FIFO
   cannot hang the tick. Each connection is served in its own task with a 10 s I/O
   timeout, so a silent client cannot hold the seed past expiry.
@@ -225,15 +226,16 @@ The list is edited only by the one-shot CLI with the typed password, from which 
 each time (`zwallet whitelist …`, never the daemon). An edit shows the change and what happens to
 signing before the password is read, applies it to exactly the list shown or changes nothing, and
 builds only on the list the seal names (an unverifiable list, or a list file without a sealed
-whitelist, is refused; only `reset` starts over, with every fee cap back to the default and no payee
-and no contract). It stops every daemon, signs the next generation, re-seals the anchor into
+whitelist, is refused; only `reset` starts over, with every fee cap back to the default,
+all optional transaction limits removed, and no payee or contract). It stops every daemon, signs the next generation, re-seals the anchor into
 wallet.json, and leaves the wallet locked unless `--unlock <duration>` starts a new session. A
 dry-run runs the daemon's check on the list on disk first, when there is one, and asks for no
-signature when it refuses. Amount caps stay planned; README §Known limits lists what the whitelist
-does not stop.
+signature when it refuses. Optional signed per-transaction amount/calldata limits are implemented
+on the review branch ([06](06-review-hardening.md)); cumulative budgets remain planned.
+[Known limits](../docs/security.md#known-limits-same-user) lists what the whitelist does not stop.
 
-The original WU1b plan below is superseded except for the amount caps, which stay planned. It is
-kept for reference:
+The original WU1b plan below is historical; cumulative budgets remain design work, and its
+remaining details are superseded by [04](04-whitelist.md) and [06](06-review-hardening.md):
 - The policy lives inside the encrypted, authenticated part of wallet.json, under the
   password-derived key. Viewing it works while locked; changing it needs the password, which only
   the human holds.
@@ -254,7 +256,7 @@ kept for reference:
 
 A Homebrew-installed binary is writable by the user, so the binary-swap limit applies to it in
 full. Real protection means installing zwallet where the agent cannot write, or running the agent
-as a different OS user (README §Known limits).
+as a different OS user ([Known limits](../docs/security.md#known-limits-same-user)).
 
 Until these exist, a process running as the same user can still swap the zwallet binary, fake the
 unlock prompt to capture the password, or talk to the socket within policy. Root defeats everything
@@ -372,3 +374,9 @@ RPC endpoint precedence: `--rpc` flag, then `ZWALLET_RPC_<KEY>` env, then the de
   fall back to brew.
 - **Visibility**: the tap downloads release assets without authentication, so the repo becomes
   public at the first release, as llmux, harn and xbrew are.
+
+## Review hardening (2026-10-29)
+
+See [`06-review-hardening.md`](06-review-hardening.md) for the in-progress validation and
+I/O isolation contracts. Unlock wire framing and progress parsing live in
+`core/protocol/unlock_channel.rs`; the parent retains process identity and lifecycle coordination.

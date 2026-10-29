@@ -2,7 +2,10 @@
 
 Status: **shipped** (WU1b, 2026-10-21, PR #4; built 2026-10-20 in three parts: A core, B daemon
 enforcement, C CLI and docs). This page is the as-built contract of all three, not a future
-target. Planned after two spec reviews (gpt6 and zhuge, both "change before implementing"); it
+target for that shipped baseline. The optional transaction-limit extension described below
+is implemented in [PR #29](https://github.com/2lab-ai/zwallet/pull/29) and remains **in-progress**
+until merged; see [`06-review-hardening.md`](06-review-hardening.md).
+Planned after two spec reviews (gpt6 and zhuge, both "change before implementing"); it
 ships in v0.1, before the v0.1.0 tag and before the wallet is funded. The v0.1 SSOT fixed a
 daemon-enforced signing policy as v0.1 scope (v0-1/ssot.md §Fixed scope), and this is that
 policy, shaped by the user's whitelist request (v0-2-tui/ssot.md). The TUI's whitelist screen is
@@ -18,7 +21,7 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
 
 ## What this guarantees (and what it does not)
 
-**Guaranteed, within the threat model** (a same-user agent; see README §Known limits):
+**Guaranteed, within the threat model** (a same-user agent; see [Known limits](../docs/security.md#known-limits-same-user)):
 - **Native coin and registry tokens** leave this wallet only to **address entries** of a list
   that verifies against the sealed anchor (public key, generation and digest), or as a native
   transfer to the signing key's own address (a token transfer to itself needs an entry too).
@@ -33,8 +36,8 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
   relaxes a stricter signed cap. The cap is per transaction (see below).
 
 **Not guaranteed:**
-- **Amounts.** There are no amount caps, so an agent can send the whole balance to any listed
-  payee.
+- **Amounts without configured limits.** An agent can send the whole balance to a listed payee
+  unless optional signed per-transaction limits below are configured. These are not cumulative budgets.
 - **What a listed contract does.** A listed contract can forward value or act on its arguments;
   a contract entry delegates that authority. That includes a token outside the registry listed
   as a contract: its listed selectors (other than the decoded `transfer`/`approve`/
@@ -46,7 +49,7 @@ agent can pay anyone for the whole unlock window (up to `1y`). The user asked (2
   against it) is refused (`WHITELIST_INVALID`, "could not be read in time (2000 ms)"). A stalled
   file or a flood of requests can deny signing this way, never widen it.
 - **The L1 data fee** on the OP-stack chains (Base, Optimism) is outside `gasLimit × maxFee`, and
-  calldata can be up to about 512 KB.
+  calldata can be up to about 512 KB unless a lower signed calldata limit is configured.
 - **Joint rollback.** The seal is authenticated (AES-GCM) but not fresh: an older `wallet.json`
   still opens with the password. Restoring an older `wallet.json` and `whitelist.json` together
   therefore resurrects revoked entries. (The older `wallet.json` seals its own salt, so the same
@@ -582,8 +585,23 @@ request):
 ![WIP](https://img.shields.io/badge/status-WIP-yellow) These items remain unimplemented in the current code; see
 [feature status](../docs/features.md#planned-features).
 
-- Amount caps (a rolling 24 h native cap, per-token caps).
+- Cumulative amount budgets (rolling 24 h native and per-token caps).
 - The `invoke` duplicate key on calldata, and the duplicate window as a policy setting (R4 N-3 and
   N-4).
 - User-added tokens.
 - Moving the whitelist key to the Secure Enclave or hardware.
+
+## Optional stateless limits (2026-10-29)
+
+The review branch implements optional signed `policy.transactionLimits`, keyed by chain.
+Each entry can contain `maxNativeWei` (decimal U256 string), `maxTokenBaseUnits` (registry token
+address to decimal U256 string), and `maxCalldataBytes` (u32). No empty chain entry is permitted.
+Absent limits preserve the original canonical signing bytes. The native limit applies to decoded
+value even on self-transfers and allowed contract calls; token limits apply to direct registry
+transfers; calldata limits apply to the whole decoded input. No new CLI intent fields are trusted.
+
+Human edits use `native-cap <chain> <coin amount|none>`,
+`token-cap <chain> <token address> <integer base units|none>` and
+`calldata-cap <chain> <byte count|none>`. Reset removes all such limits with a warning.
+These are not cumulative budgets, general contract-argument constraints or L1 total-fee caps.
+Full acceptance and delivery status: [`06-review-hardening.md`](06-review-hardening.md).

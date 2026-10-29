@@ -1,0 +1,76 @@
+Measured 2026-10-29 on macOS arm64, Rust 1.95.0
+
+cargo fmt --check: PASS
+cargo clippy --all-targets --locked -- -D warnings: PASS
+cargo test --locked: exit 0
+test result: ok. 296 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.25s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 111 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 385.14s
+test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.15s
+test result: ok. 0 passed; 0 failed; 11 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.03s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.35s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.94s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.45s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+actionlint: PASS
+git diff --check: PASS
+loop-lint: PASS (checked after ledger close)
+
+505 passed; 11 live RPC tests intentionally ignored. No real wallet or broadcast.
+Linux and GitHub-hosted CI results must be read on the PR; not measured locally.
+
+R2 documentation rebase, measured 2026-10-29 on macOS arm64, Rust 1.95.0
+Base: upstream main 51b4a51b4fae511c726f7f1be0d009c0360fe264 (PR #30).
+Source/tests/Cargo/toolchain/workflows equal prior PR head 3c745ce; docs reconciled.
+
+cargo fmt --check: PASS
+cargo clippy --all-targets --locked -- -D warnings: PASS
+cargo test --locked: exit 0
+test result: ok. 296 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.44s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 111 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 213.57s
+test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.40s
+test result: ok. 0 passed; 0 failed; 11 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.84s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.76s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.31s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+actionlint: PASS
+Local documentation paths and heading anchors: 113 checked, 0 failures
+Built CLI help: native-cap, token-cap, calldata-cap all reachable with a clean environment
+505 passed; 11 live RPC tests intentionally ignored. No real wallet or broadcast.
+Linux and GitHub-hosted CI are separate; local results do not establish their outcome.
+
+R3 Linux CI lint repair, measured 2026-10-29
+Failure: https://github.com/2lab-ai/zwallet/actions/runs/40812668867/job/123246519143
+Ubuntu strict Clippy: unused std::io::Read import at protocol.rs:2174.
+Repair: move Read into its sole caller, a macOS ARM-only test function.
+
+Linux ARM container, Rust 1.95.0:
+cargo clippy --all-targets --locked -- -D warnings: PASS, exit 0
+No lint suppression. Source-only copy; no host credentials or wallet.
+
+macOS ARM, Rust 1.95.0:
+cargo fmt --check: PASS
+cargo clippy --all-targets --locked -- -D warnings: PASS
+cargo test --locked: PASS, exit 0
+test result: ok. 296 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.46s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 111 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 217.00s
+test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.19s
+test result: ok. 0 passed; 0 failed; 11 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.97s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.29s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.82s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.52s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Remote Linux/macOS CI for the new head is required before reporting completion.
+The PR body records that final run; these local results alone are not remote success.

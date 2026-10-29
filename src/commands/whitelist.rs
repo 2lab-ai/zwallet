@@ -68,6 +68,60 @@ pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
             }
             edit(home, Change::FeeCap { chain, wei }, &a.edit).await
         }
+        WhitelistCommand::NativeCap(a) => {
+            let chain = chains::find(&a.chain)?;
+            let cap = optional_amount(&a.amount, chain.decimals)?;
+            edit(
+                home,
+                Change::Limit {
+                    chain,
+                    limit: Limit::Native(cap),
+                },
+                &a.edit,
+            )
+            .await
+        }
+        WhitelistCommand::TokenCap(a) => {
+            let chain = chains::find(&a.chain)?;
+            let token = evm::parse_address(&a.token)?;
+            if evm::registry::lookup(evm::config(chain).chain_id, &token).is_none() {
+                return Err(WalletError::validation(
+                    "token-cap needs a registry token on this chain",
+                ));
+            }
+            let amount = optional_amount(&a.amount_raw, 0)?;
+            edit(
+                home,
+                Change::Limit {
+                    chain,
+                    limit: Limit::Token {
+                        token: format!("0x{}", hex::encode(token)),
+                        amount,
+                    },
+                },
+                &a.edit,
+            )
+            .await
+        }
+        WhitelistCommand::CalldataCap(a) => {
+            let chain = chains::find(&a.chain)?;
+            let cap = if a.bytes == "none" {
+                None
+            } else {
+                Some(a.bytes.parse::<u32>().map_err(|_| {
+                    WalletError::validation("calldata-cap expects a byte count (u32) or none")
+                })?)
+            };
+            edit(
+                home,
+                Change::Limit {
+                    chain,
+                    limit: Limit::Calldata(cap),
+                },
+                &a.edit,
+            )
+            .await
+        }
         WhitelistCommand::AllowMessageSigning(a) => {
             edit(
                 home,
@@ -77,6 +131,79 @@ pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
             .await
         }
         WhitelistCommand::Reset(a) => edit(home, Change::Reset, &a).await,
+    }
+}
+
+fn optional_amount(value: &str, decimals: u8) -> Result<Option<U256>> {
+    if value == "none" {
+        Ok(None)
+    } else {
+        parse_units(value, decimals).map(Some)
+    }
+}
+
+/// Limits are explicitly per transaction, not mutable spending budgets.
+enum Limit {
+    Native(Option<U256>),
+    Token { token: String, amount: Option<U256> },
+    Calldata(Option<u32>),
+}
+
+impl Limit {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Native(_) => "native-cap",
+            Self::Token { .. } => "token-cap",
+            Self::Calldata(_) => "calldata-cap",
+        }
+    }
+    fn target(&self) -> String {
+        match self {
+            Self::Native(_) => "native value (wei)".into(),
+            Self::Token { token, .. } => format!("token {token} (smallest base units)"),
+            Self::Calldata(_) => "calldata bytes (not an L1 fee cap)".into(),
+        }
+    }
+    fn value(&self) -> String {
+        match self {
+            Self::Native(n) | Self::Token { amount: n, .. } => n.map(|n| n.to_string()),
+            Self::Calldata(n) => n.map(|n| n.to_string()),
+        }
+        .unwrap_or_else(|| "none (unbounded)".into())
+    }
+    fn previous(&self, list: &Whitelist, chain: &str) -> String {
+        let old = list
+            .policy
+            .transaction_limits
+            .get(chain)
+            .and_then(|l| match self {
+                Self::Native(_) => l.max_native_wei.clone(),
+                Self::Token { token, .. } => l.max_token_base_units.get(token).cloned(),
+                Self::Calldata(_) => l.max_calldata_bytes.map(|n| n.to_string()),
+            });
+        old.unwrap_or_else(|| "none (unbounded)".into())
+    }
+    fn apply(&self, list: &mut Whitelist, chain: &str) {
+        let l = list
+            .policy
+            .transaction_limits
+            .entry(chain.into())
+            .or_default();
+        match self {
+            Self::Native(cap) => l.max_native_wei = cap.map(|n| n.to_string()),
+            Self::Calldata(cap) => l.max_calldata_bytes = *cap,
+            Self::Token { token, amount } => {
+                if let Some(amount) = amount {
+                    l.max_token_base_units
+                        .insert(token.clone(), amount.to_string());
+                } else {
+                    l.max_token_base_units.remove(token);
+                }
+            }
+        }
+        if l.is_empty() {
+            list.policy.transaction_limits.remove(chain);
+        }
     }
 }
 
@@ -109,6 +236,10 @@ enum Change {
         chain: &'static Chain,
         wei: U256,
     },
+    Limit {
+        chain: &'static Chain,
+        limit: Limit,
+    },
     MessageSigning(bool),
     /// A new key and an empty list ([`whitelist::reset`]).
     Reset,
@@ -120,6 +251,7 @@ impl Change {
             Self::Add(_) => "added",
             Self::Remove(_) => "removed",
             Self::FeeCap { .. } => "fee-cap",
+            Self::Limit { limit, .. } => limit.name(),
             Self::MessageSigning(_) => "allow-message-signing",
             Self::Reset => "reset",
         }
@@ -136,6 +268,10 @@ impl Change {
             }),
             Self::FeeCap { chain, wei } => {
                 list.policy.set_max_fee_wei(chain.key, *wei);
+                Ok(())
+            }
+            Self::Limit { chain, limit } => {
+                limit.apply(list, chain.key);
                 Ok(())
             }
             Self::MessageSigning(on) => {
@@ -432,6 +568,17 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
         }
         _ => String::new(),
     };
+    let limit_was = match change {
+        Change::Limit { chain, limit } => old_values(&current, &next, "none (unbounded)", |l| {
+            let value = limit.previous(l, chain.key);
+            if budget.take(value.len()) {
+                value
+            } else {
+                "not shown".into()
+            }
+        }),
+        _ => String::new(),
+    };
     let reset_caps = match change {
         Change::Reset => reset_cap_lines(&current, &next, &fresh, &budget),
         _ => Vec::new(),
@@ -472,6 +619,13 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
                 fee_text(chain, *wei)
             ));
         }
+        Change::Limit { chain, limit } => lines.push(format!(
+            "  {} {}: {}: {limit_was} -> {}; per transaction, not cumulative",
+            limit.name(),
+            chain.key,
+            limit.target(),
+            limit.value()
+        )),
         Change::MessageSigning(on) => {
             let old = old_values(&current, &next, on_off(false), |l| {
                 on_off(l.policy.allow_message_signing).to_string()
@@ -589,6 +743,9 @@ fn reset_lines(
     lines.push(format!(
         "  reset: a new whitelist key and an empty list; every entry is dropped: {dropped}"
     ));
+    // A corrupt list cannot reveal which limits the sealed policy used to have.
+    // Reset discards them regardless, so disclose this even when neither file parses.
+    lines.push("  all per-transaction native/token/calldata limits are removed; set them again before unlocking".into());
     lines.push("  fee caps after the reset, the built-in defaults:".to_string());
     lines.extend(caps);
     let signing_on: Vec<&str> = list_files(current, next)
@@ -762,9 +919,16 @@ fn headline(change: &Change) -> String {
         }
         Change::Remove(nickname) => format!("remove {nickname}"),
         Change::FeeCap { chain, wei } => format!("fee-cap {} {}", chain.key, fee_text(chain, *wei)),
+        Change::Limit { chain, limit } => format!(
+            "{} {} {} = {} per transaction",
+            limit.name(),
+            chain.key,
+            limit.target(),
+            limit.value()
+        ),
         Change::MessageSigning(on) => format!("allow-message-signing {}", on_off(*on)),
         Change::Reset => {
-            "reset: a new key, an empty list, every fee cap back to the default".to_string()
+            "reset: a new key, an empty list, every fee cap back to the default; all per-transaction native/token/calldata limits removed".to_string()
         }
     }
 }
@@ -1050,6 +1214,10 @@ fn edit_output(
                 "maxFee": format!("{} {}", format_units(*wei, chain.decimals), chain.symbol),
             });
         }
+        Change::Limit { chain, limit } => {
+            out["transactionLimit"] = json!({"chain": chain.key, "target": limit.target(), "value": limit.value(), "perTransaction": true});
+            out["policy"] = json!(list.policy);
+        }
         Change::MessageSigning(on) => out["allowMessageSigning"] = json!(on),
         Change::Reset => out["dropped"] = json!(nicknames(&base.list)),
     }
@@ -1105,6 +1273,13 @@ fn edit_text(out: &Value) -> String {
             "fee cap on {} set to {}",
             out["feeCap"]["chain"].as_str().unwrap_or("?"),
             out["feeCap"]["maxFee"].as_str().unwrap_or("?")
+        ),
+        "native-cap" | "token-cap" | "calldata-cap" => format!(
+            "{} on {}: {} = {}; per transaction, not cumulative",
+            s("change"),
+            out["transactionLimit"]["chain"].as_str().unwrap_or("?"),
+            out["transactionLimit"]["target"].as_str().unwrap_or("?"),
+            out["transactionLimit"]["value"].as_str().unwrap_or("?")
         ),
         "allow-message-signing" => format!(
             "message signing {}",
@@ -1549,6 +1724,28 @@ fn list_text(out: &Value, verify: bool) -> String {
                 "off"
             }
         ));
+    }
+    if let Some(limits) = out["policy"]["transactionLimits"].as_object() {
+        let mut shown = 0;
+        for (chain, limit) in limits.iter().take(ITEMS_SHOWN) {
+            let text = serde_json::to_string(limit).unwrap_or_default();
+            let text = crate::core::text::ascii_inert(
+                &format!("{chain}: {text}"),
+                crate::core::text::PROSE_MAX,
+            );
+            if bounded && used + text.len() > crate::core::text::PROSE_MAX {
+                break;
+            }
+            used += text.len();
+            shown += 1;
+            lines.push(format!(
+                "per-transaction limits (native=wei, token=base units): {text}"
+            ));
+        }
+        if shown < limits.len() {
+            lines.push("more transaction limits: see `whitelist list --json`".into());
+        }
+        lines.push("These are not cumulative budgets or L1 fee caps.".into());
     }
     if let Some(r) = out["reason"].as_str() {
         lines.push(format!("reason: {}", printable(r)));
@@ -2095,6 +2292,20 @@ mod tests {
         assert!(!text.contains("if whitelist.json is the list"), "{text}");
         assert!(text.contains("making gen 5"), "{text}");
         assert!(!text.contains("seals no whitelist yet"), "{text}");
+    }
+
+    #[test]
+    fn reset_warns_about_removed_limits_even_when_the_list_is_unreadable() {
+        let tmp = home_with(&[]);
+        std::fs::write(tmp.path().join(WHITELIST_FILE), "invalid JSON").unwrap();
+        let text = summary(&ListFiles::read(tmp.path()), &Change::Reset, None);
+        assert!(text.contains("all per-transaction native/token/calldata limits are removed"));
+        assert!(
+            text.lines()
+                .last()
+                .unwrap()
+                .contains("native/token/calldata limits removed")
+        );
     }
 
     #[test]
