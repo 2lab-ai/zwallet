@@ -1541,13 +1541,6 @@ fn read_all_along(
 /// `LeaveAlternateScreen`); `zwallet tui`'s guard writes it once, last.
 pub const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
 
-/// What a terminal shows after a full-screen program's output, as ratatui's crossterm backend
-/// writes it: `CSI row;col H` moves the cursor, `CSI 2J` and `CSI ?1049h` (the alternate screen)
-/// clear it, any other CSI (styles, the cursor's visibility, leaving the alternate screen) changes
-/// no cell; CR, LF (raw mode: no CR added) and BS move the cursor. Every other ESC and every
-/// other control character is kept in `stray`: none may come from a cell's content (03-tui.md
-/// §Display integrity rule 1). A sequence the bytes end inside (a lone ESC, or a CSI before its
-/// final byte) is `pending`, not stray: a read of a live terminal ends anywhere.
 /// The whitelist summary's caption, `Summary rows <start>-<end> of <total>`: (start, total).
 pub fn whitelist_summary_position(frame: &Frame) -> Option<(usize, usize)> {
     frame.rows.iter().find_map(|row| {
@@ -1580,6 +1573,13 @@ pub fn open_whitelist_password(tui: &mut PtyChild, limit: Duration) {
     });
 }
 
+/// What a terminal shows after a full-screen program's output, as ratatui's crossterm backend
+/// writes it: `CSI row;col H` moves the cursor, `CSI 2J` and `CSI ?1049h` (the alternate screen)
+/// clear it, any other CSI (styles, the cursor's visibility, leaving the alternate screen) changes
+/// no cell; CR, LF (raw mode: no CR added) and BS move the cursor. Every other ESC and every
+/// other control character is kept in `stray`: none may come from a cell's content (03-tui.md
+/// §Display integrity rule 1). A sequence the bytes end inside (a lone ESC, or a CSI before its
+/// final byte) is `pending`, not stray: a read of a live terminal ends anywhere.
 pub struct Frame {
     /// One string per row, every column (trailing spaces included).
     pub rows: Vec<String>,

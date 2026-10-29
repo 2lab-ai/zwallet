@@ -408,7 +408,6 @@ impl Form {
         })
     }
 }
-/// A whole bounded ASCII line is retained across rows rather than cut with an ellipsis.
 /// The list pane's rows (rule 4): one row per line of the list text, never wrapped, cut to the
 /// pane's width when drawn. The fee caps get one row per chain instead of one run-on line, and a
 /// chain's per-transaction limits one row per limit instead of one line of JSON.
@@ -459,6 +458,8 @@ fn limit_rows(line: &str) -> Option<Vec<String>> {
     Some(rows)
 }
 
+/// A whole bounded ASCII line is retained across rows rather than cut with an ellipsis: the
+/// change summary and an outcome, which may wrap (not the list pane, [`list_rows`]).
 pub fn lines(text: &str) -> Vec<Outside> {
     text.lines()
         .flat_map(|line| {
