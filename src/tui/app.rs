@@ -6,7 +6,8 @@ use crate::chains::{Chain, Net};
 use crate::core::error::{Result, WalletError};
 use crate::core::time::unix_secs;
 use crate::tui::text::Outside;
-use crate::wallet::{Keys, StatusView, Trust};
+use crate::wallet::{CheckedList, Keys, Opened, StatusView, Trust};
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 /// A key the human pressed, as the TUI reads it.
@@ -25,6 +26,12 @@ pub enum Key {
 #[derive(Debug)]
 pub enum Msg {
     Key(Key),
+    Prepared(Result<()>),
+    PasswordLength(usize, bool),
+    PasswordSubmitted,
+    PasswordCancelled,
+    Checked(Result<(Opened, std::result::Result<CheckedList, String>)>),
+    Address(u64, String, Result<(String, Trust)>),
     /// The terminal changed size; the next frame is drawn for the new one.
     Resize,
     /// The refresh timer (`tui::REFRESH`): read the lock state again.
@@ -51,6 +58,12 @@ pub enum Effect {
     LockAll,
     /// `wallet::set_active` for this key, then [`Msg::Activated`].
     SetActive(String),
+    PrepareUnlock,
+    CheckPassword {
+        key: String,
+        start_session: bool,
+    },
+    LoadAddress(u64, String),
 }
 
 /// A pane's data: being read, read, or the error that stopped it.
@@ -83,6 +96,7 @@ pub struct KeyList {
 /// What the status bar says about the active key's address (03-tui.md §Address trust).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrustLine {
+    Password,
     /// This build's key daemon of this home derived it ([`Trust::Session`]).
     Session,
     /// Locked: the cache.
@@ -97,6 +111,7 @@ pub enum TrustLine {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LockLine {
     Locked,
+    Unknown(Outside),
     /// Unlocked: the session's expiry, when a daemon of the home reported one.
     Open(Option<Outside>),
 }
@@ -111,6 +126,19 @@ pub struct Bar {
     pub lock: LockLine,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasswordState {
+    Idle,
+    Preparing,
+    /// Preparation failed: consume typeahead until Enter/Esc dismisses the error.
+    Failed,
+    Input {
+        characters: usize,
+        rejected: bool,
+    },
+    Checking,
+}
+
 pub struct App {
     chain: &'static Chain,
     rpc_host: Outside,
@@ -118,6 +146,12 @@ pub struct App {
     keys: Pane<KeyList>,
     status: Pane<Bar>,
     selected: usize,
+    open_key: Option<String>,
+    password: PasswordState,
+    pending_key: Option<String>,
+    pins: BTreeMap<String, String>,
+    checked_list: Option<CheckedList>,
+    list_reason: Option<Outside>,
     keys_pending: bool,
     status_pending: bool,
     /// The generation of reads the panes take ([`Effect::LoadKeys`], [`Effect::LoadStatus`]).
@@ -125,6 +159,7 @@ pub struct App {
     locking: bool,
     /// Only one confirmed metadata write may be running, so writes cannot finish backwards.
     activating: bool,
+    lock_after_check: bool,
     /// An error to show in place of the key hints until the next key.
     notice: Option<Outside>,
     /// `s` asks before the key becomes the globally active one: the next key says.
@@ -144,11 +179,18 @@ impl App {
             keys: Pane::Loading,
             status: Pane::Loading,
             selected: 0,
+            open_key: None,
+            password: PasswordState::Idle,
+            pending_key: None,
+            pins: BTreeMap::new(),
+            checked_list: None,
+            list_reason: None,
             keys_pending: false,
             status_pending: false,
             generation: 0,
             locking: false,
             activating: false,
+            lock_after_check: false,
             notice: None,
             confirm: None,
             quit: false,
@@ -171,24 +213,191 @@ impl App {
             }
             Msg::Resize => Vec::new(),
             Msg::Tick => self.load_status(),
+            Msg::Prepared(Ok(())) => {
+                self.password = PasswordState::Input {
+                    characters: 0,
+                    rejected: false,
+                };
+                Vec::new()
+            }
+            Msg::Prepared(Err(e)) => {
+                self.password = PasswordState::Failed;
+                self.pending_key = None;
+                self.fail_pane(e);
+                Vec::new()
+            }
+            Msg::PasswordLength(characters, rejected) => {
+                if matches!(self.password, PasswordState::Input { .. }) {
+                    self.password = PasswordState::Input {
+                        characters,
+                        rejected,
+                    };
+                }
+                Vec::new()
+            }
+            Msg::PasswordCancelled => {
+                self.password = PasswordState::Idle;
+                self.pending_key = None;
+                Vec::new()
+            }
+            Msg::PasswordSubmitted => {
+                if matches!(self.password, PasswordState::Input { .. })
+                    && let Some(key) = self.pending_key.clone()
+                {
+                    self.password = PasswordState::Checking;
+                    self.checked_list = None;
+                    return vec![Effect::CheckPassword {
+                        key,
+                        start_session: true,
+                    }];
+                }
+                Vec::new()
+            }
+            Msg::Checked(result) => {
+                self.password = PasswordState::Idle;
+                let key = self.pending_key.take();
+                // A later password check may read a replaced wallet or edited key index. The
+                // original derivations stay authoritative for this TUI's whole lifetime.
+                let result = result.and_then(|(opened, checked)| {
+                    for row in &opened.keys {
+                        if let Some(address) = &row.address {
+                            self.check_pin(&row.name, address)?;
+                        }
+                    }
+                    Ok((opened, checked))
+                });
+                let mut work = match result {
+                    Ok((opened, checked)) => {
+                        for k in opened.keys {
+                            if let Some(address) = k.address {
+                                self.pins.insert(k.name, address);
+                            }
+                        }
+                        self.open_key = key;
+                        match checked {
+                            Ok(list) => {
+                                self.checked_list = Some(list);
+                                self.list_reason = None;
+                            }
+                            Err(reason) => {
+                                self.checked_list = None;
+                                self.list_reason = Some(Outside::warning(&reason));
+                            }
+                        }
+                        self.reload()
+                    }
+                    Err(e) => {
+                        if self.quit {
+                            self.quit_error = Some(e.clone());
+                        }
+                        self.fail_pane(e);
+                        self.load_status()
+                    }
+                };
+                if std::mem::take(&mut self.lock_after_check) {
+                    work.push(Effect::LockAll);
+                }
+                work
+            }
+            Msg::Address(generation, _, _) if generation != self.generation => Vec::new(),
+            Msg::Address(_, key, result) => {
+                if self.open_key.as_ref() != Some(&key) {
+                    return Vec::new();
+                }
+                match result.and_then(|(address, trust)| {
+                    self.check_pin(&key, &address)?;
+                    Ok((address, trust))
+                }) {
+                    Ok((address, trust)) => {
+                        let pinned = self.pins.contains_key(&key);
+                        if let Pane::Ready(bar) = &mut self.status {
+                            bar.key = Some(Outside::key_name(&key));
+                            bar.address = Some(Outside::short_address(&address));
+                            bar.trust = Some(if matches!(&trust, Trust::Unverified(Some(_))) {
+                                trust_line(trust)
+                            } else if pinned {
+                                TrustLine::Password
+                            } else {
+                                trust_line(trust)
+                            });
+                        }
+                    }
+                    Err(e) => self.fail_pane(e),
+                }
+                Vec::new()
+            }
             Msg::Keys(generation, _) if generation != self.generation => Vec::new(),
             Msg::Keys(_, keys) => {
                 self.keys_pending = false;
-                self.keys = match keys {
-                    Ok(keys) => Pane::Ready(key_list(keys)),
-                    Err(e) => Pane::Failed(Outside::error(&e)),
-                };
+                let checked = keys.and_then(|keys| {
+                    keys.rows.iter().try_for_each(|k| {
+                        k.address
+                            .as_deref()
+                            .map_or(Ok(()), |a| self.check_pin(&k.name, a))
+                    })?;
+                    Ok(keys)
+                });
+                match checked {
+                    Ok(keys) => self.keys = Pane::Ready(key_list(keys)),
+                    Err(e) => self.fail_pane(e),
+                }
                 self.selected = self.selected.min(self.rows().saturating_sub(1));
                 Vec::new()
             }
             Msg::Status(generation, _) if generation != self.generation => Vec::new(),
             Msg::Status(_, status) => {
                 self.status_pending = false;
-                self.status = match status {
-                    Ok(status) => Pane::Ready(bar(status)),
-                    Err(e) => Pane::Failed(Outside::error(&e)),
-                };
-                Vec::new()
+                match status {
+                    Ok(status) => {
+                        let mismatch = match (&status.active, &status.address) {
+                            (Some(key), Some((Some(address), _))) => {
+                                self.check_pin(key, address).err()
+                            }
+                            _ => None,
+                        };
+                        let shown_key = self.open_key.clone().or_else(|| status.active.clone());
+                        let mut next = bar(status);
+                        if let Some(key) = shown_key {
+                            next.key = Some(Outside::key_name(&key));
+                            if let Some(address) = self.pins.get(&key) {
+                                next.address = Some(Outside::short_address(address));
+                                if !matches!(&next.trust, Some(TrustLine::Impostor(_))) {
+                                    next.trust = Some(TrustLine::Password);
+                                }
+                            } else if self.open_key.is_some() {
+                                next.address = None;
+                                next.trust = None;
+                            }
+                        }
+                        // Pinning an address never pins lock certainty: fresh process-table
+                        // evidence and expiry still replace the previous lock line on refusal.
+                        self.status = Pane::Ready(next);
+                        if let Some(e) = mismatch {
+                            self.fail_pane(e);
+                            return Vec::new();
+                        }
+                    }
+                    Err(e) => {
+                        let pinned = self
+                            .open_key
+                            .as_ref()
+                            .is_some_and(|key| self.pins.contains_key(key))
+                            || (self.open_key.is_none()
+                                && matches!(&self.status, Pane::Ready(bar)
+                                if bar.key.as_ref().is_some_and(|key| self.pins.contains_key(key.text()))));
+                        if pinned && let Pane::Ready(bar) = &mut self.status {
+                            bar.lock = LockLine::Unknown(Outside::error(&e));
+                        } else {
+                            self.status = Pane::Failed(Outside::error(&e));
+                        }
+                        self.fail_pane(e);
+                        return Vec::new();
+                    }
+                }
+                self.open_key
+                    .clone()
+                    .map(|key| vec![Effect::LoadAddress(self.generation, key)])
+                    .unwrap_or_default()
             }
             Msg::Locked(stopped) => {
                 self.locking = false;
@@ -211,11 +420,7 @@ impl App {
             // error stops the pane (wrapped there), never a line cut before its warning.
             Msg::Activated(Err(e)) => {
                 self.activating = false;
-                self.invalidate_reads();
-                self.keys = Pane::Failed(Outside::error(&e));
-                if self.quit {
-                    self.quit_error = Some(e);
-                }
+                self.fail_pane(e);
                 Vec::new()
             }
         }
@@ -223,6 +428,21 @@ impl App {
 
     /// The key list and the status read again in a new generation: a read started before (a
     /// lock, a new active key) is dropped when it lands.
+    fn invalidate_reads(&mut self) {
+        self.generation += 1;
+        self.status_pending = false;
+        self.keys_pending = false;
+    }
+
+    fn fail_pane(&mut self, error: WalletError) {
+        self.invalidate_reads();
+        self.checked_list = None;
+        self.keys = Pane::Failed(Outside::error(&error));
+        if self.quit {
+            self.quit_error = Some(error);
+        }
+    }
+
     fn reload(&mut self) -> Vec<Effect> {
         self.invalidate_reads();
         let mut work = self.load_status();
@@ -230,14 +450,22 @@ impl App {
         work
     }
 
-    fn invalidate_reads(&mut self) {
-        self.generation += 1;
-        self.status_pending = false;
-        self.keys_pending = false;
-    }
-
     fn key(&mut self, key: Key) -> Vec<Effect> {
         if self.quit {
+            return Vec::new();
+        }
+        if self.password != PasswordState::Idle {
+            if self.password == PasswordState::Checking && key == Key::Char('L') {
+                // Starting a daemon is already in progress. Stop it after that operation has
+                // finished, so an immediate stop cannot be undone by its later completion.
+                self.locking = true;
+                self.lock_after_check = true;
+            }
+            if key == Key::Interrupt
+                || key == Key::Char('q') && self.password == PasswordState::Checking
+            {
+                self.quit = true;
+            }
             return Vec::new();
         }
         // Any key but `y` says no; Ctrl-C says no and still quits.
@@ -266,6 +494,27 @@ impl App {
             Key::Char('L') if !self.locking => {
                 self.locking = true;
                 return vec![Effect::LockAll];
+            }
+            Key::Enter if !self.locking && !self.activating => {
+                if let Pane::Ready(list) = &self.keys
+                    && let Some(row) = list.rows.get(self.selected)
+                {
+                    let key = row.key.clone();
+                    if matches!(
+                        &self.status,
+                        Pane::Ready(Bar {
+                            lock: LockLine::Locked,
+                            ..
+                        })
+                    ) {
+                        self.invalidate_reads();
+                        self.pending_key = Some(key);
+                        self.password = PasswordState::Preparing;
+                        return vec![Effect::PrepareUnlock];
+                    }
+                    self.open_key = Some(key.clone());
+                    return vec![Effect::LoadAddress(self.generation, key)];
+                }
             }
             Key::Char('s') if !self.activating => {
                 if let Pane::Ready(list) = &self.keys {
@@ -302,12 +551,20 @@ impl App {
 
     /// `q` was pressed, and no confirmed mutation is running: quitting waits for its result.
     pub fn quitting(&self) -> bool {
-        self.quit && !self.locking && !self.activating
+        self.quit
+            && !self.locking
+            && !self.activating
+            && self.password != PasswordState::Checking
+            && self.password != PasswordState::Preparing
     }
 
     /// `q` waits for a confirmed mutation to finish ([`App::quitting`]).
     pub fn quit_pending(&self) -> bool {
-        self.quit && (self.locking || self.activating)
+        self.quit
+            && (self.locking
+                || self.activating
+                || self.password == PasswordState::Checking
+                || self.password == PasswordState::Preparing)
     }
 
     /// The error of a lock that failed while a quit waited for it.
@@ -319,6 +576,30 @@ impl App {
     /// [`Effect::LoadStatus`]).
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    fn check_pin(&self, key: &str, address: &str) -> Result<()> {
+        if let Some(pinned) = self.pins.get(key)
+            && !pinned.eq_ignore_ascii_case(address)
+        {
+            return Err(WalletError::validation(format!(
+                "the ethereum address for key '{key}' ({address}) does not match the address this TUI derived from the seed ({pinned}); the session or cache changed. Do not send funds to either address. `zwallet address --verify` checks the cache from the seed"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn password_state(&self) -> PasswordState {
+        self.password
+    }
+    pub fn pinned(&self, key: &str) -> bool {
+        self.pins.contains_key(key)
+    }
+    pub fn checked_list(&self) -> Option<&CheckedList> {
+        self.checked_list.as_ref()
+    }
+    pub fn open_key(&self) -> Option<&str> {
+        self.open_key.as_deref()
     }
 
     pub fn chain(&self) -> &'static Chain {
@@ -398,12 +679,7 @@ fn bar(status: StatusView) -> Bar {
     let (address, trust) = match status.address {
         Some((address, trust)) => (
             address.as_deref().map(Outside::short_address),
-            Some(match trust {
-                Trust::Session => TrustLine::Session,
-                Trust::Locked => TrustLine::Locked,
-                Trust::Unverified(None) => TrustLine::NotVerified,
-                Trust::Unverified(Some(w)) => TrustLine::Impostor(Outside::warning(&w)),
-            }),
+            Some(trust_line(trust)),
         ),
         None => (None, None),
     };
@@ -413,5 +689,14 @@ fn bar(status: StatusView) -> Bar {
         address,
         trust,
         lock,
+    }
+}
+
+fn trust_line(trust: Trust) -> TrustLine {
+    match trust {
+        Trust::Session => TrustLine::Session,
+        Trust::Locked => TrustLine::Locked,
+        Trust::Unverified(None) => TrustLine::NotVerified,
+        Trust::Unverified(Some(w)) => TrustLine::Impostor(Outside::warning(&w)),
     }
 }

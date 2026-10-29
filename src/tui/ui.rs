@@ -3,7 +3,7 @@
 //! pane is wrapped there, 03-tui.md §Display integrity rule 4); the chrome is ASCII; every style
 //! is one of `style`'s. [`draw`] returns where it put each outside value, for the tests.
 
-use crate::tui::app::{App, Bar, KeyList, LockLine, Pane, TrustLine};
+use crate::tui::app::{App, Bar, KeyList, LockLine, Pane, PasswordState, TrustLine};
 use crate::tui::style::{ERROR, HINT, NORMAL, SELECTED, TITLE, WARNING};
 use crate::tui::text::{Outside, Source};
 use ratatui::Frame;
@@ -101,22 +101,32 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         .text("keys", NORMAL)
         .draw(frame, title, &mut placed);
     keys_pane(frame, pane, app, &mut placed);
-    match (app.notice(), app.confirming()) {
-        (Some(error), _) => Row::default().outside(error, ERROR),
-        // The name gives way to the question, down to 8 (5 characters and `...`).
-        (None, Some(key)) => {
-            let room = usize::from(hint.width).saturating_sub(5 + MAKE_ACTIVE.len());
-            Row::default()
-                .text("make ", WARNING)
-                .outside(&key.name.cut(room.max(8)), WARNING)
-                .text(MAKE_ACTIVE, WARNING)
+    if matches!(app.password_state(), PasswordState::Input { .. }) {
+        Row::default()
+            .text("Enter unlock and check   Esc cancel   Ctrl-C quit", HINT)
+            .draw(frame, hint, &mut placed);
+    } else if app.password_state() == PasswordState::Failed {
+        Row::default()
+            .text("Enter/Esc dismiss   Ctrl-C quit", HINT)
+            .draw(frame, hint, &mut placed);
+    } else {
+        match (app.notice(), app.confirming()) {
+            (Some(error), _) => Row::default().outside(error, ERROR),
+            // The name gives way to the question, down to 8 (5 characters and `...`).
+            (None, Some(key)) => {
+                let room = usize::from(hint.width).saturating_sub(5 + MAKE_ACTIVE.len());
+                Row::default()
+                    .text("make ", WARNING)
+                    .outside(&key.name.cut(room.max(8)), WARNING)
+                    .text(MAKE_ACTIVE, WARNING)
+            }
+            (None, None) => Row::default().text(
+                "Enter open   j/k move   s make active   r refresh   L lock all   q quit",
+                HINT,
+            ),
         }
-        (None, None) => Row::default().text(
-            "j/k move   s make active   r refresh   L lock every zwallet daemon   q quit",
-            HINT,
-        ),
+        .draw(frame, hint, &mut placed);
     }
-    .draw(frame, hint, &mut placed);
     status_bar(frame, [bar1, bar2], app, &mut placed);
     placed
 }
@@ -136,6 +146,45 @@ fn keys_pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>)
         .title(" keys (* = active) ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    match app.password_state() {
+        PasswordState::Preparing => {
+            Row::default()
+                .text("preparing...", HINT)
+                .draw(frame, line(inner, 0), placed);
+            return;
+        }
+        PasswordState::Checking => {
+            Row::default()
+                .text("checking...", HINT)
+                .draw(frame, line(inner, 0), placed);
+            return;
+        }
+        PasswordState::Input {
+            characters,
+            rejected,
+        } => {
+            Row::default()
+                .text("Wallet password:", TITLE)
+                .draw(frame, line(inner, 0), placed);
+            // The complete mask can span the pane; it never contains any input byte.
+            let mask = "*".repeat(characters);
+            for (y, chunk) in mask.as_bytes().chunks(usize::from(inner.width)).enumerate() {
+                if y + 2 >= usize::from(inner.height) {
+                    break;
+                }
+                Row::default()
+                    .text(std::str::from_utf8(chunk).expect("ASCII mask"), NORMAL)
+                    .draw(frame, line(inner, 1 + y as u16), placed);
+            }
+            if rejected {
+                Row::default()
+                    .text("input refused: empty, too long, newline or NUL", ERROR)
+                    .draw(frame, line(inner, inner.height.saturating_sub(1)), placed);
+            }
+            return;
+        }
+        PasswordState::Idle | PasswordState::Failed => {}
+    }
     match app.keys() {
         Pane::Loading => {
             Row::default()
@@ -156,6 +205,12 @@ fn keys_pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>)
 /// a key the bar shows verified by session: then it names the other keys and what checks them,
 /// and with no other key it says nothing.
 fn key_note(app: &App, list: &KeyList) -> Option<&'static str> {
+    if list.rows.iter().all(|k| app.pinned(&k.key)) {
+        return None;
+    }
+    if list.rows.iter().any(|k| app.pinned(&k.key)) {
+        return Some("not verified: other keys; `zwallet list --verify` checks them");
+    }
     match app.status() {
         Pane::Ready(bar) if bar.trust == Some(TrustLine::Session) => {
             let verified = bar.key.as_ref().map(Outside::text);
@@ -295,6 +350,7 @@ fn key_line(row: Row, chain: &str, bar: &Bar, width: usize) -> Row {
         return row.text("no wallet in this home", HINT);
     }
     let (words, style, warning) = match &bar.trust {
+        Some(TrustLine::Password) => ("verified by password", NORMAL, None),
         Some(TrustLine::Session) => ("verified by session", NORMAL, None),
         Some(TrustLine::NotVerified) if cfg!(target_os = "linux") => {
             ("not verified (no session check on Linux)", HINT, None)
@@ -354,13 +410,23 @@ fn lock_line(app: &App, bar: &Bar) -> Row {
         return Row::default().text(text, HINT);
     }
     if app.quit_pending() {
-        return Row::default().text("locking... (quits when done)", HINT);
+        return Row::default().text(
+            if app.locking() {
+                "locking... (quits when done)"
+            } else {
+                "checking... (quits when done)"
+            },
+            HINT,
+        );
     }
     if app.locking() {
         return Row::default().text("locking every zwallet daemon...", HINT);
     }
     match &bar.lock {
         LockLine::Locked => Row::default().text("locked", NORMAL),
+        LockLine::Unknown(error) => Row::default()
+            .text("status unknown: ", ERROR)
+            .outside(&error.cut(27), ERROR),
         LockLine::Open(Some(until)) => Row::default()
             .text("signing (agent too) until ", WARNING)
             .outside(&until.cut(BAR_EXPIRY), WARNING),

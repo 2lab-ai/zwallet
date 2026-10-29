@@ -251,8 +251,8 @@ trust state, 03-tui.md §Address trust) lands in TUI-2a, its rule 4 in TUI-2b.
 | PR | Branch | Scope | Closes | State |
 |---|---|---|---|---|
 | TUI-2a | `feat/tui-2-warmup` | the six entry points; `unlock`, `change`, `list --verify`, `whitelist list --verify` on them; the `open_with_password`/`check_list` unit test; `s` and its confirmation, the T2b pty run; a refused `s` stops the pane (counter-example); A1 in the TUI and `list` | T2b | in review, 2026-10-28 |
-| TUI-2b | | the password field (`src/tui/password.rs`), the warm-up, the password check in `spawn_blocking`; `zwallet tui --allow-ptrace-scope-0` (without Yama a session start refuses, as in the Docker gate); the T2 pty run, both `Msg` tests, the exact-order and password-in-a-frame counter-examples; A1 rule 4 | T2 | planned, about 800 |
-| TUI-2c | | pinned addresses checked on later reads, the open key's address and trust in the bar (`wallet::address`); the pinning and 600 `▀▄` counter-examples | none | planned, about 200 |
+| TUI-2b | `handoff/tui-unlock` | the password field (`src/tui/password.rs`), the warm-up, the password check in `spawn_blocking`; `zwallet tui --allow-ptrace-scope-0` (without Yama a session start refuses, as in the Docker gate); the T2 pty run, both `Msg` tests, the exact-order and password-in-a-frame counter-examples; A1 rule 4 | T2 | implemented 2026-10-29; integration/review pending |
+| TUI-2c | `handoff/tui-unlock` | pinned addresses checked on later reads, the open key's address and trust in the bar (`wallet::address`); the pinning and 600 `▀▄` counter-examples | none | implemented 2026-10-29; integration/review pending |
 
 ## TUI-3 — navigation, balances, every network, chain switch
 

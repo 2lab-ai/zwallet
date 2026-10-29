@@ -81,10 +81,12 @@ pub enum Command {
     /// The terminal UI for a human: the keys and the lock state (more screens follow). Needs a
     /// terminal; `q` quits.
     Tui {
-        /// How long a warm-up unlocks signing for: 30m, 1h, 24h (units s m h d w y). Warm-up is
-        /// not in this version yet; the value is checked.
+        /// How long a warm-up unlocks signing for: 30m, 1h, 24h (units s m h d w y).
         #[arg(long, value_name = "DURATION", default_value = "1h")]
         warm: String,
+        /// Accept Linux ptrace_scope 0 when starting a session (weakens same-user isolation).
+        #[arg(long)]
+        allow_ptrace_scope_0: bool,
         /// The chain the TUI shows (its RPC endpoint in the status bar).
         #[arg(long, default_value = "ethereum")]
         chain: String,

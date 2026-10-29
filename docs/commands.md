@@ -51,11 +51,16 @@ Commands that act on a key take `--key <name>` (default: the active key).
 - **Durations** are positional: an integer and one unit of `s m h d w y` (`1y` = 365d). `0`,
   negatives, fractions and unknown units are `VALIDATION_ERROR`.
 - **`tui`** (needs stdin on a terminal, the one it sets to raw mode, and stdout on one): the
-  key list with the globally active key marked `*`, and a two-line status bar: chain, active
+  key list with the globally active key marked `*`, and a two-line status bar: chain, open
   key, its short address and how far it is verified; then `locked` or `signing (agent too) until
   HH:MMZ` (UTC; `YYYY-MM-DD HH:MMZ` when a day or more away), and the RPC host. The lock state is
   read again every 5 s, so a `zwallet lock` from another shell shows. Keys: `j`/`k` or the
-  arrows move, `s` asks, then `y` makes the selected key the globally active one, the one the
+  arrows move. Enter opens a key without changing the global active key; while locked it asks
+  for the password, starts a signing session (`--warm 1h` by default), then checks the open and
+  active key's addresses and the signed list in the TUI. The password is masked, never echoed;
+  Esc cancels it. `--allow-ptrace-scope-0` accepts Linux scope 0 at session start, as for `unlock`.
+  Addresses checked with the password stay pinned until the TUI exits; a later conflicting
+  daemon or cache answer stops the pane, preserving the pinned address in the bar. `s` asks, then `y` makes the selected key the globally active one, the one the
   agent uses by default (as `zwallet change`: a key whose cached address the daemon's answer
   contradicts is refused, the error in the pane), `r` reads everything again, `L` locks every
   zwallet daemon of this user (as `zwallet lock`), `q` or Ctrl-C quits (after a running `L` is
@@ -64,7 +69,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
   as `list` does. It needs 80x24 and says so on one line when the terminal is smaller. Text from
   wallet.json, the daemon socket and the environment is escaped and bounded as in the CLI, every
   cell goes through one filter that lets only printable ASCII and `₮` through, and no QR code is
-  drawn. This version shows the keys and the lock state and makes a key active; the warm-up (`--warm`, checked but not used yet), home, transfer and whitelist screens are
+  drawn. Home, transfer and whitelist screens remain
   ![WIP](https://img.shields.io/badge/status-WIP-yellow). See [feature status](features.md#planned-features).
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then

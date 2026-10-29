@@ -66,7 +66,11 @@ pub async fn run(cli: Cli) -> Result<Out> {
         Command::Unlock(a) => unlock(&home()?, a).await,
         Command::Lock => lock(),
         Command::Whitelist(w) => whitelist::run(&home()?, w).await,
-        Command::Tui { warm, chain } => tui(&home()?, &warm, &chain, json).await,
+        Command::Tui {
+            warm,
+            chain,
+            allow_ptrace_scope_0,
+        } => tui(&home()?, &warm, &chain, json, allow_ptrace_scope_0).await,
         Command::Daemon { home } => {
             daemon::run(home).await?;
             Ok(Out::silent())
@@ -89,7 +93,13 @@ pub(crate) fn net(chain: &'static Chain, flag: Option<&str>) -> Net {
 /// `zwallet tui`: the arguments are checked first, then the terminal ([`crate::tui::run`]).
 /// Its error (the terminal, or a lock that failed while `q` waited for it) is printed as every
 /// command's is, after the terminal is given back; a clean quit prints nothing.
-async fn tui(home: &Path, warm: &str, chain: &str, json: bool) -> Result<Out> {
+async fn tui(
+    home: &Path,
+    warm: &str,
+    chain: &str,
+    json: bool,
+    allow_ptrace_scope_0: bool,
+) -> Result<Out> {
     let chain = chains::find(chain)?;
     let warm = parse_duration(warm)?;
     if json {
@@ -97,7 +107,13 @@ async fn tui(home: &Path, warm: &str, chain: &str, json: bool) -> Result<Out> {
             "zwallet tui is interactive: --json does not apply",
         ));
     }
-    crate::tui::run(home.to_path_buf(), wallet::net(chain), warm).await?;
+    crate::tui::run(
+        home.to_path_buf(),
+        wallet::net(chain),
+        warm,
+        allow_ptrace_scope_0,
+    )
+    .await?;
     Ok(Out::silent())
 }
 

@@ -1317,3 +1317,378 @@ fn while_s_asks_any_key_but_y_says_no_and_ctrl_c_still_quits() {
         assert_eq!(app.quitting(), quits, "{key:?}");
     }
 }
+
+#[test]
+fn enter_on_a_locked_key_starts_warmup_without_changing_global_active() {
+    let mut app = locked_ab();
+    let work = app.update(Msg::Key(Key::Enter));
+    assert!(
+        !work.is_empty(),
+        "Enter must start the staged warm-up for a"
+    );
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    assert!(rows.iter().any(|r| r.contains("preparing...")));
+}
+
+#[test]
+fn password_check_is_one_message_and_pinned_addresses_survive_a_later_impostor() {
+    use zwallet::tui::app::PasswordState;
+    let mut app = locked_ab();
+    assert_eq!(
+        app.update(Msg::Key(Key::Enter)),
+        vec![Effect::PrepareUnlock]
+    );
+    assert_eq!(app.password_state(), PasswordState::Preparing);
+    app.update(Msg::Prepared(Ok(())));
+    for n in 1..=17 {
+        let msg = Msg::PasswordLength(n, false);
+        assert!(!format!("{msg:?}").contains("pw-XYZ"));
+        app.update(msg);
+        let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+        assert_eq!(
+            rows.iter().map(|r| r.matches('*').count()).sum::<usize>(),
+            n + 1
+        );
+        assert!(!rows.iter().any(|r| r.contains("pw-XYZ")));
+    }
+    assert_eq!(
+        app.update(Msg::PasswordSubmitted),
+        vec![Effect::CheckPassword {
+            key: "a".into(),
+            start_session: true
+        }]
+    );
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    assert!(rows.iter().any(|r| r.contains("checking...")));
+    // Resize/tick draw while the worker owns the password; no secret is in the state.
+    app.update(Msg::Resize);
+    let opened = wallet::Opened {
+        keys: keys_ab().rows,
+        active: "b".into(),
+        warning: None,
+        anchor: Ok(None),
+        salted: false,
+    };
+    app.update(Msg::Checked(Ok((opened, Err("no list".into())))));
+    app.update(Msg::Status(app.generation(), Ok(open_status(now() + 3600))));
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    assert!(
+        rows[22].contains("a 0x7099...79C8 | verified by password"),
+        "{rows:#?}"
+    );
+    assert!(!rows.iter().any(|r| r.contains("not verified:")));
+    app.update(Msg::Address(
+        app.generation(),
+        "a".into(),
+        Ok((B.into(), Trust::Unverified(None))),
+    ));
+    let (rows, placed) = checked_frame(&mut screen(80, 24), &app);
+    assert!(placed.iter().any(
+        |p| p.outside.source() == Source::Error && p.outside.text().contains("does not match")
+    ));
+    assert!(rows[22].contains("0x7099...79C8 | verified by password"));
+}
+
+#[test]
+fn failed_password_check_never_pins_or_checks_a_list_and_quit_waits_for_it() {
+    let mut app = locked_ab();
+    app.update(Msg::Key(Key::Enter));
+    app.update(Msg::Prepared(Ok(())));
+    app.update(Msg::PasswordSubmitted);
+    app.update(Msg::Key(Key::Char('q')));
+    assert!(!app.quitting());
+    app.update(Msg::Checked(Err(WalletError::validation(
+        "cache changed; run zwallet address --verify",
+    ))));
+    assert!(app.quitting());
+    assert!(!app.pinned("a") && app.checked_list().is_none());
+    let (_, placed) = checked_frame(&mut screen(80, 24), &app);
+    assert!(
+        placed
+            .iter()
+            .any(|p| p.outside.text().contains("address --verify"))
+    );
+}
+
+#[test]
+fn t2_warmup_on_a_pty_accepts_typeahead_and_paste_without_echo_or_active_change() {
+    let home = Home::new();
+    let password = "pw-XYZ-0123456789";
+    for name in ["a", "b"] {
+        home.run_stdin(
+            &["create", name, "--password-stdin", "--json"],
+            &format!("{password}\n"),
+        )
+        .ok();
+    }
+    let mut tui =
+        PtyChild::spawn_full_screen(home.command(&["tui", "--allow-ptrace-scope-0"]), PTY_SIZE);
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("* b ")) && bar(f).1.starts_with("locked | ")
+    });
+    // Typeahead in the same write as Enter must already belong to the secret buffer.
+    tui.send(b"\rpw-XYZ-");
+    tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains("*******")));
+    tui.send(b"\x1b[200~0123456789\x1b[201~");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("*****************"))
+    });
+    let before = now();
+    tui.send(b"\r");
+    let warmed = tui.wait_frame(PTY_WAIT, |f| {
+        bar(f).0.contains("a ")
+            && bar(f).0.contains("verified by password")
+            && bar(f).1.starts_with("signing (agent too) until ")
+    });
+    let status = home.run(&["status", "--json"]).ok();
+    let expiry = parse_rfc3339_utc(status["expiresAt"].as_str().unwrap()).unwrap();
+    assert!((before + 3590..=now() + 3610).contains(&expiry));
+    let shown = Outside::expiry(status["expiresAt"].as_str().unwrap(), now());
+    assert!(bar(&warmed).1.contains(shown.cut(17).text()));
+    assert_eq!(home.run(&["list", "--json"]).ok()["active"], "b");
+    let frame = quit(&mut tui);
+    let output = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(
+        !output.contains(password) && !output.contains("pw-XYZ"),
+        "secret leaked"
+    );
+    assert!(bar(&frame).0.contains("verified by password"));
+}
+
+#[test]
+fn a_cache_changed_after_unlock_fails_the_password_check_but_keeps_the_session() {
+    let home = Home::new();
+    home.create("a", &[]);
+    home.create("b", &[]);
+    home.run_stdin(
+        &[
+            "unlock",
+            "1h",
+            "--allow-ptrace-scope-0",
+            "--password-stdin",
+            "--json",
+        ],
+        &format!("{PW}\n"),
+    )
+    .ok();
+    // Exact stage order: unlock succeeded; metadata changes before the local password check.
+    home.edit_wallet(|v| v["keys"][0]["addresses"]["ethereum"] = serde_json::json!(B));
+    let mut app = locked_ab();
+    app.update(Msg::Key(Key::Enter));
+    app.update(Msg::Prepared(Ok(())));
+    app.update(Msg::PasswordSubmitted);
+    let opened = wallet::open_with_password(home.path(), PW, Some(&["a", "b"]));
+    let e = opened.unwrap_err();
+    assert_eq!(e.code, ErrorCode::ValidationError);
+    assert!(e.message.contains("zwallet address --verify"));
+    app.update(Msg::Checked(Err(e)));
+    assert!(app.checked_list().is_none() && !app.pinned("a"));
+    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], false);
+    let (_, placed) = checked_frame(&mut screen(80, 24), &app);
+    assert!(
+        placed
+            .iter()
+            .any(|p| p.outside.text().contains("zwallet address --verify"))
+    );
+}
+
+#[test]
+fn an_invalid_socket_address_never_replaces_a_password_pinned_address() {
+    let home = Home::new();
+    home.create("a", &[]);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let reply = serde_json::json!({"v": 2, "ok": true, "result": {"address": "▀▄".repeat(600)}})
+        .to_string();
+    let fake = common::daemon_argv_impostor(&home, dir.path(), &[("ATTACKER_REPLY", &reply)]);
+    let mut app = locked_ab();
+    app.update(Msg::Key(Key::Enter));
+    app.update(Msg::Prepared(Ok(())));
+    app.update(Msg::PasswordSubmitted);
+    app.update(Msg::Checked(Ok((
+        wallet::Opened {
+            keys: keys_ab().rows,
+            active: "b".into(),
+            warning: None,
+            anchor: Ok(None),
+            salted: false,
+        },
+        Err("no list".into()),
+    ))));
+    app.update(Msg::Status(app.generation(), Ok(open_status(now() + 3600))));
+    let result = block_on(wallet::address(
+        home.path(),
+        "a",
+        chains::find("ethereum").unwrap(),
+    ));
+    assert!(
+        result
+            .as_ref()
+            .unwrap_err()
+            .message
+            .contains("not an address")
+    );
+    app.update(Msg::Address(app.generation(), "a".into(), result));
+    let (rows, placed) = checked_frame(&mut screen(80, 24), &app);
+    assert!(rows[22].contains("0x7099...79C8 | verified by password"));
+    assert!(
+        placed
+            .iter()
+            .any(|p| p.outside.source() == Source::Error && p.outside.text().contains("\\u{2580}"))
+    );
+    drop(fake);
+}
+
+#[test]
+fn lock_during_password_check_runs_after_it_so_warmup_cannot_undo_the_lock() {
+    let mut app = locked_ab();
+    app.update(Msg::Key(Key::Enter));
+    app.update(Msg::Prepared(Ok(())));
+    app.update(Msg::PasswordSubmitted);
+    assert!(app.update(Msg::Key(Key::Char('L'))).is_empty());
+    assert!(app.locking());
+    app.update(Msg::Key(Key::Char('q')));
+    assert!(!app.quitting());
+    let work = app.update(Msg::Checked(Err(WalletError::validation("check failed"))));
+    assert!(work.contains(&Effect::LockAll));
+    assert!(!app.quitting());
+    app.update(Msg::Locked(Ok(vec![])));
+    assert!(app.quitting());
+}
+
+#[test]
+fn failed_preparation_dismisses_typeahead_without_opening_a_password_or_signing_task() {
+    use zwallet::tui::app::PasswordState;
+    let mut app = locked_ab();
+    app.update(Msg::Key(Key::Enter));
+    app.update(Msg::Prepared(Err(WalletError::validation(
+        "session start refused",
+    ))));
+    assert_eq!(app.password_state(), PasswordState::Failed);
+    assert!(app.update(Msg::PasswordSubmitted).is_empty());
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    assert!(rows.iter().any(|r| r.contains("session start refused")));
+    assert!(rows.iter().any(|r| r.contains("Enter/Esc dismiss")));
+    app.update(Msg::PasswordCancelled);
+    assert_eq!(app.password_state(), PasswordState::Idle);
+}
+
+fn pinned_app_with_checked_list() -> App {
+    use zwallet::chains::evm::registry::WHITELIST_RULES;
+    use zwallet::core::whitelist::Whitelist;
+    let directory = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let checked = wallet::CheckedList {
+        list: Whitelist::empty(&WHITELIST_RULES),
+        source: "whitelist.json",
+        fingerprint: ListFiles::read(directory.path()).fingerprint(),
+    };
+    let mut app = locked_ab();
+    app.update(Msg::Key(Key::Enter));
+    app.update(Msg::Prepared(Ok(())));
+    app.update(Msg::PasswordSubmitted);
+    app.update(Msg::Checked(Ok((
+        wallet::Opened {
+            keys: keys_ab().rows,
+            active: "b".into(),
+            warning: None,
+            anchor: Ok(None),
+            salted: false,
+        },
+        Ok(checked),
+    ))));
+    app.update(Msg::Status(app.generation(), Ok(locked_status())));
+    app
+}
+
+#[test]
+fn a_second_password_check_cannot_replace_a_lifetime_pin_or_partially_insert_new_pins() {
+    let mut app = pinned_app_with_checked_list();
+    let mut opened = wallet::Opened {
+        keys: keys_ab().rows,
+        active: "b".into(),
+        warning: None,
+        anchor: Ok(None),
+        salted: false,
+    };
+    opened.keys.insert(
+        0,
+        KeyRow {
+            name: "c".into(),
+            index: 2,
+            address: Some(B.into()),
+            active: false,
+        },
+    );
+    opened.keys[1].address = Some(B.into());
+    app.update(Msg::Checked(Ok((opened, Err("no list".into())))));
+    assert!(
+        !app.pinned("c"),
+        "validation must finish before inserting any pin"
+    );
+    assert!(app.checked_list().is_none());
+    let (rows, placed) = checked_frame(&mut screen(80, 24), &app);
+    assert!(
+        placed
+            .iter()
+            .any(|p| p.outside.text().contains("does not match"))
+    );
+    assert!(rows[22].contains("0x7099...79C8"));
+}
+
+#[test]
+fn bad_keys_drop_the_checked_list_and_invalidate_older_status_and_address_reads() {
+    for malformed in [false, true] {
+        let mut app = pinned_app_with_checked_list();
+        let old = app.generation();
+        assert!(app.checked_list().is_some());
+        let mut keys = keys_ab();
+        keys.rows[0].address = Some(B.into());
+        let result = if malformed {
+            Err(WalletError::validation("keys could not be read"))
+        } else {
+            Ok(keys)
+        };
+        app.update(Msg::Keys(old, result));
+        assert!(
+            app.checked_list().is_none(),
+            "a failed key pane cannot retain an actionable checked list"
+        );
+        assert_ne!(old, app.generation());
+        app.update(Msg::Status(old, Ok(open_status(now() + 3600))));
+        app.update(Msg::Address(
+            old,
+            "a".into(),
+            Ok((B.into(), Trust::Session)),
+        ));
+        let (rows, placed) = checked_frame(&mut screen(80, 24), &app);
+        assert!(placed.iter().any(|p| p.outside.source() == Source::Error));
+        assert!(rows[22].contains("0x7099...79C8"));
+        assert!(rows[23].starts_with("locked | "));
+    }
+}
+
+#[test]
+fn an_address_refusal_preserves_the_pin_but_never_stale_lock_certainty() {
+    let mut app = pinned_app_with_checked_list();
+    let mut changed = open_status(now() + 3600);
+    changed.address = Some((Some(A.into()), Trust::Unverified(None)));
+    app.update(Msg::Status(app.generation(), Ok(changed)));
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    assert!(rows[22].contains("0x7099...79C8"));
+    assert!(
+        rows[23].starts_with("signing (agent too) until "),
+        "{rows:#?}"
+    );
+    app.update(Msg::Status(
+        app.generation(),
+        Err(WalletError::validation("status read failed")),
+    ));
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    assert!(rows[22].contains("0x7099...79C8"));
+    assert!(rows[23].starts_with("status unknown: "), "{rows:#?}");
+}

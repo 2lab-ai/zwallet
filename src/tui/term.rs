@@ -4,6 +4,7 @@
 
 use crate::core::terminal::terminal_ok;
 use crossterm::cursor::{Hide, Show};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::{Backend, ClearType, WindowSize};
@@ -212,13 +213,13 @@ fn arm_deadline() {
 /// raw mode (which a terminal that never entered it ignores). Errors are ignored: there is no
 /// better place left to report them. The guard's path; the panic hook has its own ([`on_panic`]).
 fn restore(out: &mut impl Write) {
-    let _ = execute!(out, LeaveAlternateScreen, Show);
+    let _ = execute!(out, DisableBracketedPaste, LeaveAlternateScreen, Show);
     let _ = crossterm::terminal::disable_raw_mode();
 }
 
 /// What crossterm writes for `LeaveAlternateScreen` and `Show`, for the panic hook to write
 /// without crossterm.
-const RESTORE_SCREEN: &[u8] = b"\x1b[?1049l\x1b[?25h";
+const RESTORE_SCREEN: &[u8] = b"\x1b[?2004l\x1b[?1049l\x1b[?25h";
 
 /// The terminal [`Guard::enter`] puts in raw mode: stdin, as crossterm picks it when stdin is a
 /// terminal (which `enter` requires).
@@ -461,7 +462,7 @@ impl<W: Write> Guard<W> {
     /// that fails the guard drops here, and gives the terminal back.
     fn begin(out: W) -> std::io::Result<Self> {
         let mut guard = Self { out };
-        execute!(guard.out, EnterAlternateScreen, Hide)?;
+        execute!(guard.out, EnterAlternateScreen, Hide, EnableBracketedPaste)?;
         Ok(guard)
     }
 }
