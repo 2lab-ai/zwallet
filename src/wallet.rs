@@ -2,6 +2,12 @@
 //! values out. Nothing here reads `/dev/tty` or prints; the CLI command that used the code calls
 //! the function here and prints what it returns, and the TUI draws it.
 
+pub mod read;
+pub use read::{
+    AddressRow, Addresses, ChainBalances, EveryBalance, NetworkBalance, addresses, balance,
+    balances, brief, every_balance, every_balance_with, net_with, validate_rpc,
+};
+
 use crate::chains::evm::registry::WHITELIST_RULES;
 use crate::chains::{self, Chain, Net, PRIMARY_CHAIN};
 pub use crate::commands::Trust;
@@ -270,8 +276,16 @@ pub struct Opened {
 /// `zwallet address --verify`); the addresses of `keys` (every key with `None`) derived from it;
 /// the sealed whitelist anchor. Reads no list file. The seed is dropped before it returns.
 pub fn open_with_password(home: &Path, password: &str, keys: Option<&[&str]>) -> Result<Opened> {
-    let primary = chains::find(PRIMARY_CHAIN)?;
     let (unsealed, file) = store::unlock(home, password, &chains::derive_addresses)?;
+    opened_from(&unsealed, &file, keys)
+}
+
+fn opened_from(
+    unsealed: &store::Unsealed,
+    file: &WalletFile,
+    keys: Option<&[&str]>,
+) -> Result<Opened> {
+    let primary = chains::find(PRIMARY_CHAIN)?;
     let named = match keys {
         Some(names) => names
             .iter()
@@ -289,7 +303,6 @@ pub fn open_with_password(home: &Path, password: &str, keys: Option<&[&str]>) ->
         });
     }
     let sealed = unsealed.sealed_whitelist();
-    drop(unsealed);
     let salted = matches!(&sealed, Ok(Some(s)) if s.salt().is_ok());
     // The anchor as the daemon reads it; for one zwallet 0.1.0 sealed, the cause with what a
     // human can do about it.
@@ -303,12 +316,76 @@ pub fn open_with_password(home: &Path, password: &str, keys: Option<&[&str]>) ->
             .transpose()
     });
     Ok(Opened {
-        warning: index_warning(&file, &named),
+        warning: index_warning(file, &named),
         keys: rows,
         active: file.active.clone(),
         anchor,
         salted,
     })
+}
+
+/// One address derived locally while the password is held. Never built from metadata or RPC.
+#[derive(Clone, Debug)]
+pub struct VerifiedAddress {
+    pub key: String,
+    pub chain: &'static str,
+    pub family: &'static str,
+    pub address: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PasswordCheck {
+    pub opened: Opened,
+    pub addresses: Vec<VerifiedAddress>,
+    pub repairs: Vec<store::CacheRepair>,
+}
+
+fn password_checked(
+    unsealed: &store::Unsealed,
+    file: &WalletFile,
+    keys: Option<&[&str]>,
+) -> Result<PasswordCheck> {
+    let opened = opened_from(unsealed, file, keys)?;
+    let mut addresses = Vec::new();
+    for row in &opened.keys {
+        let key = file.key(Some(&row.name))?;
+        for chain in chains::CHAINS {
+            addresses.push(VerifiedAddress {
+                key: row.name.clone(),
+                chain: chain.key,
+                family: chain.family.name(),
+                address: derive_checked(&unsealed.seed, key, chain)?,
+            });
+        }
+    }
+    Ok(PasswordCheck {
+        opened,
+        addresses,
+        repairs: Vec::new(),
+    })
+}
+
+/// Check selected keys (plus callers' chosen active key) on every chain family in one KDF run.
+/// The seed and salt are dropped here and never enter a TUI message.
+pub fn check_password(home: &Path, password: &str, keys: Option<&[&str]>) -> Result<PasswordCheck> {
+    let (unsealed, file) = store::unlock(home, password, &chains::derive_addresses)?;
+    password_checked(&unsealed, &file, keys)
+}
+
+pub struct Repaired {
+    pub checked: PasswordCheck,
+    /// Public metadata, used only to preserve the CLI's index-warning behavior.
+    pub file: WalletFile,
+}
+
+/// The shared address-repair path. It changes only the address cache and retains the sealed
+/// policy. Every returned address is derived from the password-opened seed.
+pub fn repair(home: &Path, password: &str) -> Result<Repaired> {
+    let (unsealed, file, repairs) =
+        store::unlock_repairing(home, password, &chains::derive_addresses)?;
+    let mut checked = password_checked(&unsealed, &file, None)?;
+    checked.repairs = repairs;
+    Ok(Repaired { checked, file })
 }
 
 /// The whitelist the password check verified ([`check_list`]).

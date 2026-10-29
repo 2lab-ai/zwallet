@@ -42,7 +42,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `whitelist calldata-cap <chain> <byte count\|none> [--unlock <dur>]` | a change + `{ transactionLimit: { chain, target, value, perTransaction: true }, policy }` | asks for the password |
 | `whitelist allow-message-signing on\|off [--unlock <dur>]` | a change + `{ allowMessageSigning }` | asks for the password |
 | `whitelist reset [--unlock <dur>]` | a change + `{ dropped }` | asks for the password |
-| `tui [--chain <key>] [--warm <dur>]` | none: a terminal UI for a human (`--json` is refused) | works |
+| `tui [--chain <key>] [--warm <dur>] [--allow-ptrace-scope-0]` | none: a terminal UI for a human (`--json` is refused) | works |
 
 ## Key management and terminal UI
 
@@ -64,13 +64,28 @@ Commands that act on a key take `--key <name>` (default: the active key).
   agent uses by default (as `zwallet change`: a key whose cached address the daemon's answer
   contradicts is refused, the error in the pane), `r` reads everything again, `L` locks every
   zwallet daemon of this user (as `zwallet lock`), `q` or Ctrl-C quits (after a running `L` is
-  done; a stop that failed is printed once the terminal is given back). The note under the list
+  done; activation and password checks finish too; a failed operation is printed once the terminal is given back). The note under the list
   never asks to verify the key the bar shows verified by session; it then flags the other keys,
   as `list` does. It needs 80x24 and says so on one line when the terminal is smaller. Text from
   wallet.json, the daemon socket and the environment is escaped and bounded as in the CLI, every
   cell goes through one filter that lets only printable ASCII and `₮` through, and no QR code is
-  drawn. Home, transfer and whitelist screens remain
-  ![WIP](https://img.shields.io/badge/status-WIP-yellow). See [feature status](features.md#planned-features).
+  drawn. Tabs `1`–`7` and `[`/`]` navigate; `?` or `:` opens the 55-action menu. Typing in
+  a field or menu keeps `q`, `?` and digits as input; Esc closes it. Actions belonging to later
+  work are listed with their disabled reason.
+
+  `2 wallet` shows non-zero native/registry-token balances; `a` reads every network, keeping
+  partial failures, and Esc returns to one network. `c` chooses a chain; `e` in the picker
+  enters an RPC URL for this process only. It is accepted only after a chain-id check; the
+  field hides credentials, path/query and key-like host labels. No endpoint is saved to disk.
+  `4 receive` shows the full address, its trust and every network address. `Q` points to
+  `zwallet address` for a terminal QR code. `V` verifies all keys from the seed on `1 keys`,
+  and the open plus active key elsewhere, without changing a signing session. `A` on `1 keys`
+  repairs cached addresses and shows old/new values. `u` asks for a duration and then the wallet
+  password before starting that signing session. `7 session` shows the home, expiry, daemon
+  pids, and the daemon's reported whitelist generation/count as information only. The startup
+  ptrace flag cannot be changed by any TUI key. History, transfer, whitelist forms and tools
+  remain ![WIP](https://img.shields.io/badge/status-WIP-yellow).
+  See [feature status](features.md#planned-features).
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
   reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's

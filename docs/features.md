@@ -3,9 +3,8 @@
 [Back to README](../README.md) · [Command reference](commands.md) · [Development](development.md)
 
 This page is for people deciding whether zwallet fits their workflow and contributors
-checking what still needs to be built. Reviewed on 2026-10-29 against main `99fff4e`
-with the TUI foundation and warm-up handoff changes.
-“Implemented” means a reachable code path exists in this source revision; it
+checking what still needs to be built. Reviewed against the handoff implementation on
+2026-10-29. “Implemented” means a reachable code path exists in this tree; it
 does not mean every published binary includes it or every public RPC is reachable.
 
 ![WIP](https://img.shields.io/badge/status-WIP-yellow) marks planned or incomplete behavior that you cannot use yet. A CLI
@@ -27,13 +26,13 @@ implementation does not make the corresponding TUI workflow implemented.
 | Message signing | EIP-191 `sign-message`, only when explicitly allowed by the whitelist. | [CLI](../src/cli.rs), [daemon](../src/daemon/mod.rs), [policy tests](../tests/whitelist_daemon.rs) |
 | Send recovery | Journal, one-send lock, pending/recent-duplicate guards, fixed-nonce replacement and hash lookup. Duplicate matching is not calldata-aware. | [send guards and journal](../src/chains/mod.rs), [CLI tests](../tests/cli.rs) |
 | CLI integration | JSON results/errors, terminal address QR codes only for verified addresses. TUI rejects `--json`; backup remains human-only. | [CLI](../src/cli.rs), [QR](../src/qr.rs), [CLI tests](../tests/cli.rs) |
-| Terminal UI and warm-up | Key list, active marker, status refresh, lock-all and quit; explicit activation with `s` then `y`; Enter starts the configured timed session through a masked password field. Password-verified addresses stay pinned for this TUI session. Opening a key does not change the global active key. | [state and tests](../src/tui/app.rs), [event loop](../src/tui/mod.rs), [terminal tests](../tests/tui.rs) |
+| Terminal navigation and reads | Seven tabs, a 55-action menu, one/all-network balances, session RPC selection, full receive addresses, password verification and cache repair, timed unlock and session details. Future actions stay explicitly disabled. Selecting/opening a key does not change the globally active key. | [state and tests](../src/tui/app.rs), [event loop](../src/tui/mod.rs), [terminal tests](../tests/tui.rs) |
 
 ## Planned features
 
 | Feature | Status | Evidence and current boundary |
 |---|---|---|
-| Full TUI workflows | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [TUI design](../.prd/03-tui.md), [mockups](../.prd/03-tui-screens.md), [work units](../.prd/v0-2-tui/units.md). Current effects load keys/status, make a key active, lock all and warm up a selected key with a masked password. Password-verified addresses are pinned for the TUI session. Tabs/actions, balances/history, receive, transfers, whitelist forms, key creation, contract calls and message signing remain WIP. |
+| Full TUI workflows | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [TUI design](../.prd/03-tui.md), [mockups](../.prd/03-tui-screens.md), [work units](../.prd/v0-2-tui/units.md). Navigation, balances, receive, verification, repair and session controls have reachable handlers. Password-verified family addresses stay pinned for the TUI lifetime. History, transfers, whitelist forms, key creation, contract calls and message signing remain WIP. The TUI-3+4 receipt records the still-pending process acceptance gates. |
 | Tron (TRX / TRC20 USDT) | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [v0.3 design](../.prd/05-tron.md). No Tron family, registry entry, address derivation, RPC path or signer exists in `src/chains`. `--chain tron` is unsupported. |
 | Solana and TON | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [Architecture extension plans](../.prd/02-architecture.md). No family implementation or chain entry. |
 | Cumulative spending budgets (rolling 24-hour native and per-token) | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [Deferred whitelist work](../.prd/04-whitelist.md#not-in-v01-stays-planned). Per-transaction limits do not track total spending; repeated transfers can still spend the full balance ([#26](https://github.com/2lab-ai/zwallet/issues/26)). |

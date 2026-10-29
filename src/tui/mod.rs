@@ -4,7 +4,9 @@
 //! runtime and posts its result back; every frame is drawn ([`ui`]) through the one write point
 //! ([`term::FilteredBackend`]).
 
+pub mod actions;
 pub mod app;
+pub mod form;
 pub mod password;
 pub mod style;
 pub mod term;
@@ -15,7 +17,7 @@ use crate::chains::Net;
 use crate::core::error::{Result, WalletError};
 use crate::core::protocol;
 use crate::wallet;
-use app::{App, Effect, Key, Msg, PasswordState};
+use app::{App, Effect, Key, Msg, PasswordState, UserText};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use password::PasswordBuf;
 use ratatui::Terminal;
@@ -55,6 +57,7 @@ pub async fn run(
     // per write: no `StdoutLock` is ever held across an `.await`.
     let _guard = Guard::enter(std::io::stdout()).map_err(terminal_error)?;
     let mut app = App::new(&net, warm);
+    app.configure(&home, allow_ptrace_scope_0);
     let mut terminal = Terminal::new(FilteredBackend::new(CrosstermBackend::new(
         std::io::stdout(),
     )))
@@ -81,6 +84,8 @@ pub async fn run(
                 allow_ptrace_scope_0,
                 &plan,
                 &secret,
+                app.net().clone(),
+                app.nets(),
             );
         }
         if let Err(e) = terminal.draw(|f| {
@@ -111,6 +116,7 @@ pub async fn run(
         input_waiting |= matches!(
             &msg,
             Msg::Key(_)
+                | Msg::Paste(_)
                 | Msg::Resize
                 | Msg::PasswordLength(..)
                 | Msg::PasswordSubmitted
@@ -128,6 +134,7 @@ pub async fn run(
 }
 
 /// Starts `effect` as a task that posts its result on `tx`.
+#[allow(clippy::too_many_arguments)]
 fn start(
     effect: Effect,
     home: &Path,
@@ -136,57 +143,70 @@ fn start(
     allow_ptrace_scope_0: bool,
     plan: &Arc<Mutex<Option<wallet::UnlockPlan>>>,
     secret: &Arc<Mutex<Option<PasswordBuf>>>,
+    net: Net,
+    nets: Vec<Net>,
 ) {
     let (home, tx) = (home.to_path_buf(), tx.clone());
+    let effect = match effect {
+        Effect::PrepareUnlock => Effect::PrepareDuration(warm),
+        other => other,
+    };
     match effect {
-        Effect::PrepareUnlock => {
+        Effect::PrepareDuration(ttl) => {
             let plan = plan.clone();
             tokio::task::spawn_blocking(move || {
                 let result =
-                    wallet::prepare_unlock(&home, warm, allow_ptrace_scope_0).map(|prepared| {
+                    wallet::prepare_unlock(&home, ttl, allow_ptrace_scope_0).map(|prepared| {
                         *plan.lock().expect("unlock plan lock") = Some(prepared);
                     });
                 let _ = tx.send(Msg::Prepared(result));
             });
         }
-        Effect::CheckPassword { key, start_session } => {
-            let plan = plan.lock().expect("unlock plan lock").take();
-            let secret = secret.lock().expect("secret handoff lock").take();
-            tokio::spawn(async move {
-                let result = async {
-                    let secret = secret.ok_or_else(|| WalletError::validation("password input missing"))?;
-                    let session = if start_session {
-                        let plan = plan.ok_or_else(|| WalletError::validation("unlock preparation missing"))?;
-                        Some(wallet::unlock(&plan, secret.as_str()).await?)
-                    } else { None };
-                    tokio::task::spawn_blocking(move || {
-                        let file = crate::core::store::read_wallet_file(&home)?;
-                        let mut names = vec![key.as_str()];
-                        if file.active != key { names.push(&file.active); }
-                        let opened = wallet::open_with_password(&home, secret.as_str(), Some(&names))?;
-                        drop(secret);
-                        if !opened.keys.iter().any(|k| k.name == opened.active) {
-                            return Err(WalletError::validation("active key changed during the password check; check again"));
-                        }
-                        if let Some(session) = session {
-                            let name = session.ready["active"].as_str();
-                            let address = session.ready["address"].as_str();
-                            if !opened.keys.iter().any(|k| Some(k.name.as_str()) == name && k.address.as_deref() == address) {
-                                return Err(WalletError::validation("session readiness does not match the address derived from the seed; do not send funds; run zwallet address --verify"));
-                            }
-                        }
-                        let list = wallet::check_list(&home, &opened.anchor);
-                        Ok((opened, list))
-                    }).await.map_err(|_| WalletError::validation("password check stopped"))?
-                }.await;
-                let _ = tx.send(Msg::Checked(result));
+        Effect::PrepareRead => {
+            tokio::task::spawn_blocking(move || {
+                let result = crate::core::store::read_wallet_file(&home).map(|_| ());
+                let _ = tx.send(Msg::Prepared(result));
             });
         }
+        Effect::CheckPassword { key, start_session } => {
+            start_check(home, tx, key, start_session, false, false, plan, secret);
+        }
+        Effect::CheckReadPassword { key, all, repair } => {
+            start_check(home, tx, key, false, all, repair, plan, secret);
+        }
+        Effect::LoadBalances(generation, key) => {
+            tokio::spawn(async move {
+                let result = wallet::balances(&home, &key, net).await;
+                let _ = tx.send(Msg::Balances(generation, key, result));
+            });
+        }
+        Effect::LoadEveryBalances(generation, key) => {
+            tokio::spawn(async move {
+                let result = wallet::every_balance_with(&home, &key, nets).await;
+                let _ = tx.send(Msg::EveryBalances(generation, key, result));
+            });
+        }
+        Effect::LoadAddresses(generation, key) => {
+            tokio::spawn(async move {
+                let result = wallet::addresses(&home, &key).await;
+                let _ = tx.send(Msg::Addresses(generation, key, result));
+            });
+        }
+        Effect::CheckRpc(request, choice) => {
+            tokio::spawn(async move {
+                let result = async {
+                    let chain = crate::chains::find(choice.chain)?;
+                    wallet::validate_rpc(&wallet::net_with(chain, &choice.url)).await?;
+                    Ok(choice)
+                }
+                .await;
+                let _ = tx.send(Msg::RpcChecked(request, result));
+            });
+        }
+        Effect::PrepareUnlock => unreachable!("warm duration was resolved"),
         Effect::LoadAddress(generation, key) => {
             tokio::spawn(async move {
-                let primary =
-                    crate::chains::find(crate::chains::PRIMARY_CHAIN).expect("primary chain");
-                let result = wallet::address(&home, &key, primary).await;
+                let result = wallet::address(&home, &key, net.chain).await;
                 let _ = tx.send(Msg::Address(generation, key, result));
             });
         }
@@ -211,6 +231,55 @@ fn start(
             });
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_check(
+    home: PathBuf,
+    tx: UnboundedSender<Msg>,
+    key: String,
+    start_session: bool,
+    all: bool,
+    repair: bool,
+    plan: &Arc<Mutex<Option<wallet::UnlockPlan>>>,
+    secret: &Arc<Mutex<Option<PasswordBuf>>>,
+) {
+    let plan = plan.lock().expect("unlock plan lock").take();
+    let secret = secret.lock().expect("secret handoff lock").take();
+    tokio::spawn(async move {
+        let result = async {
+            let secret = secret.ok_or_else(|| WalletError::validation("password input missing"))?;
+            let session = if start_session {
+                let plan = plan.ok_or_else(|| WalletError::validation("unlock preparation missing"))?;
+                Some(wallet::unlock(&plan, secret.as_str()).await?)
+            } else { None };
+            tokio::task::spawn_blocking(move || {
+                let file = crate::core::store::read_wallet_file(&home)?;
+                let key = if key.is_empty() { &file.active } else { &key };
+                let mut names = vec![key.as_str()];
+                if file.active != *key { names.push(&file.active); }
+                let checked = if repair {
+                    wallet::repair(&home, secret.as_str())?.checked
+                } else {
+                    wallet::check_password(&home, secret.as_str(), if all { None } else { Some(&names) })?
+                };
+                drop(secret);
+                if !checked.opened.keys.iter().any(|k| k.name == checked.opened.active) {
+                    return Err(WalletError::validation("active key changed during the password check; check again"));
+                }
+                if let Some(session) = session {
+                    let name = session.ready["active"].as_str();
+                    let address = session.ready["address"].as_str();
+                    if !checked.opened.keys.iter().any(|k| Some(k.name.as_str()) == name && k.address.as_deref() == address) {
+                        return Err(WalletError::validation("session readiness does not match the address derived from the seed; do not send funds; run zwallet address --verify"));
+                    }
+                }
+                let list = wallet::check_list(&home, &checked.opened.anchor);
+                Ok((checked, list))
+            }).await.map_err(|_| WalletError::validation("password check stopped"))?
+        }.await;
+        let _ = tx.send(Msg::Verified(result));
+    });
 }
 
 /// The input thread: terminal events as [`Msg`]s on `tx`, until `stop`. If the terminal can no
@@ -291,20 +360,21 @@ fn read_input(
                         _ => None,
                     },
                 },
-                Ok(Some(Event::Paste(mut text))) => {
-                    let accepted = if matches!(mode, InputMode::Password) {
-                        password.paste(&mut text)
-                    } else {
+                Ok(Some(Event::Paste(mut text))) => match mode {
+                    InputMode::Normal => Some(Msg::Paste(UserText(zeroize::Zeroizing::new(text)))),
+                    InputMode::Discard => {
                         use zeroize::Zeroize;
                         text.zeroize();
-                        true
-                    };
-                    if !accepted {
-                        password = PasswordBuf::default();
+                        None
                     }
-                    matches!(mode, InputMode::Password)
-                        .then(|| Msg::PasswordLength(password.characters(), !accepted))
-                }
+                    InputMode::Password => {
+                        let accepted = password.paste(&mut text);
+                        if !accepted {
+                            password = PasswordBuf::default();
+                        }
+                        Some(Msg::PasswordLength(password.characters(), !accepted))
+                    }
+                },
                 Ok(Some(Event::Resize(..))) => Some(Msg::Resize),
                 Ok(_) => None,
                 Err(_) => {
@@ -335,6 +405,14 @@ fn key(k: KeyEvent) -> Option<Key> {
         KeyCode::Char(c) => Key::Char(c),
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
         _ => return None,

@@ -2,9 +2,9 @@
 
 ![WIP](https://img.shields.io/badge/status-WIP-yellow)
 
-Partial implementation: the key list, status bar, refresh and lock-all are available. The full workflows below are a design, not the current UI. See [feature status](../docs/features.md).
+Partial implementation: navigation/actions, balances, receive, verification/repair, warm-up and timed unlock, the session pane, refresh and lock-all have reachable handlers. The full workflows below are a design, not the current UI. See [feature status](../docs/features.md).
 
-Status: **planned** (v0.2), revised 2026-10-20 after two spec reviews, revised 2026-10-27 against
+Status: **in-progress** (v0.2), revised 2026-10-20 after two spec reviews, revised 2026-10-27 against
 PRs #6–#12 (`origin/main` c7d3f13) and after review rounds 1 and 2 the same day, on 2026-10-28
 for TUI-1b (§Changes on 2026-10-28), and the same day, against `origin/main` 24f4b5b, to cover
 every CLI function (§Changes on 2026-10-28, v2: the coverage matrix, the re-decided non-goals,
@@ -108,9 +108,9 @@ Every CLI command and every user-meaningful flag (README.md §Commands, src/cli.
 24f4b5b), and the Tron functions the owner asked for on 2026-10-28. "Screen" is the tab (§Screens
 and keys). Mockups: [`03-tui-screens.md`](03-tui-screens.md).
 
-**Alias.** Each of rows 1–52 is one row of the action menu, and the Alias column is that row's
+**Alias.** Each of rows 1–52 and 60–62 is one row of the action menu, and the Alias column is that row's
 alias token, spelled exactly as here (two menu rows may share a token: rows 3 and 4, rows 33 and
-35). So the menu has exactly 52 rows, and T12 compares the menu's alias tokens with this column,
+35). So the menu has exactly 55 rows, and T12 compares the menu's alias tokens with this column,
 row for row. Rows 53–59 have no menu row. A **start flag** or **env var** in the Key(s) column is
 read when `zwallet tui` starts; each such row also names its path inside the TUI, except row 8,
 which stays a start flag for the security reason written in it (review round 2).
@@ -176,6 +176,9 @@ which stays a start flag for the security reason written in it (review round 2).
 | 57 | `--json`, `--password-stdin`, `--no-qr` | (none) | none | none | **not applicable**: the TUI is the human's surface (`tui --json` is refused, [README.md:85](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L85)), it has its own password field (§Password handling), and it draws a QR only on `Q` | none | none |
 | 58 | `daemon` (hidden) | (none) | none | none | **not applicable**: `unlock` starts it | none | none |
 | 59 | `sign-message` with a message longer than 512 characters, or with a character outside printable ASCII (a multi-line SIWE message) | (none) | none | none | **CLI-only, security**: the review must show the whole message the key signs, in rule 4's message block (512 characters in 7 rows of 76 at 80x24); a newline or a non-ASCII character would show as a `\u{…}` escape the human cannot read back as the bytes signed. Row 36 covers every other message | T36 (refused at the field) | TUI-11 (the refusal) |
+| 60 | `whitelist native-cap` | `whitelist native-cap` | 5 whitelist | action menu | chain, per-transaction native amount ceiling or `none`, summary, password, outcome; the chain's units are explicit | T45 | TUI-6 |
+| 61 | `whitelist token-cap` | `whitelist token-cap` | 5 whitelist | action menu | chain, registry token, per-transaction amount ceiling in integer base units or `none`, summary, password, outcome; token decimals and units are explicit | T46 | TUI-6 |
+| 62 | `whitelist calldata-cap` | `whitelist calldata-cap` | 5 whitelist | action menu | chain, per-transaction calldata byte ceiling or `none`, summary, password, outcome | T47 | TUI-6 |
 
 **TUI functions with no CLI command** (from [`v0-2-tui/ssot.md`](v0-2-tui/ssot.md), 2026-10-20):
 the history of the last 10 transactions (T3, T3b), the transaction detail with its fee,
@@ -189,11 +192,12 @@ and the TUI's address fields (rule 3) gain that alphabet. Inputs, outputs and er
 49–52 come from 05-tron.md; the screens are the EVM ones with Tron's values. T38–T41 stay
 conditional on it.
 
-**Count.** 59 rows:
+**Count.** 62 rows; rows 60–62 preserve the earlier row IDs and add the signed limits merged in PR #29:
 
 | Kind | Rows | How many |
 |---|---|---|
 | Reachable in the TUI, EVM | 1–48 except 8, 11 and 14 | 45 |
+| Signed transaction limits, reachable with TUI-6 | 60–62 | 3 |
 | A start flag only, with a security reason (no key in the TUI) | 8 | 1 |
 | CLI pointer until the owner picks (B1, Q1 are built; B2, Q3 are not) | 11, 14 | 2 |
 | Tron, reachable once 05-tron.md and its library land | 49–52 | 4 |
@@ -298,7 +302,7 @@ zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
    text equals an alias exactly, the menu shows only the rows with that alias (so `whitelist add`
    leaves one row, not `whitelist add --contract` too); otherwise every row whose words or alias
    contain it, exact matches first. The menu has
-   exactly one row per §Coverage matrix row 1–52 (its title says `actions (52)`); the navigation
+   exactly one row per §Coverage matrix row 1–52 and 60–62 (its title says `actions (55)`); the navigation
    keys (tabs, `[` `]`, `j`/`k`, `r`, Esc, `q`) are listed on its last lines, with
    `zwallet --version`'s line, and are not counted as actions. It is the help screen: there is no
    other.
@@ -433,6 +437,7 @@ environment, and what the human types.
 | what the human types | input fields | each field takes only its own alphabet at the key event: an amount `0-9` and one `.`; a nickname `a-z 0-9 _ -`, at most 32 (`validate_nickname`, core/whitelist.rs:455); an address `0x` then `0-9 a-f A-F`, at most 42; a duration `0-9` and one of `s m h d w y`; the password any byte, shown only as `*`. Any other key changes nothing and nothing else is echoed. Added 2026-10-28: a key name as `create` takes it (`validate_key_name`, core/store.rs:176); a tx hash `0x` and 64 hex digits; a selector `0x` and 8 hex digits; calldata `0x` and hex digits, at most 4096; a function signature and its arguments printable ASCII, at most 256 and 512; a message to sign printable ASCII, at most 512 (a paste holding anything else is refused whole, §Coverage matrix row 59); a word count one of `12 15 18 21 24`; a bump factor `0-9` and one `.`; a Tron address per 05-tron.md; an RPC URL printable ASCII, at most 512, drawn as its scheme and host as typed and every character after them as `*` (a path or query may hold an API key, [README.md:694-700](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L694-L700)), and once taken only as the RPC host row below draws it |
 | `call`'s result | 6 tools | the CLI's `render_human` of the decoded result and the returned bytes as hex cut to 512 (commands.rs:1424-1435); drawn as a result view, rule 4 |
 | a token's own `symbol()` and `decimals()` | 6 tools, token | escaped, the symbol at most 32 (`erc20_meta`, chains/evm/rpc.rs:209; [README.md:212-213](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L212-L213)) |
+| assembled read-only pane text | balances, receive, session and repair rows | printable ASCII, at most 72 per line; fields are checked/redacted before assembly; no wrapping or input-selected style |
 | the home path (`ZWALLET_HOME` or `HOME`) | 7 session | escaped, at most 64, cut with `...` |
 | `status`'s pids | 7 session | numbers only; at most 8 of another home's pids, then how many more |
 | `address --verify`'s `repaired` list | 1 keys after `A` | key names as above; `was` escaped at most 64, `now` derived from the seed ([README.md:119-123](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L119-L123)) |
@@ -890,6 +895,16 @@ list; an edit drops the review; confirm sends exactly those bytes (`message_hex`
 address (`verify_message`, chains/evm/mod.rs:193), as `sign-message` does
 (commands.rs:1792-1818).
 
+### Input authority while editing an RPC URL
+
+An incomplete authority such as `https://user:password` can become userinfo when the next
+character is `@`. The input field therefore masks the whole unfinished authority until `/`,
+`?` or `#` ends it. Once it is complete, the display uses the same parsed, redacted origin as
+other RPC output: userinfo is omitted, key-like host labels are redacted, and every suffix
+character is `*`. Incomplete or malformed input never falls back to its raw text. This narrows
+"host as typed" in T42 to a completed authority and closes the typeahead disclosure case.
+The submitted endpoint still goes through normal URL and chain-id validation.
+
 ## Password handling
 
 - The terminal is already in raw mode, so there is no echo, before the field takes input.
@@ -959,7 +974,7 @@ address (`verify_message`, chains/evm/mod.rs:193), as `sign-message` does
   the merge `history::merge`.
 - Added 2026-10-28: `src/tui/actions.rs` holds the action table: one row per §Coverage matrix
   row 1–52, with its key, its words, its alias token (the matrix's Alias column), its tab and when
-  it can run. The menu, the hint lines and T12 read that one table. The entry points of the new functions are named per unit in
+  it can run. The menu, the hint lines and T12 read that one table. The three signed-limit rows 60–62 follow rows 1–52 in this table; CLI-only rows 53–59 have no menu entries. The entry points of the new functions are named per unit in
   [`v0-2-tui/units.md`](v0-2-tui/units.md) (`wallet::balances` for every network, `wallet::create`,
   `wallet::repair`, `wallet::call`, `wallet::review_invoke`, `wallet::sign_message`,
   `wallet::token_balance`, a replacement in `wallet::review_transfer` with
@@ -997,7 +1012,7 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T9 | 80×24 resize; 79×24; `q`; forced panic | layout fits at 80×24; one `terminal too small` line at 79×24; the terminal is restored after both |
 | T10 | `zwallet lock` from another shell | the TUI shows `locked` within two refreshes (10 s) |
 | T11 | pty test across T2 and T7 | no echo; the password appears in no captured frame; cancel mid-entry, then a retry, works |
-| T12 | `?`; type `whitelist add`; Enter | the menu's title says `actions (52)` and it has exactly 52 rows, whose alias tokens equal §Coverage matrix's Alias column for rows 1–52, row for row (the test holds that column as a list: a matrix row without a menu row fails, and the other way); the filter leaves one row (key `a`, tab 5), and Enter opens the add form; a row that cannot run now shows its reason (`needs: …`, `in a later version`, `start flag`), and Enter on it starts no `Effect` |
+| T12 | `?`; type `whitelist add`; Enter | the menu's title says `actions (55)` and it has exactly 55 rows, whose alias tokens equal §Coverage matrix's Alias column for rows 1–52 then 60–62, row for row (the test holds that column as a list: a matrix row without a menu row fails, and the other way); the filter leaves one row (key `a`, tab 5), and Enter opens the add form; a row that cannot run now shows its reason (`needs: …`, `in a later version`, `start flag`), and Enter on it starts no `Effect` |
 | T13 | from the start: `1` … `7`, `[`, `]`, Esc in a popup and in a sub-screen; each frame the TUI-3+4 PR draws, at 80x24 | each tab reached; the hint rule of §Screens and keys holds (a frame whose focus is not a text field, a menu or a popup ends its hint line with `? actions`; one whose focus is shows no `? actions`); Esc closes the popup, then returns to the tab; each of those frames fits 80x24 (`TestBackend`); a tab whose screens a later unit brings says `in a later version`. Each later unit runs the same size and hint checks on the frames it adds (units.md §Every unit) |
 | T14 | 7 session, `u`, `10m`, the password | the bar says `signing (agent too) until` ≈ now+10m; `zwallet status --json` has the same `expiresAt` |
 | T15 | 2 wallet, `a`, with all 8 `ZWALLET_RPC_<CHAIN>` set: two to mock nodes that answer, one to a mock that refuses, the other five to a closed port (`http://127.0.0.1:1`) | one line per network, testnet last; each failed one `error: … [CODE]` cut to 72 (`brief`); `2 of 8 networks have a balance; 6 did not answer`; zero tokens hidden; no test reaches a public RPC |
@@ -1030,6 +1045,10 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T42 | the chain picker, `e` on base, a URL to a mock node with a key-like host label and a path; a URL whose node reports another chain id; quit and start again | the field shows the scheme and host as typed and the rest as `*`; bar line 2 shows the host as rule 3 draws it, nothing of the path; every pane reloads through it; the other chain id is refused and the URL is not used; after a restart base uses `ZWALLET_RPC_BASE` or the default again |
 | T43 | send status of a pending send after 90 s (`unknown`), `w`, `5m`; then `w` and `0` or `1x` | polling every 3 s resumes for 5 minutes from now and the status reaches mined on the mock; a duration the CLI's parser refuses leaves the status as it was |
 | T44 | `whitelist add z 0x0000000000000000000000000000000000000000` in the CLI, and `a` with that address in the TUI; then a signed list seeded with an entry `z` at the zero address (`common::seed_whitelist`, tests/common/mod.rs:275) | the add is refused before the password, nothing stopped, nothing written; the seeded list still parses and verifies (a self-transfer is still signed under it); 5 whitelist flags `z`, the payee picker does not offer it, and `d` removes it; `transfer --to @z` without `--force` is still `INVALID_ADDRESS` |
+
+| T45 | 5 whitelist, `whitelist native-cap`, a chain and amount, summary, password | the same signed per-transaction ceiling as the CLI is saved; its units and impact are shown before the password; `none` explicitly removes the amount limit, and invalid input writes nothing |
+| T46 | 5 whitelist, `whitelist token-cap`, a chain, registry token and amount, summary, password | the signed token ceiling matches CLI verification in integer base units (`none` removes it); a token outside the registry is refused before the password |
+| T47 | 5 whitelist, `whitelist calldata-cap`, a chain and byte count, summary, password | the signed calldata ceiling matches CLI verification; zero bytes is a deliberate empty-data limit, `none` removes it, and an overflow is refused before the password |
 
 **Tests:**
 - `TestBackend` buffer assertions for each screen, through `FilteredBackend`, with the style and

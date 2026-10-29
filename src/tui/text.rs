@@ -12,6 +12,12 @@ use crate::core::time::{parse_rfc3339_utc, rfc3339_utc};
 /// Where a value shown in the TUI comes from: one row of rule 3's table each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
+    /// A bounded read-only pane line, built from independently checked values.
+    Detail,
+    /// Public wallet-home path.
+    Home,
+    /// A field's already alphabet-checked, redacted display value.
+    Input,
     /// A key name in wallet.json (checked by `validate_key_name` when parsed).
     KeyName,
     /// An address: wallet.json's cache or a reply on `d.sock`, address-shaped by the CLI's checks.
@@ -30,6 +36,9 @@ impl Source {
     /// The most characters a value of this source shows.
     pub const fn budget(self) -> usize {
         match self {
+            Self::Detail => 72,
+            Self::Home => 64,
+            Self::Input => 512,
             Self::KeyName | Self::RpcHost => 32,
             Self::Address => 42,
             Self::Expiry => 64,
@@ -49,6 +58,15 @@ pub struct Outside {
 const ONE_DAY: u64 = 86_400;
 
 impl Outside {
+    pub fn detail(text: &str) -> Self {
+        Self::inert(Source::Detail, text)
+    }
+    pub fn home(text: &str) -> Self {
+        Self::inert(Source::Home, text)
+    }
+    pub fn input(text: &str) -> Self {
+        Self::inert(Source::Input, text)
+    }
     /// `text` from `source`: kept when it is printable ASCII already (as the CLI's escaping
     /// leaves it, so an escape is not escaped twice), escaped otherwise; then cut to the budget.
     fn inert(source: Source, text: &str) -> Self {

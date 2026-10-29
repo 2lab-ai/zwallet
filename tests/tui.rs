@@ -92,7 +92,9 @@ fn budget(source: Source) -> usize {
     match source {
         Source::KeyName | Source::RpcHost => 32,
         Source::Address => 42,
-        Source::Expiry => 64,
+        Source::Expiry | Source::Home => 64,
+        Source::Detail => 72,
+        Source::Input => 512,
         Source::Error | Source::Warning => 512,
     }
 }
@@ -1226,7 +1228,7 @@ fn a_key_the_bar_shows_verified_by_session_is_never_asked_to_be_verified() {
         .find(|r| r.contains("not verified:"))
         .expect("the other key is flagged");
     assert!(
-        note.contains("other key") && note.contains("`zwallet list --verify`"),
+        note.contains("other key") && note.contains("V verifies every key"),
         "{note:?}"
     );
     assert!(
@@ -1248,7 +1250,7 @@ fn a_key_the_bar_shows_verified_by_session_is_never_asked_to_be_verified() {
         status.address = Some((Some(B.into()), trust.clone()));
         app.update(Msg::Status(app.generation(), Ok(status)));
         let (rows, _) = checked_frame(&mut screen, &app);
-        let note = "not verified: run `zwallet address --verify` before funding";
+        let note = "not verified: V checks addresses from the seed before funding";
         let at = rows
             .iter()
             .position(|r| r.contains(note))
@@ -1421,8 +1423,7 @@ fn t2_warmup_on_a_pty_accepts_typeahead_and_paste_without_echo_or_active_change(
         )
         .ok();
     }
-    let mut tui =
-        PtyChild::spawn_full_screen(home.command(&["tui", "--allow-ptrace-scope-0"]), PTY_SIZE);
+    let mut tui = PtyChild::spawn_full_screen(tui_without_public_rpc(&home), PTY_SIZE);
     tui.wait_frame(PTY_WAIT, |f| {
         f.rows.iter().any(|r| r.contains("* b ")) && bar(f).1.starts_with("locked | ")
     });
@@ -1691,4 +1692,578 @@ fn an_address_refusal_preserves_the_pin_but_never_stale_lock_certainty() {
     let (rows, _) = checked_frame(&mut screen(80, 24), &app);
     assert!(rows[22].contains("0x7099...79C8"));
     assert!(rows[23].starts_with("status unknown: "), "{rows:#?}");
+}
+
+// TUI-3+4: pure Msg sequences and the same bounded/placed TestBackend gate as TUI-1.
+mod navigation {
+    use super::*;
+    use alloy::primitives::U256;
+    use zeroize::Zeroizing;
+    use zwallet::tui::actions::Tab;
+    use zwallet::tui::app::{FieldPurpose, PasswordState, Popup, UserText};
+    use zwallet::tui::form::Field;
+
+    fn paste(app: &mut App, value: &str) -> Vec<Effect> {
+        app.update(Msg::Paste(UserText(Zeroizing::new(value.into()))))
+    }
+    fn view(app: &App) -> String {
+        checked_frame(&mut screen(80, 24), app).0.join("\n")
+    }
+    fn native(raw: u64) -> chains::Balance {
+        chains::Balance {
+            symbol: "ETH".into(),
+            decimals: 18,
+            raw: U256::from(raw),
+        }
+    }
+    fn address_rows(address: &str) -> wallet::Addresses {
+        wallet::Addresses {
+            key: "a".into(),
+            trust: Trust::Locked,
+            rows: chains::CHAINS
+                .iter()
+                .map(|chain| wallet::AddressRow {
+                    chain,
+                    address: address.into(),
+                })
+                .collect(),
+        }
+    }
+    fn field(app: &App) -> &Field {
+        match app.navigation().popup.as_ref().unwrap() {
+            Popup::Field { field, .. } => field,
+            _ => panic!("expected field"),
+        }
+    }
+
+    #[test]
+    fn nav_all_tabs_hints_and_future_work_fit_one_frame() {
+        let mut app = locked_ab();
+        for number in '1'..='7' {
+            let work = app.update(Msg::Key(Key::Char(number)));
+            assert!(work.iter().any(|e| matches!(e, Effect::LoadKeys(_))));
+            assert_eq!(app.tab().number(), number as u8 - b'0');
+            let text = view(&app);
+            assert!(
+                text.lines()
+                    .nth(21)
+                    .unwrap()
+                    .trim_end()
+                    .ends_with("? actions")
+            );
+            if matches!(app.tab(), Tab::Send | Tab::Whitelist | Tab::Tools) {
+                assert!(text.contains("in a later version"));
+            }
+        }
+        app.update(Msg::Key(Key::Char(']')));
+        assert_eq!(app.tab(), Tab::Keys);
+        app.update(Msg::Key(Key::Char('[')));
+        assert_eq!(app.tab(), Tab::Session);
+    }
+
+    #[test]
+    fn nav_menu_keeps_input_focused_and_disabled_actions_inert() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('?')));
+        let text = view(&app);
+        assert!(text.contains("actions (55)"));
+        assert!(text.contains(&zwallet::version_line()));
+        assert!(!text.lines().nth(21).unwrap().contains("? actions"));
+        paste(&mut app, "whitelist add");
+        assert!(app.update(Msg::Key(Key::Enter)).is_empty());
+        assert!(view(&app).contains("in a later version"));
+        for c in ['q', '?', '1'] {
+            app.update(Msg::Key(Key::Char(c)));
+        }
+        match app.navigation().popup.as_ref().unwrap() {
+            Popup::Menu(menu) => assert_eq!(menu.filter().value(), "whitelist addq?1"),
+            _ => panic!("menu should stay open"),
+        }
+        paste(&mut app, "\u{1b}evil\u{2588}");
+        assert!(!view(&app).contains("evil"));
+        assert!(!app.quitting());
+        app.update(Msg::Key(Key::Esc));
+        assert!(app.navigation().popup.is_none());
+    }
+
+    #[test]
+    fn nav_balance_rows_omit_zero_tokens_and_bound_hostile_errors() {
+        let mut app = pinned_app_with_checked_list();
+        let tokens = vec![
+            chains::TokenBalance {
+                address: A.into(),
+                symbol: "USDC".into(),
+                decimals: 6,
+                raw: Ok(U256::from(2_000_000)),
+            },
+            chains::TokenBalance {
+                address: A.into(),
+                symbol: "DAI".into(),
+                decimals: 18,
+                raw: Ok(U256::ZERO),
+            },
+            chains::TokenBalance {
+                address: A.into(),
+                symbol: "BAD".into(),
+                decimals: 6,
+                raw: Err(WalletError::rpc("\u{1b}\u{2588}".repeat(600))),
+            },
+        ];
+        app.update(Msg::Balances(
+            app.generation(),
+            "a".into(),
+            Ok(wallet::ChainBalances {
+                chain: chains::find("ethereum").unwrap(),
+                key: "a".into(),
+                address: A.into(),
+                trust: Trust::Locked,
+                native: native(1_000_000_000_000_000_000),
+                tokens,
+            }),
+        ));
+        let text = view(&app);
+        assert!(text.contains("1 ETH"));
+        assert!(text.contains("2 USDC"));
+        assert!(!text.contains("DAI"));
+        assert!(text.contains("BAD error:"));
+    }
+
+    #[test]
+    fn nav_all_networks_render_one_row_each_and_failure_summary() {
+        let mut app = pinned_app_with_checked_list();
+        app.update(Msg::Key(Key::Char('a')));
+        let mut chains: Vec<_> = chains::CHAINS.iter().collect();
+        chains.sort_by_key(|chain| chain.is_testnet());
+        let networks = chains
+            .iter()
+            .enumerate()
+            .map(|(i, chain)| wallet::NetworkBalance {
+                chain,
+                address: Some(A.into()),
+                balances: if i < 2 {
+                    Ok((native(1), vec![]))
+                } else {
+                    Err(WalletError::rpc("unavailable"))
+                },
+            })
+            .collect();
+        app.update(Msg::EveryBalances(
+            app.generation(),
+            "a".into(),
+            Ok(wallet::EveryBalance {
+                key: "a".into(),
+                address: A.into(),
+                trust: Trust::Locked,
+                networks,
+            }),
+        ));
+        let text = view(&app);
+        for chain in &chains {
+            assert!(text.contains(&format!("{}:", chain.key)));
+        }
+        assert!(text.contains(&format!(
+            "2 of {} networks have a balance; {} did not answer",
+            chains.len(),
+            chains.len() - 2
+        )));
+        assert!(text.find("sepolia:").unwrap() > text.find("base:").unwrap());
+    }
+
+    #[test]
+    fn nav_chain_switch_reloads_every_pane_and_discards_old_response() {
+        let mut app = pinned_app_with_checked_list();
+        let old = app.generation();
+        app.update(Msg::Key(Key::Char('c')));
+        let base = chains::CHAINS
+            .iter()
+            .position(|chain| chain.key == "base")
+            .unwrap();
+        for _ in 0..base {
+            app.update(Msg::Key(Key::Down));
+        }
+        let effects = app.update(Msg::Key(Key::Enter));
+        assert_eq!(app.net().chain.key, "base");
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadBalances(_, _)))
+        );
+        assert!(effects.iter().any(|e| matches!(e, Effect::LoadKeys(_))));
+        assert!(effects.iter().any(|e| matches!(e, Effect::LoadStatus(_))));
+        app.update(Msg::Balances(
+            old,
+            "a".into(),
+            Err(WalletError::rpc("stale reply")),
+        ));
+        assert!(!view(&app).contains("stale reply"));
+    }
+
+    #[test]
+    fn nav_rpc_is_redacted_checked_before_adoption_and_cancel_discards_reply() {
+        let mut app = locked_ab();
+        let original = app.net().rpc_url.clone();
+        app.update(Msg::Key(Key::Char('c')));
+        app.update(Msg::Key(Key::Char('e')));
+        let url = "https://user:password@rpc.example.com/private-secret?q=query-secret";
+        paste(&mut app, url);
+        let text = view(&app);
+        for secret in ["password", "private-secret", "query-secret"] {
+            assert!(!text.contains(secret));
+        }
+        assert!(text.contains("rpc.example.com"));
+        let effects = app.update(Msg::Key(Key::Enter));
+        let (request, choice) = match effects.into_iter().next().unwrap() {
+            Effect::CheckRpc(request, choice) => (request, choice),
+            _ => panic!("check first"),
+        };
+        assert_eq!(app.net().rpc_url, original);
+        app.update(Msg::RpcChecked(
+            request,
+            Err(WalletError::rpc("wrong chain")),
+        ));
+        assert_eq!(app.net().rpc_url, original);
+        assert!(view(&app).contains("wrong chain"));
+        app.update(Msg::Key(Key::Esc));
+        app.update(Msg::Key(Key::Char('c')));
+        app.update(Msg::Key(Key::Char('e')));
+        paste(&mut app, url);
+        let request = match app.update(Msg::Key(Key::Enter)).remove(0) {
+            Effect::CheckRpc(r, _) => r,
+            _ => unreachable!(),
+        };
+        app.update(Msg::Key(Key::Esc));
+        app.update(Msg::RpcChecked(request, Ok(choice.clone())));
+        assert_eq!(app.net().rpc_url, original);
+        app.update(Msg::Key(Key::Char('c')));
+        app.update(Msg::Key(Key::Char('e')));
+        paste(&mut app, url);
+        let request = match app.update(Msg::Key(Key::Enter)).remove(0) {
+            Effect::CheckRpc(r, _) => r,
+            _ => unreachable!(),
+        };
+        app.update(Msg::RpcChecked(request, Ok(choice)));
+        assert_eq!(app.net().rpc_url, url);
+        assert_eq!(super::app().net().rpc_url, original);
+    }
+
+    #[test]
+    fn nav_receive_shows_full_pinned_address_and_rejects_later_mismatch() {
+        let mut app = pinned_app_with_checked_list();
+        app.update(Msg::Key(Key::Char('4')));
+        app.update(Msg::Addresses(
+            app.generation(),
+            "a".into(),
+            Ok(address_rows(A)),
+        ));
+        let text = view(&app);
+        assert!(text.contains(A));
+        assert!(text.contains("verified by password"));
+        for chain in chains::CHAINS {
+            assert!(text.contains(&format!("{}:", chain.key)));
+        }
+        app.update(Msg::Key(Key::Char('Q')));
+        assert!(view(&app).contains("zwallet address shows it as a QR code"));
+        app.update(Msg::Key(Key::Esc));
+        app.update(Msg::Addresses(
+            app.generation(),
+            "a".into(),
+            Ok(address_rows(B)),
+        ));
+        assert!(app.checked_list().is_none());
+        let text = view(&app);
+        assert!(text.contains("does not match"));
+        assert!(text.contains("0x7099...79C8"));
+    }
+
+    #[test]
+    fn nav_verify_is_read_only_and_duration_is_typed_before_preparing() {
+        let mut app = locked_ab();
+        assert!(matches!(
+            app.update(Msg::Key(Key::Char('V'))).as_slice(),
+            [Effect::PrepareRead]
+        ));
+        app.update(Msg::Prepared(Ok(())));
+        assert!(view(&app).contains("Verify every key"));
+        assert!(matches!(
+            app.update(Msg::PasswordSubmitted).as_slice(),
+            [Effect::CheckReadPassword {
+                all: true,
+                repair: false,
+                ..
+            }]
+        ));
+        app.update(Msg::Checked(Err(WalletError::validation("test refusal"))));
+        app.update(Msg::Key(Key::Char('u')));
+        paste(&mut app, "10m");
+        assert_eq!(field(&app).value(), "10m");
+        assert!(
+            matches!(app.update(Msg::Key(Key::Enter)).as_slice(), [Effect::PrepareDuration(ttl)] if *ttl == Duration::from_secs(600))
+        );
+        assert_eq!(app.password_state(), PasswordState::Preparing);
+    }
+
+    #[test]
+    fn nav_rpc_field_q_question_digits_are_input_and_start_flag_is_immutable() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('c')));
+        app.update(Msg::Key(Key::Char('e')));
+        for c in ['q', '?', '1'] {
+            app.update(Msg::Key(Key::Char(c)));
+        }
+        assert_eq!(field(&app).value(), "q?1");
+        assert!(matches!(
+            app.navigation().popup,
+            Some(Popup::Field {
+                purpose: FieldPurpose::Rpc(_),
+                ..
+            })
+        ));
+        assert!(!app.quitting());
+        app.update(Msg::Key(Key::Esc));
+        app.update(Msg::Key(Key::Char('?')));
+        paste(&mut app, "unlock --allow-ptrace-scope-0");
+        assert!(app.update(Msg::Key(Key::Enter)).is_empty());
+        assert!(!app.navigation().allow_ptrace_scope_0);
+        assert!(view(&app).contains("zwallet tui --allow-ptrace-scope-0"));
+    }
+
+    #[test]
+    fn nav_session_reports_only_untrusted_metadata_and_bounds_pid_home_values() {
+        let mut app = locked_ab();
+        app.configure(std::path::Path::new("/tmp/zwt-public\u{1b}home"), true);
+        app.update(Msg::Key(Key::Char('7')));
+        let mut status = open_status(now() + 600);
+        status.other_daemon_pids = (1000..1300).collect();
+        status.serving.as_mut().unwrap().whitelist =
+            serde_json::json!({"gen":9,"verified":true,"entries":["SECRET_ENTRY_NAME"]});
+        app.update(Msg::Status(app.generation(), Ok(status)));
+        let text = view(&app);
+        assert!(text.contains("ptrace_scope 0 accepted"));
+        assert!(text.contains("reports gen 9, 1 entries (not checked here)"));
+        assert!(text.contains("292 more"));
+        assert!(text.contains("1007"));
+        assert!(!text.contains("1008"));
+        assert!(!text.contains("SECRET_ENTRY_NAME"));
+        assert!(text.contains("\\u{1b}"));
+    }
+
+    #[test]
+    fn nav_verified_large_index_keeps_full_address_and_label() {
+        let mut app = locked_ab();
+        let mut keys = keys_ab();
+        keys.rows[1].name = "n".repeat(32);
+        keys.rows[1].index = 1000;
+        keys.active = keys.rows[1].name.clone();
+        app.update(Msg::Key(Key::Char('V')));
+        app.update(Msg::Prepared(Ok(())));
+        app.update(Msg::PasswordSubmitted);
+        app.update(Msg::Checked(Ok((
+            wallet::Opened {
+                keys: keys.rows.clone(),
+                active: keys.active.clone(),
+                warning: None,
+                anchor: Ok(None),
+                salted: false,
+            },
+            Err("no checked list".into()),
+        ))));
+        app.update(Msg::Keys(app.generation(), Ok(keys)));
+        let text = view(&app);
+        let row = text.lines().find(|line| line.contains("1000")).unwrap();
+        assert!(row.contains(B) && row.contains(" verified"));
+        assert!(row.contains("..."));
+    }
+
+    #[test]
+    fn nav_inconsistent_password_family_result_pins_nothing() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('V')));
+        app.update(Msg::Prepared(Ok(())));
+        app.update(Msg::PasswordSubmitted);
+        let checked = wallet::PasswordCheck {
+            opened: wallet::Opened {
+                keys: keys_ab().rows,
+                active: "b".into(),
+                warning: None,
+                anchor: Ok(None),
+                salted: false,
+            },
+            addresses: vec![
+                wallet::VerifiedAddress {
+                    key: "a".into(),
+                    chain: "ethereum",
+                    family: "evm",
+                    address: A.into(),
+                },
+                wallet::VerifiedAddress {
+                    key: "a".into(),
+                    chain: "base",
+                    family: "evm",
+                    address: B.into(),
+                },
+                wallet::VerifiedAddress {
+                    key: "b".into(),
+                    chain: "ethereum",
+                    family: "evm",
+                    address: B.into(),
+                },
+            ],
+            repairs: vec![],
+        };
+        app.update(Msg::Verified(Ok((checked, Err("no checked list".into())))));
+        assert!(!app.pinned("a") && !app.pinned("b"));
+        assert!(!app.family_pinned("a", chains::find("base").unwrap()));
+        assert!(view(&app).contains("family addresses disagree"));
+    }
+
+    #[test]
+    fn nav_repair_lists_hostile_old_cache_as_text_and_scrolls() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('A')));
+        app.update(Msg::Prepared(Ok(())));
+        app.update(Msg::PasswordSubmitted);
+        let checked = wallet::PasswordCheck {
+            opened: wallet::Opened {
+                keys: keys_ab().rows,
+                active: "b".into(),
+                warning: None,
+                anchor: Ok(None),
+                salted: false,
+            },
+            addresses: vec![
+                wallet::VerifiedAddress {
+                    key: "a".into(),
+                    chain: "ethereum",
+                    family: "evm",
+                    address: A.into(),
+                },
+                wallet::VerifiedAddress {
+                    key: "b".into(),
+                    chain: "ethereum",
+                    family: "evm",
+                    address: B.into(),
+                },
+            ],
+            repairs: (0..10)
+                .map(|_| store::CacheRepair {
+                    key: "a".into(),
+                    chain: "ethereum".into(),
+                    was: "\u{1b}[2J".to_string() + &"\u{2588}".repeat(600),
+                    now: A.into(),
+                })
+                .collect(),
+        };
+        app.update(Msg::Verified(Ok((checked, Err("no checked list".into())))));
+        assert!(view(&app).contains("was (do not fund):"));
+        for _ in 0..27 {
+            app.update(Msg::Key(Key::Down));
+        }
+        assert_eq!(app.navigation().popup_scroll, 27);
+        assert!(view(&app).contains(A));
+        app.update(Msg::Key(Key::Esc));
+        assert_eq!(app.navigation().popup_scroll, 0);
+    }
+}
+
+/// Read panes must never make a process test contact a public endpoint.
+fn tui_without_public_rpc(home: &Home) -> std::process::Command {
+    let mut command = home.command(&["tui", "--allow-ptrace-scope-0"]);
+    for chain in chains::CHAINS {
+        command.env(chain.rpc_env_var(), "http://127.0.0.1:1");
+    }
+    command
+}
+
+#[test]
+fn t14_on_a_pty_duration_unlock_matches_status_expiry() {
+    let home = Home::new();
+    home.create("a", &[]);
+    let mut tui = PtyChild::spawn_full_screen(tui_without_public_rpc(&home), PTY_SIZE);
+    tui.wait_frame(PTY_WAIT, |f| bar(f).1.starts_with("locked | "));
+    tui.send(b"7u10m\r");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("Wallet password:"))
+    });
+    let before = now();
+    tui.send(format!("{PW}\r").as_bytes());
+    let unlocked = tui.wait_frame(PTY_WAIT, |f| {
+        bar(f).1.starts_with("signing (agent too) until ")
+            && bar(f).0.contains("verified by password")
+    });
+    let status = home.run(&["status", "--json"]).ok();
+    let expires = parse_rfc3339_utc(status["expiresAt"].as_str().unwrap()).unwrap();
+    assert!((before + 590..=now() + 610).contains(&expires));
+    assert!(
+        bar(&unlocked).1.contains(
+            Outside::expiry(status["expiresAt"].as_str().unwrap(), now())
+                .cut(17)
+                .text()
+        )
+    );
+    quit(&mut tui);
+}
+
+#[test]
+fn t19_on_a_pty_verify_all_refuses_bad_cache_then_repair_agrees_with_cli() {
+    let home = Home::new();
+    home.create("a", &[]);
+    home.create("b", &[]);
+    let mut tui = PtyChild::spawn_full_screen(tui_without_public_rpc(&home), PTY_SIZE);
+    tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains("* b ")));
+    tui.send(b"V");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("Wallet password:"))
+    });
+    tui.send(format!("{PW}\r").as_bytes());
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows
+            .iter()
+            .filter(|r| r.contains(" verified") && r.contains("0x"))
+            .count()
+            >= 2
+    });
+    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], true);
+    home.edit_wallet(|v| v["keys"][1]["addresses"]["ethereum"] = serde_json::json!(A));
+    tui.send(b"V");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("Wallet password:"))
+    });
+    tui.send(format!("{PW}\r").as_bytes());
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("A on 1 keys repairs"))
+    });
+    tui.send(b"A");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("Wallet password:"))
+    });
+    tui.send(format!("{PW}\r").as_bytes());
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("was (do not fund):"))
+    });
+    tui.send(b"\x1b");
+    let repaired_frame = tui.wait_frame(PTY_WAIT, |f| {
+        f.rows
+            .iter()
+            .filter(|r| r.contains(" verified") && r.contains("0x"))
+            .count()
+            >= 2
+    });
+    let checked = home
+        .run_stdin(
+            &["list", "--verify", "--password-stdin", "--json"],
+            &format!("{PW}\n"),
+        )
+        .ok();
+    assert_eq!(checked["verified"], true);
+    for row in checked["keys"].as_array().unwrap() {
+        let address = row["address"].as_str().unwrap();
+        assert!(
+            repaired_frame
+                .rows
+                .iter()
+                .any(|line| line.contains(address))
+        );
+    }
+    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], true);
+    quit(&mut tui);
 }

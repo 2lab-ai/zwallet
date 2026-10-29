@@ -2,9 +2,13 @@
 //! work it asks for ([`Effect`]). Drawing is `ui`'s, reading the terminal and running the work is
 //! the loop's (`tui::run`). What comes in from outside is made [`Outside`] here, where it arrives.
 
+mod navigation;
+pub use navigation::{FieldPurpose, Navigation, Popup, RpcChoice, UserText};
+
 use crate::chains::{Chain, Net};
 use crate::core::error::{Result, WalletError};
 use crate::core::time::unix_secs;
+use crate::tui::actions::Tab;
 use crate::tui::text::Outside;
 use crate::wallet::{CheckedList, Keys, Opened, StatusView, Trust};
 use std::collections::BTreeMap;
@@ -15,6 +19,14 @@ use std::time::{Duration, SystemTime};
 pub enum Key {
     Up,
     Down,
+    Left,
+    Right,
+    Home,
+    End,
+    Backspace,
+    Delete,
+    Tab,
+    BackTab,
     Enter,
     Esc,
     Char(char),
@@ -26,6 +38,17 @@ pub enum Key {
 #[derive(Debug)]
 pub enum Msg {
     Key(Key),
+    Paste(UserText),
+    Verified(
+        Result<(
+            crate::wallet::PasswordCheck,
+            std::result::Result<CheckedList, String>,
+        )>,
+    ),
+    Balances(u64, String, Result<crate::wallet::ChainBalances>),
+    EveryBalances(u64, String, Result<crate::wallet::EveryBalance>),
+    Addresses(u64, String, Result<crate::wallet::Addresses>),
+    RpcChecked(u64, Result<RpcChoice>),
     Prepared(Result<()>),
     PasswordLength(usize, bool),
     PasswordSubmitted,
@@ -59,6 +82,17 @@ pub enum Effect {
     /// `wallet::set_active` for this key, then [`Msg::Activated`].
     SetActive(String),
     PrepareUnlock,
+    PrepareRead,
+    PrepareDuration(Duration),
+    CheckReadPassword {
+        key: String,
+        all: bool,
+        repair: bool,
+    },
+    LoadBalances(u64, String),
+    LoadEveryBalances(u64, String),
+    LoadAddresses(u64, String),
+    CheckRpc(u64, RpcChoice),
     CheckPassword {
         key: String,
         start_session: bool,
@@ -139,7 +173,18 @@ pub enum PasswordState {
     Checking,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasswordPurpose {
+    Warm,
+    Verify { all: bool },
+    Repair,
+    Unlock(Duration),
+}
+
 pub struct App {
+    nav: Navigation,
+    password_purpose: PasswordPurpose,
+    activating: bool,
     chain: &'static Chain,
     rpc_host: Outside,
     warm: Duration,
@@ -157,8 +202,6 @@ pub struct App {
     /// The generation of reads the panes take ([`Effect::LoadKeys`], [`Effect::LoadStatus`]).
     generation: u64,
     locking: bool,
-    /// Only one confirmed metadata write may be running, so writes cannot finish backwards.
-    activating: bool,
     lock_after_check: bool,
     /// An error to show in place of the key hints until the next key.
     notice: Option<Outside>,
@@ -173,6 +216,9 @@ impl App {
     /// The TUI on `net`'s chain and endpoint; `warm` is how long a warm-up unlocks for.
     pub fn new(net: &Net, warm: Duration) -> Self {
         Self {
+            nav: Navigation::new(net),
+            password_purpose: PasswordPurpose::Warm,
+            activating: false,
             chain: net.chain,
             rpc_host: Outside::rpc_host(&net.rpc_url),
             warm,
@@ -189,7 +235,6 @@ impl App {
             status_pending: false,
             generation: 0,
             locking: false,
-            activating: false,
             lock_after_check: false,
             notice: None,
             confirm: None,
@@ -206,6 +251,10 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        let msg = match self.navigation_update(msg) {
+            std::ops::ControlFlow::Continue(work) => return work,
+            std::ops::ControlFlow::Break(msg) => msg,
+        };
         match msg {
             Msg::Key(key) => {
                 self.notice = None;
@@ -246,9 +295,23 @@ impl App {
                 {
                     self.password = PasswordState::Checking;
                     self.checked_list = None;
-                    return vec![Effect::CheckPassword {
-                        key,
-                        start_session: true,
+                    return vec![match self.password_purpose {
+                        PasswordPurpose::Warm | PasswordPurpose::Unlock(_) => {
+                            Effect::CheckPassword {
+                                key,
+                                start_session: true,
+                            }
+                        }
+                        PasswordPurpose::Verify { all } => Effect::CheckReadPassword {
+                            key,
+                            all,
+                            repair: false,
+                        },
+                        PasswordPurpose::Repair => Effect::CheckReadPassword {
+                            key,
+                            all: true,
+                            repair: true,
+                        },
                     }];
                 }
                 Vec::new()
@@ -268,12 +331,21 @@ impl App {
                 });
                 let mut work = match result {
                     Ok((opened, checked)) => {
+                        let opened_key = key
+                            .filter(|key| !key.is_empty())
+                            .unwrap_or_else(|| opened.active.clone());
                         for k in opened.keys {
                             if let Some(address) = k.address {
                                 self.pins.insert(k.name, address);
                             }
                         }
-                        self.open_key = key;
+                        if matches!(
+                            self.password_purpose,
+                            PasswordPurpose::Warm | PasswordPurpose::Unlock(_)
+                        ) {
+                            self.open_key = Some(opened_key);
+                            self.nav.tab = Tab::Wallet;
+                        }
                         match checked {
                             Ok(list) => {
                                 self.checked_list = Some(list);
@@ -291,6 +363,11 @@ impl App {
                             self.quit_error = Some(e.clone());
                         }
                         self.fail_pane(e);
+                        if matches!(self.password_purpose, PasswordPurpose::Verify { .. }) {
+                            self.notice = Some(Outside::detail(
+                                "A on 1 keys repairs cached addresses with the password",
+                            ));
+                        }
                         self.load_status()
                     }
                 };
@@ -305,11 +382,11 @@ impl App {
                     return Vec::new();
                 }
                 match result.and_then(|(address, trust)| {
-                    self.check_pin(&key, &address)?;
+                    self.check_family_pin(&key, self.chain, &address)?;
                     Ok((address, trust))
                 }) {
                     Ok((address, trust)) => {
-                        let pinned = self.pins.contains_key(&key);
+                        let pinned = self.family_pinned(&key, self.chain);
                         if let Pane::Ready(bar) = &mut self.status {
                             bar.key = Some(Outside::key_name(&key));
                             bar.address = Some(Outside::short_address(&address));
@@ -349,6 +426,10 @@ impl App {
                 self.status_pending = false;
                 match status {
                     Ok(status) => {
+                        self.nav.session = Some(status.clone());
+                        if self.nav.tab == Tab::Session {
+                            self.render_session();
+                        }
                         let mismatch = match (&status.active, &status.address) {
                             (Some(key), Some((Some(address), _))) => {
                                 self.check_pin(key, address).err()
@@ -359,7 +440,7 @@ impl App {
                         let mut next = bar(status);
                         if let Some(key) = shown_key {
                             next.key = Some(Outside::key_name(&key));
-                            if let Some(address) = self.pins.get(&key) {
+                            if let Some(address) = self.family_pin(&key, self.chain) {
                                 next.address = Some(Outside::short_address(address));
                                 if !matches!(&next.trust, Some(TrustLine::Impostor(_))) {
                                     next.trust = Some(TrustLine::Password);
@@ -420,9 +501,19 @@ impl App {
             // error stops the pane (wrapped there), never a line cut before its warning.
             Msg::Activated(Err(e)) => {
                 self.activating = false;
+                if self.quit {
+                    self.quit_error = Some(e.clone());
+                }
                 self.fail_pane(e);
                 Vec::new()
             }
+            // The navigation dispatcher consumes these variants before this match.
+            Msg::Paste(_)
+            | Msg::Verified(_)
+            | Msg::Balances(..)
+            | Msg::EveryBalances(..)
+            | Msg::Addresses(..)
+            | Msg::RpcChecked(..) => unreachable!("navigation message"),
         }
     }
 
@@ -437,6 +528,7 @@ impl App {
     fn fail_pane(&mut self, error: WalletError) {
         self.invalidate_reads();
         self.checked_list = None;
+        self.nav.lines = Pane::Failed(Outside::error(&error));
         self.keys = Pane::Failed(Outside::error(&error));
         if self.quit {
             self.quit_error = Some(error);
@@ -447,6 +539,7 @@ impl App {
         self.invalidate_reads();
         let mut work = self.load_status();
         work.extend(self.load_keys());
+        work.extend(self.load_view());
         work
     }
 
@@ -480,6 +573,9 @@ impl App {
                 _ => Vec::new(),
             };
         }
+        if let Some(work) = self.navigation_key(key) {
+            return work;
+        }
         match key {
             Key::Char('q') | Key::Interrupt => self.quit = true,
             Key::Up | Key::Char('k') => self.selected = self.selected.saturating_sub(1),
@@ -487,9 +583,7 @@ impl App {
                 self.selected += 1;
             }
             Key::Char('r') => {
-                let mut work = self.load_keys();
-                work.extend(self.load_status());
-                return work;
+                return self.reload();
             }
             Key::Char('L') if !self.locking => {
                 self.locking = true;
@@ -509,11 +603,15 @@ impl App {
                     ) {
                         self.invalidate_reads();
                         self.pending_key = Some(key);
+                        self.password_purpose = PasswordPurpose::Warm;
                         self.password = PasswordState::Preparing;
                         return vec![Effect::PrepareUnlock];
                     }
                     self.open_key = Some(key.clone());
-                    return vec![Effect::LoadAddress(self.generation, key)];
+                    self.nav.tab = Tab::Wallet;
+                    let mut work = vec![Effect::LoadAddress(self.generation, key)];
+                    work.extend(self.load_view());
+                    return work;
                 }
             }
             Key::Char('s') if !self.activating => {
@@ -631,10 +729,11 @@ impl App {
     pub fn locking(&self) -> bool {
         self.locking
     }
-
-    /// A confirmed change of the active key is being written.
     pub fn activating(&self) -> bool {
         self.activating
+    }
+    pub fn password_purpose(&self) -> PasswordPurpose {
+        self.password_purpose
     }
 
     pub fn notice(&self) -> Option<&Outside> {

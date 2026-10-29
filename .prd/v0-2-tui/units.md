@@ -59,7 +59,7 @@ once. Every estimate of a unit not yet started is an estimate, not a measurement
 | TUI-1b | see the keys and the lock state; lock | `zwallet tui`, the screens (keys list, status bar, size rule), the cell/style/budget helpers | T1 | TUI-1a | 800 |
 | TUI-1c | (the same, proven on a pty) | the pty runs (restore after `q`, `locked` within two refreshes), the argv-listed fake, the pty helpers | T9, T10 | TUI-1b | 350 |
 | TUI-2 | unlock from the TUI, see the open key verified, make a key active | warm-up, password field, the password check (checked list, pinned addresses), make active, address trust | T2, T2b | TUI-1 | 750 |
-| TUI-3 | see the balance on any chain and on every network, through any RPC; find every function from `?` | tab line, action menu (52 rows), hint lines, popups and fields; 2 wallet balances, every network, the chain picker and its session RPC | T5, T8, T12, T13, T15, T42 | TUI-2 | 900 |
+| TUI-3 | see the balance on any chain and on every network, through any RPC; find every function from `?` | tab line, action menu (55 rows), hint lines, popups and fields; 2 wallet balances, every network, the chain picker and its session RPC | T5, T8, T12, T13, T15, T42 | TUI-2 | 900 |
 | TUI-4 | receive: the address and its trust (Q1's pointer to the QR); verify and repair every key's address; unlock for a chosen time; see the session | 4 receive, `V` on every key, `A`, 7 session, `u`, the start flag `--allow-ptrace-scope-0` | T14, T16, T17, T18, T19, T20 | TUI-3 | 800 (+250 if the owner picks Q3) |
 | TUI-5 | send the coin or a registry token to a listed payee and see it mined, waiting as long as he likes | 3 send: asset, payee, amount, review with the overrides and the fee ceiling, exact-intent confirm, status, `w` | T6, T6b, T21, T22, T43 | TUI-3 | 850 |
 | TUI-6 | curate the whitelist: payees, contracts, fee caps, message signing, reset; never list the zero address | 5 whitelist: view, `V`, every change, the zero-address refusal at add (CLI and TUI); the pty run across T2, T6 and T7 | T7, T11, T23, T24, T25, T44 | TUI-5 | 850 |
@@ -275,9 +275,9 @@ trust state, 03-tui.md §Address trust) lands in TUI-2a, its rule 4 in TUI-2b.
   `tests/tui.rs`.
 - **Depends on:** TUI-2 (the open key).
 - **RED tests:**
-  - T12 (`TestBackend` and `Msg` sequence): `?`: the title says `actions (52)`. The test holds
-    the Alias column of 03-tui.md §Coverage matrix rows 1–52 as a list and asserts the menu's 52
-    rows carry exactly those tokens, row for row; `whitelist add` typed leaves one row (key `a`,
+  - T12 (`TestBackend` and `Msg` sequence): `?`: the title says `actions (55)`. The test holds
+    the Alias column of 03-tui.md §Coverage matrix rows 1–52 as a list and asserts the menu's first 52
+    rows carry exactly those tokens, row for row; rows 60–62 add the three amount/calldata cap aliases; `whitelist add` typed leaves one row (key `a`,
     tab 5); Enter on an action that cannot run shows its reason and starts no `Effect`.
   - T13 (`Msg` sequence and `TestBackend`), on the frames this PR draws: `1` … `7`, `[` and `]`
     reach each tab; the hint rule holds on each frame (focus not a field, a menu or a popup: the
@@ -923,3 +923,7 @@ unanimous APPROVE on e7d896d, no must-fix. Four non-blocking points were applied
 | (fable) the salt does not travel in the snapshot | `Opened { addresses, anchor: Option<WhitelistAnchor>, salted: bool }` (core/store.rs:419), never `SealedWhitelist` with its salt (:461-467); `CheckedList.policy` is the list's own policy, not `Unsealed.policy` | 03-tui.md §Password check; flow.md §Password check; TUI-2 |
 | (grok) the "fee falls, so it signs once" test also checks the signed body | the `SignTx` request's transaction is decoded and its `chain_id`, `to`, `value`, `input`, `nonce` must equal the held fields | TUI-5 |
 | (gpt-6-astra) one wording for the confirm rule | "the transfer intent is exactly equal, and the most the fee can cost is at most the reviewed one" | 03-tui.md §Changes item 8; this file, Review round 1 row B2 |
+
+### TUI-3+4 handoff receipt — 2026-10-29
+
+Implementation and remaining process gates: [`../research/handoff-tui-navigation-2026-10-29.md`](../research/handoff-tui-navigation-2026-10-29.md). The 52 original aliases retain their row numbers; cap aliases at rows 60–62 bring the action menu to 55.

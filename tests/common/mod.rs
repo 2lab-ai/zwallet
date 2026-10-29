@@ -11,6 +11,8 @@
 
 #![allow(dead_code)]
 
+pub mod executable;
+
 use serde_json::Value;
 use std::cell::Cell;
 use std::ffi::OsStr;

@@ -478,7 +478,11 @@ impl<'a> Daemon<'a> {
     /// cannot be read: the outer error must abort the command (an answer that is no address, a
     /// failed peer check: tampering, never a row), the inner one is that the socket could not be
     /// asked or relayed an error.
-    async fn fetch(&mut self, index: u32, chain: &Chain) -> Result<Result<Option<String>>> {
+    pub(crate) async fn fetch(
+        &mut self,
+        index: u32,
+        chain: &Chain,
+    ) -> Result<Result<Option<String>>> {
         let request = Request::Address {
             chain: chain.key.into(),
             index,
@@ -535,7 +539,7 @@ impl<'a> Daemon<'a> {
     /// `key`'s address on `chain` from `derived` (this command's derivation for the chain's
     /// family) checked against the cache, or without one the cache (the daemon's derivation for
     /// a chain added after the key).
-    async fn checked(
+    pub(crate) async fn checked(
         &mut self,
         key: &KeyEntry,
         chain: &Chain,
@@ -582,7 +586,7 @@ impl<'a> Daemon<'a> {
     /// The cache's address for `key` on `chain`, used when the daemon did not derive one (the
     /// wallet is locked, or the chain was added after the key). Marks the result as cached, so
     /// [`Trust`] does not read it as session-verified.
-    async fn cache_only(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
+    pub(crate) async fn cache_only(&mut self, key: &KeyEntry, chain: &Chain) -> Result<String> {
         self.cached = true;
         key_address(self.home, key, chain).await
     }
@@ -975,12 +979,18 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         // repaired, loudly, instead of refused.
         store::read_wallet_file(home)?;
         let pw = read_password(a.verify.password_stdin, "Wallet password: ", false)?;
-        let (unsealed, file, repairs) =
-            store::unlock_repairing(home, &pw, &chains::derive_addresses)?;
+        let repaired = wallet::repair(home, &pw)?;
         drop(pw);
-        let seed = unsealed.seed;
+        let file = repaired.file;
+        let repairs = repaired.checked.repairs;
         let key = file.key(a.key.key.as_deref())?;
-        let address = derive_checked(&seed, key, chain)?;
+        let address = repaired
+            .checked
+            .addresses
+            .iter()
+            .find(|row| row.key == key.name && row.chain == chain.key)
+            .map(|row| row.address.clone())
+            .ok_or_else(|| WalletError::validation("verified address missing"))?;
         let mut out = json!({
             "chain": chain.key,
             "key": key.name,
@@ -1060,23 +1070,18 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
 async fn addresses(home: &Path, a: AddressesArgs) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
-    // One daemon derivation per family (EVM chains share an address), checked per chain.
-    let mut daemon = Daemon::new(home);
-    let mut derived: BTreeMap<&str, Option<String>> = BTreeMap::new();
-    let mut rows = Vec::new();
-    let mut primary = None;
-    for chain in CHAINS {
-        let family = chain.family.name();
-        if !derived.contains_key(family) {
-            derived.insert(family, daemon.derive(key.index, chain).await?);
-        }
-        let address = daemon.checked(key, chain, derived[family].as_ref()).await?;
-        if chain.key == PRIMARY_CHAIN {
-            primary = Some(address.clone());
-        }
-        rows.push(json!({ "chainId": chain.key, "address": address }));
-    }
-    let trust = daemon.trust();
+    let addresses = wallet::addresses(home, &key.name).await?;
+    let primary = addresses
+        .rows
+        .iter()
+        .find(|row| row.chain.key == PRIMARY_CHAIN)
+        .map(|row| row.address.clone());
+    let rows: Vec<Value> = addresses
+        .rows
+        .iter()
+        .map(|row| json!({ "chainId": row.chain.key, "address": row.address }))
+        .collect();
+    let trust = addresses.trust;
     let mut text = rows
         .iter()
         .map(|r| {
@@ -1123,17 +1128,8 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
     };
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
-    // While unlocked, the daemon's derivation, checked against the cache before any RPC.
-    let mut daemon = Daemon::new(home);
-    let owner = daemon.address(key, chain).await?;
-    let trust = daemon.trust();
     let net = net(chain, a.rpc.as_deref());
-    let bal = match &chain.family {
-        Family::Evm(_) => match &a.token {
-            Some(token) => Evm.token_balance(&net, &owner, token).await?,
-            None => Evm.native_balance(&net, &owner).await?,
-        },
-    };
+    let (owner, trust, bal) = wallet::balance(home, &key.name, &net, a.token.as_deref()).await?;
     let mut out = json!({
         "chain": chain.key,
         "key": key.name,
@@ -1155,21 +1151,8 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
     ))
 }
 
-/// How long `balance` without `--chain` waits for one network: its chain id check and every
-/// balance read on it, together.
-const NETWORK_TIMEOUT: Duration = Duration::from_secs(8);
-
-/// The most characters of an error a network's line shows in `balance` without `--chain`
-/// (`--json` has the whole message), and of each network's error in the message when none
-/// answered (`--json` has each whole in `networks`).
-const BRIEF_ERROR_CHARS: usize = 72;
-
-/// One network's balances for `balance` without `--chain`: the native coin and every registry
-/// token there.
-type NetworkBalances = Result<(chains::Balance, Vec<chains::TokenBalance>)>;
-
 /// `balance` without `--chain`: the native coin and every registry token on every chain,
-/// mainnets first. The networks are read at once, each within [`NETWORK_TIMEOUT`], through
+/// mainnets first. The networks are read at once, each within [`wallet::read::NETWORK_TIMEOUT`], through
 /// `ZWALLET_RPC_<CHAIN>` or the default RPC. A network whose endpoint, chain id or native balance
 /// fails is a row with `error` and `errorCode` instead of `native` and `tokens`; a token whose
 /// read fails is a token row with them instead of `balance` and `raw`. Only when no network
@@ -1179,75 +1162,26 @@ type NetworkBalances = Result<(chains::Balance, Vec<chains::TokenBalance>)>;
 async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
     let key = file.key(k.key.as_deref())?;
-    let mut order: Vec<&'static Chain> = CHAINS.iter().collect();
-    order.sort_by_key(|c| c.is_testnet());
-    // The address on each chain first, as `balance --chain` finds it: the daemon's derivation,
-    // or while locked the cache (the daemon's for a chain added after the key). A cache the
-    // daemon contradicts aborts the whole command here with `VALIDATION_ERROR` (a tamper signal,
-    // via `check_cache`'s `?`), before any RPC; a daemon that cannot be reached for a chain
-    // family becomes that family's chains' error rows (fail closed per chain, with `read_network`
-    // below). The two are told apart by their source, not by matching the error's text.
-    let mut daemon = Daemon::new(home);
-    let mut derived: BTreeMap<&str, Result<Option<String>>> = BTreeMap::new();
-    let mut owners = Vec::with_capacity(order.len());
-    for chain in &order {
-        let family = chain.family.name();
-        if !derived.contains_key(family) {
-            // An answer that is no address aborts (tampering); a socket that could not be asked
-            // is this family's rows.
-            derived.insert(family, daemon.fetch(key.index, chain).await?);
-        }
-        owners.push(match &derived[family] {
-            // Derived: the cache must agree, or the command fails now (naming an impostor on
-            // `d.sock`, if one answered).
-            Ok(Some(d)) => {
-                daemon.check_cache(key, chain, d)?;
-                Ok(d.clone())
-            }
-            // Locked (or a chain added after the key): the cache, a per-chain failure if absent.
-            Ok(None) => daemon.cache_only(key, chain).await,
-            // The daemon could not be reached for this family: a per-chain error row.
-            Err(e) => Err(e.clone()),
-        });
-    }
-    let trust = daemon.trust();
-    // The same on every EVM chain; a row names its own only where it differs. (When no chain
-    // has one, every row fails and this is never shown.)
-    let address = owners
-        .iter()
-        .find_map(|o| o.as_ref().ok())
-        .cloned()
-        .unwrap_or_default();
-    let reads: Vec<_> = order
-        .iter()
-        .zip(owners)
-        .map(|(chain, owner)| {
-            owner.map(|owner| {
-                let read = tokio::spawn(read_network(net(chain, None), owner.clone()));
-                (owner, read)
-            })
-        })
-        .collect();
+    let all = wallet::every_balance(home, &key.name).await?;
+    let address = all.address;
+    let trust = all.trust;
+    let order: Vec<_> = all.networks.iter().map(|row| row.chain).collect();
     let mut rows = Vec::with_capacity(order.len());
     let mut lines = vec![format!("key: {}", key.name), format!("address: {address}")];
     let mut failed: Vec<(&str, WalletError)> = Vec::new();
     let mut held = 0;
     let mut failed_tokens = 0;
-    for (chain, read) in order.iter().zip(reads) {
+    for network in all.networks {
+        let chain = network.chain;
         let mut row = json!({ "chain": chain.key, "chainId": chain.chain_id_json() });
         let mut own = String::new();
-        let result = match read {
-            Ok((owner, read)) => {
-                if owner != address {
-                    own = format!(" ({owner})");
-                    row["address"] = json!(owner);
-                }
-                read.await.unwrap_or_else(|_| {
-                    Err(WalletError::rpc("the balance read stopped unexpectedly"))
-                })
-            }
-            Err(e) => Err(e),
-        };
+        if let Some(owner) = network.address
+            && owner != address
+        {
+            own = format!(" ({owner})");
+            row["address"] = json!(owner);
+        }
+        let result = network.balances;
         match result {
             Ok((native, tokens)) => {
                 lines.push(format!("{:<10} {}{own}", chain.key, amount_text(&native)));
@@ -1346,13 +1280,6 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     ))
 }
 
-/// One network's [`NetworkBalances`], read within [`NETWORK_TIMEOUT`].
-async fn read_network(net: Net, owner: String) -> NetworkBalances {
-    match &net.chain.family {
-        Family::Evm(_) => Evm.wallet_balances(&net, &owner, NETWORK_TIMEOUT).await,
-    }
-}
-
 /// `{ symbol, decimals, balance, raw }`.
 fn amount_json(b: &chains::Balance) -> Value {
     json!({
@@ -1373,14 +1300,9 @@ fn error_text(e: &WalletError) -> String {
     format!("error: {} [{}]", brief(&e.message), e.code)
 }
 
-/// The first line of an error message, cut to [`BRIEF_ERROR_CHARS`] characters.
+/// One inert, bounded network error line, shared with the TUI.
 fn brief(message: &str) -> String {
-    let line = message.lines().next().unwrap_or_default();
-    if line.chars().count() <= BRIEF_ERROR_CHARS {
-        return line.to_string();
-    }
-    let cut: String = line.chars().take(BRIEF_ERROR_CHARS - 3).collect();
-    format!("{cut}...")
+    wallet::brief(message)
 }
 
 /// Returns (from, index) of the selected key on `chain`.
