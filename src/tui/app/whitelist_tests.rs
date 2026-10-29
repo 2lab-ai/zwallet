@@ -964,3 +964,59 @@ fn the_list_pane_never_wraps_and_the_selection_shows_full_fields() {
         "{text}"
     );
 }
+
+/// R1: a tab round trip (keys only) keeps the prepared plan usable. Coming back to 5 reads the
+/// list again, which takes a new request id; the password must still apply the plan that was
+/// prepared and reviewed, and its outcome must land.
+#[test]
+fn a_tab_round_trip_on_the_summary_keeps_the_prepared_plan_applicable() {
+    let mut app = new_app();
+    let effects = prepare_add(
+        &mut app,
+        "0x3333333333333333333333333333333333333333",
+        false,
+    );
+    let [Effect::PrepareWhitelist(request)] = &effects[..] else {
+        panic!("{effects:?}")
+    };
+    let prepared = request.id;
+    review(
+        &mut app,
+        "The password authorizes this exact change\nafter the change: the wallet stays locked",
+    );
+    key(&mut app, Key::Char('2'));
+    assert_eq!(app.nav.tab, Tab::Wallet);
+    let back = key(&mut app, Key::Char('5'));
+    assert_eq!(app.nav.tab, Tab::Whitelist);
+    assert!(
+        back.iter().any(|e| matches!(e, Effect::ReadWhitelist(..))),
+        "{back:?}"
+    );
+    assert!(matches!(app.whitelist.stage, Stage::Review(_)));
+    assert!(frame(&app, "round-trip").contains("The password authorizes"));
+    enter_password(&mut app);
+    assert_eq!(
+        app.update(Msg::PasswordSubmitted),
+        vec![Effect::ApplyWhitelist(prepared)]
+    );
+    let checked = checked();
+    let outcome = WhitelistOutcome {
+        list: checked.list.clone(),
+        stopped_daemons: vec![],
+        session: EditSession::Locked,
+        warning: None,
+        checked: Ok(checked),
+        output: json!({"locked":true}),
+        text: "added bob; gen 3; wallet stays locked".into(),
+    };
+    app.update(Msg::WhitelistApplied(prepared, Applied(Ok(outcome))));
+    assert!(!app.whitelist_busy());
+    assert!(frame(&app, "round-trip-outcome").contains("added bob"));
+    // The outcome stays across a round trip too, and Enter returns to the list.
+    key(&mut app, Key::Char('2'));
+    key(&mut app, Key::Char('5'));
+    assert!(matches!(app.whitelist.stage, Stage::Outcome { .. }));
+    let work = key(&mut app, Key::Enter);
+    assert!(matches!(app.whitelist.stage, Stage::List));
+    assert!(work.iter().any(|e| matches!(e, Effect::ReadWhitelist(..))));
+}
