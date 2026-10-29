@@ -59,6 +59,7 @@ Ubuntu 499 and macOS 505 tests, zero failures. Completed fixes are not rebuilt f
 | TUI10 creation | [PR #43](https://github.com/2lab-ai/zwallet/pull/43), 54fe8c1 | Local591; independent reviews; actual T30/T31 PTY pass | CI40845492673 Linux/macOS pass; upstream merge unavailable |
 | TUI11 tools | handoff-tui-tools | 13 exact-message/invoke/read mocks | Tools UI, replacement binding, full gates/review/CI |
 | TUI12 Tron UI | parent integration | Shared family pins; adapters identified | Complete selected-family status, send/history adapters and T38–T41 gates |
+| All of the above + main #36 | `integ/tui-tron-final` (2lab-ai/zwallet) | One merge commit per handoff PR in the integration brief's order; TUI/Tron conflicts resolved by union, policy checks from both sides kept | Combined macOS/Linux/x86_64 gate on its head, then one integration PR whose merge marks every handoff PR merged |
 
 These counts are distinct receipts, not additive coverage claims. Agent-reported focused
 checks do not replace the parent's whole gate. Every publishable commit requires fmt,

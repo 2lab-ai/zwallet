@@ -34,6 +34,10 @@ cap, each PR reviewable as one argument). Worktrees at `.worktrees/<branch with 
 
 ## Open gaps
 
+As of 2026-10-30, A, B1, B2, C and the Tron TUI are combined on `integ/tui-tron-final`
+(#35 and #37–#49 merged with main). The 🟡 rows below close when that PR merges; TR23 stays
+with the owner.
+
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
 | TR1 | the A1 mnemonic gives `TWer2…` (i=0), `TPjjv…` (i=1) | implemented and reviewed; local543 and PR #37 exact-head CI both pass; merge pending | A | 🟡 |
@@ -58,7 +62,7 @@ cap, each PR reviewable as one argument). Worktrees at `.worktrees/<branch with 
 | TR20 | TRX and USDT sent and confirmed against the mock; fee above the estimate stays within the maximum | implemented and reviewed; local591 passes; PR #42 Linux timing repair passes local595; new exact-head CI pending | C | 🟡 |
 | TR21 | each broadcast outcome; uncertain and duplicate messages name `expiresAt` and the second-payment risk | implemented and reviewed; local591 passes; PR #42 Linux timing repair passes local595; new exact-head CI pending | C | 🟡 |
 | TR25 | `expired-unseen` only by the node's head and a node within 60 s of the local clock; never a safe-resend message | implemented and reviewed; local591 passes; PR #42 Linux timing repair passes local595; new exact-head CI pending | C | 🟡 |
-| TR22 | every row of 05 §TUI is in the TUI coverage matrix | T38–T41 implementation is in H18A/B plus family UI integration; shared address display and receipt/status gates remain | TUI task | 🟡 |
+| TR22 | every row of 05 §TUI is in the TUI coverage matrix | T38–T41 implemented in the TUI (#49) and combined on `integ/tui-tron-final`; evidence: [h18](../v0-2-tui/h18-tron-tui-receipt.md), [h18b](../v0-2-tui/h18b-tron-history-receipt.md); closes when that PR merges | TUI task | 🟡 |
 | TR23 | owner-gated mainnet TRX and USDT send | needs TRON-7 and the owner's funds and decision | owner | 🚪 |
 | TR24 | `sign-message`, `call`, `invoke` on `tron` → `CAPABILITY_UNSUPPORTED` | implemented and reviewed; local543 and PR #37 exact-head CI both pass; merge pending | A | 🟡 |
 

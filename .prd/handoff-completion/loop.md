@@ -20,15 +20,12 @@ Status: in-progress, 2026-10-29.
 | H12 | Tron C fees, signed send, receipts and transaction lookup | tron_codec | 🟡 | PR42 1a4f36f; local595; real isolated daemon/mock acceptance; CI40847935216 both pass; draft transition denied |
 | H13 | TUI5 exact reviewed transfer intent and shared send API | tui_create_backend | 🟡 | PR44 685a363; local597 pass, independent reviews and actual PTY2; CI40846478124 both pass |
 | H14 | TUI6 shared verified whitelist edit API and zero-payee guard | tron_policy | 🟡 | 34 API and 10 UI tests pass; independent integration and PTY/full gate pending |
-
 | H15 | TUI11 shared contract read, arbitrary token and exact message API | tron_codec | 🟡 | Isolated handoff-tui-tools; invoke follows send/replacement APIs |
-
 | H16 | TUI10 creation forms and end-to-end seed/key workflow | tui_forms | 🟡 | PR43 54fe8c1; local591 incl actual T30/T31 PTY; CI40845492673 both pass; B1 phrase pointer retained |
 | H17 | TUI7+8 history and detail screens | tui_history_backend | 🟡 | PR45 18b2f8e; local598; frame/style gate passed; CI40851168894 both pass; chain/owner generations pinned |
-
 | H18 | TUI12 family integration: selected-chain address, Tron history/send adapters | root | 🟡 | Review found primary EVM address must not appear under a Tron label before opening a key |
-
 | H19 | TUI9 trusted original intent and fixed-nonce replacements | tui_foundation_review | 🟡 | Separate replacement boundary on reviewed send/history APIs; no journal-only authority |
+| H20 | One tree for #35 and #37–#49 plus main (#36): merges in the brief's order, conflict resolutions, combined gate | integration | 🟡 | Branch `integ/tui-tron-final` on 2lab-ai/zwallet; one merge commit per PR with its remerge diff; merging it marks every handoff PR merged |
 
 Run only one full CLI suite at once. Agent worktrees are under .worktrees; each unit
 owns its isolated tree and reports changes for integration before heavy gates.
