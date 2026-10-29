@@ -30,8 +30,7 @@ not claim that the whole product specification has shipped (01-spec.md keeps its
     are not TUI features by design (row 8, a start flag; rows 57 and 58, n/a).
   - Every signed EVM transaction and every Tron broadcast equals its review, from the mock
     nodes' decoded logs.
-  - Logs, on the dispatcher's machine:
-    `~/.local/share/zwallet-epic/logs/qa-terminal/{2a1ee64,2a1ee64-s5rt,preview-599bde9}/`.
+  - Evidence: the QA run's logs are kept off-repo; the results are in [PR #51's body](https://github.com/2lab-ai/zwallet/pull/51).
 - **Defects found and fixed before the merge**, each RED first (PR #51's body): the #46 policy
   category (now from the verified bytes, never the journal); #47's plan fingerprint, Tron payees
   and summary paging; the real-terminal D1–D4; the whitelist list wrapping; the explorer
