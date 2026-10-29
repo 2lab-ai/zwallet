@@ -414,7 +414,7 @@ fn assemble_review(
     prepared: PreparedTx,
 ) -> Result<TransferReview> {
     let decoded = tx::decode_unsigned(&payload(&prepared.unsigned)?)?;
-    if decoded.chain_id() != evm::config(net.chain).chain_id {
+    if decoded.chain_id() != evm::config(net.chain)?.chain_id {
         return Err(WalletError::validation(
             "prepared transaction has a different chainId",
         ));
@@ -424,7 +424,7 @@ fn assemble_review(
     let payee = evm::parse_address(&input.payee.address)?;
     let expected = if let Some(token) = &input.token {
         let token = evm::parse_address(token)?;
-        let registry = evm::registry::lookup(evm::config(net.chain).chain_id, &token)
+        let registry = evm::registry::lookup(evm::config(net.chain)?.chain_id, &token)
             .ok_or_else(|| WalletError::validation("the token is not in this chain's registry"))?;
         let amount = crate::core::amount::parse_units(&input.amount, registry.decimals)?;
         tx::Action::TransferCall {
@@ -445,7 +445,7 @@ fn assemble_review(
     }
     // An absent OP estimate cannot establish a reviewed upper bound. Never silently count it
     // as zero; a retry may obtain it. This is an estimate, not a cap on the eventual L1 charge.
-    if evm::config(net.chain).op_stack && prepared.l1_fee.is_none() {
+    if evm::config(net.chain)?.op_stack && prepared.l1_fee.is_none() {
         return Err(WalletError::validation(
             "L1 data fee estimate unavailable; review again before sending",
         ));
@@ -529,7 +529,7 @@ pub async fn review_transfer(
     }
     if let Some(token) = &input.token {
         let address = evm::parse_address(token)?;
-        if evm::registry::lookup(evm::config(net.chain).chain_id, &address).is_none() {
+        if evm::registry::lookup(evm::config(net.chain)?.chain_id, &address).is_none() {
             return Err(WalletError::validation(
                 "the token is not in this chain's registry",
             ));

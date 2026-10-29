@@ -1,12 +1,14 @@
 //! Chain registry and the chain-family boundary.
 //!
-//! A family (EVM today; Solana and TON later) owns key derivation from the shared seed, signing,
+//! A family (EVM and Tron today) owns key derivation from the shared seed, signing,
 //! and its chain I/O. The split is deliberate: [`FamilyKeys`] is everything the unlock daemon may
 //! do (no network), [`ChainFamily`] adds what the one-shot CLI does over RPC.
 
 pub mod evm;
+pub mod policy;
+pub mod tron;
 
-use crate::chains::evm::policy::ListView;
+use crate::chains::policy::ListView;
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
 use crate::core::store;
@@ -22,16 +24,72 @@ use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Default signed fee caps: wei on EVM, sun on Tron. Historical field names stay stable.
+pub const DEFAULT_FEE_CAPS_WEI: &[(&str, &str)] = &[
+    ("ethereum", "3000000000000000"),
+    ("base", "500000000000000"),
+    ("arbitrum", "500000000000000"),
+    ("optimism", "500000000000000"),
+    ("polygon", "2000000000000000000"),
+    ("bsc", "3000000000000000"),
+    ("avalanche", "50000000000000000"),
+    ("sepolia", "10000000000000000"),
+    ("tron", "30000000"),
+];
+
+/// Family-aware facts used to validate a list before it is signed.
+pub const WHITELIST_RULES: crate::core::whitelist::ChainRules =
+    crate::core::whitelist::ChainRules {
+        chain_known: |key| CHAINS.iter().any(|c| c.key == key),
+        family_of: |key| {
+            CHAINS
+                .iter()
+                .find(|c| c.key == key)
+                .map_or("", |c| c.family.name())
+        },
+        is_registry_token: is_registry_token_body,
+        registry_token_on_chain: registry_token_body_on_chain,
+        default_fee_caps_wei: DEFAULT_FEE_CAPS_WEI,
+    };
+
+fn tron_payload(body: &str) -> Option<[u8; 21]> {
+    let body = body.parse::<alloy::primitives::Address>().ok()?;
+    let mut payload = [0u8; 21];
+    payload[0] = tron::address::PREFIX;
+    payload[1..].copy_from_slice(body.as_slice());
+    Some(payload)
+}
+
+fn is_registry_token_body(body: &str) -> bool {
+    body.parse::<alloy::primitives::Address>()
+        .is_ok_and(|a| evm::registry::is_token_anywhere(&a))
+        || tron_payload(body).is_some_and(|a| tron::registry::is_token(&a))
+}
+
+fn registry_token_body_on_chain(key: &str, body: &str) -> bool {
+    let Some(chain) = CHAINS.iter().find(|c| c.key == key) else {
+        return false;
+    };
+    match chain.family {
+        Family::Evm(c) => body
+            .parse::<alloy::primitives::Address>()
+            .is_ok_and(|a| evm::registry::lookup(c.chain_id, &a).is_some()),
+        Family::Tron(_) => tron_payload(body).is_some_and(|a| tron::registry::is_token(&a)),
+    }
+}
+
 /// Family plus its family-specific configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     Evm(evm::EvmChain),
+    Tron(tron::TronChain),
 }
 
 impl Family {
     pub fn name(&self) -> &'static str {
         match self {
             Family::Evm(_) => "evm",
+            Family::Tron(_) => "tron",
         }
     }
 
@@ -39,6 +97,7 @@ impl Family {
     pub fn keys(&self) -> &'static dyn FamilyKeys {
         match self {
             Family::Evm(_) => &evm::Evm,
+            Family::Tron(_) => &tron::Tron,
         }
     }
 }
@@ -131,6 +190,18 @@ pub const CHAINS: &[Chain] = &[
         "https://avalanche-c-chain-rpc.publicnode.com",
         "https://snowtrace.io",
     ),
+    // Tron mainnet (`.prd/05-tron.md` §Family and registry row): TRX has 6 decimals (sun).
+    Chain {
+        key: "tron",
+        name: "Tron",
+        symbol: "TRX",
+        decimals: 6,
+        family: Family::Tron(tron::TronChain {
+            default_rpc: "https://tron-rpc.publicnode.com",
+            explorer: "https://tronscan.org/#",
+            genesis: tron::MAINNET_GENESIS,
+        }),
+    },
     evm_chain(
         "sepolia",
         "Sepolia",
@@ -172,6 +243,7 @@ impl Chain {
     pub fn default_rpc(&self) -> &'static str {
         match &self.family {
             Family::Evm(c) => c.default_rpc,
+            Family::Tron(c) => c.default_rpc,
         }
     }
 
@@ -186,22 +258,25 @@ impl Chain {
             .to_string()
     }
 
-    /// Family-specific chain id for display (`1` for Ethereum).
+    /// Family-specific chain id for display (`1` for Ethereum, 728126428 for Tron).
     pub fn chain_id_json(&self) -> Value {
         match &self.family {
             Family::Evm(c) => Value::from(c.chain_id),
+            Family::Tron(c) => Value::from(c.chain_id()),
         }
     }
 
     pub fn explorer_tx_url(&self, tx_hash: &str) -> String {
         match &self.family {
             Family::Evm(c) => format!("{}/tx/{tx_hash}", c.explorer),
+            Family::Tron(c) => format!("{}/transaction/{tx_hash}", c.explorer),
         }
     }
 
     pub fn explorer_address_url(&self, address: &str) -> String {
         match &self.family {
             Family::Evm(c) => format!("{}/address/{address}", c.explorer),
+            Family::Tron(c) => format!("{}/address/{address}", c.explorer),
         }
     }
 }
@@ -1497,6 +1572,8 @@ pub trait ChainFamily: FamilyKeys {
 pub fn require_contract_calls(chain: &Chain) -> Result<()> {
     let supported = match &chain.family {
         Family::Evm(_) => evm::Evm.supports_contract_calls(),
+        // No `call` or `invoke` on Tron (`.prd/05-tron.md` §Non-goals).
+        Family::Tron(_) => false,
     };
     if supported {
         Ok(())
@@ -2562,19 +2639,58 @@ mod tests {
     }
 
     #[test]
-    fn every_evm_chain_shares_one_address() {
+    fn every_evm_chain_shares_one_address_and_tron_has_its_own() {
         let seed = Seed::from_phrase(Zeroizing::new(TEST_MNEMONIC.into())).unwrap();
-        let addrs = derive_addresses(&seed, 0).unwrap();
-        assert_eq!(addrs.len(), CHAINS.len());
-        for a in addrs.values() {
-            assert_eq!(a, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+        for (index, evm, tron) in [
+            (
+                0,
+                "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
+            ),
+            (
+                1,
+                "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+            ),
+        ] {
+            let addrs = derive_addresses(&seed, index).unwrap();
+            assert_eq!(addrs.len(), CHAINS.len());
+            for (chain, a) in &addrs {
+                let want = match find(chain).unwrap().family {
+                    Family::Evm(_) => evm,
+                    Family::Tron(_) => tron,
+                };
+                assert_eq!(a, want, "{chain}");
+            }
         }
-        let second = derive_addresses(&seed, 1).unwrap();
-        assert!(
-            second
-                .values()
-                .all(|a| a == "0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
-        );
         assert!(require_contract_calls(find("ethereum").unwrap()).is_ok());
+        let e = require_contract_calls(find("tron").unwrap()).unwrap_err();
+        assert_eq!(e.code, ErrorCode::CapabilityUnsupported);
+    }
+
+    #[test]
+    fn the_tron_row() {
+        let tron = find("tron").unwrap();
+        assert_eq!(
+            (tron.name, tron.symbol, tron.decimals, tron.family.name()),
+            ("Tron", "TRX", 6, "tron")
+        );
+        assert_eq!(tron.chain_id_json(), Value::from(728126428u64));
+        assert_eq!(tron.default_rpc(), "https://tron-rpc.publicnode.com");
+        assert_eq!(tron.rpc_env_var(), "ZWALLET_RPC_TRON");
+        assert!(!tron.is_testnet());
+        assert_eq!(
+            tron.explorer_address_url("TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6"),
+            "https://tronscan.org/#/address/TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6"
+        );
+        // EVM code never runs on it.
+        assert_eq!(
+            evm::config(tron).unwrap_err().code,
+            ErrorCode::ValidationError
+        );
+        // After Avalanche, before the testnet.
+        let keys: Vec<&str> = CHAINS.iter().map(|c| c.key).collect();
+        let at = keys.iter().position(|k| *k == "tron").unwrap();
+        assert_eq!((keys[at - 1], keys[at + 1]), ("avalanche", "sepolia"));
     }
 }

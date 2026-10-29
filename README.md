@@ -1,6 +1,7 @@
 # zwallet
 
-A local EVM wallet for AI agents, controlled by a human. Create keys on your machine,
+A local wallet for AI agents, controlled by a human. It supports EVM signing and
+read-only Tron addresses and balances. Create keys on your machine,
 choose which recipients and contracts the wallet may pay, then unlock signing for a
 limited time. Your agent uses the CLI and JSON output; you keep the password.
 
@@ -16,7 +17,7 @@ These capabilities describe the code in this revision. Published releases can la
 | What you want to do | Available now | Boundary to know |
 |---|---|---|
 | Create and manage wallets | One encrypted BIP39 master seed, named derived keys, address verification and terminal-only recovery-phrase backup | No import/restore command in zwallet; the phrase can be imported into a compatible wallet |
-| Check funds | Native and ERC-20 balances on eight EVM networks; all-network balance view | Automatic token listing uses the built-in registry, not discovery of every token you own |
+| Check funds | Native and ERC-20 balances on eight EVM networks, TRX and TRC20 USDT on Tron; all-network balance view | Automatic token listing uses the built-in registry, not discovery of every token you own |
 | Send funds | Native coin and registry-token transfers, signed dry-runs, receipt waiting and transaction lookup | Requires an unlocked session and the daemon's signing policy |
 | Use contracts | Read-only ABI calls; writes using ABI arguments or raw calldata | Writes need an allowed contract and selector; token approvals are revoke-only |
 | Control an agent's signing | Timed unlock, immediate lock, signed recipient/contract whitelist, execution-fee caps and optional per-transaction amount/calldata limits | Limits must be configured; cumulative budgets remain WIP |
@@ -31,8 +32,8 @@ remain available where the corresponding TUI screen is WIP.
 
 | Feature | Status | What is still missing |
 |---|---|---|
-| Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Read/navigation and password warm-up are implemented. Send, history, whitelist editing, key creation and tools remain planned; their action rows explain that they are unavailable. |
-| Tron | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | TRX and TRC20 USDT addresses, balances, signing, transfers and transaction lookup; currently a v0.3 design only |
+| Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Read/navigation, password warm-up, EVM send and password-authorized whitelist editing are implemented. History, key creation, tools and the Tron send UI remain planned in this branch; their action rows explain unavailable operations. |
+| Tron transfers and lookup | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Addresses, balances, Tron-only whitelist editing and daemon policy work now. Transfer and transaction lookup commands remain planned. |
 | Solana and TON | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Chain implementations; currently future extension plans |
 | Cumulative spending budgets | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Rolling 24-hour native and per-token budgets; optional per-transaction limits do not track total spending |
 | User-added tokens | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Adding transfer tokens outside the built-in registry |
@@ -153,6 +154,7 @@ For retry and replacement rules, see [send safety](docs/commands.md#send-journal
 | `polygon` | Polygon PoS | POL |
 | `bsc` | BNB Smart Chain | BNB |
 | `avalanche` | Avalanche C-Chain | AVAX |
+| `tron` | Tron (read-only) | TRX |
 | `sepolia` | Sepolia testnet | ETH |
 
 Run `zwallet chains --json` for chain IDs and endpoints. RPC selection is
@@ -161,7 +163,9 @@ Run `zwallet chains --json` for chain IDs and endpoints. RPC selection is
 
 The same named key has the same address on all supported EVM networks. Balances and
 whitelist permissions are still network-specific. Registry-token support varies by
-network; BSC currently has no registry tokens for transfer.
+network; BSC currently has no registry tokens for transfer. The same seed also derives a
+separate Tron address. Use `zwallet address --chain tron --verify`,
+`zwallet balance --chain tron`, or `zwallet balance --chain tron --token usdt`.
 
 ## Terminal UI
 

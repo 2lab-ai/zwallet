@@ -66,7 +66,14 @@ fn create_then_fresh_processes_read_the_same_wallet() {
     assert_eq!(base["address"], address.as_str());
     let all = home.run(&["addresses", "--json"]).ok();
     let rows = all["addresses"].as_array().unwrap();
-    assert!(rows.iter().all(|r| r["address"] == address.as_str()));
+    // One address on every EVM chain; Tron's is its own (`T...`).
+    for r in rows {
+        if r["chainId"] == "tron" {
+            assert!(r["address"].as_str().unwrap().starts_with('T'), "{r}");
+        } else {
+            assert_eq!(r["address"], address.as_str(), "{r}");
+        }
+    }
     assert!(rows.iter().any(|r| r["chainId"] == "polygon"));
 
     let status = home.run(&["status", "--json"]).ok();
@@ -442,7 +449,30 @@ fn rpc_env_override_shows_in_chains() {
     let eth = rows.iter().find(|r| r["key"] == "ethereum").unwrap();
     assert_eq!(eth["rpc"], "https://ethereum-rpc.publicnode.com");
     assert_eq!(eth["family"], "evm");
-    assert_eq!(rows.len(), 8);
+    // Tron after Avalanche, Sepolia last; its chain id is the genesis id's last 4 bytes.
+    let keys: Vec<&str> = rows.iter().map(|r| r["key"].as_str().unwrap()).collect();
+    assert_eq!(
+        keys,
+        [
+            "ethereum",
+            "base",
+            "arbitrum",
+            "optimism",
+            "polygon",
+            "bsc",
+            "avalanche",
+            "tron",
+            "sepolia"
+        ]
+    );
+    let tron = rows.iter().find(|r| r["key"] == "tron").unwrap();
+    assert_eq!(
+        tron,
+        &json!({
+            "key": "tron", "name": "Tron", "family": "tron", "symbol": "TRX",
+            "chainId": 728126428, "rpc": "https://tron-rpc.publicnode.com",
+        })
+    );
     assert!(rows.iter().all(|r| r["symbol"].is_string()));
 }
 
@@ -467,11 +497,16 @@ fn socket_path_over_sun_path_limit_is_validation_error() {
 
 /// A valid address that is not this wallet's (index 1 of the well-known test mnemonic).
 const POISON: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+/// The same on Tron: index 1 of the test mnemonic at `m/44'/195'/0'/0/1`.
+const TRON_POISON: &str = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C";
 
+/// Every cached address of key 0 replaced with a valid address of its family that is not this
+/// wallet's.
 fn poison_cache(home: &Home) {
     home.edit_wallet(|v| {
-        for (_, a) in v["keys"][0]["addresses"].as_object_mut().unwrap() {
-            *a = serde_json::json!(POISON);
+        for (chain, a) in v["keys"][0]["addresses"].as_object_mut().unwrap() {
+            let poison = if chain == "tron" { TRON_POISON } else { POISON };
+            *a = serde_json::json!(poison);
         }
     });
 }
@@ -1210,13 +1245,16 @@ fn k1_squatter_answering_the_cached_address_is_never_verified() {
         .as_str()
         .unwrap()
         .to_string();
-    // It read the cache and repeats it, so the daemon cross-check finds no mismatch.
-    let fake = FakeDaemon::answering(
+    // It read the cache and repeats it (each chain family's), so the daemon cross-check finds
+    // no mismatch.
+    let tron = derived_tron(&home);
+    let fake = FakeDaemon::answering_per_family(
         &home.sock(),
         serde_json::json!({
             "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z",
             "chain": "ethereum", "index": 0, "active": "main", "address": addr,
         }),
+        &tron,
     );
     for args in ADDRESS_VIEWS.iter().copied().chain([
         &["change", "main", "--json"][..],
@@ -2208,7 +2246,8 @@ fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
         json!({
             "nickname": "alice",
             "kind": "address",
-            "address": PAYEE.to_ascii_lowercase(),
+            "address": PAYEE,
+            "family": "evm",
             "chains": ["base"],
         }),
         "{added}"
@@ -2306,6 +2345,7 @@ fn whitelist_verbs_change_one_generation_each_and_refuse_before_writing() {
             "nickname": "router",
             "kind": "contract",
             "address": ROUTER,
+            "family": "evm",
             "chains": ["base", "arbitrum"],
             "selectors": ["0x12345678", "0xabcdef01"],
         }),
@@ -2855,7 +2895,7 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
         &["add", "bob", BOB, "--chains", "*"],
         PW,
         &[
-            "chains: every chain (*)",
+            "chains: every EVM chain (*)",
             "now: gen 1, 1 entry (alice)",
             "if whitelist.json is the list wallet.json seals: the change lands on it, making gen 2",
             "otherwise: nothing changes",
@@ -2900,7 +2940,7 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
         &[
             "remove bob: whitelist.json lists it as a payee",
             BOB,
-            "every chain (*)",
+            "every EVM chain (*)",
         ],
     )
     .ok();
@@ -3674,6 +3714,7 @@ fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
         .as_str()
         .unwrap()
         .to_string();
+    let tron = derived_tron(&home);
     home.unlock("10m");
     let label = format!("scan to send to {addr}\n{EVERY_NETWORK}\n");
     for args in [
@@ -3683,6 +3724,13 @@ fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
         &["status"],
         &["change", "main"],
     ] {
+        // `addresses` draws a second code after the EVM one: the Tron address (05-tron.md §CLI
+        // surface).
+        let codes: Vec<&str> = if args[0] == "addresses" {
+            vec![&addr, &tron]
+        } else {
+            vec![&addr]
+        };
         let shown = home.run_on_terminal(args, &[], &[]);
         // --no-qr is taken everywhere a code may show; then the terminal gets the pipe's text.
         let mut quiet = args.to_vec();
@@ -3699,19 +3747,19 @@ fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
             assert!(!shown.contains("scan to send") && common::scan_qr(&shown).is_empty());
             continue;
         }
-        // The fields, then the two lines and the code, last: one code, also for `addresses`
-        // (the same address on every EVM chain).
+        // The fields, then the two lines and the code: one code for the address on every EVM
+        // chain, last but for `addresses`' Tron one.
         let at = shown
             .find(&label)
             .unwrap_or_else(|| panic!("{args:?}: {shown:?}"));
         if args[0] != "addresses" {
             assert!(shown[..at].contains("verifiedBy: session\n"), "{shown:?}");
         }
-        assert_eq!(common::scan_qr(&shown), [addr.as_str()], "{args:?}");
+        assert_eq!(common::scan_qr(&shown), codes, "{args:?}");
         assert!(!shown.contains("not verified"), "{shown:?}");
         let plain = home.run_on_terminal(args, &[], &[("NO_COLOR", "1")]);
         assert!(!plain.contains('\x1b'), "{plain:?}");
-        assert_eq!(common::scan_qr(&plain), [addr.as_str()], "{args:?}");
+        assert_eq!(common::scan_qr(&plain), codes, "{args:?}");
         // --json: the JSON only.
         let mut json = args.to_vec();
         json.push("--json");
@@ -3726,14 +3774,16 @@ fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
 fn s3_a_listener_answering_an_edited_cache_is_not_verified_and_is_named() {
     let home = Home::new();
     home.create("main", &[]);
-    // An agent's script edits the cache and listens on d.sock, answering the edited address.
+    // An agent's script edits the cache and listens on d.sock, answering the edited address
+    // (each chain family's).
     poison_cache(&home);
-    let fake = FakeDaemon::answering(
+    let fake = FakeDaemon::answering_per_family(
         &home.sock(),
         serde_json::json!({
             "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z",
             "chain": "ethereum", "index": 0, "active": "main", "address": POISON,
         }),
+        TRON_POISON,
     );
     // The listener runs in this test harness binary, not zwallet: its code is not this build's.
     // On macOS the cdhash catches that; on Linux its readable executable is not this build's.
@@ -5823,4 +5873,457 @@ fn a_repair_keeps_the_sealed_whitelist_and_the_running_session() {
         )
         .ok();
     assert_eq!(w["verified"], true, "{w}");
+}
+
+// ---- Tron (`.prd/05-tron.md`, TRON-1): the address from the same seed ----
+
+/// The two lines above the QR code of a Tron address.
+const TRON_CAPTION: &str = "(Tron only: TRX and TRC20 tokens; not an EVM address)";
+
+/// Key 0's Tron address as the seed derives it, read with the password in this process.
+fn derived_tron(home: &Home) -> String {
+    let seed = store::unlock(home.path(), PW, &chains::derive_addresses)
+        .unwrap()
+        .0
+        .seed;
+    chains::derive_addresses(&seed, 0).unwrap()["tron"].clone()
+}
+
+#[test]
+fn tr2_create_caches_the_tron_address_and_a_session_verifies_it_without_a_prompt() {
+    let home = Home::new();
+    let created = home.create("main", &[]);
+    assert!(
+        created["chains"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("tron")),
+        "{created}"
+    );
+    let tron = derived_tron(&home);
+    assert!(tron.starts_with('T') && tron.len() == 34, "{tron}");
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.wallet_json()).unwrap()).unwrap();
+    assert_eq!(on_disk["keys"][0]["addresses"]["tron"], tron.as_str());
+    // Locked: the cache, not verified, and no code on a terminal.
+    let v = home.run(&["address", "--chain", "tron", "--json"]).ok();
+    assert_eq!(
+        (&v["chain"], &v["address"], &v["verified"]),
+        (&json!("tron"), &json!(tron), &json!(false)),
+        "{v}"
+    );
+    let shown = home.run_on_terminal(&["address", "--chain", "tron"], &[], &[]);
+    assert!(shown.contains(&format!("\n{LOCKED_NOTE}\n")), "{shown:?}");
+    assert!(!shown.contains("scan to send") && common::scan_qr(&shown).is_empty());
+    // The tron row of `addresses`.
+    let all = home.run(&["addresses", "--json"]).ok();
+    let row = all["addresses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["chainId"] == "tron")
+        .unwrap_or_else(|| panic!("{all}"));
+    assert_eq!(row["address"], tron.as_str());
+    // Unlocked: the daemon's derivation, verified by the session where one verifies, no prompt.
+    home.unlock("10m");
+    let v = home.run(&["address", "--chain", "tron", "--json"]).ok();
+    assert_eq!(v["address"], tron.as_str(), "{v}");
+    if session_verifies() {
+        assert_eq!(
+            (&v["verified"], &v["verifiedBy"]),
+            (&json!(true), &json!("session")),
+            "{v}"
+        );
+        // Its own code, captioned as Tron's.
+        let shown = home.run_on_terminal(&["address", "--chain", "tron"], &[], &[]);
+        assert!(
+            shown.contains(&format!("scan to send to {tron}\n{TRON_CAPTION}\n")),
+            "{shown:?}"
+        );
+        assert!(!shown.contains(EVERY_NETWORK), "{shown:?}");
+        assert_eq!(common::scan_qr(&shown), [tron.as_str()]);
+        // `addresses`: two codes, the EVM one then the Tron one, each under its caption.
+        let evm = created["address"].as_str().unwrap();
+        let shown = home.run_on_terminal(&["addresses"], &[], &[]);
+        let evm_at = shown
+            .find(&format!("scan to send to {evm}\n{EVERY_NETWORK}\n"))
+            .unwrap_or_else(|| panic!("{shown:?}"));
+        let tron_at = shown
+            .find(&format!("scan to send to {tron}\n{TRON_CAPTION}\n"))
+            .unwrap_or_else(|| panic!("{shown:?}"));
+        assert!(evm_at < tron_at, "{shown:?}");
+        assert_eq!(common::scan_qr(&shown), [evm, tron.as_str()]);
+    } else {
+        assert_eq!(v["verified"], false, "{v}");
+        let shown = home.run_on_terminal(&["address", "--chain", "tron"], &[], &[]);
+        assert!(common::scan_qr(&shown).is_empty(), "{shown:?}");
+    }
+    // With the password: verified, and the code on a terminal.
+    let v = home
+        .run_stdin(
+            &[
+                "address",
+                "--chain",
+                "tron",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
+            &format!("{PW}\n"),
+        )
+        .ok();
+    assert_eq!(
+        (&v["address"], &v["verifiedBy"]),
+        (&json!(tron), &json!("password")),
+        "{v}"
+    );
+    let shown = home.run_on_terminal(
+        &["address", "--chain", "tron", "--verify"],
+        &["Wallet password: "],
+        &[],
+    );
+    assert_eq!(common::scan_qr(&shown), [tron.as_str()]);
+}
+
+#[test]
+fn tr4_a_tampered_tron_cache_is_refused_and_shown_escaped() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let tron = derived_tron(&home);
+    let tampered = [
+        // TWer2... with its first letter's case flipped: 34 base58 characters, checksum fails.
+        "tWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
+        // TWer2... with its last character changed: checksum fails.
+        "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL7",
+        // An EVM address where a Tron one belongs.
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        // A terminal escape and a fake line.
+        "T\u{1b}[2J\nverified: true",
+    ];
+    for value in tampered {
+        home.edit_wallet(|v| v["keys"][0]["addresses"]["tron"] = json!(value));
+        for args in [
+            &["address", "--chain", "tron", "--json"][..],
+            &["addresses", "--json"],
+        ] {
+            let out = home.run(args);
+            let msg = out.err("VALIDATION_ERROR");
+            assert!(msg.contains("which is not an address"), "{value:?}: {msg}");
+            assert!(inert(&msg), "{value:?}: {msg:?}");
+            assert!(out.json().get("address").is_none(), "{value:?}");
+        }
+        let human = home.run(&["address", "--chain", "tron"]);
+        assert_eq!(human.code, 1, "{value:?}");
+        assert!(human.stdout.is_empty(), "{:?}", human.stdout);
+        assert!(inert_output(&human.stderr), "{:?}", human.stderr);
+        assert_eq!(human.stderr.lines().count(), 1, "{:?}", human.stderr);
+    }
+    // A valid address that is not this key's: the daemon's derivation contradicts it (planted
+    // after the unlock, which refuses a cache the seed contradicts).
+    home.edit_wallet(|v| v["keys"][0]["addresses"]["tron"] = json!(tron));
+    home.unlock("10m");
+    home.edit_wallet(|v| v["keys"][0]["addresses"]["tron"] = json!(TRON_POISON));
+    let msg = home
+        .run(&["address", "--chain", "tron", "--json"])
+        .err("VALIDATION_ERROR");
+    assert!(msg.contains(genuine_daemon_mismatch()), "{msg}");
+    assert!(msg.contains(TRON_POISON), "{msg}");
+}
+
+#[test]
+fn a_daemon_answering_an_evm_address_for_tron_is_never_shown_as_one() {
+    let home = Home::new();
+    home.create("main", &[]);
+    home.edit_wallet(|v| {
+        v["keys"][0]["addresses"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tron");
+    });
+    let fake = FakeDaemon::answering(
+        &home.sock(),
+        json!({
+            "locked": false, "pid": 1, "expiresAt": "2099-01-01T00:00:00Z",
+            "chain": "tron", "index": 0, "active": "main", "address": POISON,
+        }),
+    );
+    let out = home.run(&["address", "--chain", "tron", "--json"]);
+    let msg = out.err("VALIDATION_ERROR");
+    assert!(
+        msg.contains(&format!(
+            "returned {POISON} as a tron address, which is not an address"
+        )),
+        "{msg}"
+    );
+    assert!(out.json().get("address").is_none(), "{}", out.stdout);
+    drop(fake);
+}
+
+#[test]
+fn tr24_sign_message_call_and_invoke_on_tron_are_unsupported_and_so_for_now_are_transfer_and_tx() {
+    let home = Home::new();
+    let me = home.create("main", &["--unlock", "10m"])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tron_payee = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C";
+    let txid = "21b776c7957ba1213b8616414912c9e81643e15e3e55b59fe143b991fa35a690";
+    let rpc = "http://127.0.0.1:1";
+    for args in [
+        &[
+            "sign-message",
+            "--chain",
+            "tron",
+            "--message",
+            "hi",
+            "--json",
+        ][..],
+        &[
+            "call", "--chain", "tron", "--to", tron_payee, "--sig", "f()", "--rpc", rpc, "--json",
+        ],
+        &[
+            "invoke", "--chain", "tron", "--to", tron_payee, "--sig", "f()", "--rpc", rpc, "--json",
+        ],
+        &[
+            "transfer", "--chain", "tron", "--to", tron_payee, "--amount", "1", "--rpc", rpc,
+            "--json",
+        ],
+        &["tx", "--chain", "tron", txid, "--rpc", rpc, "--json"],
+    ] {
+        let msg = home.run(args).err("CAPABILITY_UNSUPPORTED");
+        assert!(msg.contains("tron"), "{args:?}: {msg}");
+    }
+    // The same commands on an EVM chain still get past that point (here to the closed port).
+    home.run(&[
+        "call", "--chain", "base", "--to", &me, "--sig", "f()", "--rpc", rpc, "--json",
+    ])
+    .err("RPC_ERROR");
+}
+
+#[test]
+fn tron_whitelist_add_defaults_to_tron_and_shows_its_family_without_changing_signed_shape() {
+    let _exclusive = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    let address = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C";
+    let stored = "0x9705bf55c3dcc6d277ebb8fe2a68762268822ba2";
+    let pw = format!("{PW}\n");
+    let out = home.run_stdin(
+        &[
+            "whitelist",
+            "add",
+            "bob",
+            address,
+            "--password-stdin",
+            "--json",
+        ],
+        &pw,
+    );
+    out.ok();
+    assert!(out.stderr.contains(address));
+    assert!(out.stderr.contains(&format!("stored as {stored}")));
+    let file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("whitelist.json")).unwrap())
+            .unwrap();
+    assert_eq!(file["entries"][0]["address"], stored);
+    assert_eq!(file["entries"][0]["chains"], json!(["tron"]));
+    let list = home
+        .run_stdin(
+            &[
+                "whitelist",
+                "list",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
+            &pw,
+        )
+        .ok();
+    assert_eq!(list["verified"], true);
+    assert_eq!(list["entries"][0]["address"], address);
+    assert_eq!(list["entries"][0]["family"], "tron");
+    for args in [
+        vec!["fee-cap", "tron", "30"],
+        vec!["native-cap", "tron", "2"],
+        vec![
+            "token-cap",
+            "tron",
+            "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+            "1000000",
+        ],
+        vec!["calldata-cap", "tron", "68"],
+    ] {
+        let mut cmd = vec!["whitelist"];
+        cmd.extend(args);
+        cmd.extend(["--password-stdin", "--json"]);
+        home.run_stdin(&cmd, &pw).ok();
+    }
+}
+
+#[test]
+fn tron_whitelist_rejects_wrong_families_checksums_and_contract_entries_before_password() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let addr = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C";
+    let bad = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6D";
+    for (address, extra) in [
+        (addr, vec!["--chains", "base"]),
+        (addr, vec!["--chains", "*"]),
+        (BOB, vec!["--chains", "tron"]),
+        (addr, vec!["--chains", "tron,base"]),
+        (bad, vec![]),
+        (addr, vec!["--contract", "--selectors", "0xa9059cbb"]),
+    ] {
+        let mut args = vec!["whitelist", "add", "bob", address];
+        args.extend(extra);
+        args.extend(["--password-stdin", "--json"]);
+        let out = home.run_stdin(&args, "wrong\n");
+        out.err("VALIDATION_ERROR");
+        assert!(!out.stderr.contains("password"), "{}", out.stderr);
+        assert!(!home.path().join("whitelist.json").exists());
+    }
+}
+
+// ---- Tron (TRON-2): a key made before this build knew Tron ----
+
+#[test]
+fn tr3_a_key_without_a_tron_cache_is_locked_until_unlock_or_verify_adds_it() {
+    let home = Home::new();
+    let evm = home.create("main", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tron = derived_tron(&home);
+    // As a wallet made before this version: no `tron` in its cache.
+    home.edit_wallet(|v| {
+        v["keys"][0]["addresses"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tron");
+    });
+    // Locked: nothing to show, and the error says how to get it.
+    let msg = home
+        .run(&["address", "--chain", "tron", "--json"])
+        .err("WALLET_LOCKED");
+    assert!(msg.contains("zwallet unlock"), "{msg}");
+    assert!(
+        msg.contains("zwallet address --chain tron --verify"),
+        "{msg}"
+    );
+    // `addresses` still lists every other chain; the tron row says why it has no address.
+    let all = home.run(&["addresses", "--json"]).ok();
+    let rows = all["addresses"].as_array().unwrap();
+    for row in rows {
+        if row["chainId"] == "tron" {
+            assert_eq!(row["errorCode"], "WALLET_LOCKED", "{row}");
+            assert!(row.get("address").is_none(), "{row}");
+        } else {
+            assert_eq!(row["address"], evm.as_str(), "{row}");
+        }
+    }
+    // With the password: added from the seed, said so, and no tamper warning.
+    let v = home
+        .run_stdin(
+            &[
+                "address",
+                "--chain",
+                "tron",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
+            &format!("{PW}\n"),
+        )
+        .ok();
+    assert_eq!(
+        (&v["address"], &v["verifiedBy"]),
+        (&json!(tron), &json!("password")),
+        "{v}"
+    );
+    assert_eq!(
+        v["added"],
+        json!([{ "key": "main", "chain": "tron", "now": tron }]),
+        "{v}"
+    );
+    assert!(
+        v.get("warning").is_none() && v.get("repaired").is_none(),
+        "{v}"
+    );
+    // Then cached: the locked read shows it.
+    let v = home.run(&["address", "--chain", "tron", "--json"]).ok();
+    assert_eq!(v["address"], tron.as_str(), "{v}");
+    // A second --verify has nothing to add.
+    let v = home
+        .run_stdin(
+            &["address", "--verify", "--password-stdin", "--json"],
+            &format!("{PW}\n"),
+        )
+        .ok();
+    assert!(v.get("added").is_none(), "{v}");
+    // The human text names what was added.
+    home.edit_wallet(|v| {
+        v["keys"][0]["addresses"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tron");
+    });
+    let human = home.run_stdin(
+        &["address", "--chain", "tron", "--verify", "--password-stdin"],
+        &format!("{PW}\n"),
+    );
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human
+            .stdout
+            .contains(&format!("added: key 'main' tron: {tron}")),
+        "{}",
+        human.stdout
+    );
+    assert!(!human.stdout.contains("warning"), "{}", human.stdout);
+}
+
+#[test]
+fn t44_zero_whitelist_add_refuses_before_password_and_keeps_running_session() {
+    let _exclusive = common::exclusive();
+    let home = Home::new();
+    let pid = home.create("main", &["--unlock", "10m"])["daemonPid"]
+        .as_i64()
+        .unwrap() as i32;
+    let before = fs::read(home.wallet_json()).unwrap();
+    let tron_zero = chains::tron::address::from_body(&[0; 20]);
+    for address in [
+        "0x0000000000000000000000000000000000000000",
+        tron_zero.as_str(),
+    ] {
+        for contract in [false, true] {
+            let mut args = vec![
+                "whitelist",
+                "add",
+                "zero",
+                address,
+                "--password-stdin",
+                "--json",
+            ];
+            if contract {
+                args.extend(["--contract", "--selectors", "0x12345678"]);
+            }
+            // EOF would be a password-input failure if the command ever reached the prompt.
+            let out = home.run_stdin(&args, "");
+            let message = out.err("VALIDATION_ERROR");
+            assert!(message.contains("zero address"), "{message}");
+            assert!(
+                !out.stderr.contains("The password authorizes"),
+                "{}",
+                out.stderr
+            );
+            assert_eq!(before, fs::read(home.wallet_json()).unwrap());
+            assert!(!home.path().join("whitelist.json").exists());
+            assert!(!home.path().join("whitelist.next.json").exists());
+            assert!(pid_alive(pid));
+            assert_eq!(
+                home.run(&["status", "--json"]).ok()["daemonPids"],
+                json!([pid])
+            );
+        }
+    }
 }

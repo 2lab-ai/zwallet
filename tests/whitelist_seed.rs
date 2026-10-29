@@ -33,8 +33,8 @@ fn seeded_lists_verify_against_the_cli_wallet_seal() {
     assert_eq!(list.generation, 1);
     let alice = list.by_nickname("alice").unwrap();
     assert_eq!(alice.address, PAYEE.to_ascii_lowercase());
-    assert!(list.payee(PAYEE, "base").is_some());
-    assert!(list.payee(PAYEE, "ethereum").is_none());
+    assert!(list.payee(PAYEE, "base", true).is_some());
+    assert!(list.payee(PAYEE, "ethereum", true).is_none());
     let caps = whitelist::Policy::defaults(&chains::evm::registry::WHITELIST_RULES);
     assert_eq!(
         list.policy, caps,

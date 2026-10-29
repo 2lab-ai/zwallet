@@ -66,6 +66,7 @@ pub async fn run(
     let stop = Arc::new(AtomicBool::new(false));
     let secret = Arc::new(Mutex::new(None));
     let plan = Arc::new(Mutex::new(None));
+    let whitelist_plan = Arc::new(Mutex::new(None));
     let (ack_tx, ack_rx) = sync::sync_channel(1);
     let input = read_input(tx.clone(), stop.clone(), ack_rx, secret.clone());
     let mut input_waiting = false;
@@ -93,6 +94,7 @@ pub async fn run(
                 warm,
                 allow_ptrace_scope_0,
                 &plan,
+                &whitelist_plan,
                 &secret,
                 app.net().clone(),
                 app.nets(),
@@ -199,6 +201,7 @@ fn start(
     warm: Duration,
     allow_ptrace_scope_0: bool,
     plan: &Arc<Mutex<Option<wallet::UnlockPlan>>>,
+    whitelist_plan: &Arc<Mutex<Option<(u64, wallet::WhitelistPlan)>>>,
     secret: &Arc<Mutex<Option<PasswordBuf>>>,
     net: Net,
     nets: Vec<Net>,
@@ -210,6 +213,68 @@ fn start(
     };
     match effect {
         Effect::Transfer(_) => unreachable!("transfer jobs are moved out of App by the loop"),
+        Effect::ReadWhitelist(id, checked) => {
+            tokio::spawn(async move {
+                let result =
+                    tokio::task::spawn_blocking(move || app::whitelist::read(&home, checked))
+                        .await
+                        .unwrap_or_else(|_| Err(WalletError::validation("whitelist read stopped")));
+                let _ = tx.send(Msg::WhitelistRead(id, result));
+            });
+        }
+        Effect::PrepareWhitelist(request) => {
+            let slot = whitelist_plan.clone();
+            tokio::spawn(async move {
+                let id = request.id;
+                let result = tokio::task::spawn_blocking(move || {
+                    if let Some(fingerprint) = request.checked_fingerprint {
+                        crate::core::whitelist::check_unchanged(&home, &fingerprint)?;
+                    }
+                    let change = request.draft.change()?;
+                    let unlock = (!request.unlock.is_empty()).then_some(wallet::WhitelistUnlock {
+                        duration: request.unlock,
+                        allow_ptrace_scope_0,
+                    });
+                    let plan = wallet::whitelist_plan(&home, change, unlock)?;
+                    let summary = plan.summary().to_string();
+                    *slot.lock().expect("whitelist plan lock") = Some((id, plan));
+                    Ok(summary)
+                })
+                .await
+                .unwrap_or_else(|_| Err(WalletError::validation("whitelist preparation stopped")));
+                let _ = tx.send(Msg::WhitelistPrepared(id, result));
+            });
+        }
+        Effect::DiscardWhitelist(id) => {
+            let mut slot = whitelist_plan.lock().expect("whitelist plan lock");
+            if slot.as_ref().is_some_and(|(pending, _)| *pending == id) {
+                slot.take();
+            }
+        }
+        Effect::ApplyWhitelist(id) => {
+            let plan = whitelist_plan.lock().expect("whitelist plan lock").take();
+            let password = secret.lock().expect("secret handoff lock").take();
+            let runtime = tokio::runtime::Handle::current();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    let (prepared, plan) = plan
+                        .ok_or_else(|| WalletError::validation("whitelist preparation missing"))?;
+                    if prepared != id {
+                        return Err(WalletError::validation("whitelist preparation changed"));
+                    }
+                    let password = password
+                        .ok_or_else(|| WalletError::validation("password input missing"))?;
+                    runtime.block_on(wallet::whitelist_apply(plan, password))
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    Err(WalletError::validation(
+                        "whitelist worker stopped; check the list before retrying",
+                    ))
+                });
+                let _ = tx.send(Msg::WhitelistApplied(id, app::whitelist::Applied(result)));
+            });
+        }
         Effect::PrepareDuration(ttl) => {
             let plan = plan.clone();
             tokio::task::spawn_blocking(move || {

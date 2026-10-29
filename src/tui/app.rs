@@ -4,6 +4,7 @@
 
 mod navigation;
 pub mod transfer;
+pub mod whitelist;
 pub use navigation::{FieldPurpose, Navigation, Popup, RpcChoice, UserText};
 
 use crate::chains::{Chain, Net};
@@ -38,6 +39,9 @@ pub enum Key {
 /// Everything that changes the state: a key, the refresh timer, or the result of work.
 #[derive(Debug)]
 pub enum Msg {
+    WhitelistRead(u64, Result<whitelist::Read>),
+    WhitelistPrepared(u64, Result<String>),
+    WhitelistApplied(u64, whitelist::Applied),
     Transfer(u64, transfer::TransferMsg),
     Key(Key),
     Paste(UserText),
@@ -72,8 +76,12 @@ pub enum Msg {
 }
 
 /// Work the state asks for; its result comes back as a [`Msg`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
+    ReadWhitelist(u64, Option<CheckedList>),
+    PrepareWhitelist(whitelist::EditRequest),
+    ApplyWhitelist(u64),
+    DiscardWhitelist(u64),
     Transfer(u64),
     /// `wallet::keys`, then [`Msg::Keys`] with this generation: a lock starts a new one, and a
     /// read from an older one is dropped.
@@ -178,6 +186,8 @@ pub enum PasswordState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PasswordPurpose {
+    WhitelistVerify,
+    WhitelistEdit,
     Warm,
     Verify { all: bool },
     Repair,
@@ -185,6 +195,7 @@ pub enum PasswordPurpose {
 }
 
 pub struct App {
+    whitelist: whitelist::WhitelistUi,
     transfer: transfer::Transfer,
     nav: Navigation,
     password_purpose: PasswordPurpose,
@@ -221,6 +232,7 @@ impl App {
     /// The TUI on `net`'s chain and endpoint; `warm` is how long a warm-up unlocks for.
     pub fn new(net: &Net, warm: Duration) -> Self {
         Self {
+            whitelist: whitelist::WhitelistUi::default(),
             transfer: transfer::Transfer::default(),
             nav: Navigation::new(net),
             password_purpose: PasswordPurpose::Warm,
@@ -258,6 +270,10 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        let msg = match self.whitelist_update(msg) {
+            std::ops::ControlFlow::Continue(work) => return work,
+            std::ops::ControlFlow::Break(msg) => msg,
+        };
         let msg = match self.transfer_update(msg) {
             std::ops::ControlFlow::Continue(work) => return work,
             std::ops::ControlFlow::Break(msg) => msg,
@@ -313,6 +329,14 @@ impl App {
                                 start_session: true,
                             }
                         }
+                        PasswordPurpose::WhitelistEdit => {
+                            unreachable!("whitelist submission owns its prepared plan")
+                        }
+                        PasswordPurpose::WhitelistVerify => Effect::CheckReadPassword {
+                            key,
+                            all: false,
+                            repair: false,
+                        },
                         PasswordPurpose::Verify { all } => Effect::CheckReadPassword {
                             key,
                             all,
@@ -528,6 +552,9 @@ impl App {
             }
             // The navigation dispatcher consumes these variants before this match.
             Msg::Transfer(..)
+            | Msg::WhitelistRead(..)
+            | Msg::WhitelistPrepared(..)
+            | Msg::WhitelistApplied(..)
             | Msg::Paste(_)
             | Msg::Verified(_)
             | Msg::Balances(..)
@@ -551,7 +578,9 @@ impl App {
         self.nav.lines = Pane::Failed(Outside::error(&error));
         self.keys = Pane::Failed(Outside::error(&error));
         if self.quit {
-            self.quit_error = Some(error);
+            // Reads can finish while a submitted operation waits for its deferred lock.
+            // Keep that operation's original error and recovery details for the exit.
+            self.quit_error.get_or_insert(error);
         }
     }
 
@@ -676,6 +705,7 @@ impl App {
         self.locking
             || self.activating
             || self.sending()
+            || self.whitelist_busy()
             || self.password == PasswordState::Checking
     }
 

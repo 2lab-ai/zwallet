@@ -290,3 +290,188 @@ fn t6_pty_native_policy_cap_refuses_without_journal_or_broadcast() {
     quit(&mut tui);
     assert_eq!(node.broadcasts(), 0);
 }
+
+// These two cross-unit cases are compiled in H13, then executed only after H14 is integrated.
+fn verified_list(home: &Home) -> Value {
+    home.run_stdin(
+        &[
+            "whitelist",
+            "list",
+            "--verify",
+            "--password-stdin",
+            "--json",
+        ],
+        &format!("{PW}\n"),
+    )
+    .ok()
+}
+fn authorize_whitelist_edit(tui: &mut PtyChild, outcome: &str) {
+    wait(tui, "The password authorizes");
+    // The summary owns Enter until its last page; End makes that review step explicit.
+    tui.send(b"\x1b[F\r");
+    wait(tui, "Wallet password");
+    tui.send(format!("{PW}\r").as_bytes());
+    wait(tui, outcome);
+}
+
+#[test]
+fn t2_t6_t7_pty_warm_send_then_whitelist_edit_stops_all_and_requires_new_warmup() {
+    let _exclusive = common::exclusive();
+    let home = Home::new();
+    let created = home.create("main", &[]);
+    let from = created["address"].as_str().unwrap();
+    home.allow("alice", PAYEE, &["ethereum"]);
+    let other = Home::new();
+    other.create("other", &[]);
+    let node = Node::new(&home, from);
+    let mut tui = start_and_warm(&home, &node, from);
+    native_review(&mut tui, from);
+    confirm(&mut tui);
+    let mined = tui.wait_frame(WAIT, |f| {
+        contains(f, "Hash: 0x") && contains(f, "mined: success")
+    });
+    assert_eq!(node.broadcasts(), 1);
+    assert!(node.journal_before_broadcast.load(Ordering::SeqCst));
+    let hash = format!("{:#x}", keccak256(&node.sent.lock().unwrap()[0]));
+    assert!(contains(&mined, &hash));
+
+    // A second test-scoped home makes the edit's stop-all contract observable.
+    other.unlock("10m");
+    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], false);
+    assert_eq!(other.run(&["status", "--json"]).ok()["locked"], false);
+    tui.send(b"5");
+    wait(&mut tui, "verified by password: gen 1");
+    tui.send(b"a");
+    wait(&mut tui, "add payee");
+    tui.send(b"bob\r0x3333333333333333333333333333333333333333\rethereum\r\r");
+    authorize_whitelist_edit(&mut tui, "added bob");
+    tui.wait_frame(WAIT, |f| bar(f).1.starts_with("locked | "));
+    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], true);
+    assert_eq!(other.run(&["status", "--json"]).ok()["locked"], true);
+    let checked = verified_list(&home);
+    assert_eq!(checked["verified"], true);
+    assert_eq!(checked["gen"], 2);
+    assert!(checked["entries"].as_array().unwrap().iter().any(|entry| {
+        entry["nickname"] == "bob"
+            && entry["address"] == "0x3333333333333333333333333333333333333333"
+    }));
+    tui.send(b"\r");
+    let list = tui.wait_frame(WAIT, |f| {
+        contains(f, "verified by password: gen 2") && bar(f).1.starts_with("locked | ")
+    });
+    assert!(contains(&list, "bob"));
+
+    // Observe the refreshed key rows as well as the lock bar before opening another send.
+    tui.send(b"1");
+    tui.wait_frame(WAIT, |f| {
+        contains(f, "* main ") && bar(f).1.starts_with("locked | ")
+    });
+    // Returning to the prior receipt never repeats it. Explicitly start a new payment.
+    tui.send(b"3");
+    wait(&mut tui, "Send recorded");
+    tui.send(b"n");
+    let refused = wait(&mut tui, "wallet is locked");
+    assert!(!contains(&refused, "Select an asset"));
+    assert_eq!(node.broadcasts(), 1);
+    tui.send(b"u");
+    wait(&mut tui, "unlock duration");
+    tui.send(b"10m\r");
+    wait(&mut tui, "Wallet password:");
+    tui.send(format!("{PW}\r").as_bytes());
+    tui.wait_frame(WAIT, |f| {
+        bar(f).0.contains("verified by password")
+            && bar(f).1.starts_with("signing (agent too) until ")
+    });
+    tui.send(b"1");
+    tui.wait_frame(WAIT, |f| {
+        contains(f, "* main ") && bar(f).0.contains("verified by password")
+    });
+    tui.send(b"3");
+    wait(&mut tui, "Select an asset");
+    assert_eq!(
+        node.broadcasts(),
+        1,
+        "warming again must not resubmit the prior send"
+    );
+    quit(&mut tui);
+    assert_eq!(node.broadcasts(), 1);
+}
+
+#[test]
+fn t44_pty_legacy_zero_is_flagged_excluded_from_picker_and_removable() {
+    let _exclusive = common::exclusive();
+    let home = Home::new();
+    let created = home.create("main", &[]);
+    let from = created["address"].as_str().unwrap();
+    home.allow("alice", PAYEE, &["ethereum"]);
+    // Core signing/sealing emulates an existing legacy entry. The add UI deliberately refuses it.
+    let zero = "0x0000000000000000000000000000000000000000";
+    common::seed_whitelist(home.path(), |list| {
+        list.entries
+            .push(zwallet::core::whitelist::Entry::new_address(
+                "z",
+                zero,
+                &["ethereum"],
+            ));
+    });
+    let checked = verified_list(&home);
+    assert_eq!(checked["verified"], true);
+    assert_eq!(checked["gen"], 2);
+    assert!(
+        checked["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["nickname"] == "z" && entry["address"] == zero)
+    );
+    let node = Node::new(&home, from);
+    let mut tui = start_and_warm(&home, &node, from);
+    tui.send(b"5");
+    wait(&mut tui, "verified by password: gen 2");
+    tui.send(b"j");
+    let flagged = tui.wait_frame(WAIT, |f| {
+        contains(f, "selected for d: z") && contains(f, "zero address; unavailable as payee")
+    });
+    assert!(contains(&flagged, zero));
+    tui.send(b"3");
+    wait(&mut tui, "Select an asset");
+    tui.send(b"\r");
+    let picker = tui.wait_frame(WAIT, |f| {
+        contains(f, "Pick a password-checked payee") && contains(f, PAYEE)
+    });
+    assert!(contains(&picker, "alice"));
+    assert!(!contains(&picker, zero));
+    assert!(
+        !picker
+            .rows
+            .iter()
+            .any(|row| row.trim_matches(|c| c == ' ' || c == '|') == "z")
+    );
+    assert_eq!(node.broadcasts(), 0);
+    assert!(!node.journal.exists());
+    // The picker consumes typed address characters, so leave it explicitly before switching tabs.
+    tui.send(b"\x1b");
+    wait(&mut tui, "Select an asset");
+    tui.send(b"5");
+    tui.wait_frame(WAIT, |f| {
+        contains(f, "verified by password: gen 2") && contains(f, "selected for d: z")
+    });
+    tui.send(b"d");
+    let remove = wait(&mut tui, "remove selected entry");
+    assert!(contains(&remove, "remove: z"));
+    tui.send(b"\r"); // blank duration: remain locked after the mutation
+    authorize_whitelist_edit(&mut tui, "removed z");
+    tui.wait_frame(WAIT, |f| bar(f).1.starts_with("locked | "));
+    let checked = verified_list(&home);
+    assert_eq!(checked["verified"], true);
+    assert_eq!(checked["gen"], 3);
+    let entries = checked["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["nickname"], "alice");
+    tui.send(b"\r");
+    let remaining = wait(&mut tui, "verified by password: gen 3");
+    assert!(!contains(&remaining, "zero address"));
+    assert_eq!(node.broadcasts(), 0);
+    assert!(!node.journal.exists());
+    quit(&mut tui);
+}

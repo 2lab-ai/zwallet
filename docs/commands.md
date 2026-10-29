@@ -20,15 +20,15 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `create <name> [--password-stdin] [--unlock <dur> [--allow-ptrace-scope-0]] [--words 12\|15\|18\|21\|24] [--no-qr]` | `{ name, index, address, active, master, home, chains, verified }` (+ `locked, expiresAt, daemonPid, whitelist` with `--unlock`) | see below |
 | `list [--verify [--password-stdin]]` | `{ active, keys: [{ name, index, address, active }], verified, verifiedBy?, warning? }` | works |
 | `change <name> [--no-qr]` | `{ active, address, verified, verifiedBy?, warning? }` | works |
-| `address [--chain <key>] [--verify [--password-stdin]] [--no-qr]` | `{ chain, key, address, verified, verifiedBy?, warning? }` (EIP-55; `--verify` adds `index`) | works |
-| `addresses [--no-qr]` | `{ key, addresses: [{ chainId: <key>, address }], verified, verifiedBy?, warning? }` | works |
+| `address [--chain <key>] [--verify [--password-stdin]] [--no-qr]` | `{ chain, key, address, verified, verifiedBy?, warning? }` (EIP-55; on `tron` the base58check `T…`; `--verify` adds `index`, and `added?`/`repaired?` when it fills or repairs the cache) | works |
+| `addresses [--no-qr]` | `{ key, addresses: [{ chainId: <key>, address }], verified, verifiedBy?, warning? }` (a row with no cached address while locked, such as `tron` for a key made before this version, has `error` and `errorCode` instead of `address`) | works |
 | `status [--no-qr]` | `{ wallet, locked, home, daemonPids?, otherDaemonPids, daemonPid?, expiresAt?, whitelist?, active?, address?, verified?, verifiedBy?, warning? }` | works |
 | `balance [--no-qr]` | `{ key, address, verified, verifiedBy?, warning?, chains: [{ chain, chainId, native: { symbol, decimals, balance, raw }, tokens: [{ symbol, address, decimals, balance, raw }] }] }`; a network that failed has `{ chain, chainId, error, errorCode }` instead, a token whose read failed `{ symbol, address, decimals, error, errorCode }` (see below) | works |
-| `balance --chain <key> [--token <erc20>] [--rpc <url>] [--no-qr]` | `{ chain, key, address, symbol, decimals, balance, raw, verified, verifiedBy?, warning?, token? }` | works |
+| `balance --chain <key> [--token <erc20>] [--rpc <url>] [--no-qr]` | `{ chain, key, address, symbol, decimals, balance, raw, verified, verifiedBy?, warning?, token? }` (on `tron` also `activated`, and `--token usdt\|<T…>` adds `symbolSource`) | works |
 | `call --chain <key> --to <contract> --sig "<fn>" [ARGS...] [--rpc <url>]` | `{ chain, from, to, sig, args, result, raw }` | works |
 | `invoke --chain <key> --to <contract\|@nick> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw, toNickname? }` | `WALLET_LOCKED` |
 | `transfer --chain <key> --to <0x\|@nick> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
-| `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191; refused unless the whitelist allows it) | `WALLET_LOCKED` |
+| `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191; refused unless the whitelist allows it; `CAPABILITY_UNSUPPORTED` on `tron`) | `WALLET_LOCKED` |
 | `tx --chain <key> <txHash> [--rpc <url>]` | `{ chain, txHash, found, status, from, to, nonce, value, valueRaw, symbol, explorerUrl, blockNumber?, gasUsed?, success?, hint? }` | works (no wallet needed) |
 | `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0] [--no-qr]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, verifiedBy: "password", whitelist, warning? }` | - |
 | `lock` | `{ locked: true, wasUnlocked, stopped: [<pid>] }` | - |
@@ -86,6 +86,38 @@ Commands that act on a key take `--key <name>` (default: the active key).
   ptrace flag cannot be changed by any TUI key. History, transfer, whitelist forms and tools
   remain ![WIP](https://img.shields.io/badge/status-WIP-yellow).
   See [feature status](features.md#planned-features).
+  `3 send` reviews and sends EVM native/registry-token transfers using the pinned open key.
+  `5 whitelist` lists the policy; `V` checks it locally with the password before selection or
+  a message toggle. `a` adds a payee, `C` adds an EVM contract with selectors, `d` removes the
+  selected entry, `f` sets the fee cap, `n`/`t`/`b` set native/token/calldata transaction limits,
+  `m` toggles message signing and `R` resets the policy. Every edit shows its exact scrollable
+  summary before asking for the password, stops all zwallet daemons before writing, then
+  verifies the saved list locally. A blank duration leaves the wallet locked; an explicit
+  duration requests a new session and its outcome is shown. `L` during saving locks after the
+  edit completes; `q` waits for the edit and that lock. Zero-address adds are refused before
+  the password; legacy zero entries remain viewable/removable and unavailable as payees.
+
+- **Tron** ([Tron design](../.prd/05-tron.md)): this version shows the Tron address of each
+  key and reads TRX and USDT; the daemon also enforces the Tron signing policy. `create` caches `addresses.tron`, the
+  key's address at `m/44'/195'/0'/0/<index>` (key 0's is the one TronWeb derives by default from the
+  same phrase), as base58check `T…` (34 characters, payload `0x41` and the 20-byte body, a
+  4-byte double-SHA-256 checksum). Tron addresses are compared byte for byte, never ignoring case:
+  a cached value that is no such address (a case flip fails the checksum) is `VALIDATION_ERROR`,
+  shown escaped. A key made before this version has no cached Tron address: while locked
+  `address --chain tron` is `WALLET_LOCKED` (unlock once, or run `zwallet address --chain tron
+  --verify`, which adds it and says so in `added`), and its `addresses` row shows that error. After
+  `unlock`, `address --chain tron` is verified by the session as for EVM, with no prompt.
+  `sign-message`, `call` and `invoke` on `tron` are `CAPABILITY_UNSUPPORTED`, and so are
+  `transfer` and `tx` until the Tron send path comes. `whitelist add <nick> <T…>` adds a
+  Tron-only payee; `--chains tron` is the only allowed scope for it. EVM `*` entries cover
+  EVM chains only, never Tron. Tron contract entries and selectors are unsupported.
+  `whitelist fee-cap tron <TRX>` bounds signed `fee_limit`, with a default of 30 TRX.
+  It does not bound bandwidth or account activation fees. Historical JSON fields named
+  `maxFeeWei` and `maxNativeWei` store sun on Tron (1 TRX = 1,000,000 sun). Token caps use
+  the token's smallest units; calldata caps bound bytes, not bandwidth charges. The daemon
+  accepts only strict native transfers and the registry USDT's exact transfer call, from
+  its own derived address to a listed Tron payee, under the signed limits. It refuses
+  approvals, arbitrary contracts, permissions, memo, malformed protobuf and self-TRX.
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
   reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's
@@ -209,7 +241,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
     bytes as hex (512) on its own line (`--json` keeps the result and the hex whole).
 
   A QR code holding an Ethereum address needs at least version 2: a block of 25 × 25 = 625
-  modules without a quiet zone, 25 rows of 25 cells from one source at one character per module.
+  modules without a quiet zone, 25 rows of 25 cells from one source at one character per module
+  (a Tron address, 34 bytes, needs version 3: 29 × 29 = 841).
   A source bounded to 512 characters cannot fill one. The exceptions above are not shown unable
   to: their parts sit on separate labelled lines, or are hex only. What a bounded source can
   still do is pad to the terminal's width so that its text starts a visual row at column 0 (soft
@@ -248,11 +281,14 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `scan to send to <address>` and ``(the same address on every EVM network in `zwallet chains`)``,
   then the address as a QR code for a phone wallet: the plain EIP-55 address (no URI scheme, no
   chain), error correction level M, a quiet zone of 4 modules, black on white in ANSI colours, or
-  with `NO_COLOR` plain blocks for a dark terminal. Scan that one and save it in the phone
+  with `NO_COLOR` plain blocks for a dark terminal. A Tron address (`address --chain tron`,
+  `balance --chain tron`) has its own code of the plain `T…` under the lines `scan to send to
+  T…` and `(Tron only: TRX and TRC20 tokens; not an EVM address)`. Scan that one and save it in the phone
   wallet's address book. The `create` that makes the master seed shows no code, only a line to run
   `zwallet backup` first: funds sent before the recovery phrase is written down are at risk.
-  `--no-qr` leaves either out. `addresses` shows one code (the address is the same on every EVM
-  chain), and `balance` shows it after the networks. Nothing unverified prints one, and neither
+  `--no-qr` leaves either out. `addresses` shows two codes, the EVM one (the address is the same
+  on every EVM chain) then the Tron one, each under its lines, and `balance` shows the EVM one after
+  the networks. Nothing unverified prints one, and neither
   `--json` nor output into a pipe ever has one, so agents see the same text as before.
 ## The whitelist
 
@@ -307,7 +343,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
     cap bounds each transaction, not a total: repeated transactions can each spend up to it. On
     the OP-stack chains (Base, Optimism) the L1 data fee is charged on top of it. The defaults
     are ethereum 0.003 ETH; base, arbitrum and optimism 0.0005 ETH; polygon 2 POL; bsc 0.003
-    BNB; avalanche 0.05 AVAX; sepolia 0.01 ETH, changed with `whitelist fee-cap <chain>
+    BNB; avalanche 0.05 AVAX; sepolia 0.01 ETH; tron 30 TRX (signed fee_limit only),
+    changed with `whitelist fee-cap <chain>
     <amount>`.
   - **Optional transaction limits.** A verified list can also cap decoded native value,
     direct registry-token amounts and calldata size per chain. Exceeding one is
@@ -496,10 +533,25 @@ issues [#26](https://github.com/2lab-ai/zwallet/issues/26) and
   short to 72 characters as its line shows it; `--json` adds `networks: [{ chain, error,
   errorCode }]`, each error whole as a network's row has it (human output never shows it). The
   address is the same on every EVM chain; a row has its own `address` only where the cache
-  differs. Human output: `key` and `address`, one line per network with its coin, indented under
+  differs, as the `tron` row always does. The `tron` row is TRX and USDT (the Tron registry's
+  only token), with `activated` and, when the account's owner permission is not this key alone
+  at threshold 1, its own `warning` (also a line under it). Human output: `key` and `address`, one line per network with its coin, indented under
   it each non-zero token and each failed token as `<SYMBOL> error: …`, a failed network as
   `error: <message, cut short> [<CODE>]`, and a last line `<n> of <all> networks have a balance`
   (`; <m> did not answer`, `; <k> token reads failed` when some failed).
+- **`balance --chain tron`** checks the endpoint first: block 0's id (`/wallet/getblockbynum`)
+  must be mainnet's genesis id, else `RPC_ERROR` naming both, before any account is read. It
+  then reads `/wallet/getaccount`: TRX in sun (6 decimals), `activated: false` when the node does
+  not know the account (it never received TRX), and a `warning` when the account's owner
+  permission is not this address alone at threshold 1 ("funds here may not be controlled by
+  this wallet's key; do not fund it"; the keys it names are escaped and cut). `--token usdt` (any
+  case) reads USDT's `balanceOf` with the registry's symbol and decimals (`symbolSource:
+  "registry"`); `--token <T…>` asks the contract for `decimals()` and `symbol()`, shown escaped
+  (`symbolSource: "contract"` unless it is the registry contract answering its recorded
+  symbol). Only one 32-byte word with `result.result: true` is read as a balance; a balance that
+  is not a whole number of sun below 2^63, an answer about another account, or a failed call is
+  `RPC_ERROR` (the node's message escaped and cut at 512), never shown as a balance. Requests
+  carry `User-Agent: zwallet/<version>` and nothing about who runs them.
 ## Contract calls
 
 - **`call` / `invoke` signatures** are `name(argTypes)(returnTypes)`, e.g.
@@ -737,10 +789,15 @@ issues [#26](https://github.com/2lab-ai/zwallet/issues/26) and
 | polygon | 137 | POL | https://polygon-bor-rpc.publicnode.com |
 | bsc | 56 | BNB | https://bsc-rpc.publicnode.com |
 | avalanche | 43114 | AVAX | https://avalanche-c-chain-rpc.publicnode.com |
+| tron | 728126428 | TRX | https://tron-rpc.publicnode.com |
 | sepolia | 11155111 | ETH | https://ethereum-sepolia-rpc.publicnode.com |
 
-RPC precedence: `--rpc <url>`, then `ZWALLET_RPC_<KEY>` (e.g. `ZWALLET_RPC_BASE`), then the
-default. zwallet checks the endpoint's `eth_chainId` before using it. An RPC URL may carry an API
+RPC precedence: `--rpc <url>`, then `ZWALLET_RPC_<KEY>` (e.g. `ZWALLET_RPC_BASE`,
+`ZWALLET_RPC_TRON`), then the default. zwallet checks the endpoint's `eth_chainId` before using
+it; on `tron` (Tron's HTTP API, `POST /wallet/*`, no API key) it checks that block 0 is mainnet's
+genesis block, whose id ends in the chain id shown (`0x2b6653dc`). TronGrid
+(`https://api.trongrid.io`) works as `--rpc` too, but without a key it allowed 3 requests a
+second on 2026-10-28, too few for `balance` without `--chain`. An RPC URL may carry an API
 key, so zwallet prints only its scheme and host (`https://host/<redacted>`), parsing the URL the
 way the HTTP client does. Some providers put the key in a subdomain, so a host label that looks
 like a key (a hyphen-free run of 20+ characters, or 12+ characters mixing letters and digits) is

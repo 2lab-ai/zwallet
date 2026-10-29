@@ -1,6 +1,6 @@
 # v0.3 Tron — loop
 
-Status: **planned**, 2026-10-28. Target = [`ssot.md`](ssot.md), [`../05-tron.md`](../05-tron.md)
+Status: **in-progress**, 2026-10-29. Target = [`ssot.md`](ssot.md), [`../05-tron.md`](../05-tron.md)
 acceptance TR1–TR25. Units: [`units.md`](units.md). This file holds only open work.
 
 ## Round 1 — plan
@@ -10,7 +10,7 @@ cap, each PR reviewable as one argument). Worktrees at `.worktrees/<branch with 
 
 | PR | Branch | Work items | Closes | Owner | State |
 |---|---|---|---|---|---|
-| A, see it | `feat/tron-a-see` | TRON-1, TRON-2 (no `tron` default fee cap) | TR1–TR8, TR24 | coding agent + dispatcher gate | planned; preview after merge |
+| A, see it | `handoff/tron-a` (continues PR #33) | TRON-1, TRON-2 (no `tron` default fee cap) | TR1–TR8, TR24 | coding agent + dispatcher gate | implementation and focused tests; full gate and review pending |
 | B1, codec | `feat/tron-b1-codec` | TRON-4 | TR12, TR13 | coding agent + dispatcher gate | planned, after A |
 | B2, guard | `feat/tron-b2-guard` | TRON-3, TRON-5, the `tron` default fee cap; review evidence carries B1's refusal list | TR9–TR11, TR14, TR15 | coding agent + dispatcher gate | planned, after B1 |
 | C, send it | `feat/tron-c-send` | TRON-6, TRON-7 | TR16–TR21, TR25 | coding agent + dispatcher gate | planned, after B2 and Q3 (units.md §Before C starts); preview after merge |
@@ -21,10 +21,13 @@ cap, each PR reviewable as one argument). Worktrees at `.worktrees/<branch with 
 - Gate (as [`../v0-2-tui/loop.md`](../v0-2-tui/loop.md) §Build facts): `cargo fmt --check &&
   cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`; the cli suite again
   on a pty ×3 (`script -q /dev/null cargo test --locked --test cli < /dev/null`); the tui suite
-  the same way; live `cargo test --locked -- --ignored`; Linux Docker `rust:1.99-bookworm` as a
+  the same way; live `cargo test --locked -- --ignored`; Linux with Rust 1.95 (the repository toolchain) as a
   non-root user; an x86_64 macOS build (`unlock` needs it signed).
 - From A on, `tests/tron_offline.rs` (the local mock node) runs in `cargo test --locked`.
-- Before a gate, `ps` shows no live `zwallet daemon` of the user: the gate stops every daemon.
+- Tests use `/tmp/zwt-*` homes and the debug-only `ZWALLET_TEST_DAEMON_SCOPE` guard.
+  Confirm the guard before running tests; never stop the user's real wallet daemon.
+  Run only one complete CLI suite at a time. Focused tests that can stop test daemons
+  hold `common::exclusive()` and serialize with other suites.
 - Live Tron tests use `https://tron-rpc.publicnode.com`. TronGrid without a key allowed 3
   requests/s on 2026-10-28 (05 §Network access), too few for a parallel test run.
 - `bs58` 0.5.1 and `sha2` 0.10.9 are already in `Cargo.lock`; TRON-1 adds no crate.
@@ -33,14 +36,14 @@ cap, each PR reviewable as one argument). Worktrees at `.worktrees/<branch with 
 
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
-| TR1 | the A1 mnemonic gives `TWer2…` (i=0), `TPjjv…` (i=1) | no Tron family | A | 🚪 |
-| TR2 | `addresses.tron` cached; session-verified after unlock, no prompt | no Tron address | A | 🚪 |
-| TR3 | an old key: `WALLET_LOCKED` locked, `--verify` adds the address | `cache_repairs` only checks entries that exist | A | 🚪 |
-| TR4 | case-flipped, bad-checksum, `0x` caches refused | compare is case-insensitive | A | 🚪 |
-| TR5 | a Nile genesis is `RPC_ERROR` before any read | no chain identity check | A | 🚪 |
-| TR6 | owner-permission warning from the M7 fixture; live balance equals the node, nothing pinned | no Tron RPC | A | 🚪 |
-| TR7 | USDT balance, 6 decimals; a token error is the row's | no Tron registry | A | 🚪 |
-| TR8 | `balance` has a `tron` row, Sepolia last | no Tron arm in `every_balance` | A | 🚪 |
+| TR1 | the A1 mnemonic gives `TWer2…` (i=0), `TPjjv…` (i=1) | implemented; full integration gate/review pending | A | 🟡 |
+| TR2 | `addresses.tron` cached; session-verified after unlock, no prompt | implemented; full integration gate/review pending | A | 🟡 |
+| TR3 | an old key: `WALLET_LOCKED` locked, `--verify` adds the address | implemented; full integration gate/review pending | A | 🟡 |
+| TR4 | case-flipped, bad-checksum, `0x` caches refused | implemented; full integration gate/review pending | A | 🟡 |
+| TR5 | a Nile genesis is `RPC_ERROR` before any read | implemented; full integration gate/review pending | A | 🟡 |
+| TR6 | owner-permission warning from the M7 fixture; live balance equals the node, nothing pinned | implemented; full integration gate/review pending | A | 🟡 |
+| TR7 | USDT balance, 6 decimals; a token error is the row's | implemented; full integration gate/review pending | A | 🟡 |
+| TR8 | `balance` has a `tron` row, Sepolia last | implemented; full integration gate/review pending | A | 🟡 |
 | TR9 | `whitelist add bob T…` stores `0x…` + `["tron"]`, shows `T…` | `add_change` takes `0x` only | B2 | 🚪 |
 | TR10 | six bad `add` inputs refused before the password; `validate` refuses mixed and contract `tron` entries | no Tron parse rules | B2 | 🚪 |
 | TR11 | old lists verify unchanged; `*` is no `tron` payee; the EVM twin of a `tron` payee is refused | `covers_chain` treats `*` as every chain | B2 | 🚪 |
@@ -57,11 +60,13 @@ cap, each PR reviewable as one argument). Worktrees at `.worktrees/<branch with 
 | TR25 | `expired-unseen` only by the node's head and a node within 60 s of the local clock; never a safe-resend message | no Tron lookup | C | 🚪 |
 | TR22 | every row of 05 §TUI is in the TUI coverage matrix | `03-tui.md` is being rewritten | TUI task | 🚪 |
 | TR23 | owner-gated mainnet TRX and USDT send | needs TRON-7 and the owner's funds and decision | owner | 🚪 |
-| TR24 | `sign-message`, `call`, `invoke` on `tron` → `CAPABILITY_UNSUPPORTED` | no `tron` chain | A | 🚪 |
+| TR24 | `sign-message`, `call`, `invoke` on `tron` → `CAPABILITY_UNSUPPORTED` | implemented; full integration gate/review pending | A | 🟡 |
 
 ## Next
 
-Dispatch A with RED tests first, the gate above, an outside review, merge, preview. Then B1, B2
+Finish the integration gate and outside review for A (PR #33 continued on `handoff/tron-a`),
+then merge and preview with authorized upstream access. Focused repair evidence is in
+`review-a-2026-10-29.md`. Then B1, B2
 and C in that order; Q3 closes before C (units.md §Before C starts).
 
 The spec passed the three-engine review in round 3 (2026-10-28: grok-4.7, gpt-6-astra and fable all

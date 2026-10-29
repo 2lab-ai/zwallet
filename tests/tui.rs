@@ -1728,6 +1728,7 @@ mod navigation {
                 .map(|chain| wallet::AddressRow {
                     chain,
                     address: address.into(),
+                    error: None,
                 })
                 .collect(),
         }
@@ -1754,7 +1755,7 @@ mod navigation {
                     .trim_end()
                     .ends_with("? actions")
             );
-            if matches!(app.tab(), Tab::Whitelist | Tab::Tools) {
+            if app.tab() == Tab::Tools {
                 assert!(text.contains("in a later version"));
             }
         }
@@ -1772,14 +1773,14 @@ mod navigation {
         assert!(text.contains("actions (55)"));
         assert!(text.contains(&zwallet::version_line()));
         assert!(!text.lines().nth(21).unwrap().contains("? actions"));
-        paste(&mut app, "whitelist add");
+        paste(&mut app, "create --unlock");
         assert!(app.update(Msg::Key(Key::Enter)).is_empty());
         assert!(view(&app).contains("in a later version"));
         for c in ['q', '?', '1'] {
             app.update(Msg::Key(Key::Char(c)));
         }
         match app.navigation().popup.as_ref().unwrap() {
-            Popup::Menu(menu) => assert_eq!(menu.filter().value(), "whitelist addq?1"),
+            Popup::Menu(menu) => assert_eq!(menu.filter().value(), "create --unlockq?1"),
             _ => panic!("menu should stay open"),
         }
         paste(&mut app, "\u{1b}evil\u{2588}");
@@ -1821,6 +1822,8 @@ mod navigation {
                 address: A.into(),
                 trust: Trust::Locked,
                 native: native(1_000_000_000_000_000_000),
+                activated: None,
+                warning: None,
                 tokens,
             }),
         ));
@@ -1844,7 +1847,12 @@ mod navigation {
                 chain,
                 address: Some(A.into()),
                 balances: if i < 2 {
-                    Ok((native(1), vec![]))
+                    Ok(wallet::read::NetworkRead {
+                        native: native(1),
+                        tokens: vec![],
+                        activated: None,
+                        warning: None,
+                    })
                 } else {
                     Err(WalletError::rpc("unavailable"))
                 },

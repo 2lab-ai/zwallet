@@ -4,7 +4,7 @@ use super::{Trust, address, net};
 use crate::chains::evm::{Evm, rpc};
 use crate::chains::{self, CHAINS, Chain, ChainFamily, Family, Net};
 use crate::commands::Daemon;
-use crate::core::error::{Result, WalletError};
+use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::store;
 use crate::core::text::ascii_inert;
 use std::collections::BTreeMap;
@@ -13,6 +13,21 @@ use std::time::Duration;
 
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(8);
 pub type NetworkBalances = Result<(chains::Balance, Vec<chains::TokenBalance>)>;
+#[derive(Clone, Debug)]
+pub struct NetworkRead {
+    pub native: chains::Balance,
+    pub tokens: Vec<chains::TokenBalance>,
+    pub activated: Option<bool>,
+    pub warning: Option<String>,
+}
+#[derive(Clone, Debug)]
+pub struct AssetRead {
+    pub balance: chains::Balance,
+    pub activated: Option<bool>,
+    pub token: Option<String>,
+    pub symbol_source: Option<&'static str>,
+    pub warning: Option<String>,
+}
 
 #[derive(Clone, Debug)]
 pub struct ChainBalances {
@@ -22,12 +37,14 @@ pub struct ChainBalances {
     pub trust: Trust,
     pub native: chains::Balance,
     pub tokens: Vec<chains::TokenBalance>,
+    pub activated: Option<bool>,
+    pub warning: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct NetworkBalance {
     pub chain: &'static Chain,
     pub address: Option<String>,
-    pub balances: NetworkBalances,
+    pub balances: Result<NetworkRead>,
 }
 #[derive(Clone, Debug)]
 pub struct EveryBalance {
@@ -38,6 +55,7 @@ pub struct EveryBalance {
 }
 #[derive(Clone, Debug)]
 pub struct AddressRow {
+    pub error: Option<WalletError>,
     pub chain: &'static Chain,
     pub address: String,
 }
@@ -59,20 +77,48 @@ pub async fn validate_rpc(net: &Net) -> Result<()> {
     tokio::time::timeout(NETWORK_TIMEOUT, async {
         match net.chain.family {
             Family::Evm(_) => rpc::connect(net).await.map(|_| ()),
+            Family::Tron(_) => chains::tron::rpc::connect(net).await.map(|_| ()),
         }
     })
     .await
     .map_err(|_| WalletError::rpc("RPC chain check timed out"))?
 }
 pub async fn read_network(net: Net, owner: String) -> NetworkBalances {
+    read_network_details(net, owner)
+        .await
+        .map(|r| (r.native, r.tokens))
+}
+pub async fn read_network_details(net: Net, owner: String) -> Result<NetworkRead> {
     match net.chain.family {
-        Family::Evm(_) => Evm.wallet_balances(&net, &owner, NETWORK_TIMEOUT).await,
+        Family::Evm(_) => Evm
+            .wallet_balances(&net, &owner, NETWORK_TIMEOUT)
+            .await
+            .map(|(native, tokens)| NetworkRead {
+                native,
+                tokens,
+                activated: None,
+                warning: None,
+            }),
+        Family::Tron(_) => chains::tron::wallet_balances(&net, &owner, NETWORK_TIMEOUT)
+            .await
+            .map(|r| NetworkRead {
+                native: r.native,
+                tokens: r.tokens,
+                activated: Some(r.activated),
+                warning: r.warning,
+            }),
     }
 }
+
 pub async fn balances(home: &Path, key: &str, net: Net) -> Result<ChainBalances> {
     let (owner, trust) = address(home, key, net.chain).await?;
     let chain = net.chain;
-    let (native, tokens) = read_network(net, owner.clone()).await?;
+    let NetworkRead {
+        native,
+        tokens,
+        activated,
+        warning,
+    } = read_network_details(net, owner.clone()).await?;
     Ok(ChainBalances {
         chain,
         key: key.to_string(),
@@ -80,6 +126,8 @@ pub async fn balances(home: &Path, key: &str, net: Net) -> Result<ChainBalances>
         trust,
         native,
         tokens,
+        activated,
+        warning,
     })
 }
 /// The one-asset CLI path retains its response and does not add token RPCs.
@@ -89,15 +137,47 @@ pub async fn balance(
     net: &Net,
     token: Option<&str>,
 ) -> Result<(String, Trust, chains::Balance)> {
-    let (owner, trust) = address(home, key, net.chain).await?;
-    let balance = match net.chain.family {
-        Family::Evm(_) => match token {
-            Some(token) => Evm.token_balance(net, &owner, token).await?,
-            None => Evm.native_balance(net, &owner).await?,
-        },
-    };
-    Ok((owner, trust, balance))
+    let (owner, trust, read) = balance_detail(home, key, net, token).await?;
+    Ok((owner, trust, read.balance))
 }
+pub async fn balance_detail(
+    home: &Path,
+    key: &str,
+    net: &Net,
+    token: Option<&str>,
+) -> Result<(String, Trust, AssetRead)> {
+    let (owner, trust) = address(home, key, net.chain).await?;
+    let read = match net.chain.family {
+        Family::Evm(_) => AssetRead {
+            balance: match token {
+                Some(token) => Evm.token_balance(net, &owner, token).await?,
+                None => Evm.native_balance(net, &owner).await?,
+            },
+            activated: None,
+            token: token.map(|t| Evm.normalize_address(t)).transpose()?,
+            symbol_source: None,
+            warning: None,
+        },
+        Family::Tron(_) => {
+            let r = chains::tron::balance(net, &owner, token).await?;
+            AssetRead {
+                balance: r.balance,
+                activated: Some(r.activated),
+                token: r.token.as_ref().map(|t| t.address.clone()),
+                symbol_source: r.token.map(|t| {
+                    if t.from_registry {
+                        "registry"
+                    } else {
+                        "contract"
+                    }
+                }),
+                warning: r.warning,
+            }
+        }
+    };
+    Ok((owner, trust, read))
+}
+
 pub async fn addresses(home: &Path, key_name: &str) -> Result<Addresses> {
     let file = store::read_wallet_file(home)?;
     let key = file.key(Some(key_name))?;
@@ -109,8 +189,23 @@ pub async fn addresses(home: &Path, key_name: &str) -> Result<Addresses> {
         if !derived.contains_key(family) {
             derived.insert(family, daemon.derive(key.index, chain).await?);
         }
-        let address = daemon.checked(key, chain, derived[family].as_ref()).await?;
-        rows.push(AddressRow { chain, address });
+        match daemon.checked(key, chain, derived[family].as_ref()).await {
+            Ok(address) => rows.push(AddressRow {
+                chain,
+                address,
+                error: None,
+            }),
+            Err(e)
+                if matches!(chain.family, Family::Tron(_)) && e.code == ErrorCode::WalletLocked =>
+            {
+                rows.push(AddressRow {
+                    chain,
+                    address: String::new(),
+                    error: Some(e),
+                })
+            }
+            Err(e) => return Err(e),
+        }
     }
     Ok(Addresses {
         key: key.name.clone(),
@@ -162,7 +257,7 @@ pub async fn every_balance_with(
         .map(|(net, owner)| {
             let chain = net.chain;
             let read = owner.map(|owner| {
-                let task = tokio::spawn(read_network(net, owner.clone()));
+                let task = tokio::spawn(read_network_details(net, owner.clone()));
                 (owner, task)
             });
             (chain, read)

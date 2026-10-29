@@ -700,8 +700,57 @@ pub struct CacheRepair {
     pub now: String,
 }
 
-/// Every cached address in `file` that is not the one `seed` derives for its key and chain.
-/// Chain keys this build derives nothing for are left alone.
+/// A chain the seed derives an address for that a key's cache lacks (a chain added after the
+/// key was made): what [`unlock_repairing`] adds. Nothing was tampered with, so it carries no
+/// old value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheAddition {
+    pub key: String,
+    pub chain: String,
+    /// The seed's address.
+    pub now: String,
+}
+
+/// Every chain `derive` gives an address for that some key's cache lacks.
+fn cache_additions(
+    file: &WalletFile,
+    seed: &Seed,
+    derive: AddressDeriver<'_>,
+) -> Result<Vec<CacheAddition>> {
+    let mut added = Vec::new();
+    for key in &file.keys {
+        for (chain, now) in derive(seed, key.index)? {
+            if !key.addresses.contains_key(&chain) {
+                added.push(CacheAddition {
+                    key: key.name.clone(),
+                    chain,
+                    now,
+                });
+            }
+        }
+    }
+    Ok(added)
+}
+
+/// Whether a cached address is the one derived. An address the deriver writes as `0x` and hex
+/// digits names its bytes in either case (an EVM address, EIP-55 or not), so it compares
+/// case-insensitively; any other text (Tron's base58check `T…`, where the case is part of the
+/// value and a case variant is another string) compares byte for byte. Core knows the encoding,
+/// not the chain.
+fn same_cached(derived: &str, cached: &str) -> bool {
+    let hex = |s: &str| {
+        s.strip_prefix("0x")
+            .is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    if hex(derived) {
+        derived.eq_ignore_ascii_case(cached)
+    } else {
+        derived == cached
+    }
+}
+
+/// Every cached address in `file` that is not the one `seed` derives for its key and chain
+/// ([`same_cached`]). Chain keys this build derives nothing for are left alone.
 fn cache_repairs(
     file: &WalletFile,
     seed: &Seed,
@@ -712,7 +761,7 @@ fn cache_repairs(
         let derived = derive(seed, key.index)?;
         for (chain, cached) in &key.addresses {
             if let Some(actual) = derived.get(chain)
-                && !actual.eq_ignore_ascii_case(cached)
+                && !same_cached(actual, cached)
             {
                 repairs.push(CacheRepair {
                     key: key.name.clone(),
@@ -763,10 +812,7 @@ fn moved_index(
                 std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::btree_map::Entry::Vacant(e) => e.insert(derive(seed, j)?),
             };
-            if !at_j
-                .get(&r.chain)
-                .is_some_and(|a| a.eq_ignore_ascii_case(&r.was))
-            {
+            if !at_j.get(&r.chain).is_some_and(|a| same_cached(a, &r.was)) {
                 continue;
             }
             // `r.key`'s cache holds index `j`'s address. If a key legitimately sits at `j` with a
@@ -775,10 +821,9 @@ fn moved_index(
             // caches the wrong address (two indices swapped), is this a move, and refused.
             let owner = file.keys.iter().find(|k| k.index == j);
             let owner_correct = owner.is_some_and(|k| {
-                k.addresses.get(&r.chain).is_some_and(|c| {
-                    at_j.get(&r.chain)
-                        .is_some_and(|a| a.eq_ignore_ascii_case(c))
-                })
+                k.addresses
+                    .get(&r.chain)
+                    .is_some_and(|c| at_j.get(&r.chain).is_some_and(|a| same_cached(a, c)))
             });
             if owner_correct {
                 continue;
@@ -801,27 +846,30 @@ fn moved_index(
 
 /// [`unlock`], but cached addresses that differ from the seed are repaired instead of refused:
 /// with the password the seed is authoritative and the cache is only metadata. Every other check
-/// (distinct names and indices) still refuses. The repair is written under the writer lock, only
-/// while wallet.json's crypto envelope is still the one the password opened, through the same
-/// atomic replace as every metadata write; the encrypted master is never touched. Returns the
-/// repairs made (none when the cache was right, and then nothing is written).
+/// (distinct names and indices) still refuses. Chains the seed derives that a key's cache lacks
+/// (added to zwallet after the key was made) are added the same way. The write is done under
+/// the writer lock, only while wallet.json's crypto envelope is still the one the password
+/// opened, through the same atomic replace as every metadata write; the encrypted master is never
+/// touched. Returns the repairs and the additions made (none when the cache was right and whole,
+/// and then nothing is written).
 pub fn unlock_repairing(
     home: &Path,
     password: &str,
     derive: AddressDeriver<'_>,
-) -> Result<(Unsealed, WalletFile, Vec<CacheRepair>)> {
+) -> Result<(Unsealed, WalletFile, Vec<CacheRepair>, Vec<CacheAddition>)> {
     let file = read_wallet_file(home)?;
     let unsealed = decrypt(&file.crypto, password)?;
     verify_key_list(&file)?;
     let repairs = cache_repairs(&file, &unsealed.seed, derive)?;
-    if repairs.is_empty() {
+    if repairs.is_empty() && cache_additions(&file, &unsealed.seed, derive)?.is_empty() {
         verify_key_cache(&file, &unsealed.seed, derive)?;
-        return Ok((unsealed, file, Vec::new()));
+        return Ok((unsealed, file, Vec::new(), Vec::new()));
     }
     moved_index(&file, &unsealed.seed, derive, &repairs)?;
     let lock = MetaLock::acquire(home)?;
-    let (repaired, repairs) = repair_under_lock(&lock, &file.crypto, &unsealed.seed, derive)?;
-    Ok((unsealed, repaired, repairs))
+    let (repaired, repairs, added) =
+        repair_under_lock(&lock, &file.crypto, &unsealed.seed, derive)?;
+    Ok((unsealed, repaired, repairs, added))
 }
 
 /// [`repair_under_lock`] with no test hook.
@@ -830,14 +878,14 @@ fn repair_under_lock(
     opened: &CryptoBox,
     seed: &Seed,
     derive: AddressDeriver<'_>,
-) -> Result<(WalletFile, Vec<CacheRepair>)> {
+) -> Result<(WalletFile, Vec<CacheRepair>, Vec<CacheAddition>)> {
     repair_under_lock_hooked(lock, opened, seed, derive, || {})
 }
 
 /// The write of [`unlock_repairing`], under `lock`: only while wallet.json's crypto envelope is
 /// still `opened` (the one the password decrypted); the key list checked again and the repairs
-/// computed again as the file is now, and nothing written when there are none (another process
-/// repaired first). The envelope is then **read back from disk** and must still be `opened`, so a
+/// and additions computed again as the file is now, and nothing written when there are none
+/// (another process repaired first). The envelope is then **read back from disk** and must still be `opened`, so a
 /// same-user process that swapped the file around the write (`after_write`, a test seam) is
 /// caught: the repair writes only cached addresses and must never be the path that lets a
 /// different master through.
@@ -847,9 +895,10 @@ fn repair_under_lock_hooked(
     seed: &Seed,
     derive: AddressDeriver<'_>,
     after_write: impl FnOnce(),
-) -> Result<(WalletFile, Vec<CacheRepair>)> {
+) -> Result<(WalletFile, Vec<CacheRepair>, Vec<CacheAddition>)> {
     let opened = serde_json::to_value(opened).ok();
     let mut repairs = Vec::new();
+    let mut added = Vec::new();
     lock.update_if(|current| {
         if serde_json::to_value(&current.crypto).ok() != opened {
             return Err(WalletError::validation(
@@ -859,12 +908,17 @@ fn repair_under_lock_hooked(
         verify_key_list(current)?;
         repairs = cache_repairs(current, seed, derive)?;
         moved_index(current, seed, derive, &repairs)?;
-        for r in &repairs {
-            if let Some(key) = current.keys.iter_mut().find(|k| k.name == r.key) {
-                key.addresses.insert(r.chain.clone(), r.now.clone());
+        added = cache_additions(current, seed, derive)?;
+        let writes = repairs
+            .iter()
+            .map(|r| (&r.key, &r.chain, &r.now))
+            .chain(added.iter().map(|a| (&a.key, &a.chain, &a.now)));
+        for (name, chain, now) in writes {
+            if let Some(key) = current.keys.iter_mut().find(|k| k.name == *name) {
+                key.addresses.insert(chain.clone(), now.clone());
             }
         }
-        Ok(!repairs.is_empty())
+        Ok(!repairs.is_empty() || !added.is_empty())
     })?;
     after_write();
     let on_disk = read_wallet_file(lock.home())?;
@@ -875,7 +929,7 @@ fn repair_under_lock_hooked(
         ));
     }
     verify_key_cache(&on_disk, seed, derive)?;
-    Ok((on_disk, repairs))
+    Ok((on_disk, repairs, added))
 }
 
 /// Options for creating the master seed.
@@ -1902,7 +1956,7 @@ mod tests {
             "{}",
             err.message
         );
-        let (_, file, repairs) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
+        let (_, file, repairs, _) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
         assert_eq!(repairs.len(), 1, "{repairs:?}");
         assert_eq!(
             (repairs[0].key.as_str(), repairs[0].was.as_str()),
@@ -1912,9 +1966,83 @@ mod tests {
         unlock(tmp.path(), PW, &fake_derive).unwrap();
         // Nothing left to repair: nothing is written.
         let before = fs::read(tmp.path().join(WALLET_FILE)).unwrap();
-        let (_, _, again) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
+        let (_, _, again, _) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
         assert!(again.is_empty());
         assert_eq!(fs::read(tmp.path().join(WALLET_FILE)).unwrap(), before);
+    }
+
+    /// A deriver with two address encodings: `hex` gives `0x` and hex digits in mixed case (the
+    /// EVM form), `b58` a base58check string (the Tron form), both from the index.
+    fn two_encodings(_: &Seed, index: u32) -> Result<BTreeMap<String, String>> {
+        let (hex, b58) = match index {
+            0 => (
+                "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
+            ),
+            _ => (
+                "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+            ),
+        };
+        Ok(BTreeMap::from([
+            ("hex".to_string(), hex.to_string()),
+            ("b58".to_string(), b58.to_string()),
+        ]))
+    }
+
+    #[test]
+    fn hex_caches_compare_in_any_case_and_every_other_text_byte_for_byte() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_master(tmp.path(), PW, "a", fast(), &two_encodings).unwrap();
+        let path = tmp.path().join(WALLET_FILE);
+        // `nextIndex` 2: index 1, which no key owns, is among the indices a mismatch is checked
+        // against for a moved index.
+        let edit = |hex: &str, b58: &str| {
+            let mut file: WalletFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            file.next_index = 2;
+            file.keys[0].addresses.insert("hex".into(), hex.into());
+            file.keys[0].addresses.insert("b58".into(), b58.into());
+            fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        };
+        // The hex address in lower case is the same 20 bytes: no repair.
+        edit(
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
+        );
+        unlock(tmp.path(), PW, &two_encodings).unwrap();
+        // A base58 address with one letter's case flipped is another string: repaired.
+        edit(
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "tWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6",
+        );
+        assert!(unlock(tmp.path(), PW, &two_encodings).is_err());
+        let (_, file, repairs, _) = unlock_repairing(tmp.path(), PW, &two_encodings).unwrap();
+        assert_eq!(repairs.len(), 1, "{repairs:?}");
+        assert_eq!(
+            (repairs[0].chain.as_str(), repairs[0].was.as_str()),
+            ("b58", "tWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6")
+        );
+        assert_eq!(
+            file.keys[0].addresses["b58"],
+            "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6"
+        );
+        // A case variant of index 1's base58 address is not index 1's address: a repair, not a
+        // moved index (which the exact compare alone tells apart).
+        edit(
+            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+            "tPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+        );
+        let (_, _, repairs, _) = unlock_repairing(tmp.path(), PW, &two_encodings).unwrap();
+        assert_eq!(repairs.len(), 1, "{repairs:?}");
+        // Index 1's address itself, with no key at index 1: a moved index, refused.
+        edit(
+            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+            "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+        );
+        let e = unlock_repairing(tmp.path(), PW, &two_encodings)
+            .err()
+            .unwrap();
+        assert!(e.message.contains("indices were changed"), "{}", e.message);
     }
 
     #[test]
@@ -2034,7 +2162,7 @@ mod tests {
             let b_addr = f.keys[1].addresses["alpha"].clone();
             f.keys[0].addresses.insert("alpha".into(), b_addr);
         });
-        let (unsealed, file, repairs) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
+        let (unsealed, file, repairs, _) = unlock_repairing(tmp.path(), PW, &fake_derive).unwrap();
         let want0 = fake_derive(&unsealed.seed, 0).unwrap()["alpha"].clone();
         let want1 = fake_derive(&unsealed.seed, 1).unwrap()["alpha"].clone();
         assert_eq!(repairs.len(), 1, "{repairs:?}");
@@ -2056,7 +2184,7 @@ mod tests {
         let seed = decrypt(&file.crypto, PW).unwrap().seed;
         let before = fs::read(tmp.path().join(WALLET_FILE)).unwrap();
         let lock = MetaLock::acquire(tmp.path()).unwrap();
-        let (_, repairs) = repair_under_lock(&lock, &file.crypto, &seed, &fake_derive).unwrap();
+        let (_, repairs, _) = repair_under_lock(&lock, &file.crypto, &seed, &fake_derive).unwrap();
         assert!(repairs.is_empty(), "{repairs:?}");
         drop(lock);
         assert_eq!(

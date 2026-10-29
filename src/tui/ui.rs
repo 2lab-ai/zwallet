@@ -4,6 +4,7 @@
 //! is one of `style`'s. [`draw`] returns where it put each outside value, for the tests.
 
 mod transfer;
+mod whitelist;
 
 use crate::tui::actions::{Availability, Tab};
 use crate::tui::app::{
@@ -108,7 +109,9 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         );
     }
     tabs.draw(frame, title, &mut placed);
-    if app.password_state() != PasswordState::Idle {
+    if whitelist::active(app) {
+        whitelist::draw(frame, pane, app, &mut placed);
+    } else if app.password_state() != PasswordState::Idle {
         keys_pane(frame, pane, app, &mut placed);
     } else if let Some(popup) = &app.navigation().popup {
         popup_pane(frame, pane, app, popup, &mut placed);
@@ -119,7 +122,9 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
     } else {
         data_pane(frame, pane, app, &mut placed);
     }
-    let hint_row = if matches!(app.password_state(), PasswordState::Input { .. }) {
+    let hint_row = if whitelist::active(app) {
+        Row::default().text(whitelist::hint(app), HINT)
+    } else if matches!(app.password_state(), PasswordState::Input { .. }) {
         Row::default().text("Enter check   Esc cancel   Ctrl-C quit", HINT)
     } else if app.password_state() == PasswordState::Failed {
         Row::default().text("Enter/Esc dismiss   Ctrl-C quit", HINT)
@@ -409,6 +414,8 @@ fn keys_pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>)
             rejected,
         } => {
             let purpose = match app.password_purpose() {
+                PasswordPurpose::WhitelistVerify => "Verify local whitelist with the password",
+                PasswordPurpose::WhitelistEdit => "Authorize the exact whitelist summary",
                 PasswordPurpose::Warm => "Warm-up: unlock signing and verify addresses",
                 PasswordPurpose::Unlock(_) => "Unlock signing for the chosen duration",
                 PasswordPurpose::Verify { all: true } => {

@@ -2,13 +2,14 @@
 //! through the daemon socket (or, for `create`/`backup`, a password typed by the human).
 
 use crate::chains::evm::{self, Evm, abi, rpc as evm_rpc};
+use crate::chains::tron;
 use crate::chains::{
     self, CHAINS, Chain, ChainFamily, Family, Net, PRIMARY_CHAIN, PreparedTx, TransferRequest,
     redact_url,
 };
 use crate::cli::{
     AddressArgs, AddressesArgs, BalanceArgs, CallArgs, Cli, Command, CreateArgs, InvokeArgs,
-    KeyArg, Out, SendArgs, SignMessageArgs, TransferArgs, TxArgs, UnlockArgs, VerifyArgs,
+    KeyArg, Out, Qr, SendArgs, SignMessageArgs, TransferArgs, TxArgs, UnlockArgs, VerifyArgs,
     render_human,
 };
 use crate::core::amount::{format_units, parse_units};
@@ -179,8 +180,9 @@ async fn key_address(home: &Path, key: &KeyEntry, chain: &Chain) -> Result<Strin
             ErrorCode::WalletLocked,
             format!(
                 "key '{}' has no cached {} address yet; unlock once (`zwallet unlock 24h`) to \
-                 derive it",
-                key.name, chain.key
+                 derive it, or run `zwallet address --chain {} --verify` (with the password) to \
+                 add it",
+                key.name, chain.key, chain.key
             ),
         )
     })?;
@@ -263,7 +265,8 @@ pub(crate) fn signer_decoded(view: &Value) -> Value {
 }
 
 /// Whether `value` has the shape of an address on `chain`: for EVM, `0x` and 40 hex digits (any
-/// case). Says nothing about whose address it is.
+/// case); for Tron, 34 base58 characters whose checksum holds and whose payload starts `0x41`
+/// ([`tron::address::parse`]). Says nothing about whose address it is.
 fn address_shaped(chain: &Chain, value: &str) -> bool {
     match &chain.family {
         Family::Evm(_) => {
@@ -271,6 +274,16 @@ fn address_shaped(chain: &Chain, value: &str) -> bool {
                 && value.starts_with("0x")
                 && value[2..].bytes().all(|b| b.is_ascii_hexdigit())
         }
+        Family::Tron(_) => tron::address::is_address(value),
+    }
+}
+
+/// Whether `a` and `b` are the same address on chain key `chain`: EVM hex in any case, Tron byte
+/// for byte ([`tron::address::same`]: a case variant of a base58check string is another one).
+fn same_address(chain: &str, a: &str, b: &str) -> bool {
+    match chains::find(chain).map(|c| &c.family) {
+        Ok(Family::Tron(_)) => tron::address::same(a, b),
+        _ => a.eq_ignore_ascii_case(b),
     }
 }
 
@@ -379,7 +392,7 @@ fn cache_mismatch(key: &KeyEntry, chain: &str, derived: &str) -> Result<Option<S
     match key.addresses.get(chain) {
         Some(cached) => {
             let cached = cached_address(key, chain, cached)?;
-            Ok((!cached.eq_ignore_ascii_case(derived)).then_some(cached))
+            Ok((!same_address(chain, &cached, derived)).then_some(cached))
         }
         None => Ok(None),
     }
@@ -629,32 +642,54 @@ fn with_note(value: Value, note: Option<&str>) -> Out {
     Out::with_text(value, text)
 }
 
-/// The line under `scan to send to <address>`: the code carries no chain. Two lines, so both fit
-/// an 80-column terminal.
+/// The line under `scan to send to <address>` for an EVM address: the code carries no chain.
+/// Two lines, so both fit an 80-column terminal.
 const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
 
-/// `out` with `address` as a QR code after its human text ([`Out::qr`]), for a phone wallet to
-/// scan, under the lines `scan to send to <address>` and [`EVERY_EVM_NETWORK`] (which are text). Only for an address
-/// reported `verified: true` (by the password or by the session), only with stdout on a
-/// terminal, and not with `--no-qr`: agents read zwallet through pipes, and `--json` prints no
-/// human text.
-fn with_qr(out: Out, verified: bool, address: Option<&str>, no_qr: bool) -> Out {
+/// The same line for a Tron address, which no EVM network takes (`.prd/05-tron.md` §CLI
+/// surface).
+const TRON_ONLY: &str = "(Tron only: TRX and TRC20 tokens; not an EVM address)";
+
+/// `out` with `address` (on `chain`) as a QR code after its human text and any code before it
+/// ([`Out::qr`]), for a phone wallet to scan, under the lines `scan to send to <address>` and
+/// [`EVERY_EVM_NETWORK`] or [`TRON_ONLY`]. Only for an address reported `verified: true` (by the
+/// password or by the session), only with stdout on a terminal, and not with `--no-qr`: agents
+/// read zwallet through pipes, and `--json` prints no human text.
+fn with_qr(mut out: Out, verified: bool, chain: &Chain, address: Option<&str>, no_qr: bool) -> Out {
     let Some(address) = address.filter(|_| verified && qr_shown(no_qr)) else {
         return out;
     };
     // No colours when NO_COLOR is set and not empty (no-color.org).
     let color = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
-    match qr::render(address, color) {
-        Some(code) => {
-            let mut out = with_line(
-                out,
-                &format!("scan to send to {address}\n{EVERY_EVM_NETWORK}"),
-            );
-            out.qr = Some(code);
-            out
-        }
-        None => out,
-    }
+    let Some(code) = qr::render(address, color) else {
+        return out;
+    };
+    let networks = match chain.family {
+        Family::Evm(_) => EVERY_EVM_NETWORK,
+        Family::Tron(_) => TRON_ONLY,
+    };
+    out.qr.push(Qr {
+        caption: format!("scan to send to {address}\n{networks}"),
+        code,
+    });
+    out
+}
+
+/// The chain whose address the key shows by default ([`PRIMARY_CHAIN`]).
+fn primary_chain() -> Result<&'static Chain> {
+    chains::find(PRIMARY_CHAIN)
+}
+
+/// `CAPABILITY_UNSUPPORTED` for what `chain`'s family does not do (in this version).
+fn unsupported(chain: &Chain, what: &str) -> WalletError {
+    WalletError::new(
+        ErrorCode::CapabilityUnsupported,
+        format!(
+            "{} ({} family) does not support {what}",
+            chain.key,
+            chain.family.name()
+        ),
+    )
 }
 
 /// Whether human output may end with a QR code: stdout on a terminal, and no `--no-qr`.
@@ -797,7 +832,13 @@ async fn create(home: &Path, a: CreateArgs) -> Result<Out> {
             out
         });
     }
-    Ok(with_qr(out, verified, address.as_deref(), a.qr.no_qr))
+    Ok(with_qr(
+        out,
+        verified,
+        primary_chain()?,
+        address.as_deref(),
+        a.qr.no_qr,
+    ))
 }
 
 /// The error for a `create --unlock` whose new session shows another key: says whether locking
@@ -963,6 +1004,7 @@ async fn change(home: &Path, name: &str, no_qr: bool) -> Result<Out> {
     Ok(with_qr(
         with_note(out, trust.note()),
         trust.verified(),
+        primary_chain()?,
         Some(&address),
         no_qr,
     ))
@@ -979,6 +1021,7 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         drop(pw);
         let file = repaired.file;
         let repairs = repaired.checked.repairs;
+        let added = repaired.added;
         let key = file.key(a.key.key.as_deref())?;
         let address = repaired
             .checked
@@ -995,6 +1038,16 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
             "verified": true,
             "verifiedBy": BY_PASSWORD,
         });
+        // Chains this build derives that the cache lacked (added to zwallet after the key was
+        // made): filled in from the seed, which is no sign of tampering.
+        if !added.is_empty() {
+            out["added"] = json!(
+                added
+                    .iter()
+                    .map(|a| json!({ "key": a.key, "chain": a.chain, "now": a.now }))
+                    .collect::<Vec<_>>()
+            );
+        }
         let mut warnings: Vec<String> = Vec::new();
         if !repairs.is_empty() {
             out["repaired"] = json!(
@@ -1030,6 +1083,7 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
         let mut shown_out = out.clone();
         if let Some(o) = shown_out.as_object_mut() {
             o.remove("repaired");
+            o.remove("added");
         }
         let mut text = render_human(&shown_out);
         for r in &repairs {
@@ -1041,9 +1095,13 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
                 r.now
             ));
         }
+        for a in &added {
+            text.push_str(&format!("\nadded: key '{}' {}: {}", a.key, a.chain, a.now));
+        }
         return Ok(with_qr(
             Out::with_text(out, text),
             true,
+            chain,
             Some(&address),
             a.qr.no_qr,
         ));
@@ -1058,6 +1116,7 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
     Ok(with_qr(
         with_note(out, trust.note()),
         trust.verified(),
+        chain,
         Some(&address),
         a.qr.no_qr,
     ))
@@ -1067,25 +1126,25 @@ async fn addresses(home: &Path, a: AddressesArgs) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
     let addresses = wallet::addresses(home, &key.name).await?;
-    let primary = addresses
-        .rows
-        .iter()
-        .find(|row| row.chain.key == PRIMARY_CHAIN)
-        .map(|row| row.address.clone());
-    let rows: Vec<Value> = addresses
-        .rows
-        .iter()
-        .map(|row| json!({ "chainId": row.chain.key, "address": row.address }))
-        .collect();
+    let mut codes: Vec<(&'static Chain, String)> = Vec::new();
+    let rows:Vec<Value>=addresses.rows.iter().map(|row| {
+        if let Some(e)=&row.error {return json!({"chainId":row.chain.key,"error":e.message,"errorCode":e.code.as_str()});}
+        if !codes.iter().any(|(chain,_)|chain.family.name()==row.chain.family.name()) {codes.push((row.chain,row.address.clone()));}
+        json!({"chainId":row.chain.key,"address":row.address})
+    }).collect();
     let trust = addresses.trust;
     let mut text = rows
         .iter()
         .map(|r| {
-            format!(
-                "{:<10} {}",
-                r["chainId"].as_str().unwrap_or(""),
-                r["address"].as_str().unwrap_or("")
-            )
+            let shown = match r["address"].as_str() {
+                Some(a) => a.to_string(),
+                None => format!(
+                    "error: {} [{}]",
+                    brief(r["error"].as_str().unwrap_or("")),
+                    r["errorCode"].as_str().unwrap_or("")
+                ),
+            };
+            format!("{:<10} {shown}", r["chainId"].as_str().unwrap_or(""))
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1101,13 +1160,12 @@ async fn addresses(home: &Path, a: AddressesArgs) -> Result<Out> {
     }
     let mut out = json!({ "key": key.name, "addresses": rows });
     trust.mark(&mut out);
-    // One code: the address is the same on every EVM chain.
-    Ok(with_qr(
-        Out::with_text(out, text),
-        trust.verified(),
-        primary.as_deref(),
-        a.qr.no_qr,
-    ))
+    // One code per family: the address is the same on every EVM chain, Tron's is its own.
+    let mut out = Out::with_text(out, text);
+    for (chain, address) in &codes {
+        out = with_qr(out, trust.verified(), chain, Some(address), a.qr.no_qr);
+    }
+    Ok(out)
 }
 
 async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
@@ -1125,7 +1183,10 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
     let net = net(chain, a.rpc.as_deref());
-    let (owner, trust, bal) = wallet::balance(home, &key.name, &net, a.token.as_deref()).await?;
+    let (owner, trust, read) =
+        wallet::read::balance_detail(home, &key.name, &net, a.token.as_deref()).await?;
+    let bal = read.balance;
+    let warning = read.warning;
     let mut out = json!({
         "chain": chain.key,
         "key": key.name,
@@ -1135,13 +1196,29 @@ async fn balance(home: &Path, a: BalanceArgs) -> Result<Out> {
         "balance": format_units(bal.raw, bal.decimals),
         "raw": bal.raw.to_string(),
     });
+    if let Some(active) = read.activated {
+        out["activated"] = json!(active);
+    }
+    if let Some(token) = read.token {
+        out["token"] = json!(token);
+    }
+    if let Some(source) = read.symbol_source {
+        out["symbolSource"] = json!(source);
+    }
     trust.mark(&mut out);
-    if let Some(token) = &a.token {
-        out["token"] = json!(Evm.normalize_address(token)?);
+    // The account's own warning (a Tron owner permission held by other keys) after any about
+    // what answered on the socket.
+    if let Some(w) = warning {
+        let joined = match out["warning"].as_str() {
+            Some(first) => format!("{first}. {w}"),
+            None => w,
+        };
+        out["warning"] = json!(joined);
     }
     Ok(with_qr(
         Out::json(out),
         trust.verified(),
+        chain,
         Some(&owner),
         a.qr.no_qr,
     ))
@@ -1179,8 +1256,16 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
         }
         let result = network.balances;
         match result {
-            Ok((native, tokens)) => {
+            Ok(wallet::read::NetworkRead {
+                native,
+                tokens,
+                activated,
+                warning,
+            }) => {
                 lines.push(format!("{:<10} {}{own}", chain.key, amount_text(&native)));
+                if let Some(a) = activated {
+                    row["activated"] = json!(a);
+                }
                 let mut any = !native.raw.is_zero();
                 let mut token_rows = Vec::with_capacity(tokens.len());
                 for t in tokens {
@@ -1217,6 +1302,10 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
                 }
                 row["native"] = amount_json(&native);
                 row["tokens"] = Value::Array(token_rows);
+                if let Some(w) = warning {
+                    lines.push(format!("{:<10} warning: {w}", ""));
+                    row["warning"] = json!(w);
+                }
             }
             Err(e) => {
                 lines.push(format!("{:<10} {}", chain.key, error_text(&e)));
@@ -1267,10 +1356,12 @@ async fn every_balance(home: &Path, k: &KeyArg, no_qr: bool) -> Result<Out> {
     }
     let mut out = json!({ "key": key.name, "address": address, "chains": rows });
     trust.mark(&mut out);
-    // The code after the networks.
+    // The code after the networks: the top-level address's (an EVM one; `balance --chain tron`
+    // shows Tron's).
     Ok(with_qr(
         Out::with_text(out, lines.join("\n")),
         trust.verified(),
+        primary_chain()?,
         Some(&address),
         no_qr,
     ))
@@ -1465,6 +1556,8 @@ async fn transfer(home: &Path, a: TransferArgs) -> Result<Out> {
     let net = net(chain, a.rpc.as_deref());
     match &chain.family {
         Family::Evm(_) => transfer_with(&Evm, home, &net, a).await,
+        // Before any RPC: the Tron send path comes with a later version (`.prd/v0-3-tron`).
+        Family::Tron(_) => Err(unsupported(chain, "transfers in this version")),
     }
 }
 
@@ -1581,12 +1674,17 @@ async fn tx(a: TxArgs) -> Result<Out> {
     let net = net(chain, a.rpc.as_deref());
     let found = match &chain.family {
         Family::Evm(_) => Evm.lookup_tx(&net, &a.tx_hash).await?,
+        Family::Tron(_) => return Err(unsupported(chain, "transaction lookups in this version")),
     };
     Ok(Out::json(Value::Object(found)))
 }
 
 async fn sign_message(home: &Path, a: SignMessageArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
+    // Before the wallet is read: no Tron message is ever signed (`.prd/05-tron.md` §Non-goals).
+    if let Family::Tron(_) = chain.family {
+        return Err(unsupported(chain, "message signing"));
+    }
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
     let expected = key_address(home, key, chain).await?;
@@ -1602,6 +1700,7 @@ async fn sign_message(home: &Path, a: SignMessageArgs) -> Result<Out> {
     .await?;
     match &chain.family {
         Family::Evm(_) => Evm.verify_message(a.message.as_bytes(), &signed, &expected)?,
+        Family::Tron(_) => return Err(unsupported(chain, "message signing")),
     }
     Ok(Out::json(json!({
         "chain": chain.key,
@@ -1652,7 +1751,13 @@ async fn status(home: &Path, no_qr: bool) -> Result<Out> {
         ));
     }
     Ok(match shown {
-        Some((address, trust)) => with_qr(text, trust.verified(), address.as_deref(), no_qr),
+        Some((address, trust)) => with_qr(
+            text,
+            trust.verified(),
+            primary_chain()?,
+            address.as_deref(),
+            no_qr,
+        ),
         None => text,
     })
 }
@@ -1724,6 +1829,7 @@ async fn unlock(home: &Path, a: UnlockArgs) -> Result<Out> {
     Ok(with_qr(
         Out::json(out),
         true,
+        primary_chain()?,
         ready["address"].as_str(),
         a.qr.no_qr,
     ))
@@ -1907,6 +2013,35 @@ mod tests {
             "{}",
             failed.message
         );
+    }
+
+    #[test]
+    fn the_cache_compares_tron_addresses_byte_for_byte_and_evm_ones_in_any_case() {
+        const TWER: &str = "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6";
+        const EVM: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+        let mut k = key("main", 0);
+        k.addresses.insert("tron".into(), TWER.into());
+        k.addresses
+            .insert("ethereum".into(), EVM.to_ascii_lowercase());
+        assert_eq!(cache_mismatch(&k, "tron", TWER).unwrap(), None);
+        // The comparison is `tron::address::same`: a case variant of the derived address is
+        // another address (it never gets this far: the shape check refuses it first).
+        assert!(!crate::chains::tron::address::same(
+            TWER,
+            &TWER.to_ascii_lowercase()
+        ));
+        assert_eq!(
+            cache_mismatch(&k, "tron", "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C").unwrap(),
+            Some(TWER.to_string())
+        );
+        // EVM hex is the same address in either case.
+        assert_eq!(cache_mismatch(&k, "ethereum", EVM).unwrap(), None);
+        // A Tron address is never the shape of an EVM one, nor the other way round.
+        let tron = chains::find("tron").unwrap();
+        let eth = chains::find("ethereum").unwrap();
+        assert!(address_shaped(tron, TWER) && !address_shaped(eth, TWER));
+        assert!(address_shaped(eth, EVM) && !address_shaped(tron, EVM));
+        assert!(!address_shaped(tron, "tWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6"));
     }
 
     #[test]

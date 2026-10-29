@@ -45,8 +45,10 @@ processes running as the same OS user.
   1 MiB, so a FIFO or link planted in its place fails fast instead of hanging a reader.
 - **Keys**: named subkeys of the master by index, in creation order, never reused. EVM uses
   `m/44'/60'/0'/0/<index>` (the standard BIP44 Ethereum account order), so the phrase imports into standard
-  wallets with the same accounts. One address per key on every EVM chain. Indices stay below
-  2^31, where BIP32's hardened range starts (`VALIDATION_ERROR` at or above it).
+  wallets with the same accounts. One address per key on every EVM chain. Tron uses
+  `m/44'/195'/0'/0/<index>` (SLIP-44 coin 195; TronWeb's default path for index 0), one more
+  address per key. Indices stay below 2^31, where BIP32's hardened range starts
+  (`VALIDATION_ERROR` at or above it).
 - **Daemon**: `unlock` pins the zwallet binary before it asks for the password. On Linux that is
   the running image (`/proc/self/exe`), so a file swapped in at the binary's path while the human
   types is never started. On macOS it is the file's identity, checked again right before the

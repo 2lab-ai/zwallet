@@ -2,6 +2,12 @@
 //! values out. Nothing here reads `/dev/tty` or prints; the CLI command that used the code calls
 //! the function here and prints what it returns, and the TUI draws it.
 
+pub mod whitelist;
+pub use whitelist::{
+    Change, EditSession, WhitelistOutcome, WhitelistPlan, WhitelistUnlock, WhitelistView,
+    whitelist_apply, whitelist_plan, whitelist_view,
+};
+
 pub mod read;
 pub use read::{
     AddressRow, Addresses, ChainBalances, EveryBalance, NetworkBalance, addresses, balance,
@@ -14,10 +20,10 @@ pub use send::{
     parse_fee_ceiling, review_transfer, send_transfer, transfer_payees,
 };
 
-use crate::chains::evm::registry::WHITELIST_RULES;
+use self::whitelist::FIRST_ADD;
+use crate::chains::WHITELIST_RULES;
 use crate::chains::{self, Chain, Net, PRIMARY_CHAIN};
 pub use crate::commands::Trust;
-use crate::commands::whitelist::FIRST_ADD;
 use crate::commands::{
     Daemon, derive_checked, index_warning, inert_whitelist, live_daemons, primary_address,
     session_index_warning, shown,
@@ -26,7 +32,8 @@ use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::protocol::{self, DaemonExe};
 use crate::core::store::{self, WalletFile, WhitelistAnchor};
 use crate::core::whitelist::{
-    self, BaseSource, Fingerprint, ListFiles, NEXT_FILE, WHITELIST_FILE, Whitelist,
+    self as core_whitelist, BaseSource, Fingerprint, ListFiles, NEXT_FILE, WHITELIST_FILE,
+    Whitelist,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -317,7 +324,7 @@ fn opened_from(
             .map(|s| {
                 s.salt()
                     .map(|_| s.anchor)
-                    .map_err(|e| WalletError::validation(whitelist::without_salt(&e.message)))
+                    .map_err(|e| WalletError::validation(core_whitelist::without_salt(&e.message)))
             })
             .transpose()
     });
@@ -379,6 +386,7 @@ pub fn check_password(home: &Path, password: &str, keys: Option<&[&str]>) -> Res
 }
 
 pub struct Repaired {
+    pub added: Vec<store::CacheAddition>,
     pub checked: PasswordCheck,
     /// Public metadata, used only to preserve the CLI's index-warning behavior.
     pub file: WalletFile,
@@ -387,11 +395,15 @@ pub struct Repaired {
 /// The shared address-repair path. It changes only the address cache and retains the sealed
 /// policy. Every returned address is derived from the password-opened seed.
 pub fn repair(home: &Path, password: &str) -> Result<Repaired> {
-    let (unsealed, file, repairs) =
+    let (unsealed, file, repairs, added) =
         store::unlock_repairing(home, password, &chains::derive_addresses)?;
     let mut checked = password_checked(&unsealed, &file, None)?;
     checked.repairs = repairs;
-    Ok(Repaired { checked, file })
+    Ok(Repaired {
+        checked,
+        file,
+        added,
+    })
 }
 
 /// The whitelist the password check verified ([`check_list`]).
@@ -420,24 +432,24 @@ pub fn check_list(
         Err(e) => return Err(e.message.clone()),
         // A list file with no seal is never offered as the first add: that add refuses.
         Ok(None) => {
-            return Err(match whitelist::unsealed_files_note(&files) {
+            return Err(match core_whitelist::unsealed_files_note(&files) {
                 Some(note) => format!(
                     "{note}: it is not verified, and every edit refuses. {}",
-                    whitelist::recovery()
+                    core_whitelist::recovery()
                 ),
                 None => format!("wallet.json seals no whitelist key yet; {FIRST_ADD}"),
             });
         }
         Ok(Some(a)) => a,
     };
-    let base = whitelist::pick_base_from(&files, Some(anchor), &WHITELIST_RULES);
+    let base = core_whitelist::pick_base_from(&files, Some(anchor), &WHITELIST_RULES);
     let source = match base.source {
         BaseSource::Current => WHITELIST_FILE,
         BaseSource::PromotedNext => NEXT_FILE,
         // With an anchor, `discarded` always says why; the same one remedy as an edit's refusal.
         BaseSource::Empty => {
             let why = base.discarded.map(|d| d.reason).unwrap_or_default();
-            return Err(format!("{why}. {}", whitelist::recovery()));
+            return Err(format!("{why}. {}", core_whitelist::recovery()));
         }
     };
     Ok(CheckedList {

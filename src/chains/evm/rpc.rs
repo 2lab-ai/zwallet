@@ -165,7 +165,7 @@ fn timed_out(what: &str) -> WalletError {
 pub async fn connect(net: &Net) -> Result<EvmProvider> {
     let p = EvmProvider::new(net)?;
     let got = p.rpc("eth_chainId", p.get_chain_id()).await?;
-    let want = config(net.chain).chain_id;
+    let want = config(net.chain)?.chain_id;
     if got != want {
         return Err(WalletError::rpc(format!(
             "RPC {} serves chainId {got}, but {} is chainId {want}",
@@ -235,7 +235,7 @@ pub async fn erc20_meta(p: &EvmProvider, net: &Net, token: Address) -> Result<To
         .unwrap_or_else(|| "?".to_string());
     // The contract writes `symbol()`: escaped and cut where it enters the output, unless it is
     // the recorded symbol of this registry token.
-    let symbol = match super::registry::lookup(config(net.chain).chain_id, &token) {
+    let symbol = match super::registry::lookup(config(net.chain)?.chain_id, &token) {
         Some(t) if t.onchain_symbol == symbol => t.onchain_symbol.to_string(),
         _ => crate::core::text::ascii_inert(&symbol, SYMBOL_SHOWN),
     };
@@ -724,7 +724,7 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     };
     let gas_limit = gas_with_margin(gas_estimate);
     let unsigned = UnsignedEvmTx {
-        chain_id: config(chain).chain_id,
+        chain_id: config(chain)?.chain_id,
         nonce,
         gas_limit,
         fees,
@@ -733,7 +733,7 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         input: intent.input.clone(),
     };
     // OP-stack L1 data fee. Best effort: without it the node still rejects an unfundable tx.
-    let l1_fee = if config(chain).op_stack {
+    let l1_fee = if config(chain)?.op_stack {
         op_l1_fee(p, &unsigned).await.ok()
     } else {
         None
