@@ -658,6 +658,10 @@ impl App {
         }
         if self.replacement.stage != Stage::Idle {
             let work = match key {
+                // Not a text field: the tab keys act, and the review stays for the return.
+                tab if super::navigation::switches_tab(&super::navigation::input(tab)) => {
+                    return None;
+                }
                 Key::Esc => {
                     self.replacement.stage = Stage::Idle;
                     self.replacement.active = None;

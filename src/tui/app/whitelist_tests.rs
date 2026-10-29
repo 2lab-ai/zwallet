@@ -833,12 +833,12 @@ fn summary_review_and_outcome_pass_the_global_tab_keys() {
     app.nav.tab = Tab::Whitelist;
     assert!(matches!(app.whitelist.stage, Stage::Review(_)));
     key(&mut app, Key::Char('['));
-    assert_eq!(app.nav.tab, Tab::Tools);
+    assert_eq!(app.nav.tab, Tab::Receive);
     app.nav.tab = Tab::Whitelist;
     app.whitelist.stage = Stage::Outcome {
         lines: lines("added bob"),
         scroll: 0,
     };
     key(&mut app, Key::Char(']'));
-    assert_eq!(app.nav.tab, Tab::Session);
+    assert_eq!(app.nav.tab, Tab::Tools);
 }

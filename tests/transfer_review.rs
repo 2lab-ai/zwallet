@@ -733,12 +733,19 @@ async fn to_review(app: &mut App, f: &Fixture) -> Vec<(u64, TransferJob)> {
     let effects = key(app, Key::Enter);
     drive(app, f, effects).await;
     assert_eq!(app.transfer().stage, Stage::Payees);
+    // No recipient can be typed or pasted (T6b): the step has no field. Its keys are a list's,
+    // so a digit or `c` acts globally (D1); a pasted address and the other hex letters do nothing.
     let selected = app.transfer().selected;
-    for c in OTHER.chars() {
-        assert!(key(app, Key::Char(c)).is_empty());
+    let pasted = app.update(Msg::Paste(zwallet::tui::app::UserText(
+        zeroize::Zeroizing::new(OTHER.into()),
+    )));
+    assert!(pasted.is_empty());
+    for c in "abdefxABCDEF".chars() {
+        assert!(key(app, Key::Char(c)).is_empty(), "{c}");
     }
     assert_eq!(app.transfer().selected, selected);
     assert_eq!(app.transfer().stage, Stage::Payees);
+    assert!(app.transfer().field.is_none() && app.transfer().draft.is_none());
     key(app, Key::Enter);
     assert_eq!(app.transfer().stage, Stage::Amount);
     type_text(app, "0.01");

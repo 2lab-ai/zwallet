@@ -69,9 +69,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   as `list` does. It needs 80x24 and says so on one line when the terminal is smaller. Text from
   wallet.json, the daemon socket and the environment is escaped and bounded as in the CLI, every
   cell goes through one filter that lets only printable ASCII and `₮` through, and no QR code is
-  drawn. Tabs `1`–`7` and `[`/`]` navigate; `?` or `:` opens the 55-action menu. Typing in
-  a field or menu keeps `q`, `?` and digits as input; Esc closes it. Actions belonging to later
-  work are listed with their disabled reason.
+  drawn. Tabs `1`–`7` and `[`/`]` navigate from any list, review or popup that is not a text
+  field; `?` or `:` opens the 55-action menu. Typing in a field or menu keeps `q`, `?` and
+  digits as input; Esc closes it. Actions belonging to later work are listed with their
+  disabled reason.
 
   `2 wallet` shows non-zero native/registry-token balances; `a` reads every network, keeping
   partial failures, and Esc returns to one network. `c` chooses a chain; `e` in the picker

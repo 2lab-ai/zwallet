@@ -834,7 +834,6 @@ impl App {
                 ));
                 Vec::new()
             }
-            (Stage::Payees, Key::Char(c)) if !matches!(c, 'q' | '?' | ':') => Vec::new(),
             _ => return None,
         };
         Some(work)

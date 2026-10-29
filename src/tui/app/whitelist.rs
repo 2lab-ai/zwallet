@@ -612,6 +612,12 @@ impl App {
             ));
             return Some(Vec::new());
         }
+        // Only a form's text fields keep the tab keys; a review or an outcome stays for the return.
+        if super::navigation::switches_tab(&input)
+            && !matches!(self.whitelist.stage, Stage::Form(_))
+        {
+            return None;
+        }
         let stage = std::mem::replace(&mut self.whitelist.stage, Stage::List);
         match stage {
             Stage::Form(mut form) => {

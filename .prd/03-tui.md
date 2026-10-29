@@ -322,7 +322,11 @@ state outside the TUI (`L`, `R` reset or retry, `A` repair) or asks for the pass
 secret or a code (`V`, `B`, `Q`). Added in review round 1: `e` on the chain picker (an RPC URL for
 the highlighted chain, this session only), `w` on the send status (keep waiting for a typed
 duration); in round 2: `b` on a replacement's review (the bump). No key lowers a protection:
-`ptrace_scope` 0 is accepted only by the start flag (§Coverage matrix row 8).
+`ptrace_scope` 0 is accepted only by the start flag (§Coverage matrix row 8). "Outside a text
+field" includes every list, review and outcome: the send asset and payee lists (EVM and Tron),
+the chain picker, a read-only popup (`Q`, `B`), the whitelist list, summary and outcome, the tools
+menu and contract list, and a replacement review. There `1`–`7`, `[` and `]` switch tabs; a popup
+closes first, and a review or outcome is still there on return (added 2026-10-30, D1).
 
 **Text fields.** While a field has the focus every key goes to it (within its alphabet, rule 3)
 except Enter, Esc, Tab, the arrows and Ctrl-C; so `q`, `?` and the digits are typed, not acted on.
@@ -1118,6 +1122,10 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 5. **The Keys tab's hint names `u unlock` again** (review of merge #43). The merge kept `n new`
    and `B backup` and dropped `u unlock`, which still opens the duration field there; the hint is
    78 columns ([`03-tui-screens.md`](03-tui-screens.md) §1 keys).
+6. **Tab keys act on every list step** (real-terminal acceptance D1). The send payee list
+   swallowed every character, and the chain picker, read-only popups, the whitelist summary and
+   outcome and the replacement review kept `1`–`7`, `[`, `]`; only a focused text field keeps
+   them now (§Screens and keys).
 
 ## Changes on 2026-10-28, v2, review round 3
 

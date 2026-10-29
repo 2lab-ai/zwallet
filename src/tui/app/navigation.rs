@@ -756,6 +756,8 @@ impl App {
                         selected = (selected + 1).min(CHAINS.len() - 1)
                     }
                     Input::Esc => return Some(Vec::new()),
+                    // A list, not a text field: the popup closes and the tab keys act.
+                    tab if switches_tab(&tab) => return None,
                     Input::Interrupt => {
                         self.quit = true;
                         return Some(Vec::new());
@@ -819,6 +821,10 @@ impl App {
             Popup::Lines { title, lines } => match input {
                 Input::Esc | Input::Enter => {
                     self.nav.popup_scroll = 0;
+                }
+                tab if switches_tab(&tab) => {
+                    self.nav.popup_scroll = 0;
+                    return None;
                 }
                 Input::Interrupt => self.quit = true,
                 Input::Up | Input::Char('k') => {
@@ -1020,6 +1026,12 @@ impl App {
         }
         self.nav.lines = Pane::Ready(lines);
     }
+}
+
+/// The global tab keys, `1`–`7`, `[` and `]`. Only a focused text field keeps them
+/// (.prd/03-tui.md §Screens and keys); a list, a review or an outcome lets them through.
+pub(super) fn switches_tab(input: &Input<'_>) -> bool {
+    matches!(input, Input::Char('1'..='7' | '[' | ']'))
 }
 
 pub(super) fn input(key: Key) -> Input<'static> {
