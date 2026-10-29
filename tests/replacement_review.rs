@@ -1854,3 +1854,18 @@ async fn t27_session_token_speedup_keeps_the_reviewed_category() {
     assert_eq!(actual.to(), reviewed.intent().to());
     assert_eq!(actual.input(), reviewed.intent().input());
 }
+
+/// D1: the replacement review is not a text field; the global tab keys act there.
+#[tokio::test]
+async fn tui_replacement_review_passes_the_global_tab_keys() {
+    use zwallet::tui::actions::Tab;
+    let f = Fixture::new(false);
+    let node = Node::new("ethereum");
+    let row = original(&node, &f, 1, false, false);
+    let mut app = tui_app(&f, &node);
+    history_review(&mut app, &f, &node, &row, 's').await;
+    assert_eq!(app.tab(), Tab::Send);
+    press(&mut app, Key::Char('4'));
+    assert_eq!(app.tab(), Tab::Receive, "{}", frame(&app));
+    assert_eq!(f.signer.count(), 0);
+}

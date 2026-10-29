@@ -816,3 +816,29 @@ fn the_password_opens_only_after_every_summary_row_was_on_screen() {
         assert!(presses < ROWS, "Enter never reached the password");
     }
 }
+
+/// D1: the summary review and the outcome are not text fields; the global tab keys act there,
+/// and the review is still there on return.
+#[test]
+fn summary_review_and_outcome_pass_the_global_tab_keys() {
+    let mut app = new_app();
+    prepare_add(
+        &mut app,
+        "0x3333333333333333333333333333333333333333",
+        false,
+    );
+    review(&mut app, "the change before the password");
+    key(&mut app, Key::Char('2'));
+    assert_eq!(app.nav.tab, Tab::Wallet);
+    app.nav.tab = Tab::Whitelist;
+    assert!(matches!(app.whitelist.stage, Stage::Review(_)));
+    key(&mut app, Key::Char('['));
+    assert_eq!(app.nav.tab, Tab::Tools);
+    app.nav.tab = Tab::Whitelist;
+    app.whitelist.stage = Stage::Outcome {
+        lines: lines("added bob"),
+        scroll: 0,
+    };
+    key(&mut app, Key::Char(']'));
+    assert_eq!(app.nav.tab, Tab::Session);
+}

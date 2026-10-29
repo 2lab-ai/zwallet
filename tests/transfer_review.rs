@@ -1144,3 +1144,34 @@ async fn tui_picker_filters_checked_payees_and_rejects_forged_session_and_stale_
     assert!(unverified.checked_list().is_none());
     assert_eq!(f.signer.count(), 0);
 }
+
+/// D1: the payee step is a list, not a text field, so the global tab keys act there
+/// (.prd/03-tui.md §Screens and keys: "Global, outside a text field: 1–7 tabs, [ ]").
+#[tokio::test]
+async fn tui_payee_step_passes_the_global_tab_keys() {
+    use zwallet::tui::actions::Tab;
+    let f = Fixture::new(false);
+    let node = Node::new("ethereum");
+    let mut app = tui_app(&f, &node);
+    for (press, tab) in [
+        (Key::Char('2'), Tab::Wallet),
+        (Key::Char(']'), Tab::Receive),
+        (Key::Char('['), Tab::Wallet),
+    ] {
+        let work = key(&mut app, Key::Char('3'));
+        drive(&mut app, &f, work).await;
+        if app.transfer().stage == Stage::Assets {
+            let work = key(&mut app, Key::Enter);
+            drive(&mut app, &f, work).await;
+        }
+        assert_eq!(app.transfer().stage, Stage::Payees, "{}", frame(&app));
+        key(&mut app, press);
+        assert_eq!(
+            app.tab(),
+            tab,
+            "{press:?} on the payee step:\n{}",
+            frame(&app)
+        );
+    }
+    assert_eq!(f.signer.count(), 0);
+}

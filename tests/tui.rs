@@ -1788,6 +1788,24 @@ mod navigation {
         assert_eq!(app.tab(), Tab::Session);
     }
 
+    /// D1: the chain picker and a read-only lines popup are lists, not text fields: the global
+    /// tab keys close them and switch tabs.
+    #[test]
+    fn nav_chain_picker_and_lines_popup_pass_the_global_tab_keys() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('c')));
+        assert!(matches!(app.navigation().popup, Some(Popup::Chains { .. })));
+        app.update(Msg::Key(Key::Char('2')));
+        assert_eq!(app.tab(), Tab::Wallet, "{}", view(&app));
+        assert!(app.navigation().popup.is_none());
+        app.update(Msg::Key(Key::Char('4')));
+        app.update(Msg::Key(Key::Char('Q')));
+        assert!(matches!(app.navigation().popup, Some(Popup::Lines { .. })));
+        app.update(Msg::Key(Key::Char(']')));
+        assert_eq!(app.tab(), Tab::Whitelist, "{}", view(&app));
+        assert!(app.navigation().popup.is_none());
+    }
+
     /// The Keys tab's hint names every key it acts on, `u unlock` included (#43's merge dropped
     /// it), within 80 columns, and `u` there opens the duration field.
     #[test]

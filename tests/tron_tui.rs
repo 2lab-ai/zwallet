@@ -1006,3 +1006,19 @@ async fn tron_picker_lists_only_tron_entries_as_t_addresses_never_wildcards() {
         "the screen passed; the EVM payee list offers on Tron: {offered:?}"
     );
 }
+
+/// D1 on Tron: the payee list passes the global tab keys.
+#[tokio::test]
+async fn tron_payee_step_passes_the_global_tab_keys() {
+    use zwallet::tui::actions::Tab;
+    let f = Fixture::new(0);
+    let n = Node::new();
+    let mut app = app(&f, &n);
+    let work = key(&mut app, Key::Char('3'));
+    drive(&mut app, &f, work).await;
+    let work = key(&mut app, Key::Enter);
+    drive(&mut app, &f, work).await;
+    assert_eq!(app.transfer().stage, Stage::Payees);
+    key(&mut app, Key::Char('2'));
+    assert_eq!(app.tab(), Tab::Wallet, "{}", screen(&app));
+}
