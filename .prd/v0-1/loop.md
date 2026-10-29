@@ -3,11 +3,9 @@
 Status: **in-progress**, 2026-10-28. Target = [`ssot.md`](ssot.md), [`../01-spec.md`](../01-spec.md)
 acceptance A1–A12. This file holds only open work.
 
-## Round 8 — plan (WU1–WU5, WU1b, R6 and R7 hardening PRs #6–#15 closed: see [`loop.done.md`](loop.done.md))
+## Round 9 — plan (WU1–WU6, WU1b, R6 and R7 hardening PRs #6–#15 closed: see [`loop.done.md`](loop.done.md))
 
-| WU | Repo · branch · worktree | Scope | Owner | State |
-|---|---|---|---|---|
-| WU6 | live | user runs create and unlock on fable-m5max, then the agent reads address and balance (A12) | user TTY + dispatcher | the wallet exists (key `zbrain`, created 2026-10-21); waits for the user's `zwallet unlock 1y` on the newest preview; a watcher reads the address and balance as soon as the user's daemon starts |
+No open WU: G3 waits on the owner's choice of an xbrew release.
 
 ## Build facts
 
@@ -26,10 +24,8 @@ acceptance A1–A12. This file holds only open work.
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
 | G3 | A11 | `xbrew install zwallet` measured on the xbrew preview build (macOS formula, Arch pinned binary); stable xbrew users need an xbrew release, pending the owner (it also ships xbrew PRs #1–#3, on preview since 2026-08-26) | xbrew release | 🚪 |
-| G4 | A12 | the wallet exists; the agent's read of the session-verified address and the balance waits for the user's unlock at a TTY | WU6 | 🚪 |
 
 ## Next
 
-The user unlocks on the newest preview (`zwallet unlock 1y`); the agent then reads the
-session-verified address and the balance (A12, closes G4). Funding comes after that. v0.2 (the
-TUI) runs in [`../v0-2-tui/loop.md`](../v0-2-tui/loop.md).
+A12 is closed (R8 in [`loop.done.md`](loop.done.md)). Funding is the owner's. G3 waits on the owner's
+choice of an xbrew release. v0.2 (the TUI) runs in [`../v0-2-tui/loop.md`](../v0-2-tui/loop.md).

@@ -268,7 +268,9 @@ registry is refused there); every other selector is a `contract-call`.
 **Edits.** `whitelist add | remove | fee-cap | allow-message-signing on|off | reset`. Each runs
 only with a typed password (terminal prompt or `--password-stdin`), in this order:
 0. Before the prompt: the arguments are checked as the list will check them (nickname, address,
-   EIP-55 checksum, chains, selectors, no registry token as a contract, fee amount). With
+   EIP-55 checksum, chains, selectors, no registry token as a contract, fee amount; planned
+   2026-10-28 for TUI-6: no entry at the zero address, refused here and not at parse,
+   [`03-tui.md`](03-tui.md) §Whitelist edits step 0). With
    `--unlock <duration>`, `unlock`'s own start-up checks run too (the duration, Linux
    `ptrace_scope` (`--allow-ptrace-scope-0` accepts it), `/proc` hidepid) and the binary is
    pinned as `unlock` pins it. Then `whitelist.json` and `whitelist.next.json` are **read once**
@@ -576,6 +578,9 @@ request):
 | W18 | edits with the password; a sealed salt that does not derive the sealed key, or another password over the same seal; a seal from zwallet 0.1.0 (no salt) | every edit derives the same key from the same password and salt, and no key file is ever written; a reset draws a new salt and key; a key that is not the sealed one refuses, nothing written; a 0.1.0 seal: `unlock` shows it untrusted, with the cause alone as the reason, and nothing is signed; every edit and `list --verify` add the recovery, every edit refuses before anything is stopped, and `reset` starts over; the daemon's session holds the anchor and never the salt; the key is derived with the KDF parameters that opened `wallet.json`, not ones edited on disk after |
 
 ## Not in v0.1 (stays planned)
+
+![WIP](https://img.shields.io/badge/status-WIP-yellow) These items remain unimplemented in the current code; see
+[feature status](../docs/features.md#planned-features).
 
 - Amount caps (a rolling 24 h native cap, per-token caps).
 - The `invoke` duplicate key on calldata, and the duplicate window as a policy setting (R4 N-3 and

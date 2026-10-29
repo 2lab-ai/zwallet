@@ -1,988 +1,199 @@
 # zwallet
 
-Local, login-free wallet CLI for agents (EVM today; Solana and TON planned), written in Rust. No
-API credentials, no telemetry, no OS keychain, no backend registration: keys stay on this machine,
-and chain access is plain JSON-RPC.
+A local EVM wallet for AI agents, controlled by a human. Create keys on your machine,
+choose which recipients and contracts the wallet may pay, then unlock signing for a
+limited time. Your agent uses the CLI and JSON output; you keep the password.
 
-It does four things: create a wallet, read balances, call contract functions (read and write), and
-transfer. A human unlocks it for a chosen time; while unlocked, a small daemon holds only the key so
-an agent can sign without the human present.
+zwallet is written in Rust and runs on macOS and Linux. It needs no wallet-service
+account, API credentials, or OS keychain. Balances and transactions use public RPC
+endpoints by default; you can supply your own.
+
+## What you can use today
+
+These capabilities describe the code on `main`. Stable releases can lag behind it;
+`zwallet --version` shows your build's channel and revision.
+
+| What you want to do | Available now | Boundary to know |
+|---|---|---|
+| Create and manage wallets | One encrypted BIP39 master seed, named derived keys, address verification and terminal-only recovery-phrase backup | No import/restore command in zwallet; the phrase can be imported into a compatible wallet |
+| Check funds | Native and ERC-20 balances on eight EVM networks; all-network balance view | Automatic token listing uses the built-in registry, not discovery of every token you own |
+| Send funds | Native coin and registry-token transfers, signed dry-runs, receipt waiting and transaction lookup | Requires an unlocked session and the daemon's signing policy |
+| Use contracts | Read-only ABI calls; writes using ABI arguments or raw calldata | Writes need an allowed contract and selector; token approvals are revoke-only |
+| Control an agent's signing | Timed unlock, immediate lock, signed recipient/contract whitelist, per-chain execution-fee caps | No spend-amount or daily budget caps yet; see the WIP items below |
+| Integrate an agent | `--json`, structured error codes, send journal, pending/repeat guards and fixed-nonce replacement | A pending or unknown receipt is not permission to send the payment again |
+| Inspect from a terminal UI | Key list, active-key marker, lock status, refresh and lock-all | The full wallet UI is still WIP |
+
+### Planned features
+
+![WIP](https://img.shields.io/badge/status-WIP-yellow) means **not available in the current implementation**, even if a design or
+mockup exists. These are plans, not release-date promises. Existing CLI capabilities
+remain available where the corresponding TUI screen is WIP.
+
+| Feature | Status | What is still missing |
+|---|---|---|
+| Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Password warm-up/unlock, navigation and actions, balances/history, receive, send, whitelist editing and other CLI workflows in the TUI. `tui --warm` currently validates a duration but does not unlock. |
+| Tron | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | TRX and TRC20 USDT addresses, balances, signing, transfers and transaction lookup; currently a v0.3 design only |
+| Solana and TON | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Chain implementations; currently future extension plans |
+| Spend-amount limits | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Rolling 24-hour native and per-token caps; today's fee cap only bounds execution gas per transaction |
+| User-added tokens | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Adding transfer tokens outside the built-in registry |
+| More precise repeat protection | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Calldata-aware `invoke` duplicate matching and a configurable duplicate window |
+| Hardware-backed whitelist key | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Moving whitelist authority to Secure Enclave or hardware |
+
+See [feature status and code evidence](docs/features.md) for the current boundaries and
+links to each plan.
 
 ## Install
 
+Choose **one** installation method:
+
 ```sh
-brew install 2lab-ai/tap/zwallet            # stable (v* releases)
-brew install 2lab-ai/tap/zwallet-preview    # preview (every push to main)
-xbrew install zwallet
-cargo install --git https://github.com/2lab-ai/zwallet
+brew install 2lab-ai/tap/zwallet          # stable
+# Or, for the current main-branch features:
+brew install 2lab-ai/tap/zwallet-preview  # preview
 ```
 
-Homebrew works on macOS and Linux. Hold one channel at a time: both formulae install
-`bin/zwallet`, so `brew uninstall` the other one before switching. `xbrew` uses the stable tap
-formula on macOS and the checksummed release binary on Arch. Or download a binary from
-[GitHub Releases](https://github.com/2lab-ai/zwallet/releases) (`zwallet-macos-aarch64`,
-`zwallet-macos-x86_64`, `zwallet-linux-aarch64`, `zwallet-linux-x86_64`, checksums in
-`SHA256SUMS`), make it executable and put it on your `PATH` as `zwallet`.
+Homebrew supports macOS and Linux. Both channels install `bin/zwallet`; uninstall the
+other formula before switching.
 
-On macOS every binary zwallet publishes (arm64 and x86_64) is ad-hoc code-signed with the hardened
-runtime. `unlock` needs a signed build: it compares the code of the key daemon it starts with its
-own. The linker signs arm64 output only: any x86_64 build, including one built on Apple silicon,
-is unsigned until it is signed afterwards, and `unlock` refuses it until then:
-`codesign --force --sign - "$(command -v zwallet)"`.
+You can also use `xbrew install zwallet`, build from source with Rust
+(`cargo install --git https://github.com/2lab-ai/zwallet --locked`), or download a binary
+and `SHA256SUMS` from [GitHub Releases](https://github.com/2lab-ai/zwallet/releases).
+Binaries are provided for macOS and Linux on arm64 and x86_64. Verify the checksum,
+make the binary executable, and place it on your `PATH` as `zwallet`.
 
-`zwallet --version` prints `zwallet <version> (<channel> <rev12>)`: channel `release` or `preview`
-for published binaries, `dev` for a local build.
+Published macOS binaries are ad-hoc signed with the hardened runtime. An unsigned
+local x86_64 build must be signed before `unlock` can start its daemon:
+
+```sh
+codesign --force --sign - "$(command -v zwallet)"
+```
+
+Check what you installed:
+
+```sh
+zwallet --version
+zwallet --help
+```
+
+The version line includes the channel (`release`, `preview`, or `dev`) and revision
+when build metadata is supplied.
 
 ## Quick start
 
+Run the setup steps yourself in an interactive terminal. The agent does not need
+your password. Start on Sepolia if you want to try a transfer with testnet funds.
+
+### 1. Create and back up a key
+
 ```sh
-zwallet create main          # human, at a terminal: choose a password (asked twice)
-zwallet whitelist add alice 0x... --chains base  # human: let the wallet pay alice on base
-zwallet unlock 24h           # human: unlock signing for 24h (also 30m, 365d, 1y, ...)
-zwallet address --verify     # human: 0x..., checked against the seed with the password
-zwallet address              # anyone: 0x... from the cache (works while locked)
-zwallet balance              # anyone: every network at once (coin + registry tokens)
-zwallet balance --chain base
-zwallet transfer --chain base --to @alice --amount 0.01 --dry-run
-zwallet transfer --chain base --to @alice --amount 0.01 --wait
-zwallet lock                 # human: wipe the key now (ends every zwallet session of this user)
+zwallet create main       # choose a password of at least 12 characters
+zwallet backup            # displays the recovery phrase after your password
+zwallet address --verify # verify the receiving address against the encrypted seed
 ```
 
-## Commands
+Store the recovery phrase privately before funding the address. `backup` requires an
+interactive terminal and is not JSON output for an agent. Keep a current copy of
+`wallet.json` after whitelist changes too: the phrase alone does not restore your
+whitelist policy. See [custody and recovery limits](docs/security.md).
 
-Every command takes `--json`. On failure with `--json` the CLI prints
-`{ "error": "<msg>", "errorCode": "<CODE>" }` on stdout (plus `txHash` or `refusedTxHash`,
-`nonce`, `from`, `journal` after a send, see **Error codes**) and exits 1; without `--json` the
-message goes to stderr as `error: <msg> [<CODE>]`, followed by one `txHash: …` /
-`refusedTxHash: …` / `nonce: …` / `from: …` / `journal: …` line for each of those fields, exit 1.
-Commands that act on a key take `--key <name>` (default: the active key).
+### 2. Allow a recipient, then unlock
 
-| Command | Output (`--json`) | While locked |
-|---|---|---|
-| `chains` | `[{ key, name, family, symbol, chainId, rpc }]` | works |
-| `create <name> [--password-stdin] [--unlock <dur> [--allow-ptrace-scope-0]] [--words 12\|15\|18\|21\|24] [--no-qr]` | `{ name, index, address, active, master, home, chains, verified }` (+ `locked, expiresAt, daemonPid, whitelist` with `--unlock`) | see below |
-| `list [--verify [--password-stdin]]` | `{ active, keys: [{ name, index, address, active }], verified, verifiedBy?, warning? }` | works |
-| `change <name> [--no-qr]` | `{ active, address, verified, verifiedBy?, warning? }` | works |
-| `address [--chain <key>] [--verify [--password-stdin]] [--no-qr]` | `{ chain, key, address, verified, verifiedBy?, warning? }` (EIP-55; `--verify` adds `index`) | works |
-| `addresses [--no-qr]` | `{ key, addresses: [{ chainId: <key>, address }], verified, verifiedBy?, warning? }` | works |
-| `status [--no-qr]` | `{ wallet, locked, home, daemonPids?, otherDaemonPids, daemonPid?, expiresAt?, whitelist?, active?, address?, verified?, verifiedBy?, warning? }` | works |
-| `balance [--no-qr]` | `{ key, address, verified, verifiedBy?, warning?, chains: [{ chain, chainId, native: { symbol, decimals, balance, raw }, tokens: [{ symbol, address, decimals, balance, raw }] }] }`; a network that failed has `{ chain, chainId, error, errorCode }` instead, a token whose read failed `{ symbol, address, decimals, error, errorCode }` (see below) | works |
-| `balance --chain <key> [--token <erc20>] [--rpc <url>] [--no-qr]` | `{ chain, key, address, symbol, decimals, balance, raw, verified, verifiedBy?, warning?, token? }` | works |
-| `call --chain <key> --to <contract> --sig "<fn>" [ARGS...] [--rpc <url>]` | `{ chain, from, to, sig, args, result, raw }` | works |
-| `invoke --chain <key> --to <contract\|@nick> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw, toNickname? }` | `WALLET_LOCKED` |
-| `transfer --chain <key> --to <0x\|@nick> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
-| `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191; refused unless the whitelist allows it) | `WALLET_LOCKED` |
-| `tx --chain <key> <txHash> [--rpc <url>]` | `{ chain, txHash, found, status, from, to, nonce, value, valueRaw, symbol, explorerUrl, blockNumber?, gasUsed?, success?, hint? }` | works (no wallet needed) |
-| `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0] [--no-qr]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, verifiedBy: "password", whitelist, warning? }` | - |
-| `lock` | `{ locked: true, wasUnlocked, stopped: [<pid>] }` | - |
-| `backup` | prints the recovery phrase; interactive terminal only | asks for the password |
-| `whitelist list [--verify [--password-stdin]]` | `{ gen, entries: [{ nickname, kind, address, chains, selectors? }], policy: { maxFeeWei, allowMessageSigning }, verified, source?, sealedGen?, reason? }` | works |
-| `whitelist add <nick> <0x> [--chains <c1,c2>\|'*'] [--contract --selectors <0x…,0x…>] [--unlock <dur>]` | a change (see **The whitelist**) + `{ entry, warning? }` | asks for the password |
-| `whitelist remove <nick> [--unlock <dur>]` | a change + `{ entry }` | asks for the password |
-| `whitelist fee-cap <chain> <amount> [--unlock <dur>]` | a change + `{ feeCap: { chain, maxFeeWei, maxFee } }` | asks for the password |
-| `whitelist allow-message-signing on\|off [--unlock <dur>]` | a change + `{ allowMessageSigning }` | asks for the password |
-| `whitelist reset [--unlock <dur>]` | a change + `{ dropped }` | asks for the password |
-| `tui [--chain <key>] [--warm <dur>]` | none: a terminal UI for a human (`--json` is refused) | works |
+Replace `0xRECIPIENT_ADDRESS` with the recipient's full EVM address before running:
 
-- **Whitelist changes** also take `--password-stdin`, and with `--unlock <dur>` also
-  `--allow-ptrace-scope-0` (see **The whitelist**).
-- **Durations** are positional: an integer and one unit of `s m h d w y` (`1y` = 365d). `0`,
-  negatives, fractions and unknown units are `VALIDATION_ERROR`.
-- **`tui`** (needs stdin on a terminal, the one it sets to raw mode, and stdout on one): the
-  key list with the globally active key marked `*`, and a two-line status bar: chain, active
-  key, its short address and how far it is verified; then `locked` or `signing (agent too) until
-  HH:MMZ` (UTC; `YYYY-MM-DD HH:MMZ` when a day or more away), and the RPC host. The lock state is
-  read again every 5 s, so a `zwallet lock` from another shell shows. Keys: `j`/`k` or the
-  arrows move, `s` asks, then `y` makes the selected key the globally active one, the one the
-  agent uses by default (as `zwallet change`: a key whose cached address the daemon's answer
-  contradicts is refused, the error in the pane), `r` reads everything again, `L` locks every
-  zwallet daemon of this user (as `zwallet lock`), `q` or Ctrl-C quits (after a running `L` is
-  done; a stop that failed is printed once the terminal is given back). The note under the list
-  never asks to verify the key the bar shows verified by session; it then flags the other keys,
-  as `list` does. It needs 80x24 and says so on one line when the terminal is smaller. Text from
-  wallet.json, the daemon socket and the environment is escaped and bounded as in the CLI, every
-  cell goes through one filter that lets only printable ASCII and `₮` through, and no QR code is
-  drawn. This version shows the keys and the lock state and makes a key active; the warm-up
-  (`--warm`, checked but not used yet), home, transfer and whitelist screens follow.
-- **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
-  `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
-  reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's
-  parent directory must already exist. Afterwards it derives the next index as `<name>` and makes
-  it active. At a terminal or with `--password-stdin` it asks for the password for that one
-  operation and derives the key itself (`verified: true`). Without either (an agent) it derives
-  through the unlocked daemon without a password (`verified: false`), and while locked it refuses.
-  It starts no daemon unless `--unlock` is given. Concurrent creates get distinct indices.
-- **Address trust** (`verified`, `verifiedBy`): the addresses in `wallet.json` are a plain cache
-  that anything running as the same user can edit, and a listener of that user can answer on
-  `d.sock`. An address is shown at one of three levels:
-  - `verified: true, verifiedBy: "password"`: derived from the seed after the human's password,
-    by this process or by the daemon child it just started.
-    - `address --verify` and `list --verify` (password at the terminal prompt, or
-      `--password-stdin`): decrypt `wallet.json` here, derive, and compare with the cache. A
-      wallet the password does not open is `WRONG_PASSWORD`. With the password the seed is
-      authoritative and the cache only metadata, so `address --verify` **repairs** every cached
-      address (of every key) that differs from the seed: it rewrites them in `wallet.json` under
-      the writer lock (the encrypted master untouched), and says so in `repaired: [{key, chain,
-      was, now}]` (`was` escaped) and a `warning` that something modified `wallet.json`. `list
-      --verify`, `unlock`, `create` of a further key with the password, `backup`, the whitelist
-      changes and `whitelist list --verify` refuse such a cache with `VALIDATION_ERROR` and say to
-      run `zwallet address --verify`.
-      Both show each key's derivation `index`, and add a `warning` when an index is one zwallet
-      never assigns (at or past `nextIndex`, or with an unused index below it): the key list in
-      `wallet.json` was edited. Such an address is still this seed's, but a wallet restored from
-      the phrase lists accounts in index order and may not show it.
-    - `unlock` and `create --unlock`: the address the CLI's own daemon child derived from the
-      seed the password opened, reported on that child's channel (both also add `daemonPid`).
-      `unlock` also shows that key's derivation `index`, and the same `warning` as `--verify`
-      when the index is one zwallet never assigns (checked against the key list it read before
-      the prompt).
-    - `create`: the first key, derived from the seed generated in the same process, and a later
-      key when the password was asked for (see above).
-  - `verified: true, verifiedBy: "session"`: while unlocked, `address`, `addresses`, `status`,
-    `change` and `balance` (with or without `--chain`) ask the key daemon to derive the address
-    (once per chain family), compare it with the cache, and check with the kernel which process
-    answered. On **macOS** that check identifies the code actually running, not a path or a value
-    the binary declares about itself (both of which a same-user attacker can forge): using the
-    peer's audit token (`LOCAL_PEERTOKEN`, so pid reuse cannot swap the target), the peer's
-    code-signing hash (`csops` `CS_OPS_CDHASH`, the hash the kernel validates against the mapped
-    code pages; every macOS build zwallet ships is signed, see **Install**) must equal this
-    process's own, the peer must be `CS_VALID`, its argv must be in the process table as a key
-    daemon of this home, it must hold the listening `d.sock` of this home, and the executable UUID
-    it used the socket with (`LOCAL_PEERUUID`) must match. That daemon decrypted this home's
-    `wallet.json` with the password typed at `unlock`. On **Linux** every zwallet process is
-    non-dumpable, which hides `/proc/<pid>/exe` from its own user, so the daemon's code cannot be
-    checked there and nothing is verified by session: the address is shown as below.
-  - `verified: false`: the cache while locked, with the line ``not verified: the wallet is locked;
-    `zwallet unlock <dur>` or `zwallet address --verify` checks it`` in human output; or, while
-    unlocked, an address no session verified (an agent's `create`, `list` without `--verify`, or
-    Linux), with ``not verified: run `zwallet address --verify` before funding``. When the
-    process answering on `d.sock` is known not to be this build's key daemon of this home
-    (another program, another zwallet build such as the one before a `brew upgrade`, or one that
-    does not hold the socket), the command still succeeds, unverified, with a `warning` naming the
-    pid and what it is, ending ``run `zwallet lock` and unlock again``. A process whose code cannot
-    be read (an unsigned program, such as an x86_64 one on any Mac, or a non-dumpable one on
-    Linux) is not named: its answer is only not verified. `balance` adds no note line. `list`
-    without `--verify` never asks to verify the active key while this build's key daemon of the
-    home derived the rows (macOS): its note is then ``not verified: the other keys' addresses;
-    `zwallet list --verify` checks them``, and with one key there is none; locked, on Linux, or
-    with another process answering, it is the note above.
+```sh
+zwallet whitelist add alice 0xRECIPIENT_ADDRESS --chains sepolia
+zwallet unlock 30m
+```
 
-  While a daemon answers, a cache that its answer contradicts fails these commands (and `list`)
-  with `VALIDATION_ERROR`. Only when every process that answered is this build's key daemon (so
-  only on macOS) does that error say the cache was modified. Otherwise the answer is no proven
-  derivation, so the error says the two addresses disagree, that one of them was tampered with,
-  to fund neither and to run `zwallet address --verify`, which decides with the password; a
-  process known to be another one is also named, in the message and the `warning` field. An
-  answer that is not an address, or a cached value that is not one, is `VALIDATION_ERROR` too and
-  is never shown, compared or verified as an address.
+A whitelist edit asks for your password and ends existing signing sessions, so unlock
+**after** editing the list. A listed recipient can receive the entire balance:
+spend-amount caps are WIP. Unlocking also lets other processes under your OS user
+request signatures within the policy.
 
-  What reaches the terminal, exactly. Every byte zwallet writes for a human (results, errors,
-  notes, the whitelist change summary, the password prompt) goes through one write point that
-  lets through only printable ASCII (`0x20`–`0x7E`), the newline and `₮` (U+20AE, in the
-  registry's `USD₮0`); any other character — `\r`, tab, ESC, DEL, C1, bidi controls, line
-  separators, block and box-drawing glyphs, emoji, accented letters — is written as a `\u{…}`
-  escape. Two writes do not go through it: zwallet's own QR code of a verified address, printed
-  after the text, and clap's help, version, usage and argument errors (`--help`, `--version`, a
-  mistyped command line without `--json`), which repeat only the command line the invoker typed
-  (no argument is read from the environment). `--json` is printable ASCII too: every other
-  character inside a string is a JSON `\uXXXX` escape (two for a character above U+FFFF), so a
-  JSON parser reads back the exact string.
+### 3. Let the agent read and preview
 
-  Before that, each source zwallet does not control is escaped where it comes in (the same
-  `\u{…}` form, with `\` itself as `\u{5c}`, so the encoding is one-to-one) and bounded. What
-  holds, as one invariant (every cut counts its `...(cut)` marker):
-  - **whitelist.json and whitelist.next.json** (anyone of this user's to write): a file is a list
-    only if every value in it is in the shape zwallet writes — a nickname of `a-z 0-9 _ -`, an
-    address or selector of `0x` and hex digits, a chain `*` or a chain key's shape (`a-z 0-9 -`),
-    a fee cap of decimal digits — else it is not a list, and the message names the field, never
-    its value; the daemon then trusts nothing from that file. So every value from these files a
-    human sees is in that alphabet, or `<invalid>` (a chain zwallet does not know, a field of a
-    file that is not a list). Two exceptions, each bounded: the parser's message for a file JSON
-    cannot read as a list quotes at most 80 characters of it; and `whitelist reset` shows the
-    entries of the files it discards as found, at most 512 per file, on a line that holds nothing
-    else from the file (`whitelist.json`'s below the line with its reason, which quotes at most
-    the parser's 80, or the file's generation, and `whitelist.next.json`'s when it is not the
-    sealed list).
-  - **Names and fee caps from those files** in one command: at most 512 characters in all, each
-    name or cap whole, then how many more (the change summary before the password, with the old
-    caps of a `fee-cap` and the caps a `reset` sets back, counted before any name; `whitelist
-    list` and its fee caps for a list that did not verify). Each file's names are shown once: a
-    `reset`'s summary names them where it says what it drops, and the file's own line gives its
-    generation and count only. A list the seal verified (`whitelist list --verify`) is the
-    human's own, signed by the key only the password derives: up to 100 entries.
-  - **The send journal:** at most 512 characters per message, each field in the shape zwallet
-    writes it or `<invalid>` (see **The send journal**).
-  - **Everything else from outside**, at most 512 characters per source: an error the process on
-    `d.sock` sends (its message and its string or number details together; array and object
-    details are dropped); `status`'s whitelist and a sign reply's `signerDecoded` (a value that
-    is not an object is one string of at most 512 in `--json` too); an RPC endpoint's error text;
-    a decode error's return data and message (128 + 384); a `call` result in human output; and,
-    at 64 or less, a relayed `expiresAt`, a token's `symbol()` (32), a cached address or an answer
-    that is not an address. Exceptions, each named and bounded: a relayed error from a process
-    known to be another one names its executable path (64) beside its message (512); `status`
-    shows the serving process's `expiresAt` (64), whitelist (512) and, from another process, its
-    path in the warning (200), on three labelled lines; `call`'s human output adds the returned
-    bytes as hex (512) on its own line (`--json` keeps the result and the hex whole).
+```sh
+zwallet balance --chain sepolia --json
+zwallet transfer --chain sepolia --to @alice --amount 0.001 --dry-run --json
+```
 
-  A QR code holding an Ethereum address needs at least version 2: a block of 25 × 25 = 625
-  modules without a quiet zone, 25 rows of 25 cells from one source at one character per module.
-  A source bounded to 512 characters cannot fill one. The exceptions above are not shown unable
-  to: their parts sit on separate labelled lines, or are hex only. What a bounded source can
-  still do is pad to the terminal's width so that its text starts a visual row at column 0 (soft
-  wrap), and on a terminal exactly 21 columns wide, a 512-character budget fits a version-1 code
-  (441 modules, at most 17 bytes: a short link, not an address) with no quiet zone. All of this
-  is what a same-user process can already do by writing to the terminal directly (**Known
-  limits**), so it is documented, not mitigated.
+A dry-run uses live RPC data and, when allowed, signs without broadcasting. Check
+`whitelist`, `sufficientFunds` and the transaction details. It does not expose a
+broadcastable raw transaction. Read commands work while locked; signing needs the
+unlocked daemon.
 
-  Two places keep `₮`, the one non-ASCII character the write point lets through: a registry
-  token whose `symbol()` is exactly the symbol the registry records shows it as is (USDT0's
-  `USD₮0`; any other symbol, from that address or another, is escaped), and a send journal
-  amount whose symbol has it (the shape check lets `₮` into any journaled symbol, so a line
-  zwallet did not write can carry up to 32 of them too; in `--json` it is `\u{20ae}`, as every
-  non-ASCII character of a file value is). An error from the process on `d.sock` reads as its own:
-  prefixed ``the process answering on the key daemon socket reported:`` unless it is this
-  build's key daemon, or, from a process known to be another one, named, with its details
-  dropped. A `WALLET_LOCKED` reply from any process running this build's code gets the neutral
-  prefix instead of being named (a daemon whose session just ended looks like another process by
-  then), and still no details: a genuine `WALLET_LOCKED` carries none.
-  `wallet.json` must hold only key names `create` accepts (`active` too); a file with another is
-  `VALIDATION_ERROR`. What a session cannot rule out: a process of this user that
-  swaps in its own `wallet.json` and unlocks it with its own password through this very binary (a
-  genuine daemon of a wallet the human did not make), or injects code into the genuine binary
-  (`DYLD_INSERT_LIBRARIES` on a binary without the hardened runtime, or on any binary while System
-  Integrity Protection is off; `LD_PRELOAD`) — the same
-  class as replacing the binary, which nothing here can prevent. So keep the address you saved
-  from your first unlock; if it ever changes, stop. **Piped and `--json` output changed with
-  this check**: the locked note now names `zwallet unlock`, and a session-verified result gains
-  `verifiedBy: "session"` and drops the unverified note; agents should read `--json`.
-- **QR code**: where the address is `verified: true`, by the password (`unlock`, `create` and
-  `create --unlock` with a verified key, `address --verify`) or by the session (`address`,
-  `addresses`, `status`, `change` and `balance` while unlocked), human output on a terminal ends
-  with the lines
-  `scan to send to <address>` and ``(the same address on every EVM network in `zwallet chains`)``,
-  then the address as a QR code for a phone wallet: the plain EIP-55 address (no URI scheme, no
-  chain), error correction level M, a quiet zone of 4 modules, black on white in ANSI colours, or
-  with `NO_COLOR` plain blocks for a dark terminal. Scan that one and save it in the phone
-  wallet's address book. The `create` that makes the master seed shows no code, only a line to run
-  `zwallet backup` first: funds sent before the recovery phrase is written down are at risk.
-  `--no-qr` leaves either out. `addresses` shows one code (the address is the same on every EVM
-  chain), and `balance` shows it after the networks. Nothing unverified prints one, and neither
-  `--json` nor output into a pipe ever has one, so agents see the same text as before.
-- **The whitelist** ([`.prd/04-whitelist.md`](.prd/04-whitelist.md)): the key daemon signs a
-  transaction that moves value only when a list signed with this wallet's whitelist key allows
-  it. That ed25519 key is not derived from the seed, and it is never stored: every whitelist
-  change derives it again from the password you type and a random per-wallet salt sealed in
-  `wallet.json` (its own scrypt run, with the wallet's parameters). After `unlock` the daemon
-  keeps only the seed and, from the sealed policy, the key's public half, the list's generation
-  and its digest (the rest of the decrypted policy, the salt included, is dropped once the session
-  starts), so the daemon can check a list but never sign one. The generation and the digest are
-  there because the public key alone would also accept an older list the same key signed. The
-  seed is not derived from the password: it is a random BIP39 mnemonic encrypted under it, since
-  a password-derived seed would be a "brain wallet" that anyone could attack by guessing
-  passwords against its public addresses. The list (`whitelist.json`) is plain JSON anyone can
-  read; the daemon trusts it only when it verifies.
-  - **Entries.** `whitelist add <nick> <0x>` lists a payee: native coin and registry tokens
-    (USDC, USDT, DAI and WETH where their issuers publish them) may be sent to it on its
-    `--chains` (comma-separated chain keys, default `ethereum`; `'*'`, quoted, for every chain,
-    only when given). `whitelist add <nick> <0x> --chains <c> --contract --selectors
-    <0x12345678,…>` lists a contract that may be called with those 4-byte selectors only (named
-    chains, never `*` and never a registry token); it prints `warning: a listed contract may
-    forward value or act on its arguments`. Nicknames are 1-32 of `a-z 0-9 _ -` starting with a
-    letter or digit, and each address is listed once.
-  - **What the daemon allows**, checked on every signature against the list it verifies right
-    then. A native transfer goes to a payee on one of its chains, or to the signing key's own
-    address (with a list that verifies, or while the wallet has no whitelist yet; see **Fees**).
-    Calldata is judged by what the daemon decodes:
-    - **ERC-20 `transfer`, `approve`, `transferFrom`** (decoded from their canonical encoding,
-      whatever the entries say): a `transfer` only of a registry token on that chain, to a
-      payee on that chain that is not itself a registry token on any chain (a token transfer to
-      the key's own address needs a payee entry too); an `approve` only of a registry token on
-      that chain, and only of 0 (a revoke; any spender); `transferFrom` never. The same calls on
-      a token outside the registry are refused.
-    - **Any other call** goes only to a contract entry on one of its chains, with one of its
-      listed selectors (native value only then), and never to a registry token. A contract
-      entry delegates: the agent may call its listed selectors with any arguments and value, and
-      the contract may forward value or act on them. That holds for a token outside the registry
-      listed as a contract, too: its listed selectors (say `increaseAllowance`) are called like
-      any listed contract's.
+### 4. Send deliberately and check the result
 
-    Everything else is `WHITELIST_DENIED`, and so is `sign-message` until `whitelist
-    allow-message-signing on`.
-  - **Fees.** Each signature, a native self-transfer included, must pass the execution-fee cap
-    for its chain: its fee limit (`gasLimit × maxFeePerGas`, or `× gasPrice`) against the
-    verified list's cap, or the built-in default before any whitelist exists (no anchor
-    sealed); otherwise `FEE_CAP_EXCEEDED`. With a verified list the action is decided first, so
-    an action the list refuses is `WHITELIST_DENIED` whatever its fee, and a fee refusal only
-    ever concerns a transaction the list would otherwise sign. A list with no readable cap for
-    the chain, or a chain with no default, is refused with the `whitelist fee-cap` command. The
-    cap bounds each transaction, not a total: repeated transactions can each spend up to it. On
-    the OP-stack chains (Base, Optimism) the L1 data fee is charged on top of it. The defaults
-    are ethereum 0.003 ETH; base, arbitrum and optimism 0.0005 ETH; polygon 2 POL; bsc 0.003
-    BNB; avalanche 0.05 AVAX; sepolia 0.01 ETH, changed with `whitelist fee-cap <chain>
-    <amount>`.
-  - **A list that cannot be trusted** (it does not verify: edited by hand, an older copy; it
-    cannot be read, or not within the 2 s deadline; or the sealed anchor is malformed) refuses
-    **every** transaction with `WHITELIST_INVALID`, a native self-transfer included: a broken
-    list never relaxes a stricter signed fee cap. The message gives the reason and points to
-    `zwallet whitelist list --verify`, with no `command`: an edit suggested from the refused
-    transaction would name an address an agent chose. A `whitelist.json` above the sealed
-    generation gets its own reason, by its generation and signer (see **Joint rollback**
-    below). Two or more edits above, under the sealed key: "wallet.json was rolled back".
-    One edit above: an edit that never finished sealing, or a rolled-back `wallet.json`.
-    Another key: a rollback across a reset, a reset that never finished sealing, or a foreign
-    file. A wallet with **no whitelist
-    yet** signs only a native self-transfer under the built-in cap; a self-transfer above it, or on
-    a chain with no built-in cap, is `FEE_CAP_EXCEEDED` with the `whitelist fee-cap` command, and
-    anything else is `WHITELIST_INVALID`.
-  - **What a refusal says.**
-    - A transaction refusal (`WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED`)
-      carries `counterparty` and `chain`, and `command` with the exact command when one edit of
-      the list would allow what was refused: `zwallet whitelist add <nick> <addr> --chains
-      <chain>` for an address not in the list (for a contract, with `--contract --selectors
-      <selector>`), or `zwallet whitelist fee-cap <chain> <this transaction's fee>`. A fee
-      refusal also carries `feeWei`, and `capWei` when there is a cap. A `fee-cap` command
-      comes only with an action the list allows, so it is the one edit that lets the request
-      through; after an add, a request over the cap too is refused next with its own `fee-cap`
-      command.
-    - `command` is left out when no edit can allow it (`transferFrom`, an approve of more than 0
-      or on a token outside the registry, another call on a registry token, a token transfer to
-      a token contract, an address listed as the other kind); when an entry exists but does not
-      cover the chain or the selector (the message names the entry and what it is missing); and
-      for every refusal of a list that cannot be trusted. With no whitelist yet, `command` is the
-      first `whitelist add` only when an entry could allow the action: a forbidden action has
-      none, and neither has a revoke of a registry token (any signed list allows it).
-    - A `sign-message` refusal carries no `counterparty` or `chain`: `WHITELIST_DENIED` with
-      `command: zwallet whitelist allow-message-signing on` while the verified list has it off;
-      `WHITELIST_INVALID` with that `command` while there is no whitelist; `WHITELIST_INVALID`
-      with no `command`, pointing to `list --verify`, while the list cannot be trusted.
-  - **`whitelist list`** works while locked: `whitelist.json` as it is, `verified: false`. Human
-    output shows a field of an entry as it is only when it passes the check `add` applies to it
-    (the nickname rule, `address` or `contract`, `0x` and 40 hex digits, a known chain key or
-    `*`, `0x` and 8 hex digits), else `<invalid>`; `gen` is a number or `<invalid>`; at most 16
-    chains, selectors and fee caps each. A list that is not `verified: true` shows its entry lines
-    and fee caps within one 512-character budget (about 5 entries), then "... N more; `zwallet
-    whitelist list --verify` shows them all" (after a `--verify` that did not verify, `--json`
-    does); a file that cannot be read as a list is also counted. A verified list (`--verify`)
-    shows up to 100 entries. `--json` keeps every entry, its strings escaped.
-    `--verify` (password) checks it against the seal: `verified: true` with
-    `source` and `sealedGen`, or `verified: false` with the `reason` (with no whitelist sealed
-    but a list file there, why every edit refuses and what to do, not the first `add`; for a
-    `whitelist.json` that does not verify and is not above the seal (deleted, unreadable, not a
-    list, edited, or older), the same one recovery as an edit's). Plain `list`
-    with only `whitelist.next.json` there names it and points to `--verify`. `unlock`, `create
-    --unlock` and `status` show what the daemon trusts, read again on every `status`: `whitelist: {
-    gen, verified: true, entries: [nicknames] }`, or `{ gen (null without a whitelist), verified:
-    false, entries: [], reason }`.
-  - **Changes** (`add`, `remove`, `fee-cap`, `allow-message-signing on|off`, `reset`) ask for the
-    password (terminal prompt, or `--password-stdin`). Before the password is read,
-    `whitelist.json` and `whitelist.next.json` are read once and the change is printed where the
-    password is read from (the terminal, or stderr with `--password-stdin`): the nickname, the
-    full address, payee or contract, the chains (`*` as "every chain", otherwise zwallet's key for
-    each or `<invalid>`, at most 16), the selectors, a policy change's old and new value (from
-    both files when an unfinished edit is in `whitelist.next.json`), what a `reset` drops and
-    every fee cap it sets back (by zwallet's key for each chain, once; of the files' caps that
-    differ, each that still fits the budget is shown beside it, then "and N more caps from the
-    files, not shown"), both files as they are (at most 20 names per file, on a `reset` only
-    where it says what it drops; names and fee caps from the files share one budget of 512
-    characters, the caps first and each file's names once, then how many more; a file that
-    exists but cannot be read, or is not a list, is "there but cannot be read: its entries are
-    unknown, and a reset drops them", never "none"), every outcome
-    that can still happen (for an edit: the change lands on `whitelist.json` if it is the sealed
-    list, on the unfinished edit if that is, on a first list from the defaults if there is no
-    list file and no whitelist yet, otherwise nothing changes; for a `reset`: the generation it
-    makes in each of those cases, "if neither file is the sealed list (it was changed or
-    deleted): gen M+1, where M is the sealed generation", and gen 1 with no whitelist sealed),
-    that every zwallet daemon of this user is
-    stopped, and what happens to signing: "after the
-    change: the wallet stays locked", or with `--unlock <duration>` "after the change: a new
-    signing session for <duration> (until about <local time>, <UTC>)". The last line, right above
-    the prompt, repeats the change and what happens to signing. **The change is applied to
-    exactly the list shown, or nothing changes**: the files are checked again right before
-    anything is stopped, and read again once under `w.lock`; if they are not those bytes, the
-    change is refused ("<file> changed after it was shown; nothing in the whitelist changed").
-    An edit builds only on the list `wallet.json` seals: if the list shown does not verify
-    (edited by hand, an older copy, deleted, or newer than a rolled-back `wallet.json`), or
-    `wallet.json` seals no whitelist but a list file exists (a `wallet.json` restored from
-    before the first edit, a planted file, or a first edit interrupted before its re-seal, which
-    leaves only `whitelist.next.json` at gen 1), nothing in the whitelist changes, and the
-    message points to `zwallet whitelist list --verify`. Whatever the cause, it gives one
-    recovery: "If wallet.json is an older copy, restore the current one if you have it (zwallet
-    keeps no copy of it); otherwise `zwallet whitelist reset` …". zwallet never suggests restoring
-    an older `whitelist.json` (see **Known limits**), so recovering from accidental damage to the
-    list means restoring `wallet.json` if an older one went back, or a reset. `zwallet whitelist
-    reset` starts over, at a cost the summary and the message spell out: every fee cap goes back to
-    the built-in default, and no payee and no contract is listed (native self-transfers under the
-    default caps and approve-0 revokes still sign), so set `whitelist fee-cap` again before
-    `--unlock`. A wrong password stops nothing; neither does a list an edit cannot build on (an
-    edit; a `reset` goes ahead), or a change the list refuses. Otherwise the change stops every
-    zwallet daemon of this user (as `lock` does), signs the next generation and re-seals it into
-    `wallet.json`, and the wallet stays locked unless `--unlock <duration>` starts a new session for
-    that duration with the password just typed (with `unlock`'s checks, so on Linux it may need
-    `--allow-ptrace-scope-0`). Output: `{ change, gen, previousGen, base, entries: [nicknames],
-    verified: true, stoppedDaemons, discarded?, discardedNext?, warning?, locked, hint? }` plus the
-    change's own fields, and with `--unlock` `{ duration, expiresAt, daemonPid, whitelist }` (or
-    `unlockError`). Every change derives the whitelist key from the password just typed and the
-    sealed salt, and refuses, writing nothing, if that is not the key `wallet.json` seals ("the
-    password-derived whitelist key is not the one wallet.json seals; …"). The first `add` draws the
-    salt, so the key. `reset` draws a new salt, so a new key, and makes an empty list with the
-    default caps, for when the list does not verify and the current `wallet.json` is in place (or
-    there is no copy of it), or for a whitelist made by zwallet 0.1.0 (or a `wallet.json` restored
-    from before the upgrade), which every other change refuses before anything is stopped ("this
-    whitelist was made by zwallet 0.1.0, whose key file is no longer used …", with the one
-    recovery); the daemon signs nothing under it, and its reason names that cause alone; when the
-    list it replaces did not verify (or
-    `wallet.json` sealed none), `discarded` shows it (the reason and its unverified entries, as
-    JSON, `null` when the file is missing, cannot be read or has no entries; the human output then
-    says "no verified entry; whitelist.json's entries unknown" where it says what was dropped), and
-    `discardedNext` a dropped `whitelist.next.json` that was not the sealed list. If
-    `whitelist.next.json` cannot be removed once the new list is published (or the directory not
-    synced after), the change still succeeds, with a `warning` that says to remove it (a later
-    change can stage its list only where there is a plain file or nothing), and `--unlock` still
-    runs; the next summary shows the file as "a copy of whitelist.json (e.g. left after a
-    change)". An edit never has `discarded`: it refuses instead.
-  - **`--dry-run`**, when there is a `whitelist.json`, first runs the daemon's own check on it as
-    it is on disk (unverified; one that cannot be read counts as untrusted). If that refuses, the
-    dry-run reports `whitelist: { allowed: false, reason, code, command?, counterparty, chain, …
-    }` and asks the daemon for no signature (no `txHash`, no `recoveredFrom`). If it allows, the
-    daemon checks and signs as for a live send, and the output adds `whitelist: { allowed: true
-    }`. Without a `whitelist.json` the CLI checks nothing (it cannot tell a wallet with no
-    whitelist yet from one whose list was deleted; the anchor is sealed): the daemon decides, its
-    refusal is the same error as a live send's, and there is no `whitelist` field. A live send is
-    decided by the daemon alone.
-  - **`@nick`**: `transfer --to @alice` and `invoke --to @router` take the address from
-    `whitelist.json` as it is, unverified (the daemon decides anyway), and add `toNickname`. An
-    unknown nickname is `VALIDATION_ERROR` naming `zwallet whitelist list`.
-- **`balance` without `--chain`** checks every network in **Chains**, mainnets first and the
-  testnet (Sepolia) last: the native coin and every registry token there (USDC, USDT, DAI and
-  WETH where their issuers publish them; BNB Smart Chain has none), zero balances included in
-  `--json`. Token symbols and decimals come from the registry; `--token` instead asks the
-  contract. The networks are read at once, each through `ZWALLET_RPC_<KEY>` or its default RPC
-  and within 8 s for all its reads; `--token` and `--rpc` need `--chain` (a contract and an RPC
-  URL belong to one chain). A network whose endpoint, chain id check or native balance fails or
-  runs out of time has `error` and `errorCode` (and no `native` or `tokens`); a token whose
-  `balanceOf` does has them on its own row (and no `balance` or `raw`), and the rest of the
-  network still shows. The command exits 0 when any network answered; when none did it fails with
-  their shared error code (else `RPC_ERROR`) and every network's error in the message, each cut
-  short to 72 characters as its line shows it; `--json` adds `networks: [{ chain, error,
-  errorCode }]`, each error whole as a network's row has it (human output never shows it). The
-  address is the same on every EVM chain; a row has its own `address` only where the cache
-  differs. Human output: `key` and `address`, one line per network with its coin, indented under
-  it each non-zero token and each failed token as `<SYMBOL> error: …`, a failed network as
-  `error: <message, cut short> [<CODE>]`, and a last line `<n> of <all> networks have a balance`
-  (`; <m> did not answer`, `; <k> token reads failed` when some failed).
-- **`call` / `invoke` signatures** are `name(argTypes)(returnTypes)`, e.g.
-  `balanceOf(address)(uint256)` or `getReserves()(uint112,uint112,uint32)`. Return types are
-  optional (without them `result` is null and `raw` has the hex). Arrays are written `[1,2]`,
-  tuples `(a,b)`; scalar results are strings. `uint`/`int` mean `uint256`/`int256` (the selector
-  is computed from the canonical names). Arguments:
-  - `address`: `0x` plus 40 hex digits; mixed case must be a valid EIP-55 checksum.
-  - integers: plain decimal (`-` allowed for `int`) or `0x` hex; no units or exponents.
-  - `bytes`, `bytesN`, `function`: `0x` hex, exactly N bytes for `bytesN` (24 for `function`).
-  - `bool`: `true` or `false`.
-  - a top-level `string` argument is taken exactly as given (no trimming, quotes included).
-  - inside a list, every element is trimmed. A string element that starts with `"` or `'` must
-    end with the same quote, which is removed; quoting keeps commas, brackets and surrounding
-    spaces. There are no escapes: to include one kind of quote, quote with the other
-    (`["a, b", 'say "hi"', plain words]`).
-- **`transfer` / `invoke`** fill the pending nonce, EIP-1559 fees (legacy `gasPrice` where the chain
-  has no base fee), `eth_estimateGas` + 20% (exactly 21000 for plain transfers) and, on Base and OP
-  Mainnet, the L1 data fee. Without `--dry-run` a shortfall is `INSUFFICIENT_FUNDS` before anything
-  is signed. `--dry-run` signs but does not broadcast and returns `{ dryRun: true, chain, key, from,
-  to, amount, amountRaw, symbol, decimals, token?, chainId, nonce, pendingNonces, pendingRange,
-  pendingCount, duplicateSends?, gasLimit, gasEstimate, gasLimitSource, type, maxFeePerGas,
-  maxPriorityFeePerGas, gasPrice, maxGasCost, l1Fee, nativeBalance, sufficientFunds, shortfall,
-  whitelist, signerDecoded, txHash, recoveredFrom }` (without the last three when the whitelist
-  refuses, see **The whitelist**). It has no `rawTx`: a dry-run never hands out bytes that
-  could be broadcast without zwallet. `recoveredFrom` is recovered from the signed raw bytes,
-  `signerDecoded` is what the key daemon decoded from the bytes it signed, and an empty wallet can
-  be dry-run. `pendingNonces` lists the key's nonces that are pending (between its mined count and
-  its next free nonce) on the node, at most the first 64; `pendingRange` is `[first, last]` of them
-  (or `null`) and `pendingCount` how many there are. Both counts come from the node, so the range is
-  never listed in full. `duplicateSends` (a send without `--nonce`) lists the journal's recent sends
-  that this one repeats (see below). Live: `{ ..., txHash, explorerUrl, journal, broadcastWarning?,
-  rpcTxHash? }` plus `{ status, success, blockNumber, gasUsed, hint? }` with `--wait`.
-- **`--wait`** polls for the receipt for `--wait-timeout <dur>` (default `90s`; same units as
-  unlock durations). A receipt is `status: "success"` (`success: true`) when its status is
-  exactly `0x1`, `"reverted"` (`success: false`) when it is exactly `0x0`, and `"mined"` with
-  `success: null` otherwise (no status, as before Byzantium, or any other value): the execution
-  outcome is unknown, never a failure, and a `hint` says "do not send this payment again; check
-  the receipt on the explorer" with the explorer page. Not mined by then is `status: "pending"`,
-  and a receipt RPC problem is `status: "unknown"` with `receiptError`; neither turns a broadcast
-  into an error, and both add ``hint: "still pending; to speed up or cancel use --nonce N
-  --replace <txHash>; a run without --nonce is a second payment; look it up with `zwallet tx
-  --chain <chain> <txHash>` or <explorer>/tx/<txHash>"`` (for `unknown` it starts "receipt
-  unknown, it may still be pending").
-- **`tx --chain <key> <txHash>`** looks a transaction up on the chain's node
-  (`eth_getTransactionByHash` and `eth_getTransactionReceipt`). It needs no wallet and no key, so
-  it works while locked. `status` is `"mined"` (with `blockNumber`, and `gasUsed` and `success`
-  from the receipt: `true` for status `0x1`, `false` for `0x0`, `null` with the same `hint` as
-  `--wait` for anything else, and `null` with a hint that this node has no receipt when the
-  transaction names its block but the node returns none), `"pending"`, or `"not found"` (`found: false`, and `from`, `to`,
-  `nonce`, `value` are `null`). `value` is in the chain's coin (`valueRaw` in wei); for a token
-  transfer it is `0` and `to` is the token contract. A pending transaction adds `hint: "still
-  pending; to speed up or cancel use --nonce N --replace <txHash>; a run without --nonce is a
-  second payment"`. Not found adds a `hint` that this does not mean it was never sent (it may still
-  reach the network, be held by other nodes, or have been dropped) and that a retry of the
-  payment passes `--nonce <the nonce it was signed with>`, never a plain resend. A node that
-  answers about another transaction is `RPC_ERROR`, never "not found". Every message below that
-  says to look a transaction up names this command and the explorer page: with the hash for a
-  transaction zwallet itself sent or found mined, and for the send journal's entries their
-  hashes, then one `zwallet tx --chain <chain> <txHash>` or `/tx/<txHash>` template.
-- **The send journal.** Right before `eth_sendRawTransaction`, zwallet appends one JSON line
-  `{ ts, chain, from, nonce, txHash, to, value, amountRaw, kind, token? }` (`value` like
-  `"0.01 ETH"` for people, `amountRaw` the same amount in base units: wei, or the token's smallest
-  unit; `kind` `transfer`, `token-transfer` or `invoke`, `to` the recipient or the contract,
-  `token` the token contract of a token transfer) to
-  `sends-<chainId>-<address>.jsonl` in the wallet home (0600, fsynced), and prints the same fields
-  on one stderr line: "broadcasting <txHash> (nonce N on <chain>); if this command does not finish,
-  look this hash up before sending again (`zwallet tx --chain <chain> <txHash>` or
-  <explorer>/tx/<txHash>); a retry must pass --nonce N --replace <txHash>. Journal <path>: {…}".
-  So a run that is killed after the broadcast still leaves its hash behind. If the line cannot be
-  written, nothing is broadcast. A record cut off by a killed run (no final newline) gets a
-  newline before the next one, so it never swallows that line. The journal is opened without
-  following a symlink and without blocking (a FIFO cannot hang a send), and must be a regular
-  file owned by this user; otherwise a send without `--nonce` is `VALIDATION_ERROR` "cannot read
-  the send journal <path>: …; nothing was signed", since the repeat check below needs it. Errors
-  and messages below that send the agent to an earlier transaction name the journal's entries at
-  that nonce, then how to look each hash up (`zwallet tx --chain <chain> <txHash>` or the
-  explorer's `/tx/<txHash>` page). The journal is a file any process of this user can write, so
-  a message shows each field of an entry only in the shape zwallet writes it, else `<invalid>`:
-  the time as RFC 3339 UTC (re-rendered from the instant, not the file's text), the kind
-  `transfer`, `token-transfer` or `invoke`, the recipient `0x` and 40 hex digits, the amount as
-  `format_units` writes it (at most 78 digits before a point and 255 after, 257 characters in
-  all), one space and the symbol zwallet journaled (1 to 32 printable characters other than a
-  space, `₮` included: the chain's, a registry token's, `?` when `symbol()` failed, or an
-  on-chain one as `erc20_meta` escaped and cut it; one with a space in it shows as `<invalid>`),
-  and the hash only when it is a 32-byte hash (`?` else). The journal's text in one message is at
-  most 512 characters (an entry is at most 452, so the newest always fits): of the 5 newest
-  entries, newest first, each that still fits, shown whole and oldest first (one that does not
-  fit is skipped, so it cannot hide a smaller one behind it), then "(and N more there)" for every
-  entry not shown. The human `duplicateSends` line of a dry-run or an `--allow-duplicate`
-  send shows its entries the same way. The entries in `duplicateSends`, `pendingSends` and
-  `journalEntries` (on the other messages that name the journal's entries) keep all their fields,
-  every string escaped.
-- **One send at a time.** Sends from one key on one chain never overlap: each holds
-  `nonce-<chainId>-<address>.lock` in the wallet home from before reading the nonce until the
-  command returns, through `--wait`. A send that finds the lock held does not wait (after waiting,
-  a second attempt at the same payment would sign the next nonce and land too): it fails at once
-  with `VALIDATION_ERROR`, before any RPC call, so nothing is signed or broadcast (see **Error
-  codes**). The message says where the running send's txHash will be (its output, and the send
-  journal once it is broadcast) and how to look it up. A dry-run takes no lock.
-- **A send without `--nonce` while one is pending is refused.** If the key has a transaction pending
-  on the node (its next free nonce is above its mined count), a send without `--nonce` is
-  `VALIDATION_ERROR` "a transaction from this key is still pending on <chain> at nonce N; nothing
-  was signed", with the journal's entries at those nonces (`pendingNonces`, `pendingRange`,
-  `pendingCount`, `pendingSends`, `journal`). The usual cause is a re-run of a send that was cut
-  off, which would land at the next nonce as a second payment: look the pending transaction up, and
-  to speed it up or replace it use `--nonce N --replace <its txHash>`. `--allow-pending` sends
-  anyway; use it only for a different payment. A dry-run reports `pendingNonces` instead of
-  refusing.
-- **A send without `--nonce` that repeats a recent one is refused.** If the send journal has an
-  entry from the last 10 minutes with the same chain, kind, `to` and amount in base units
-  (`amountRaw`: wei for a native transfer or an invoke's value; for a token transfer the token's
-  base units and the same token contract), a send without `--nonce` is `VALIDATION_ERROR` "this
-  looks like a repeat of a recent send; look those hashes up first. If this really is a second
-  payment, pass --allow-duplicate", naming each match's txHash, nonce and time, then one `zwallet
-  tx` template to look each hash up (`duplicateSends`, `journal`); nothing is signed. The display text (`value`) is
-  never compared: a token's symbol comes from the node, and a `symbol()` call that fails once
-  (shown as `?`) must not make a repeat look new. A journal line written before `amountRaw`
-  existed is compared by its `value`. This catches the re-run of a send that was cut off after it
-  was already mined, which the pending check cannot see. A send that was refused or never got out is
-  in the journal too, so the lookup comes first there as well. `--allow-duplicate` sends anyway;
-  a dry-run reports `duplicateSends` instead of refusing, and a live send without `--nonce`
-  reports it too. `--nonce` sends skip the check: at a fixed nonce they can only replace or retry,
-  never add a payment. Only the journal's last 1 MiB is read, and lines that are not entries are
-  skipped.
-- **`signerDecoded.action`** names the ABI method the calldata calls, never an asset, because
-  ERC-20 and ERC-721 share these selectors: `{ kind: "native-transfer", to, value }`,
-  `{ kind: "transfer-call", token, to, amount, assetType: "unverified" }`,
-  `{ kind: "approve-call", contract, spender, value, assetType: "unverified" }`,
-  `{ kind: "transfer-from-call", contract, from, to, value, assetType: "unverified" }`, or
-  `{ kind: "contract-call", contract, selector, value }`. Amounts are raw base units.
-- **`--nonce <n>`** signs with nonce `n` instead of the next free one; `n` must be between the
-  account's mined count and its next free nonce (`VALIDATION_ERROR` otherwise). A mined `n` is "the
-  transaction at nonce N is already mined (nonce consumed); whether the payment succeeded is not
-  known from this alone: look up its receipt with `zwallet tx --chain <chain> <hash>` before
-  sending anything new; nothing was signed", with the journal's entries at `n`. Mined only means
-  the nonce was used: the transaction there may have reverted and paid nothing, so no message
-  says a payment went through from that alone. Where the transaction mined at `n` is known (the
-  `--replace` hash or a journal entry at `n` that the node reports as this key's at `n`, with a
-  receipt), the error names it (`minedTxHash`, and the hash in the message: 66 hex characters,
-  the node's own transaction, shown up to three times beside the journal's 512) and adds the
-  receipt's `success` (`true`, `false`, or `null` when its status says nothing); otherwise the
-  message has `<its txHash>`. `n` equal to the next free nonce takes that free slot. Below it,
-  `--nonce` replaces the transaction pending at `n`, and `--replace <txHash>` must name it (it must
-  be this key's, at nonce `n`, not mined); without it the send is `VALIDATION_ERROR` "nonce N
-  belongs to a pending transaction; pass --replace <its txHash> to replace it (see the send
-  journal)", with the journal's entries at `n`. That message, the mined-nonce one and the
-  unknown-`--replace` one below end with "If the transaction at nonce N is a different payment than
-  the one you are retrying, do not replace it; that payment and yours are separate". A `--replace`
-  hash that is already mined is refused with the same "already mined (nonce consumed)" text, its
-  `zwallet tx` command and explorer page, and, when its receipt can be read, `minedTxHash` and
-  `success`. zwallet
-  reads the replaced transaction's fees from the node and pays
-  `--bump` times the higher of them and its own estimate (tip and max fee, or `gasPrice`; default
-  1.25, allowed 1.1 to 3) so that nodes accept the replacement. An explicit `--bump` also applies
-  when nothing is replaced. If the node does not know the `--replace` hash: where it holds another
-  pending transaction at `n`, the error says the hash is the wrong one and names the journal's
-  entries at `n`; where nothing is pending at `n`, it says to retry with `--nonce n` and no
-  `--replace`. With `--nonce` the output adds `replacesPending` and `feeBump` (e.g. `"1.25x"`, or
-  `null` without a bump), and `--replace` adds `replacesTx`.
-- **`--max-fee-gwei <gwei>`**: fees come from the RPC node, so zwallet refuses a tip above 2x and a
-  price per gas above 6x of max(base fee, `eth_gasPrice`, 1 gwei) with `VALIDATION_ERROR` before
-  signing. On a legacy chain (no base fee, e.g. BSC) the price is `eth_gasPrice` itself, so it is
-  left out of its own ceiling: `gasPrice` may be at most 6x of max(base fee, 1 gwei), i.e. 6 gwei.
-  `--max-fee-gwei` replaces these ceilings with one explicit price per gas (higher or lower); it
-  is checked after the bump.
-- **`--force`** (`transfer`) allows a recipient that is almost always a mistake: the zero address,
-  or the token contract itself. Without it they are `INVALID_ADDRESS`.
-- **Amounts** are decimal strings converted exactly (no floats); more fractional digits than the
-  asset's decimals is `VALIDATION_ERROR`. ENS names are refused (`INVALID_ADDRESS`).
-- **Error codes**: `VALIDATION_ERROR`, `WALLET_EXISTS`, `WALLET_NOT_FOUND`, `WRONG_PASSWORD`,
-  `WALLET_LOCKED`, `KEY_EXISTS`, `KEY_NOT_FOUND`, `CHAIN_UNSUPPORTED`, `CAPABILITY_UNSUPPORTED`,
-  `INVALID_ADDRESS`, `RPC_ERROR`, `INSUFFICIENT_FUNDS`, `BROADCAST_UNCERTAIN`,
-  `WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED`. Errors from the broadcast step
-  carry the signed transaction's `txHash` (or `refusedTxHash`, below), `nonce`, `from` and, once
-  the journal line is written, `journal`. zwallet never suggests a plain resend:
-  a retry of a send that may have gone out passes `--nonce <nonce> --replace <txHash>`, so it can
-  only replace the first attempt, never add a second one.
-  - `WHITELIST_DENIED`, `WHITELIST_INVALID`, `FEE_CAP_EXCEEDED` come from the key daemon before it
-    signs (see **The whitelist**): nothing was signed or broadcast. They carry `counterparty` and
-    `chain`, `feeWei` and `capWei` for a fee, and `command`, the `zwallet whitelist …` command a
-    human would run to allow it, when one edit can. Human output prints `counterparty`, `chain`
-    and `command` under the message.
-  - A failure after signing but before the send request keeps its code (`RPC_ERROR` when the node
-    is unreachable) and says "...; nothing was broadcast. If you retry, pass --nonce N ...":
-    nothing went out, so nonce N is still free and there is nothing to name with `--replace`.
-  - `BROADCAST_UNCERTAIN`: the send failed or timed out, or the node answered with another hash
-    (`rpcTxHash`), and the node does not report the transaction by its own hash. It may still be
-    on the network. Look it up first (the message names `zwallet tx --chain <chain> <txHash>`
-    and the explorer page), or retry with `--nonce <nonce> --replace <txHash>` so the retry
-    replaces it instead of sending twice.
-  - "nonce N is taken by another transaction from this key, pending or mined": the node answered
-    "nonce too low" or "replacement transaction underpriced" and does not report this transaction
-    by its hash. This transaction was refused and will never be found, so its hash is
-    `refusedTxHash`, not `txHash`, and the message names the journal's other entries at nonce N.
-    Without `--nonce` it is `RPC_ERROR`: "If you were retrying an earlier send, look up that
-    send's txHash before sending again". With `--nonce` (a retry) it is `BROADCAST_UNCERTAIN`:
-    "This retry was refused and will not be found; look up the txHash of your earlier send at
-    nonce N from its own output (or the send journal below). While it may be pending or mined, do
-    not send this payment without --nonce; to replace it use --nonce N --replace <earlier
-    txHash>" (for "underpriced", with a larger `--bump`).
-  - `RPC_ERROR` "the node rejected the transaction; nothing was broadcast" when the node refuses
-    it outright ("insufficient funds", "intrinsic gas too low", "exceeds block gas limit", "max
-    fee per gas less than block base fee", or "transaction underpriced", a price below the pool's
-    minimum); it also says to pass `--nonce N` on a retry, and for "transaction underpriced" to
-    pay more with `--nonce N --bump <factor>`.
-  - A send error or another hash for a transaction the node does report by its own hash (e.g.
-    "already known", or "nonce too low" for this very transaction) is a success with
-    `broadcastWarning` (and `rpcTxHash` if the node answered another hash).
-  - `VALIDATION_ERROR` "another send from this key on <chain> is in progress (lock <path>)":
-    nothing was signed or broadcast. If the running send is an earlier attempt at this same
-    payment, wait for it to finish and look up its result before sending again (its txHash is in
-    its output and, once broadcast, in the send journal; `zwallet tx --chain <chain> <txHash>`);
-    for a different payment, retry after it finishes.
-  - `VALIDATION_ERROR` "this looks like a repeat of a recent send" and "a transaction from this
-    key is still pending on <chain> at nonce N" (a send without `--nonce`, see above) and "nonce N belongs to a pending transaction; pass
-    --replace <its txHash>" (`--nonce` below the next free nonce): nothing was signed.
+After funding the verified address with Sepolia ETH and reviewing the dry-run:
+
+```sh
+zwallet transfer --chain sepolia --to @alice --amount 0.001 --wait --json
+```
+
+Save the returned `txHash`. If the result is pending or unknown, look up that hash
+before retrying; replace `0xTRANSACTION_HASH` below with it:
+
+```sh
+zwallet tx --chain sepolia 0xTRANSACTION_HASH --json
+zwallet lock
+```
+
+`lock` stops **every zwallet signing session for your OS user**, across wallet homes.
+For retry and replacement rules, see [send safety](docs/commands.md#send-journal-and-retry-safety).
 
 ## Chains
 
-| key | chainId | symbol | default RPC |
-|---|---|---|---|
-| ethereum | 1 | ETH | https://ethereum-rpc.publicnode.com |
-| base | 8453 | ETH | https://base-rpc.publicnode.com |
-| arbitrum | 42161 | ETH | https://arbitrum-one-rpc.publicnode.com |
-| optimism | 10 | ETH | https://optimism-rpc.publicnode.com |
-| polygon | 137 | POL | https://polygon-bor-rpc.publicnode.com |
-| bsc | 56 | BNB | https://bsc-rpc.publicnode.com |
-| avalanche | 43114 | AVAX | https://avalanche-c-chain-rpc.publicnode.com |
-| sepolia | 11155111 | ETH | https://ethereum-sepolia-rpc.publicnode.com |
+| CLI key | Network | Native coin |
+|---|---|---|
+| `ethereum` | Ethereum | ETH |
+| `base` | Base | ETH |
+| `arbitrum` | Arbitrum One | ETH |
+| `optimism` | OP Mainnet | ETH |
+| `polygon` | Polygon PoS | POL |
+| `bsc` | BNB Smart Chain | BNB |
+| `avalanche` | Avalanche C-Chain | AVAX |
+| `sepolia` | Sepolia testnet | ETH |
 
-RPC precedence: `--rpc <url>`, then `ZWALLET_RPC_<KEY>` (e.g. `ZWALLET_RPC_BASE`), then the
-default. zwallet checks the endpoint's `eth_chainId` before using it. An RPC URL may carry an API
-key, so zwallet prints only its scheme and host (`https://host/<redacted>`), parsing the URL the
-way the HTTP client does. Some providers put the key in a subdomain, so a host label that looks
-like a key (a hyphen-free run of 20+ characters, or 12+ characters mixing letters and digits) is
-`<redacted>` too wherever the URL or its origin is printed (`chains`, HTTP errors, a chainId
-mismatch); the default hosts above stay readable. A non-2xx HTTP answer is reported as
-`HTTP <status> from <scheme://host:port>`, never with its body, and an answer that is not the
-JSON-RPC expected only by the parse error's kind and position, never the value it quotes. In other
-error text the endpoint sends back, zwallet replaces with `<redacted>` the URL's userinfo, query
-values, whole path and key-like host labels at any length, and its path segments (and fragment)
-of 8+ characters, each as written and percent-decoded; a part shorter than 8 characters only where
-it stands as a whole word. A JSON-RPC error's `data` is printed only when it is a string (revert
-data).
+Run `zwallet chains --json` for chain IDs and endpoints. RPC selection is
+`--rpc` → `ZWALLET_RPC_<CHAIN>` → built-in public endpoint. See
+[RPC configuration](docs/commands.md#rpc-configuration) for details.
 
-## Custody model
+The same named key has the same address on all supported EVM networks. Balances and
+whitelist permissions are still network-specific. Registry-token support varies by
+network; BSC currently has no registry tokens for transfer.
 
-- **Home**: `$ZWALLET_HOME` or `~/.zwallet`, mode 0700.
-- **`wallet.json`** (0600, written atomically): a sealed section encrypted with AES-256-GCM under a
-  scrypt key (N=2^18, r=8, p=1, 256 MiB; parameters, a 32-byte salt and nonce stored in the file;
-  only r=8, p=1, N from 2^15 to 2^18 and a salt of exactly 32 bytes are accepted, checked before
-  any key derivation), plus non-secret
-  metadata: `createdAt`, `active`, `nextIndex`, and
-  `keys: [{ name, index, createdAt, addresses: { <chain>: <address> } }]`. The sealed plaintext is
-  a versioned object `{ version, mnemonic, policy }`: one BIP39 English mnemonic (no BIP39
-  passphrase) and a `policy` object holding the whitelist's anchor (`whitelistPub`,
-  `whitelistGen`, `whitelistDigest`) and the salt its key is derived from (`whitelistSalt`, 32
-  random bytes drawn by the first `whitelist add` and by every `reset`); empty until the first
-  `whitelist add`, and carried through every other write intact. The policy lives under the
-  password because anything outside it can be edited by the same OS user without the password.
-  The daemon keeps the anchor, never the salt.
-- **`whitelist.json`** (0600, next to `wallet.json`): the signed list in plain JSON. Its ed25519
-  signing key is in no file: each change derives it from the password and `whitelistSalt` (scrypt
-  over `zwallet/whitelist-key/v1\n` followed by the salt, with the parameters that opened
-  `wallet.json`), separately from the AES key that opens `wallet.json`. Only `whitelist` changes
-  write the list, under `w.lock`, which orders zwallet's own writers but cannot stop a same-user
-  process that ignores it: what exposes such a write is the signature and the seal.
-  `whitelist.next.json` exists while a change is being published, or after one was cut off (see
-  **Known limits**). A `whitelist.key` left by zwallet 0.1.0 is no longer read and is not removed;
-  you can delete it after `whitelist reset`.
-- **Password**: held by the human only, at least 12 characters. There is no password file and no
-  password env variable; it is typed at a terminal prompt (no echo) or piped with
-  `--password-stdin`, and read with raw reads into one wiped buffer. Nothing on disk decrypts the
-  wallet by itself. `unlock` hands it to its own daemon child over a socketpair, never over the
-  socket file (see **Daemon**). `create` writes a
-  temp file, reads it back from disk, decrypts it and checks the addresses and the phrase, and only
-  then links it into place as `wallet.json`; a failure before that removes only its temp file (a
-  home it created stays, with `w.lock`). Once `wallet.json` is in place it is never removed: a
-  later failure says recovery is needed and names the file. Every write of `wallet.json` holds an
-  exclusive lock on `w.lock` (an empty file, never deleted). `wallet.json` is only read without
-  following a symlink and without blocking, and only as a regular file of this user's of at most
-  1 MiB, so a FIFO or link planted in its place fails fast instead of hanging a reader.
-- **Keys**: named subkeys of the master by index, in creation order, never reused. EVM uses
-  `m/44'/60'/0'/0/<index>` (the standard BIP44 Ethereum account order), so the phrase imports into standard
-  wallets with the same accounts. One address per key on every EVM chain. Indices stay below
-  2^31, where BIP32's hardened range starts (`VALIDATION_ERROR` at or above it).
-- **Daemon**: `unlock` pins the zwallet binary before it asks for the password. On Linux that is
-  the running image (`/proc/self/exe`), so a file swapped in at the binary's path while the human
-  types is never started. On macOS it is the file's identity, checked again right before the
-  start: a binary swapped in while the human types is refused. One swapped in between that check
-  and the exec is still started (macOS has no `fexecve`). Once the started process asks for
-  input, and before the password is written, `unlock` refuses it unless it runs this build's code
-  (its `csops` cdhash equals `unlock`'s own and it is `CS_VALID`): it is stopped, given nothing,
-  and `unlock` fails with `VALIDATION_ERROR`. That is partial hardening: it does not prove that
-  no other process holds the daemon's channel, so a binary swapped in as it starts can still pass
-  the password to a process it forked before it exec'd this build. A build that is not
-  code-signed cannot make the check and refuses to unlock before the prompt (see **Install**).
-  One swapped in before `unlock` ran gets the password on any OS. Against a swapped binary the
-  only real protection is to install zwallet where an agent cannot write it (see **Known
-  limits**). On Linux, `unlock` and `create --unlock` also
-  refuse, before the password prompt, when `kernel.yama.ptrace_scope` is 0 or Yama is missing
-  (any same-user process could attach to the new daemon during its start-up); set it to 1 or
-  more, or pass `--allow-ptrace-scope-0` to accept that. `unlock` then starts the pinned binary
-  as its own child `zwallet daemon --home <canonical home>` (own session, empty environment, no
-  inherited descriptor but its channel: the open descriptors are listed and marked
-  close-on-exec, not just those below the soft descriptor limit; stderr is `/dev/null`). The
-  channel is one end of a socketpair on the child's fds 0 and 1, whose other end only `unlock`
-  holds: unlike a pipe, a socket cannot be reopened through `/proc/<pid>/fd`, so no same-user
-  process can read the password from it or write a fake readiness line into it, even before the
-  child turns non-dumpable (on Linux the daemon refuses to start on anything but a socket). Over
-  that channel:
-  1. the child, whose first step (like every zwallet process's) disabled core dumps and, on
-     Linux, made it non-dumpable, asks for input;
-  2. `unlock` writes the TTL and password into the channel. The password never goes over the
-     socket file, argv or env;
-  3. the child decrypts the wallet and says so. A wrong password ends here, and a session that was
-     already running is left untouched;
-  4. only now does `unlock` stop the daemons already serving this home (see **`lock`**), then
-     tells the child to go on;
-  5. the child takes an exclusive lock on `d.lock` for its whole life (waiting up to 5 s),
-     replaces whatever is at `$ZWALLET_HOME/d.sock`, binds it (0600; peer uid checked on both
-     ends), and reports `{ locked, expiresAt, active, index, address, pid }`.
-
-  `unlock` reports success only after that line, and kills the child on any failure or timeout.
-  If `unlock` is gone by then (killed after it told the child to go on), the child's readiness
-  write fails, and it wipes the seed and exits instead of serving.
-  Concurrent unlocks take turns on `u.lock`, held from after the password prompt until the new
-  daemon is ready or has failed (another `unlock` waits up to 30 s for it). A listener squatting
-  on `d.sock` gets only requests that carry nothing and is replaced; a process holding `d.lock`
-  makes `unlock` fail visibly. Neither ever receives the password.
-- **`lock`** is the panic button: it ends every zwallet session of this user, not only this
-  home's, so a home moved or re-linked since its unlock cannot hide a daemon. It reads no wallet
-  home at all (it works with `ZWALLET_HOME` and `HOME` unset, and nothing at a home path, such as
-  a stalled mount, can hold it up): it finds every process of this user whose arguments are
-  `daemon --home <absolute path>` in the OS process table (macOS `KERN_PROCARGS2`, Linux
-  `/proc/<pid>/cmdline`), sends it SIGTERM (with SIGCONT, so a stopped daemon still wipes its
-  seed), and SIGKILL after 2 s. It reports `locked: true` with the pids in `stopped` only when
-  none is left; otherwise it fails naming the pids. `unlock` stops the old daemons of its own
-  home the same way (the home matched by path first, then by inode, with each stat of another
-  process's path bounded to 1 s so a hanging mount cannot stall it).
-  `status` reads the same table: any daemon process for this home means `locked: false` (with
-  `daemonPids`), whatever answers on `d.sock`; `daemonPid` and `expiresAt` come from `d.sock`'s
-  reply only when that reply is from one of those processes. `otherDaemonPids` (always present)
-  lists this user's daemons for other homes, which `zwallet lock` stops too; human output says so
-  when there are any. On macOS a process list that fills its buffer is read again with more
-  room, and one that still fills it is an error, never a shorter list. File names (`d.sock`,
-  `d.lock`) never decide which daemons exist, since any same-user process can rename or replace
-  them.
-- **Daemon duties**: the daemon keeps only the master seed and the whitelist's sealed anchor in
-  memory, and does nothing but derive addresses and sign; it makes no network request. Before it
-  signs a transaction it reads `whitelist.json` and checks it against the anchor (see **The
-  whitelist**). That read runs outside the session's lock, with at most 4 reads in flight, and a
-  signing request whose list read cannot complete within the 2 s deadline (waiting for a free slot
-  counts against it) is refused (`WHITELIST_INVALID`, "could not be read in time"), so a stalled
-  file cannot hold up `lock` or expiry. The session, `wallet.json`'s ciphertext and, last, the
-  expiry are checked again before signing, so a read that finishes after `lock`, expiry or a re-seal
-  signs nothing. For a transaction it receives only the unsigned signing payload bytes and decodes
-  them itself: type, chain id, recipient, value, and the ABI method the calldata calls
-  (`transfer-call` / `approve-call` / `transfer-from-call`, each `assetType: "unverified"`, else
-  `contract-call`; see **`signerDecoded.action`**). It refuses anything zwallet does not produce
-  (other tx types, access lists, contract creation, non-canonical encodings, calldata for those
-  three methods that is not their canonical ABI encoding or that also sends native value) and signs
-  exactly the bytes it decoded. It never trusts intent fields from the CLI, which is the
-  agent-controlled side. On `lock`, at expiry (wall clock), or on SIGTERM it wipes the seed and
-  exits. A reboot or a dead daemon means locked. Everything else (RPC, ABI, tx building, broadcast)
-  runs in the one-shot CLI process, which checks every signature it gets back by recovering the
-  signer.
-- **Daemon lifetime**: each connection is served in its own task with a 10 s I/O budget, so a
-  silent client never delays expiry. Every second and on every request (including `status`) the
-  daemon also checks that `wallet.json`'s ciphertext is still the one it decrypted and that
-  `d.sock` is still its own socket; otherwise it wipes the seed and exits. The socket check is
-  best effort (a same-user process can race it); `lock` does not depend on it. Every zwallet
-  process disables core dumps as its first step, and on Linux also becomes non-dumpable (out of
-  reach of same-user `/proc/<pid>/mem`, `/proc/<pid>/fd` and new ptrace attachments) from that
-  step on; not before it, since exec makes every process dumpable again.
-- **Secrets are never printed**: the mnemonic, password and private keys appear in no output, log
-  or error. The single exception is `backup`, which prints the phrase only when stdin and stdout
-  are both an interactive terminal, after the password is entered again.
-
-## Known limits (same user)
-
-The threat zwallet is built against is an agent (or anything prompt-injected into one) running as
-the same OS user, with read and write access to the wallet home: it must never get the password or
-the phrase, `lock` must end all signing, and no output may present its address as verified. Some
-things a same-user process can still do, and what to do about them:
-
-- **Swap the zwallet binary.** A binary replaced before `unlock` (or `create`, `backup`,
-  `--verify`) runs gets the password. On macOS one swapped in between `unlock`'s identity check
-  and its exec of the daemon (there is no `fexecve`) is started; `unlock` refuses it, and gives
-  it nothing, when it does not run this build's code once it asks for input (same cdhash,
-  `CS_VALID`). That check does not prove that no other process holds the daemon's channel: the
-  swapped-in program can fork a process that keeps the channel, then exec this build, which
-  passes, and that process can read the password. (It could also exec this build with
-  `DYLD_INSERT_LIBRARIES`; the binaries zwallet ships carry the hardened runtime, under which dyld
-  ignores that variable while System Integrity Protection is on, but a build from source does
-  not.) A Homebrew-installed binary is
-  writable by the user, and so by the agent. For
-  real protection install zwallet where the agent cannot write (e.g. a root-owned directory), or
-  run the agent as a different OS user.
-- **Read the human's terminal** while the password is typed: a same-user process can open the
-  terminal device the prompt reads. The same access lets it write there too, so it can draw
-  whatever it likes on that terminal: the escaping above covers zwallet's own output only.
-- **Forge a line within a budget.** Text from outside is bounded and cannot break a line or draw
-  a glyph, but padded to the terminal's width it can start a visual row at column 0 by soft wrap,
-  and on a 21-column terminal a 512-character budget fits a version-1 QR code of a short link
-  (not an address, which needs 625 modules). A same-user process can draw anything on the
-  terminal directly anyway; zwallet's own output never presents such text as verified.
-- **Read a piped password** (`--password-stdin` from a pipe, Linux): the process writing into the
-  pipe, and zwallet itself until its first step makes it non-dumpable, are dumpable, so a
-  same-user process can open the pipe through `/proc/<pid>/fd` and race zwallet to read the
-  password. This is the same class as reading the terminal; prefer the terminal prompt.
-- **Log keystrokes under X11**, where any client can read another's input.
-- **Attach a debugger on macOS** to a build from source: a same-user debugger (where the system
-  allows one) can read a zwallet process's memory. The binaries zwallet ships carry the hardened
-  runtime without the `get-task-allow` entitlement, so a same-user debugger cannot attach to them
-  unless System Integrity Protection is off.
-- **Linux with `kernel.yama.ptrace_scope` 0** (or without Yama): any same-user process can
-  attach to a new daemon before it turns non-dumpable and stay attached (or copy its descriptors
-  with `pidfd_getfd`, which takes the same permission). `unlock` refuses this by
-  default (`--allow-ptrace-scope-0` accepts it). With `ptrace_scope` 1, a process that is an
-  ancestor of `zwallet unlock` (e.g. the shell an agent started, if the human types `unlock`
-  into it) still can: run `unlock` from a terminal the agent did not start.
-- **Linux hosts with `/proc` mounted `hidepid`** (`1`/`noaccess`, `2`/`invisible`,
-  `4`/`ptraceable`, with or without `gid=`) are refused: there the kernel hides a non-dumpable
-  process such as the key daemon even from its own user, so `lock` could not find a daemon to
-  stop. `unlock` and `create --unlock` refuse to start one before the password prompt (there is
-  no flag to accept this), and `lock` and `status` fail instead of reporting the wallet locked.
-  The same holds when `/proc/self/mountinfo` cannot be read. `subset=pid` is fine. Elsewhere,
-  a `/proc/<pid>` file that cannot be read is skipped only when the process is gone or this user
-  may not signal it (`kill(pid, 0)` answers EPERM: another user's process, or one a security
-  module shields). One whose `status` shows this user's effective uid, or that this user may
-  signal (`kill(pid, 0)` succeeds: also for a process whose real or saved uid is this user's,
-  and for any process under root or CAP_KILL), makes `lock` and `status` fail ("refusing to
-  trust a partial daemon list"). Signal permission is what is checked, not ownership.
-- **Root** defeats all of this.
-
-The whitelist ([`.prd/04-whitelist.md`](.prd/04-whitelist.md)) limits what an unlocked daemon
-signs for such an agent. What it does not do:
-
-- **No amount caps.** An agent can send the whole balance, in one transfer, to any listed payee
-  on its chains. List only payees you would accept that for; amount caps are planned.
-- **Listed contracts.** A contract entry lets the agent call its listed selectors with any
-  arguments and native value, and the contract may forward value or act on those arguments. List
-  only contracts and selectors whose effects you accept from any caller.
-- **Joint rollback.** The seal is authenticated but not fresh: an older `wallet.json` still opens
-  with the password. Restoring an older `wallet.json` and `whitelist.json` together brings back the
-  older list, revoked entries included; nothing stored in the home can tell. (The older
-  `wallet.json` seals its own salt, so the same password derives the key it names.) `unlock`,
-  `status` and `whitelist list` show the generation and the entries: check them. Restoring
-  `wallet.json` alone to an older edit fails closed: its anchor does not match the list, and every
-  signature is refused. The reason names the cause by the list it finds above the seal (gen N, the
-  seal at gen M): two or more edits above, under the sealed key, "whitelist.json (gen N) is newer
-  than the seal (gen M): wallet.json was rolled back"; one edit above, an edit that never finished
-  sealing or a rolled-back `wallet.json`; another key, a rollback across a reset, a reset that never
-  finished sealing, or a foreign file. If wallet.json is an older copy, restore the current one if
-  you have it; zwallet keeps no copy of `wallet.json` (`zwallet backup` prints only the recovery
-  phrase), so keep your own copy after each whitelist change. Otherwise `whitelist reset`, and set
-  the list up again.
-- **zwallet never suggests restoring an older whitelist.json.** A copy restored by hand that
-  verifies against the sealed digest is the older list, so restoring one can complete a
-  rollback (W5b). zwallet keeps no counter outside the home, so it cannot tell such a copy from
-  the current list. If the list is damaged, deleted or edited by accident, the way back is the
-  current `wallet.json` (if an older one went back) or `whitelist reset`, adding the entries
-  again by hand; the reset summary states the cost before the password.
-- **Rollback to before the first edit.** A `wallet.json` from before the first `whitelist add`
-  seals no whitelist, so the daemon sees "no whitelist yet": it signs no payee send and no
-  contract call, but it does sign native self-transfers under the **built-in default caps**,
-  which may be looser than the caps you signed. `unlock` and `status` show it (`whitelist:
-  { gen: null, verified: false }`), and every whitelist edit refuses while a list file exists;
-  put the current `wallet.json` back (your own copy from after the last change), or `whitelist
-  reset` (every fee cap back to the default, no payee and no contract).
-- **Same password.** The whitelist key is derived from the wallet password, so the whitelist
-  adds no second factor: whoever has the password can change the list. What it buys is that the
-  daemon never holds the key that signs the list. Any change to the password or to
-  `wallet.json`'s KDF parameters (zwallet has no command for either yet) must sign the list again
-  under the key they then derive; otherwise every change refuses the key.
-- **The staged list.** A change cut off between its re-seal and writing `whitelist.json` leaves
-  the new list in `whitelist.next.json`. The daemon and `whitelist list --verify` use it, since
-  it is exactly the list the seal names (generation and digest), and the next change moves it
-  into place.
-- **A change ends every session.** Like `lock`, a whitelist change stops every zwallet daemon of
-  this user, for every home, and leaves them locked; `--unlock <duration>` starts a new session
-  for this home only.
-- **The fee cap is per transaction.** It bounds each signature, not a total: repeated
-  transactions can each spend up to the cap.
-- **The L1 data fee is outside the cap** on the OP-stack chains (Base, Optimism): the cap covers
-  `gasLimit × maxFeePerGas`, and the L1 fee for the calldata (which can be up to about 512 KB)
-  is charged on top.
-
-## Development
-
-Gate (must be green before every commit):
+## Terminal UI
 
 ```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+zwallet tui --chain sepolia
 ```
 
-Live tests against public mainnet RPC (read-only; nothing is broadcast):
+Requires an interactive terminal of at least 80×24. Use `j`/`k` or arrow keys to
+browse, `r` to refresh, `L` to lock all sessions, and `q` or Ctrl-C to quit. The current
+UI shows keys and signing status; use the CLI for the remaining workflows. See
+[the planned UI](.prd/03-tui.md) ![WIP](https://img.shields.io/badge/status-WIP-yellow).
 
-```sh
-cargo test -- --ignored
-```
+## Before funding a wallet
 
-Tests always use a temporary `ZWALLET_HOME` under `/tmp/zwt-*` (short, for the socket path limit)
-and never touch the real `~/.zwallet`. Layout: `src/core` (custody, seed, amounts, durations,
-errors, daemon protocol), `src/chains` (registry and family traits; `src/chains/evm`),
-`src/daemon` (key holder), `src/cli.rs` and `src/commands.rs`. The spec lives in `.prd/`.
+- The whitelist limits recipients and contract selectors. It is not a per-payment
+  approval screen, a daily budget, or isolation from processes under your OS user.
+- Non-zero token approvals and `transferFrom` are refused. Token transfers use only
+  registry deployments; reading an arbitrary token balance does not authorize sending it.
+- Fee caps apply per transaction. On Base and Optimism, L1 data fees are outside that cap.
+- Cached addresses can be edited by the same OS user. Verify the address before funding;
+  Linux does not provide the same session-based address verification as macOS.
 
-## Release
+Read [security and custody](docs/security.md) for the trust model, rollback limits
+and operating-system constraints.
 
-- **Stable**: set `version` in `Cargo.toml`, merge to `main`, then push the tag `vX.Y.Z` with the
-  same version. `release.yml` refuses a tag that does not match `Cargo.toml`, builds the four
-  binaries, and publishes them with `SHA256SUMS` as the GitHub release `vX.Y.Z`.
-- **Preview**: every push to `main` publishes the prerelease
-  `preview-<YYYY-MM-DD-HHMM>-<sha12>` with the same assets (`preview.yml`; the 15 newest are kept).
-- The `2lab-ai/homebrew-tap` formulae `zwallet` and `zwallet-preview` pick up new releases on the
-  tap's schedule.
+## Documentation
+
+| Reader | Start here |
+|---|---|
+| Agent integrator or CLI user | [Command reference, JSON fields and errors](docs/commands.md) |
+| Wallet owner or security reviewer | [Security and custody](docs/security.md) |
+| Evaluator or contributor | [Feature status and implementation evidence](docs/features.md) |
+| Contributor or release maintainer | [Development and releases](docs/development.md) |
+| Contributor working on future features | [Product specification](.prd/01-spec.md) and [architecture](.prd/02-architecture.md) |
+
+Licensed under [MIT](LICENSE).

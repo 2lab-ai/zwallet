@@ -234,10 +234,8 @@ impl App {
         match key {
             Key::Char('q') | Key::Interrupt => self.quit = true,
             Key::Up | Key::Char('k') => self.selected = self.selected.saturating_sub(1),
-            Key::Down | Key::Char('j') => {
-                if self.selected + 1 < self.rows() {
-                    self.selected += 1;
-                }
+            Key::Down | Key::Char('j') if self.selected + 1 < self.rows() => {
+                self.selected += 1;
             }
             Key::Char('r') => {
                 let mut work = self.load_keys();
