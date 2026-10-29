@@ -1869,3 +1869,52 @@ async fn tui_replacement_review_passes_the_global_tab_keys() {
     assert_eq!(app.tab(), Tab::Receive, "{}", frame(&app));
     assert_eq!(f.signer.count(), 0);
 }
+
+/// D3: the invoke and raw-invoke reviews show the pending and repeat guards' verdicts before the
+/// nickname, as the transfer review does, so `p`/`d` are chosen knowingly. The repeat key is the
+/// CLI's (chain, kind, contract, value, token): another calldata to the same contract with the
+/// same value is a repeat there too.
+#[tokio::test]
+async fn tools_invoke_and_raw_reviews_show_the_pending_and_repeat_verdicts() {
+    use zwallet::tui::app::tools::Stage;
+    let (f, capture) = invoke_fixture();
+    let node = Node::new("ethereum");
+    let mut app = invoke_from_tools(&f, &node, &capture).await;
+    node.pending.store(7, Ordering::SeqCst);
+    for raw in [false, true] {
+        press(&mut app, Key::Char('6'));
+        let work = press(&mut app, Key::Char(if raw { 'd' } else { 'i' }));
+        drive_ui(&mut app, &f, work).await;
+        assert_eq!(app.tools().stage, Stage::Contracts, "{}", frame(&app));
+        press(&mut app, Key::Enter);
+        if raw {
+            type_text(&mut app, &format!("0x414bf389{}", "00".repeat(32 * 8)));
+        } else {
+            type_text(
+                &mut app,
+                "exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))",
+            );
+            press(&mut app, Key::Enter);
+            type_text(&mut app, &format!("({OTHER},{OTHER},500,{OTHER},9,8,7,0)"));
+        }
+        press(&mut app, Key::Enter);
+        press(&mut app, Key::Home);
+        press(&mut app, Key::Delete);
+        type_text(&mut app, "0.001");
+        let work = press(&mut app, Key::Enter);
+        drive_ui(&mut app, &f, work).await;
+        assert_eq!(app.tools().stage, Stage::InvokeReview, "{}", frame(&app));
+        let shown = frame(&app);
+        assert!(shown.contains("repeats 1 blocked"), "raw {raw}:\n{shown}");
+        assert!(shown.contains("pending 0 blocked"), "raw {raw}:\n{shown}");
+        let work = press(&mut app, Key::Char('d'));
+        drive_ui(&mut app, &f, work).await;
+        assert!(
+            frame(&app).contains("repeats 1 OVERRIDE"),
+            "{}",
+            frame(&app)
+        );
+        press(&mut app, Key::Esc);
+    }
+    assert_eq!(captured(&capture).len(), 1, "a review signs nothing");
+}
