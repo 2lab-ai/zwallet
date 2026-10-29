@@ -1,46 +1,68 @@
 # zwallet
 
-A local wallet for AI agents, controlled by a human. It supports EVM signing and
-Tron TRX/USDT transfers and balances. Create keys on your machine,
-choose which recipients and contracts the wallet may pay, then unlock signing for a
-limited time. Your agent uses the CLI and JSON output; you keep the password.
+**Fund the task. Let your agent execute. Keep the receipts.**
 
-zwallet is written in Rust and runs on macOS and Linux. It needs no wallet-service
-account, API credentials, or OS keychain. Balances and transactions use public RPC
-endpoints by default; you can supply your own.
+An open-source wallet CLI for agents doing real on-chain work. Give a dedicated
+wallet the funds you are willing to allocate, set its signing rules, and unlock a
+session. Your agent can check balances, send permitted payments, call allowed
+contracts and verify the results without asking you to approve every transaction.
+
+**Local keys · No service signup · Signed spending rules · JSON CLI · MIT · Rust**
+
+[Get started](#quick-start) · [Watch the demo](docs/assets/agent-budget.mp4) ·
+[Run it yourself](examples/agent-budget/README.md) · [Current features](docs/features.md)
+
+[![Real zwallet CLI demo followed by clearly labeled WIP investment and shopping concepts](docs/assets/agent-budget.gif)](docs/assets/agent-budget.mp4)
+
+**In the video:** real CLI execution on an isolated Anvil chain using valueless ETH,
+followed by **CONCEPT / WIP** investment and shopping scenes. The CLI segment is a
+scripted agent workflow, not an LLM conversation. Selected JSON output is shown;
+the example script computes the report. [MP4](docs/assets/agent-budget.mp4) ·
+[Terminal recording](docs/assets/agent-budget.cast) ·
+[Execution evidence](docs/assets/agent-budget-evidence.json) ·
+[Transcript and reproduction](examples/agent-budget/README.md)
+
+## Why I built this
+
+My coding agent could write blockchain code, then kept handing the work back to me:
+send some gas, move USDT, run the transaction, check whether it worked.
+
+I wanted to give it a dedicated allocation, let it do the development work, and get
+back a clear account of what it spent. I also wanted to own the wallet setup rather
+than create another service account just to let a local agent transact.
+
+That is zwallet's starting point. The broader direction is a wallet that other agents
+can use to **develop, invest and purchase under the user's instructions**. The first
+part works through the CLI today; the higher-level investment and shopping workflows
+are [future work](#where-this-goes-next).
 
 ## What you can use today
 
-These capabilities describe the code in this revision. Published releases can lag behind it;
-`zwallet --version` shows your build's channel and revision.
-
-| What you want to do | Available now | Boundary to know |
+| You provide | Your agent can do | You can check |
 |---|---|---|
-| Create and manage wallets | One encrypted BIP39 master seed, named derived keys, address verification and terminal-only recovery-phrase backup | No import/restore command in zwallet; the phrase can be imported into a compatible wallet |
-| Check funds | Native and ERC-20 balances on eight EVM networks, TRX and TRC20 USDT on Tron; all-network balance view | Automatic token listing uses the built-in registry, not discovery of every token you own |
-| Send funds | Native coin and registry-token transfers, signed dry-runs, receipt waiting and transaction lookup | Requires an unlocked session and the daemon's signing policy |
-| Use contracts | Read-only ABI calls; writes using ABI arguments or raw calldata | Writes need an allowed contract and selector; token approvals are revoke-only |
-| Control an agent's signing | Timed unlock, immediate lock, signed recipient/contract whitelist, execution-fee caps and optional per-transaction amount/calldata limits | Limits must be configured; cumulative budgets remain WIP |
-| Integrate an agent | `--json`, structured error codes, send journal, pending/repeat guards and EVM fixed-nonce replacement | A pending or unknown receipt is not permission to send the payment again |
-| Use the terminal UI | Tabs/actions, balances, receive addresses, verify/repair, timed unlock, checked-payee transfers, transaction lookup, EVM fixed-nonce recovery (speed up, cancel, retry), whitelist/limit editing, key creation and contract/message tools | Tron has no contract tools or nonce replacement; Tron incoming history is not indexed |
+| A funded, dedicated wallet | Read native and ERC-20 balances on eight EVM networks, and TRX and TRC20 USDT on Tron | Current balances and verified addresses |
+| Allowed payees and contract selectors | Transfer native coin / registry tokens (TRX and USDT to listed Tron payees); read and invoke EVM contracts | Transaction hashes, receipts and the local send journal |
+| Optional per-transaction limits | Execute within native-value, token-amount, calldata and execution-fee limits | A refused request returns a structured error |
+| A time-limited unlock | Request signatures without a fresh password per transaction | Expiry and immediate lock-all |
 
-### Planned features
+The **allocation is the balance you choose to place in the wallet**. Per-transaction
+limits are available; enforced cumulative task/daily budgets are ![WIP](https://img.shields.io/badge/status-WIP-yellow). Repeated
+allowed transactions can spend the balance. A named key is not an isolated agent
+identity: processes under the same OS user share the session's access boundary.
 
-![WIP](https://img.shields.io/badge/status-WIP-yellow) means **not available in the current implementation**, even if a design or
-mockup exists. These are plans, not release-date promises. Existing CLI capabilities
-remain available where the corresponding TUI screen is WIP.
+For tokens, transfer support is the built-in registry's exact deployments:
+USDC, USDT, DAI and WETH where listed. It is not every token on every chain. Native
+coin is still needed for gas (TRX on Tron). On Tron, zwallet sends only TRX and the
+registry USDT, and only to explicitly listed Tron payees; there are no Tron contract calls
+or message signing.
 
-| Feature | Status | What is still missing |
-|---|---|---|
-| Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | All 55 menu actions have handlers in this tree: navigation, password warm-up, checked-payee sends (EVM and Tron), history/detail, EVM fixed-nonce recovery, whitelist and limit editing, wallet/key creation and contract/message tools. Owner acceptance on a preview build is still pending. |
-| Solana and TON | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Chain implementations; currently future extension plans |
-| Cumulative spending budgets | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Rolling 24-hour native and per-token budgets; optional per-transaction limits do not track total spending |
-| User-added tokens | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Adding transfer tokens outside the built-in registry |
-| More precise repeat protection | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Calldata-aware `invoke` duplicate matching and a configurable duplicate window |
-| Hardware-backed whitelist key | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Moving whitelist authority to Secure Enclave or hardware |
+A person at the keyboard can reach every CLI function from the [terminal UI](#terminal-ui)
+(`zwallet tui`), under the same password, session and signing policy; the recovery phrase
+and QR codes stay in the CLI.
 
-See [feature status and code evidence](docs/features.md) for the current boundaries and
-links to each plan.
+For the task prompt, retry rules and receipt-based report format, see
+[Using zwallet with an agent](docs/agent-workflow.md). zwallet is the wallet component;
+your agent decides which permitted actions advance the task.
 
 ## Install
 
@@ -102,6 +124,7 @@ Replace `0xRECIPIENT_ADDRESS` with the recipient's full EVM address before runni
 
 ```sh
 zwallet whitelist add alice 0xRECIPIENT_ADDRESS --chains sepolia
+zwallet whitelist native-cap sepolia 0.005 # optional limit per transaction
 zwallet unlock 30m
 ```
 
@@ -217,10 +240,54 @@ to `zwallet backup`), and `Q` points to `zwallet address` for a QR code. See the
 Read [security and custody](docs/security.md) for the trust model, rollback limits
 and operating-system constraints.
 
+## Where this goes next
+
+The long-term goal is an agent that can use an allocation to **build, invest or buy
+on your instructions**, then explain what happened. zwallet supplies the wallet and
+execution controls; strategies, shopping and service integrations sit above it.
+
+| Future workflow | Status | What needs to exist first |
+|---|---|---|
+| Give an agent a task budget and get a reconciled spend report | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Cumulative reservations, pending-transaction accounting, task IDs and native report export |
+| Let an investment agent execute an approved mandate | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Venue/asset constraints, quote and slippage checks, bounded approvals, exposure accounting and an explicit loss policy |
+| Let an agent pay for APIs and digital services | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Protocol adapters such as x402, invoice validation, duplicate-payment protection and proof of delivery |
+| Ask an agent to buy a physical item | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Merchant adapters, an all-in quote, order/payment reconciliation, shipping privacy and refund handling |
+
+These are **product directions, not available commands or promised returns**.
+There is no built-in investment strategy, automatic profit, merchant checkout or
+cumulative-budget engine today. The [future feature PRD](.prd/07-agent-economy.md)
+defines the dependencies and acceptance criteria. The video labels these scenes
+**CONCEPT / WIP**.
+
+## Why another agent wallet?
+
+Choose zwallet when you want a local Rust CLI, a password-held signing session,
+daemon-enforced policy, and direct access to the RPC endpoints you choose. Use it from any
+agent that can run shell commands; no zwallet service account or dedicated token is
+required. MIT licensing lets you inspect, modify and self-host the code.
+
+Other useful open-source approaches exist. WDK offers a broader multi-chain CLI/MCP
+stack; smart-account toolkits can enforce policies on-chain. Hosted agent-wallet
+products can offer integrated trading, payments and gas sponsorship. zwallet's focus
+is a small, inspectable local signing boundary. See the dated, source-linked
+[comparison and research](docs/marketing/research.md).
+
+## Get involved
+
+Try the [local demo](examples/agent-budget/README.md), connect the CLI to your agent,
+and [tell us what it needed to pay for](https://github.com/2lab-ai/zwallet/issues).
+A useful report includes the workflow, chain, expected outcome and redacted command
+output. Never include passwords, recovery phrases or private keys.
+
+If this solves a problem you recognize, star the repo or contribute a reproducible
+agent workflow. Current capabilities and WIP boundaries live in
+[feature status](docs/features.md).
+
 ## Documentation
 
 | Reader | Start here |
 |---|---|
+| Agent builder | [Delegate a task and collect a spend report](docs/agent-workflow.md) |
 | Agent integrator or CLI user | [Command reference, JSON fields and errors](docs/commands.md) |
 | Wallet owner or security reviewer | [Security and custody](docs/security.md) |
 | Evaluator or contributor | [Feature status and implementation evidence](docs/features.md) |
