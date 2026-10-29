@@ -233,17 +233,21 @@ pub struct Review {
     /// How many leading rows have all been on screen. Enter opens the password only once this
     /// covers every row.
     seen: usize,
+    /// The request that prepared this plan. Apply and discard name it, never the list-read
+    /// counter (`WhitelistUi::request`), which a tab round trip moves on.
+    pub id: u64,
 }
 /// Rows the review moves by and counts as drawn; an 80x24 frame draws more (16).
 const PAGE: usize = 10;
 impl Review {
-    pub fn new(summary: String) -> Self {
+    pub fn new(summary: String, id: u64) -> Self {
         let lines = lines(&summary);
         Self {
             seen: lines.len().min(PAGE),
             lines,
             summary,
             scroll: 0,
+            id,
         }
     }
     /// Shows the page from `scroll`. The seen prefix grows only when that page starts inside it,
@@ -730,16 +734,13 @@ impl App {
                 match input {
                     Input::Char('L') => {
                         self.locking = true;
-                        return Some(vec![
-                            Effect::DiscardWhitelist(self.whitelist.request),
-                            Effect::LockAll,
-                        ]);
+                        return Some(vec![Effect::DiscardWhitelist(review.id), Effect::LockAll]);
                     }
                     Input::Esc | Input::Interrupt | Input::Char('q') => {
                         if matches!(input, Input::Interrupt | Input::Char('q')) {
                             self.quit = true;
                         }
-                        return Some(vec![Effect::DiscardWhitelist(self.whitelist.request)]);
+                        return Some(vec![Effect::DiscardWhitelist(review.id)]);
                     }
                     Input::Up => review.show(review.scroll.saturating_sub(1)),
                     Input::Down => {
@@ -856,7 +857,7 @@ impl App {
             {
                 self.password = PasswordState::Idle;
                 match result {
-                    Ok(summary) => self.whitelist.stage = Stage::Review(Review::new(summary)),
+                    Ok(summary) => self.whitelist.stage = Stage::Review(Review::new(summary, id)),
                     Err(error) => {
                         self.whitelist.stage = Stage::Outcome {
                             lines: lines(&error.message),
@@ -867,8 +868,7 @@ impl App {
                 Vec::new()
             }
             Msg::WhitelistPrepared(..) => Vec::new(),
-            Msg::WhitelistApplied(id, Applied(result))
-                if id == self.whitelist.request && self.whitelist_busy() =>
+            Msg::WhitelistApplied(id, Applied(result)) if matches!(&self.whitelist.stage, Stage::Applying(review) if review.id == id) =>
             {
                 self.password = PasswordState::Idle;
                 self.pending_key = None;
@@ -917,10 +917,11 @@ impl App {
             {
                 let stage = std::mem::replace(&mut self.whitelist.stage, Stage::List);
                 if let Stage::Review(review) = stage {
+                    let id = review.id;
                     self.whitelist.stage = Stage::Applying(review);
                     self.password = PasswordState::Checking;
                     self.checked_list = None;
-                    vec![Effect::ApplyWhitelist(self.whitelist.request)]
+                    vec![Effect::ApplyWhitelist(id)]
                 } else {
                     self.whitelist.stage = stage;
                     Vec::new()
@@ -932,8 +933,10 @@ impl App {
             {
                 self.password = PasswordState::Idle;
                 self.pending_key = None;
-                self.whitelist.stage = Stage::List;
-                vec![Effect::DiscardWhitelist(self.whitelist.request)]
+                match std::mem::replace(&mut self.whitelist.stage, Stage::List) {
+                    Stage::Review(review) => vec![Effect::DiscardWhitelist(review.id)],
+                    _ => Vec::new(),
+                }
             }
             Msg::Key(Key::Char('L')) if self.whitelist_busy() => {
                 // Finish the authorized edit and optional start, then honor the panic lock.
