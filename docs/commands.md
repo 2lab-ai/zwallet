@@ -83,9 +83,18 @@ Commands that act on a key take `--key <name>` (default: the active key).
   repairs cached addresses and shows old/new values. `u` asks for a duration and then the wallet
   password before starting that signing session. `7 session` shows the home, expiry, daemon
   pids, and the daemon's reported whitelist generation/count as information only. The startup
-  ptrace flag cannot be changed by any TUI key. History, transfer, whitelist forms and tools
+  ptrace flag cannot be changed by any TUI key. Transfer, whitelist forms and tools
   remain ![WIP](https://img.shields.io/badge/status-WIP-yellow).
   See [feature status](features.md#planned-features).
+  On the wallet tab, `Tab` switches between balance scrolling and history selection, Enter opens
+  a transaction, and `/` accepts a `0x` + 64-hex-digit EVM hash. The ten-row history combines this
+  home's selected-key journal with fixed Blockscout sources on Ethereum, Optimism and Sepolia;
+  other chains show journal coverage only. Source labels and unavailable-explorer notes remain
+  visible. Detail shows node claims, fee (including supported L1 fee), confirmations and only
+  registry-token receipt movements; `j`/`k` scroll, `r` refreshes and Esc returns. A missing receipt
+  with a consumed journal nonce is `dropped/replaced`, not proof that another payment is safe.
+  Nicknames appear only from a password-checked, unchanged whitelist.
+
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
   reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's

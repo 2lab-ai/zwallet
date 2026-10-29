@@ -74,6 +74,13 @@ const fn evm_chain(
     }
 }
 
+/// Keyless history endpoints explicitly supported by this build. No user input changes them.
+pub const EXPLORERS: &[(&str, &str)] = &[
+    ("ethereum", "https://eth.blockscout.com"),
+    ("optimism", "https://explorer.optimism.io"),
+    ("sepolia", "https://eth-sepolia.blockscout.com"),
+];
+
 pub const CHAINS: &[Chain] = &[
     evm_chain(
         "ethereum",
@@ -861,6 +868,23 @@ fn journal_path(home: &Path, chain: &Chain, address: &str) -> PathBuf {
     ))
 }
 
+/// One shaped local history claim, never an authorization or an authenticated signing intent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalRow {
+    pub chain: &'static str,
+    pub tx_hash: String,
+    pub from: String,
+    pub to: String,
+    pub nonce: Option<u64>,
+    /// Milliseconds since epoch for expiring transactions (Tron); absent for EVM.
+    pub expiration_ms: Option<u64>,
+    pub timestamp: u64,
+    pub kind: &'static str,
+    pub amount_raw: Option<U256>,
+    pub value: String,
+    pub token: Option<String>,
+}
+
 impl SendJournal {
     pub fn new(home: &Path, chain: &'static Chain, address: &str) -> Self {
         Self {
@@ -868,6 +892,93 @@ impl SendJournal {
             chain,
             address: address.to_string(),
         }
+    }
+
+    /// Shaped history from the bounded journal tail, newest first. Wrong-chain/owner and
+    /// malformed records are ignored; file failures remain errors. Symbols are chosen from
+    /// this build's registry/chain, never from the locally mutable human-readable value.
+    pub fn recent(&self) -> Result<Vec<JournalRow>> {
+        use alloy::primitives::Address;
+        let owner = self.address.parse::<Address>().ok();
+        let mut rows = Vec::new();
+        for e in self.entries()?.iter().rev() {
+            let shaped = || -> Option<JournalRow> {
+                if e["chain"].as_str()? != self.chain.key {
+                    return None;
+                }
+                let hash = e["txHash"].as_str()?;
+                if hash.len() != 66 || !hash.starts_with("0x") {
+                    return None;
+                }
+                let addr = |key: &str| {
+                    let s = e[key].as_str()?;
+                    is_address(s).then(|| s.parse::<Address>().ok()).flatten()
+                };
+                let from = addr("from")?;
+                if Some(from) != owner {
+                    return None;
+                }
+                let to = addr("to")?;
+                let kind = *SEND_KINDS
+                    .iter()
+                    .find(|&&k| Some(k) == e["kind"].as_str())?;
+                let token = if kind == "token-transfer" {
+                    let a = addr("token")?;
+                    Some(evm::registry::lookup(
+                        self.chain.chain_id_json().as_u64()?,
+                        &a,
+                    )?)
+                } else {
+                    None
+                };
+                let (symbol, decimals) = token
+                    .map_or((self.chain.symbol, self.chain.decimals), |t| {
+                        (t.symbol, t.decimals)
+                    });
+                let amount_raw = match e.get("amountRaw") {
+                    Some(Value::String(raw))
+                        if !raw.is_empty()
+                            && raw.len() <= AMOUNT_DIGITS
+                            && raw.bytes().all(|b| b.is_ascii_digit()) =>
+                    {
+                        U256::from_str_radix(raw, 10).ok()
+                    }
+                    None | Some(Value::Null) => {
+                        let value = e["value"].as_str()?;
+                        if !is_amount_value(value) {
+                            return None;
+                        }
+                        let (number, old_symbol) = value.split_once(' ')?;
+                        (old_symbol == symbol)
+                            .then(|| crate::core::amount::parse_units(number, decimals).ok())
+                            .flatten()
+                    }
+                    _ => return None,
+                }?;
+                Some(JournalRow {
+                    chain: self.chain.key,
+                    tx_hash: entry_hash(e)?,
+                    from: from.to_checksum(None),
+                    to: to.to_checksum(None),
+                    nonce: Some(e["nonce"].as_u64()?),
+                    expiration_ms: None,
+                    timestamp: e["ts"]
+                        .as_str()
+                        .and_then(crate::core::time::parse_rfc3339_utc)?,
+                    kind,
+                    amount_raw: Some(amount_raw),
+                    value: format!(
+                        "{} {symbol}",
+                        crate::core::amount::format_units(amount_raw, decimals)
+                    ),
+                    token: token.map(|t| t.address.to_string()),
+                })
+            };
+            if let Some(row) = shaped() {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 
     pub fn path(&self) -> &Path {

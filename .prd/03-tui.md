@@ -740,11 +740,14 @@ address), writes what it returns. So it is read like `d.sock` or an RPC endpoint
   <code>)` or `(not JSON)`: zwallet's own text and the status code, never a byte of the body (T3b).
 - **Fields kept, each with its shape; an item with any field out of shape is dropped whole.**
   - a transaction: `hash` (`0x` and 64 hex digits); `block_number` (at most 20 decimal digits, or
-    `null` while pending); `position` (at most 10 digits); `nonce` (at most 20 digits);
+    `null` while pending); `position` (at most 10 digits, or `null` while pending); `nonce` (at most 20 digits);
     `from.hash` and `to.hash` (`0x` and 40 hex digits; `to` may be `null`, shown as "contract
-    creation"); `value` and `fee.value` (at most 78 digits); `status` (`ok`, `error` or `null`);
-    `timestamp` (RFC 3339, parsed and written again by zwallet, as the journal's time is,
-    chains/mod.rs:769-772).
+    creation"); `value` and `fee.value` (at most 78 digits; only `fee.value` may be `null` while
+    pending); `status` (`ok`, `error` or `null`); `timestamp` (RFC 3339, parsed and written again
+    by zwallet, as the journal's time is, chains/mod.rs:769-772; or `null` while pending).
+    These nullable pending fields must still be present; malformed non-null values are rejected,
+    and mined transactions require the numeric position/fee and timestamp. This matches the
+    Blockscout serializer's unmined transaction fields (2026-10-29 review).
   - a token transfer: `transaction_hash`, `block_number`, `log_index`, `from.hash`, `to.hash` in
     the shapes above; `token.address_hash` (`0x` and 40 hex digits), which must be a registry
     token on this chain (`registry::lookup`, chains/evm/registry.rs:109); `total.value` (at most

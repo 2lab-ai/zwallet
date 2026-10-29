@@ -3,6 +3,8 @@
 //! pane is wrapped there, 03-tui.md §Display integrity rule 4); the chrome is ASCII; every style
 //! is one of `style`'s. [`draw`] returns where it put each outside value, for the tests.
 
+pub(crate) mod history;
+
 use crate::tui::actions::{Availability, Tab};
 use crate::tui::app::{
     App, Bar, FieldPurpose, KeyList, LockLine, Pane, PasswordPurpose, PasswordState, Popup,
@@ -112,6 +114,8 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         popup_pane(frame, pane, app, popup, &mut placed);
     } else if app.tab() == Tab::Keys {
         keys_pane(frame, pane, app, &mut placed);
+    } else if app.tab() == Tab::Wallet && !app.navigation().every {
+        history::draw(frame, pane, app, &mut placed);
     } else {
         data_pane(frame, pane, app, &mut placed);
     }
@@ -142,7 +146,9 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
     } else {
         let words = match app.tab() {
             Tab::Keys => "Enter open  V verify  A repair  s active  u unlock  ? actions",
-            Tab::Wallet => "a all networks  c chain  r refresh  L lock  q quit  ? actions",
+            Tab::Wallet => {
+                "Tab focus  j/k  Enter detail  / hash  a networks  c chain  r  ? actions"
+            }
             Tab::Receive => "V verify  Q QR hint  c chain  r refresh  q quit  ? actions",
             Tab::Session => "u unlock  L lock all  r refresh  q quit  ? actions",
             _ => "1 keys  c chain  L lock all  q quit  ? actions",
@@ -217,6 +223,10 @@ fn popup_pane(frame: &mut Frame, area: Rect, app: &App, popup: &Popup, placed: &
             purpose: FieldPurpose::Rpc(_),
             ..
         } => "session RPC endpoint".to_string(),
+        Popup::Field {
+            purpose: FieldPurpose::TxHash,
+            ..
+        } => "transaction hash".to_string(),
         Popup::CheckingRpc => "checking endpoint".to_string(),
         Popup::Error(_) => "refused".to_string(),
         Popup::Lines { title, .. } => title.to_string(),
@@ -317,6 +327,7 @@ fn popup_pane(frame: &mut Frame, area: Rect, app: &App, popup: &Popup, placed: &
         }
         Popup::Field { purpose, field } => {
             let label = match purpose {
+                FieldPurpose::TxHash => "Transaction hash: 0x followed by 64 hexadecimal digits",
                 FieldPurpose::Duration => "Duration, e.g. 10m or 1h:",
                 FieldPurpose::Rpc(_) => "HTTP(S) endpoint; credentials and suffix are hidden:",
             };

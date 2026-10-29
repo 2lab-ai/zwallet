@@ -1,6 +1,9 @@
 //! EVM JSON-RPC: balances, contract reads, transaction preparation, broadcast, receipts.
 //! Runs in the CLI process only; the daemon never reaches this module.
 
+mod detail;
+pub use detail::{MovementsState, TxDetail, tx_detail, tx_state};
+
 use super::tx::{
     EvmFees, IERC20, IGasPriceOracle, UnsignedEvmTx, encoded_for_signing, erc20_transfer_calldata,
     gas_with_margin,
@@ -1396,7 +1399,7 @@ async fn fetch_by_hash(
             return Err(WalletError::rpc(format!(
                 "{method} for {shown} answered about transaction {}, so the node says nothing \
                  about this one; look it up on {}",
-                got.unwrap_or("<none>"),
+                crate::core::text::ascii_inert(&p.net.redact(got.unwrap_or("<none>")), 128),
                 p.net.chain.explorer_tx_url(&shown)
             )));
         }
