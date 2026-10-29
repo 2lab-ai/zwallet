@@ -1,5 +1,9 @@
 # v0.2 TUI — current flow (what the TUI would call today)
 
+![WIP](https://img.shields.io/badge/status-WIP-yellow)
+
+This integration plan maps reusable CLI logic and missing work. Existing CLI functions do not imply that the corresponding TUI action is available. See [feature status](../../docs/features.md).
+
 Status: **in-progress**, 2026-10-27, read from `origin/main` c7d3f13 (PR #12), revised after
 review rounds 1 and 2 the same day. For every TUI behaviour in [`../03-tui.md`](../03-tui.md)
 this page names the code that does it today, with `file:line`, what it returns, and whether the TUI can
