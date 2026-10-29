@@ -625,7 +625,10 @@ entries; Tron requires exact scope, while `*` remains EVM-only.
 
 The forms bound every field and validate before preparation. The exact prepared summary wraps
 and scrolls before the password is accepted. Removal and message toggles use only a locally
-password-checked list, with its fingerprint checked again by the worker. The owned password
+password-checked list. Every edit prepared while a checked list is held compares the plan's own
+fingerprint, taken when the plan read the files, with that list's; a difference refuses with
+`list changed; cancel and verify it again` (added 2026-10-30: the worker had checked the files,
+then let the plan read them again). The owned password
 and prepared plan move once into a blocking worker for authentication, stop/write, optional
 session start and local recheck. While that worker runs, lock is queued after optional session
 start and quit waits for the mutation and any queued lock; navigation, cancellation and
@@ -1095,6 +1098,9 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
    token's `transfer` recovered from the node is refused for speed-up (an invoke has the same
    bytes and the invoke's rule cannot be met); `x` stays (§Status of a send, Replacements, judged
    by kind; T27 (i)).
+2. **The whitelist plan is the checked list** (review of #47, NB1). The prepare worker compares
+   `plan.fingerprint()` with the checked list's after the plan's own read, not before it
+   (§Whitelist edits).
 
 ## Changes on 2026-10-28, v2, review round 3
 

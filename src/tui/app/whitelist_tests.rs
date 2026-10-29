@@ -701,7 +701,7 @@ fn t7_stale_completion_cannot_replace_a_new_plan_or_a_finished_outcome() {
     assert!(app.checked_list().is_none());
 }
 
-/// The prepare worker checks the checked list's fingerprint, then the plan reads the files again.
+/// The prepare worker checked the checked list's fingerprint, then the plan read the files again.
 /// A list rewritten in between must not become the plan the password authorizes.
 #[test]
 fn prepare_refuses_a_list_rewritten_between_the_check_and_the_plan_read() {
@@ -764,4 +764,14 @@ fn prepare_refuses_a_list_rewritten_between_the_check_and_the_plan_read() {
         Err(error) => error,
     };
     assert!(error.message.contains("verify it again"), "{error}");
+    // Unchanged files still prepare, and an unchecked edit (no verified list) compares nothing.
+    for checked_fingerprint in [Some(ListFiles::read(home.path()).fingerprint()), None] {
+        let request = EditRequest {
+            id: 2,
+            draft: Draft::Message(true),
+            unlock: String::new(),
+            checked_fingerprint,
+        };
+        assert!(prepare(home.path(), request, false).is_ok());
+    }
 }

@@ -7,6 +7,8 @@ use crate::wallet::{self, WhitelistOutcome};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+const LIST_CHANGED: &str = "list changed; cancel and verify it again";
+
 pub const ACTIONS: &[ActionId] = &[
     ActionId::WhitelistList,
     ActionId::WhitelistVerify,
@@ -122,24 +124,30 @@ pub fn prepare(
     prepare_with(home, request, allow_ptrace_scope_0, || {})
 }
 
-// `before_read` runs between the checked list's check and the plan's read of the list files: the
-// test seam for another process of this user rewriting the list in between.
+// The plan holds the list files as it read them, and its summary is what the password will
+// authorize, so it is compared with the list this TUI verified: one compare on the plan's own
+// bytes, after the read, instead of a check before it. `before_read` runs just before that read:
+// the test seam for another process of this user rewriting the list.
 fn prepare_with(
     home: &Path,
     request: EditRequest,
     allow_ptrace_scope_0: bool,
     before_read: impl FnOnce(),
 ) -> Result<wallet::WhitelistPlan> {
-    if let Some(fingerprint) = request.checked_fingerprint {
-        crate::core::whitelist::check_unchanged(home, &fingerprint)?;
-    }
     let change = request.draft.change()?;
     let unlock = (!request.unlock.is_empty()).then_some(wallet::WhitelistUnlock {
         duration: request.unlock,
         allow_ptrace_scope_0,
     });
     before_read();
-    wallet::whitelist_plan(home, change, unlock)
+    let plan = wallet::whitelist_plan(home, change, unlock)?;
+    if request
+        .checked_fingerprint
+        .is_some_and(|checked| plan.fingerprint() != checked)
+    {
+        return Err(WalletError::validation(LIST_CHANGED));
+    }
+    Ok(plan)
 }
 
 pub fn read(home: &Path, checked: Option<CheckedList>) -> Result<Read> {
@@ -607,9 +615,7 @@ impl App {
                                 if matches!(draft, Draft::Remove(_) | Draft::Message(_))
                                     && !self.whitelist_verified()
                                 {
-                                    form.error = Some(Outside::detail(
-                                        "list changed; cancel and verify it again",
-                                    ));
+                                    form.error = Some(Outside::detail(LIST_CHANGED));
                                 } else {
                                     self.whitelist.request += 1;
                                     let request = EditRequest {
