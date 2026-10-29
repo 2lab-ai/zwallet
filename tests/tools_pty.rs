@@ -33,7 +33,9 @@ fn t36_real_daemon_signs_the_512_bytes_shown_by_the_tui() {
     let home = Home::new();
     let created = home.create("main", &[]);
     home.edit_whitelist(|list| list.policy.allow_message_signing = true);
-    let mut command = home.command(&["tui", "--chain", "ethereum"]);
+    // Linux without Yama (the Docker gate) refuses a session start unless the start flag allows
+    // ptrace scope 0, as in every other warm-up PTY test.
+    let mut command = home.command(&["tui", "--chain", "ethereum", "--allow-ptrace-scope-0"]);
     command.env("ZWALLET_RPC_ETHEREUM", "http://127.0.0.1:1");
     let mut tui = PtyChild::spawn_full_screen(command, PTY_SIZE);
     tui.wait_frame(WAIT, |f| contains(f, "main") && contains(f, "Enter"));

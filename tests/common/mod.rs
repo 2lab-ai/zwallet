@@ -436,7 +436,11 @@ pub fn zwallet_at_with(exe: impl AsRef<OsStr>, debug_assertions: bool) -> Comman
 pub fn command_in(home: &Path, args: &[&str]) -> Command {
     let mut cmd = zwallet_at(env!("CARGO_BIN_EXE_zwallet"));
     cmd.env("ZWALLET_HOME", home).args(args);
-    if ptrace_scope_is_open() && args.iter().any(|a| *a == "unlock" || *a == "--unlock") {
+    // A caller that passes the flag itself (clap refuses it twice) keeps exactly one.
+    if ptrace_scope_is_open()
+        && args.iter().any(|a| *a == "unlock" || *a == "--unlock")
+        && !args.contains(&"--allow-ptrace-scope-0")
+    {
         cmd.arg("--allow-ptrace-scope-0");
     }
     cmd
