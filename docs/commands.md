@@ -111,7 +111,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
 
   On the wallet tab, `Tab` switches between balance scrolling and history selection, Enter opens
   a transaction, and `/` accepts a `0x` + 64-hex-digit EVM hash. The ten-row history combines this
-  home's selected-key journal with fixed Blockscout sources on Ethereum, Optimism and Sepolia;
+  home's selected-key journal with Blockscout sources on Ethereum, Optimism and Sepolia (or the
+  one `ZWALLET_EXPLORER_<KEY>` names, below);
   other chains show journal coverage only. Each shown journal row is looked up on the node in
   the background and says `checking` until its status arrives (`unknown` if that lookup fails).
   Source labels and unavailable-explorer notes remain visible. Detail shows node claims, fee (including supported L1 fee), confirmations and only
@@ -855,6 +856,12 @@ issues [#26](https://github.com/2lab-ai/zwallet/issues/26) and
 | avalanche | 43114 | AVAX | https://avalanche-c-chain-rpc.publicnode.com |
 | tron | 728126428 | TRX | https://tron-rpc.publicnode.com |
 | sepolia | 11155111 | ETH | https://ethereum-sepolia-rpc.publicnode.com |
+
+Explorer for TUI history: `ZWALLET_EXPLORER_<KEY>` (e.g. `ZWALLET_EXPLORER_ETHEREUM`) names a
+Blockscout v2 API base URL for an EVM chain, replacing the built-in one (ethereum, optimism,
+sepolia) or adding one. It must be an http(s) URL with a host; like an RPC URL it is never
+printed, and a value that is not one makes history say `explorer unavailable` with the variable's
+name. No flag, file, cookie, login or redirect changes the explorer.
 
 RPC precedence: `--rpc <url>`, then `ZWALLET_RPC_<KEY>` (e.g. `ZWALLET_RPC_BASE`,
 `ZWALLET_RPC_TRON`), then the default. zwallet checks the endpoint's `eth_chainId` before using

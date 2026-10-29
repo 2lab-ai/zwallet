@@ -426,8 +426,16 @@ pub fn zwallet_at_with(exe: impl AsRef<OsStr>, debug_assertions: bool) -> Comman
     sign_the_binary();
     let mut cmd = Command::new(exe);
     cmd.env_clear().env(TEST_SCOPE_ENV, TEST_HOMES);
+    // No test reaches a public explorer: every chain's history explorer is a closed loopback
+    // port unless the test names its own mock (`ZWALLET_EXPLORER_<CHAIN>`).
+    for chain in zwallet::chains::CHAINS {
+        cmd.env(chain.explorer_env_var(), CLOSED_EXPLORER);
+    }
     cmd
 }
+
+/// A loopback port nothing listens on: the history explorer of every test process.
+pub const CLOSED_EXPLORER: &str = "http://127.0.0.1:9";
 
 /// The binary with `args`, an empty environment but `ZWALLET_HOME` and the test scope
 /// ([`zwallet_at`]), and, where the host's ptrace policy makes `unlock` refuse

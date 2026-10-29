@@ -247,6 +247,12 @@ impl Chain {
         format!("ZWALLET_RPC_{}", self.key.to_ascii_uppercase())
     }
 
+    /// Environment variable that names this EVM chain's Blockscout API base for history
+    /// ([`evm::explorer::base_url`]).
+    pub fn explorer_env_var(&self) -> String {
+        format!("ZWALLET_EXPLORER_{}", self.key.to_ascii_uppercase())
+    }
+
     pub fn default_rpc(&self) -> &'static str {
         match &self.family {
             Family::Evm(c) => c.default_rpc,

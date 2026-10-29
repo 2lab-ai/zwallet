@@ -1,5 +1,6 @@
-//! The first page from three explicitly supported Blockscout deployments. All fields are
-//! outside claims. Labels, names, methods, symbols and decoded input never enter the model.
+//! The first page from three explicitly supported Blockscout deployments, or from the one
+//! `ZWALLET_EXPLORER_<CHAIN>` names. All fields are outside claims. Labels, names, methods,
+//! symbols and decoded input never enter the model.
 use crate::chains::{Chain, EXPLORERS};
 use crate::core::time::parse_rfc3339_utc;
 use crate::history::{Row, Source, State, TokenMovement};
@@ -19,6 +20,8 @@ pub enum Unavailable {
     TooLarge,
     Timeout,
     Network,
+    /// `ZWALLET_EXPLORER_<CHAIN>` is set but is not an http(s) URL with a host.
+    BadOverride,
 }
 impl Unavailable {
     /// Fixed text and a numeric HTTP status only: never any server-provided body or URL.
@@ -30,6 +33,9 @@ impl Unavailable {
             Self::TooLarge => "response exceeds 1 MiB".into(),
             Self::Timeout => "timed out after 8s".into(),
             Self::Network => "network error".into(),
+            Self::BadOverride => {
+                "ZWALLET_EXPLORER_<CHAIN> is not an http(s) URL with a host".into()
+            }
         }
     }
 }
@@ -39,14 +45,32 @@ pub struct Page {
     pub dropped: usize,
 }
 
-/// No environment, flag, file, cookie, login, or redirect changes the destination.
+/// The Blockscout v2 API base for `chain`: `env_value` (from `ZWALLET_EXPLORER_<CHAIN>`) when it
+/// is set, which must be an http(s) URL with a host, as an RPC URL must; else the built-in
+/// deployment, if the chain has one. Like the RPC override it is never printed: its errors are
+/// the fixed texts of [`Unavailable`]. No flag, file, cookie, login or redirect changes it.
+pub fn base_url(chain: &Chain, env_value: Option<&str>) -> Result<String, Unavailable> {
+    match env_value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(value) => {
+            let url = alloy::transports::http::reqwest::Url::parse(value)
+                .map_err(|_| Unavailable::BadOverride)?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return Err(Unavailable::BadOverride);
+            }
+            Ok(value.trim_end_matches('/').to_string())
+        }
+        None => EXPLORERS
+            .iter()
+            .find(|(key, _)| *key == chain.key)
+            .map(|(_, base)| base.to_string())
+            .ok_or(Unavailable::Unsupported),
+    }
+}
+
 pub async fn fetch(chain: &Chain, wallet: Address) -> Result<Page, Unavailable> {
-    let base = EXPLORERS
-        .iter()
-        .find(|(key, _)| *key == chain.key)
-        .map(|(_, base)| *base)
-        .ok_or(Unavailable::Unsupported)?;
-    fetch_from(chain, wallet, base, TIMEOUT).await
+    let env = std::env::var(chain.explorer_env_var()).ok();
+    let base = base_url(chain, env.as_deref())?;
+    fetch_from(chain, wallet, &base, TIMEOUT).await
 }
 async fn fetch_from(
     chain: &Chain,
@@ -305,6 +329,41 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn the_explorer_override_must_be_an_http_url_with_a_host() {
+        let ethereum = crate::chains::find("ethereum").unwrap();
+        let base = crate::chains::find("base").unwrap();
+        assert_eq!(
+            base_url(ethereum, None).unwrap(),
+            "https://eth.blockscout.com"
+        );
+        assert_eq!(base_url(base, Some("  ")), Err(Unavailable::Unsupported));
+        assert_eq!(
+            base_url(ethereum, Some(" http://127.0.0.1:9/ ")).unwrap(),
+            "http://127.0.0.1:9"
+        );
+        assert_eq!(
+            base_url(base, Some("https://base.example/api-key-123")).unwrap(),
+            "https://base.example/api-key-123"
+        );
+        for bad in [
+            "127.0.0.1:9",
+            "ftp://host",
+            "file:///etc/passwd",
+            "http://",
+            "not a url",
+        ] {
+            assert_eq!(
+                base_url(ethereum, Some(bad)),
+                Err(Unavailable::BadOverride),
+                "{bad}"
+            );
+        }
+        // The reason names the variable, never the value.
+        assert!(!Unavailable::BadOverride.reason().contains("passwd"));
+        assert_eq!(ethereum.explorer_env_var(), "ZWALLET_EXPLORER_ETHEREUM");
+    }
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

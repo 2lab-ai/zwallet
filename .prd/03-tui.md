@@ -704,6 +704,11 @@ Sources:
 2. **A keyless explorer**, where one answers a non-browser client: `eth.blockscout.com`,
    `explorer.optimism.io` and `eth-sepolia.blockscout.com`. Base, arbitrum and polygon Blockscout
    return a Cloudflare challenge (HTTP 403); bsc and avalanche have no Blockscout instance.
+   `ZWALLET_EXPLORER_<CHAIN>` (added 2026-10-30) names another Blockscout v2 API base for an EVM
+   chain, in place of the built-in one or where there is none: an http(s) URL with a host, never
+   printed (an unusable value reads `explorer unavailable (ZWALLET_EXPLORER_<CHAIN> is not an
+   http(s) URL with a host)`). The test harness sets it to a closed loopback port for every
+   chain, so no test reaches a public explorer.
 
 **Reachability, measured 2026-10-27 11:53:24Z** with `curl 8.7.1`, no key, `GET
 /api/v2/addresses/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045/transactions`; rechecked by 11:54:29Z
@@ -1161,6 +1166,9 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
     chunks, splitting rows and words even at 120x40, and ran the fee caps into one line. Rows are
     now cut at the pane's width, the fee caps and limits get a row each, and the selected entry
     shows its full fields (§Display integrity rule 4).
+11. **No test reaches a public explorer** (gate audit). History's explorer base can be named by
+    `ZWALLET_EXPLORER_<CHAIN>`, and `tests/common` sets it to a closed loopback port for every
+    process it starts (§History, source 2).
 
 ## Changes on 2026-10-28, v2, review round 3
 
