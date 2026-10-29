@@ -451,3 +451,46 @@ fn tx_action_from_another_tab_resolves_the_owner_and_keeps_early_hash_input() {
             .any(|e| matches!(e, Effect::LoadTransaction(request) if request.hash == hash(5)))
     );
 }
+
+fn journal_row(n: u64) -> chains::JournalRow {
+    chains::JournalRow {
+        chain: "ethereum",
+        tx_hash: hash(n),
+        from: OWNER.into(),
+        to: OWNER.into(),
+        nonce: Some(n),
+        expiration_ms: None,
+        timestamp: n,
+        kind: "transfer",
+        amount_raw: Some(alloy::primitives::U256::from(n)),
+        value: format!("0.00000000000000000{} ETH", n % 10),
+        token: None,
+    }
+}
+
+/// D2: a journal row is a local claim; the list looks each shown one up on chain, at most the 10
+/// shown, and says `checking` until that lookup lands, never `unknown` for a row it has not read.
+#[test]
+fn shown_journal_rows_are_looked_up_on_chain_and_say_checking_until_then() {
+    let (mut app, scope) = opened();
+    let chain = chains::find("ethereum").unwrap();
+    let merged = history::merge(
+        chain,
+        (1..=12).map(journal_row).collect(),
+        Err(chains::evm::explorer::Unavailable::Http(403)),
+    );
+    let work = app.update(Msg::History(
+        scope,
+        Ok(HistoryRead {
+            history: merged,
+            list_unchanged: false,
+        }),
+    ));
+    let text = frame(&app, 80, 24);
+    let rows: Vec<&str> = text.lines().filter(|l| l.contains("[journal]")).collect();
+    assert_eq!(rows.len(), 10, "{text}");
+    for row in &rows {
+        assert!(row.contains("checking"), "{row}\n{text}");
+    }
+    assert_eq!(work.len(), 10, "one lookup per shown journal row: {work:?}");
+}
