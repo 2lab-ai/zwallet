@@ -55,6 +55,8 @@ pub enum Msg {
     HistoryOwner(HistoryTarget, Result<(String, Trust)>),
     History(HistoryScope, Result<HistoryRead>),
     Transaction(Box<DetailRequest>, Result<DetailRead>),
+    /// One shown journal row's on-chain status ([`Effect::LookupHistoryRow`]).
+    HistoryRow(Box<DetailRequest>, Result<DetailRead>),
     HistoryList(u64, crate::core::whitelist::Fingerprint, Result<()>),
     Create(CreateMsg),
     Key(Key),
@@ -102,6 +104,8 @@ pub enum Effect {
     HistoryOwner(HistoryTarget),
     LoadHistory(HistoryScope),
     LoadTransaction(Box<DetailRequest>),
+    /// The status of one shown journal row: the same lookup as a detail, for the list.
+    LookupHistoryRow(Box<DetailRequest>),
     CheckHistoryList(u64, crate::core::whitelist::Fingerprint),
     Create(CreateEffect),
     /// `wallet::keys`, then [`Msg::Keys`] with this generation: a lock starts a new one, and a
@@ -656,6 +660,7 @@ impl App {
             | Msg::HistoryOwner(..)
             | Msg::History(..)
             | Msg::Transaction(..)
+            | Msg::HistoryRow(..)
             | Msg::HistoryList(..)
             | Msg::WhitelistRead(..)
             | Msg::WhitelistPrepared(..)

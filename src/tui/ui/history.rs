@@ -104,7 +104,12 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
             placed,
         ),
         Pane::Ready(history) => {
-            for (index, row) in history.rows.iter().take(10).enumerate() {
+            for (index, row) in history
+                .rows
+                .iter()
+                .take(crate::tui::app::history::SHOWN_ROWS)
+                .enumerate()
+            {
                 let hash = match (
                     row.tx_hash.get(..8),
                     row.tx_hash.get(row.tx_hash.len().saturating_sub(6)..),
@@ -135,14 +140,17 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                     })
                     .collect::<Vec<_>>()
                     .join(",");
-                let label = if row.state == State::Mined {
+                let label = if state.checking(&row.tx_hash) {
+                    "checking"
+                } else if row.state == State::Mined {
                     "mined"
                 } else {
                     state_label(row.state, row.success)
                 };
+                // 16 columns: every status reads in full (`dropped/replaced`).
                 let text = format!(
-                    "{:<9} {:<16} {:<17} [{}]",
-                    Outside::detail(label).cut(9).text(),
+                    "{:<16} {:<16} {:<17} [{}]",
+                    Outside::detail(label).cut(16).text(),
                     Outside::detail(&hash).cut(16).text(),
                     Outside::detail(&value).cut(17).text(),
                     sources

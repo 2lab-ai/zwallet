@@ -493,4 +493,170 @@ fn shown_journal_rows_are_looked_up_on_chain_and_say_checking_until_then() {
         assert!(row.contains("checking"), "{row}\n{text}");
     }
     assert_eq!(work.len(), 10, "one lookup per shown journal row: {work:?}");
+    let requests: Vec<_> = work
+        .into_iter()
+        .map(|e| match e {
+            Effect::LookupHistoryRow(r) => *r,
+            other => panic!("not a row lookup: {other:?}"),
+        })
+        .collect();
+    // A reply for another hash, or for an older scope, changes nothing.
+    let mut wrong = requests[0].clone();
+    wrong.hash = hash(99);
+    app.update(Msg::HistoryRow(
+        Box::new(wrong),
+        Ok(detail(99, State::Mined)),
+    ));
+    let mut stale = requests[0].clone();
+    stale.scope.owner = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC".into();
+    app.update(Msg::HistoryRow(
+        Box::new(stale),
+        Ok(detail(12, State::Mined)),
+    ));
+    assert_eq!(frame(&app, 80, 24).matches("checking").count(), 10);
+    // Each lands on its own row: the node's status, or `unknown` when the lookup failed.
+    for request in requests {
+        let n = u64::from_str_radix(request.hash.trim_start_matches("0x"), 16).unwrap();
+        let result = match n % 3 {
+            0 => Ok(detail(n, State::Mined)),
+            1 => Ok(detail(n, State::DroppedReplaced)),
+            _ => Err(zwallet::core::error::WalletError::rpc("node timed out")),
+        };
+        app.update(Msg::HistoryRow(Box::new(request), result));
+    }
+    let text = frame(&app, 80, 24);
+    assert!(
+        !text
+            .lines()
+            .any(|l| l.contains("[journal]") && l.contains("checking")),
+        "{text}"
+    );
+    for n in 3..=12u64 {
+        let short = format!("0x000000..{:06x}", n);
+        let row = text.lines().find(|l| l.contains(&short)).unwrap();
+        let label = match n % 3 {
+            0 => "mined",
+            1 => "dropped/replaced",
+            _ => "unknown",
+        };
+        assert!(row.contains(label), "{n}: {row}");
+    }
+}
+
+/// D2 on Tron: journal rows are looked up by id, the same way.
+#[test]
+fn tron_journal_rows_are_looked_up_by_id() {
+    const TRON_OWNER: &str = "TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6";
+    let tron = chains::find("tron").unwrap();
+    let net = Net {
+        chain: tron,
+        rpc_url: "http://127.0.0.1:1".into(),
+    };
+    let mut app = App::new(&net, Duration::from_secs(60));
+    app.update(Msg::Keys(
+        0,
+        Ok(Keys {
+            active: "first".into(),
+            rows: vec![KeyRow {
+                name: "first".into(),
+                index: 0,
+                address: Some(OWNER.into()),
+                active: true,
+            }],
+            trust: Trust::Locked,
+        }),
+    ));
+    let target = app
+        .update(Msg::Key(Key::Enter))
+        .into_iter()
+        .find_map(|e| match e {
+            Effect::HistoryOwner(t) => Some(t),
+            _ => None,
+        })
+        .unwrap();
+    let scope = app
+        .update(Msg::HistoryOwner(
+            target,
+            Ok((TRON_OWNER.into(), Trust::Locked)),
+        ))
+        .into_iter()
+        .find_map(|e| match e {
+            Effect::LoadHistory(s) => Some(s),
+            _ => None,
+        })
+        .unwrap();
+    let id = |n: u64| format!("{n:064x}");
+    let journal = (1..=2)
+        .map(|n| chains::JournalRow {
+            chain: "tron",
+            tx_hash: id(n),
+            from: TRON_OWNER.into(),
+            to: TRON_OWNER.into(),
+            nonce: None,
+            expiration_ms: Some(1),
+            timestamp: n,
+            kind: "transfer",
+            amount_raw: Some(alloy::primitives::U256::from(n)),
+            value: "0.000001 TRX".into(),
+            token: None,
+        })
+        .collect();
+    let work = app.update(Msg::History(
+        scope,
+        Ok(HistoryRead {
+            history: history::merge(
+                tron,
+                journal,
+                Err(chains::evm::explorer::Unavailable::Unsupported),
+            ),
+            list_unchanged: false,
+        }),
+    ));
+    assert_eq!(work.len(), 2, "{work:?}");
+    let text = frame(&app, 80, 24);
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.contains("[journal]") && l.contains("checking"))
+            .count(),
+        2,
+        "{text}"
+    );
+    for effect in work {
+        let Effect::LookupHistoryRow(request) = effect else {
+            panic!("{effect:?}")
+        };
+        let detail = zwallet::tui::app::history::TronDetail {
+            chain: "tron",
+            tx_hash: request.hash.clone(),
+            state: State::Mined,
+            success: Some(true),
+            from: Some(TRON_OWNER.into()),
+            to: Some(TRON_OWNER.into()),
+            value: None,
+            token: None,
+            fee_sun: None,
+            block: Some(1),
+            expiration_ms: None,
+            energy_used: None,
+            net_usage: None,
+            as_of: None,
+            node_behind_secs: None,
+            hint: String::new(),
+        };
+        app.update(Msg::HistoryRow(
+            request,
+            Ok(zwallet::tui::app::history::DetailRead {
+                list_unchanged: false,
+                detail: zwallet::tui::app::history::TransactionDetail::Tron(detail),
+            }),
+        ));
+    }
+    let text = frame(&app, 80, 24);
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.contains("[journal]") && l.contains("mined"))
+            .count(),
+        2,
+        "{text}"
+    );
 }

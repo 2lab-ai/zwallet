@@ -274,6 +274,12 @@ fn start(
                 let _ = tx.send(Msg::Transaction(request, result));
             });
         }
+        Effect::LookupHistoryRow(request) => {
+            tokio::spawn(async move {
+                let result = app::history::read_transaction(&home, &request).await;
+                let _ = tx.send(Msg::HistoryRow(request, result));
+            });
+        }
         Effect::CheckHistoryList(generation, fingerprint) => {
             tokio::task::spawn_blocking(move || {
                 let result = crate::core::whitelist::check_unchanged(&home, &fingerprint);

@@ -110,8 +110,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   On the wallet tab, `Tab` switches between balance scrolling and history selection, Enter opens
   a transaction, and `/` accepts a `0x` + 64-hex-digit EVM hash. The ten-row history combines this
   home's selected-key journal with fixed Blockscout sources on Ethereum, Optimism and Sepolia;
-  other chains show journal coverage only. Source labels and unavailable-explorer notes remain
-  visible. Detail shows node claims, fee (including supported L1 fee), confirmations and only
+  other chains show journal coverage only. Each shown journal row is looked up on the node in
+  the background and says `checking` until its status arrives (`unknown` if that lookup fails).
+  Source labels and unavailable-explorer notes remain visible. Detail shows node claims, fee (including supported L1 fee), confirmations and only
   registry-token receipt movements; `j`/`k` scroll, `r` refreshes and Esc returns. A missing receipt
   with a consumed journal nonce is `dropped/replaced`, not proof that another payment is safe.
   Nicknames appear only from a password-checked, unchanged whitelist.

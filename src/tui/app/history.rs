@@ -67,6 +67,8 @@ impl TransactionDetail {
 pub struct HistoryView {
     pub scope: Option<HistoryScope>,
     pub rows: Pane<History>,
+    /// Shown journal rows whose on-chain lookup has not landed (lowercase hashes).
+    checking: std::collections::BTreeSet<String>,
     pub selected: usize,
     pub detail: Option<(DetailRequest, Pane<TransactionDetail>)>,
     pub scroll: usize,
@@ -79,6 +81,7 @@ impl Default for HistoryView {
         Self {
             scope: None,
             rows: Pane::Loading,
+            checking: Default::default(),
             selected: 0,
             detail: None,
             scroll: 0,
@@ -86,6 +89,14 @@ impl Default for HistoryView {
             labels: None,
             request: 0,
         }
+    }
+}
+/// The list shows at most this many rows, and looks up at most these.
+pub const SHOWN_ROWS: usize = 10;
+impl HistoryView {
+    /// Whether this row's on-chain lookup is still running: the list says `checking`.
+    pub fn checking(&self, hash: &str) -> bool {
+        self.checking.contains(&hash.to_ascii_lowercase())
     }
 }
 impl App {
@@ -145,13 +156,58 @@ impl App {
                 {
                     return std::ops::ControlFlow::Continue(Vec::new());
                 }
+                self.history.checking.clear();
+                let mut lookups = Vec::new();
                 self.history.rows = match result {
                     Ok(read) => {
                         self.accept_labels(scope.target.checked, read.list_unchanged);
+                        // A journal row is a local claim: each shown one is looked up on chain
+                        // before it shows a status (.prd/03-tui.md §History, source 1).
+                        for row in read.history.rows.iter().take(SHOWN_ROWS).filter(|row| {
+                            row.state == State::Unknown
+                                && row.sources.contains(&crate::history::Source::Journal)
+                        }) {
+                            self.history.request += 1;
+                            self.history
+                                .checking
+                                .insert(row.tx_hash.to_ascii_lowercase());
+                            lookups.push(Effect::LookupHistoryRow(Box::new(DetailRequest {
+                                scope: scope.clone(),
+                                request: self.history.request,
+                                hash: row.tx_hash.clone(),
+                                journal: row.journal.clone(),
+                                explorer_listed: false,
+                            })));
+                        }
                         Pane::Ready(read.history)
                     }
                     Err(error) => Pane::Failed(Outside::error(&error)),
                 };
+                lookups
+            }
+            Msg::HistoryRow(request, result) => {
+                let request = *request;
+                let hash = request.hash.to_ascii_lowercase();
+                if !self.target_matches(&request.scope.target)
+                    || self.history.scope.as_ref() != Some(&request.scope)
+                    || !self.history.checking.remove(&hash)
+                {
+                    return std::ops::ControlFlow::Continue(Vec::new());
+                }
+                // A failed lookup leaves the row `unknown`; the detail (Enter) says why.
+                if let (Ok(read), Pane::Ready(history)) = (result, &mut self.history.rows)
+                    && read.detail.chain() == request.scope.target.endpoint.chain
+                    && read.detail.hash().eq_ignore_ascii_case(&hash)
+                    && let Some(row) = history
+                        .rows
+                        .iter_mut()
+                        .find(|row| row.tx_hash.eq_ignore_ascii_case(&hash))
+                {
+                    (row.state, row.success) = match &read.detail {
+                        TransactionDetail::Evm(d) => (d.state, d.success),
+                        TransactionDetail::Tron(d) => (d.state, d.success),
+                    };
+                }
                 Vec::new()
             }
             Msg::Transaction(request, result) => {

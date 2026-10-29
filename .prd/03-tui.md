@@ -693,7 +693,10 @@ points flow.md §T7 names, and nothing else:
 
 Sources:
 1. **The send journal.** This is a *local claim*. Every row from it is looked up on chain (`tx`)
-   before it shows a status.
+   before it shows a status: when the list lands, each shown journal row without a status (at
+   most the 10 shown) gets its own background lookup, the same one Enter runs (Tron: by id); the
+   row says `checking` until it lands, then the node's status, or `unknown` if the lookup failed.
+   A reply for an older key, chain, endpoint or list is dropped (added 2026-10-30, D2).
 2. **A keyless explorer**, where one answers a non-browser client: `eth.blockscout.com`,
    `explorer.optimism.io` and `eth-sepolia.blockscout.com`. Base, arbitrum and polygon Blockscout
    return a Cloudflare challenge (HTTP 403); bsc and avalanche have no Blockscout instance.
@@ -1044,7 +1047,7 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T1 | 2 keys, `b` globally active | both listed, `b` marked; lock state only in the status bar |
 | T2 | Enter on `a` (locked), type the password | bar shows `signing (agent too) until` ≈ now+1h and `verified by password` for `a`; `zwallet status` agrees; the global active key is still `b` |
 | T2b | `s` on `a`, confirm | `zwallet list` shows `a` active |
-| T3 | fixture: 14 txs, the same hash in the journal and in Blockscout, 2 pending | exactly 10 rows; pending rows first; that hash appears once with both sources; coverage note shown |
+| T3 | fixture: 14 txs, the same hash in the journal and in Blockscout, 2 pending; then 12 journal-only rows, explorer unavailable, on EVM and on Tron | exactly 10 rows; pending rows first; that hash appears once with both sources; coverage note shown; each shown journal row says `checking` with one lookup, then the node's status (`mined`, `dropped/replaced`), or `unknown` when its lookup failed; a reply for another hash or an older scope changes nothing |
 | T3b | explorer unavailable (fixture 403) | journal rows only; the note says so; no error banner covering the list |
 | T4 | Enter on a row | fields equal the fixture's expected values, token movements from the receipt included |
 | T5 | USDC fixture balance | native + USDC rows; zero-balance tokens hidden |
@@ -1126,6 +1129,10 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
    swallowed every character, and the chain picker, read-only popups, the whitelist summary and
    outcome and the replacement review kept `1`–`7`, `[`, `]`; only a focused text field keeps
    them now (§Screens and keys).
+7. **Journal rows show the node's status** (D2). The history list looked nothing up and said
+   `unknown` for every journal row; each shown one is now looked up in the background and says
+   `checking` until then. The status column is 16 wide, so `dropped/replaced` reads in full
+   (§History; T3).
 
 ## Changes on 2026-10-28, v2, review round 3
 
