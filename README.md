@@ -41,7 +41,7 @@ are [future work](#where-this-goes-next).
 | You provide | Your agent can do | You can check |
 |---|---|---|
 | A funded, dedicated wallet | Read native and ERC-20 balances on eight EVM networks, and TRX and TRC20 USDT on Tron | Current balances and verified addresses |
-| Allowed payees and contract selectors | Transfer native coin / registry tokens (TRX and USDT to listed Tron payees); read and invoke EVM contracts | Transaction hashes, receipts and the local send journal |
+| Allowed payees and contract selectors | Transfer native coin / registry tokens (TRX and USDT to listed Tron payees); read and invoke EVM contracts | Transaction hashes, receipts and the local send journal. A pending or unknown receipt is not permission to send the payment again (EVM and Tron alike) |
 | Optional per-transaction limits | Execute within native-value, token-amount, calldata and execution-fee limits | A refused request returns a structured error |
 | A time-limited unlock | Request signatures without a fresh password per transaction | Expiry and immediate lock-all |
 

@@ -655,7 +655,8 @@ issues [#26](https://github.com/2lab-ai/zwallet/issues/26) and
   into an error, and both add ``hint: "still pending; to speed up or cancel use --nonce N
   --replace <txHash>; a run without --nonce is a second payment; look it up with `zwallet tx
   --chain <chain> <txHash>` or <explorer>/tx/<txHash>"`` (for `unknown` it starts "receipt
-  unknown, it may still be pending").
+  unknown, it may still be pending"). A pending or unknown receipt is not permission to send the
+  payment again, on EVM and on Tron alike: look the hash up first.
 - **`tx --chain <key> <txHash>`** looks a transaction up on the chain's node
   (`eth_getTransactionByHash` and `eth_getTransactionReceipt`). It needs no wallet and no key, so
   it works while locked. `status` is `"mined"` (with `blockNumber`, and `gasUsed` and `success`
