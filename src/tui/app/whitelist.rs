@@ -112,6 +112,36 @@ pub struct Read {
     pub text: String,
     pub reason: Option<String>,
 }
+/// The prepare worker: the plan for `request`, which stops and writes nothing. Display its
+/// `summary()` verbatim before asking for the edit's password.
+pub fn prepare(
+    home: &Path,
+    request: EditRequest,
+    allow_ptrace_scope_0: bool,
+) -> Result<wallet::WhitelistPlan> {
+    prepare_with(home, request, allow_ptrace_scope_0, || {})
+}
+
+// `before_read` runs between the checked list's check and the plan's read of the list files: the
+// test seam for another process of this user rewriting the list in between.
+fn prepare_with(
+    home: &Path,
+    request: EditRequest,
+    allow_ptrace_scope_0: bool,
+    before_read: impl FnOnce(),
+) -> Result<wallet::WhitelistPlan> {
+    if let Some(fingerprint) = request.checked_fingerprint {
+        crate::core::whitelist::check_unchanged(home, &fingerprint)?;
+    }
+    let change = request.draft.change()?;
+    let unlock = (!request.unlock.is_empty()).then_some(wallet::WhitelistUnlock {
+        duration: request.unlock,
+        allow_ptrace_scope_0,
+    });
+    before_read();
+    wallet::whitelist_plan(home, change, unlock)
+}
+
 pub fn read(home: &Path, checked: Option<CheckedList>) -> Result<Read> {
     let mut reason = None;
     if let Some(checked) = checked {

@@ -700,3 +700,68 @@ fn t7_stale_completion_cannot_replace_a_new_plan_or_a_finished_outcome() {
     assert!(!frame(&app, "failed-edit").contains("replayed completion"));
     assert!(app.checked_list().is_none());
 }
+
+/// The prepare worker checks the checked list's fingerprint, then the plan reads the files again.
+/// A list rewritten in between must not become the plan the password authorizes.
+#[test]
+fn prepare_refuses_a_list_rewritten_between_the_check_and_the_plan_read() {
+    use crate::core::store;
+    use crate::core::whitelist::{WHITELIST_FILE, WhitelistKey};
+    let home = tempfile::Builder::new()
+        .prefix("zwt-wlprep-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    store::create_master(
+        home.path(),
+        "whitelist prepare test password",
+        "main",
+        store::MasterOptions {
+            kdf: store::KdfParams {
+                log_n: store::KDF_MIN_LOG_N,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        &crate::chains::derive_addresses,
+    )
+    .unwrap();
+    let write = |generation: u64, entries: &[(&str, &str)]| {
+        let mut list = Whitelist::empty(&crate::chains::WHITELIST_RULES);
+        list.generation = generation;
+        for (nickname, address) in entries {
+            list.add(Entry::new_address(nickname, address, &["base"]))
+                .unwrap();
+        }
+        let signed = WhitelistKey::from_secret(&[9; 32]).sign(&list);
+        std::fs::write(
+            home.path().join(WHITELIST_FILE),
+            signed.to_file_bytes().unwrap(),
+        )
+        .unwrap();
+    };
+    write(1, &[("bob", "0x3333333333333333333333333333333333333333")]);
+    let checked = ListFiles::read(home.path()).fingerprint();
+    let request = EditRequest {
+        id: 1,
+        draft: Draft::Message(true),
+        unlock: String::new(),
+        checked_fingerprint: Some(checked),
+    };
+    let result = prepare_with(home.path(), request, false, || {
+        write(
+            2,
+            &[
+                ("bob", "0x3333333333333333333333333333333333333333"),
+                ("mallory", "0x4444444444444444444444444444444444444444"),
+            ],
+        )
+    });
+    let error = match result {
+        Ok(plan) => panic!(
+            "a plan of the rewritten list was prepared:\n{}",
+            plan.summary()
+        ),
+        Err(error) => error,
+    };
+    assert!(error.message.contains("verify it again"), "{error}");
+}

@@ -294,15 +294,7 @@ fn start(
             tokio::spawn(async move {
                 let id = request.id;
                 let result = tokio::task::spawn_blocking(move || {
-                    if let Some(fingerprint) = request.checked_fingerprint {
-                        crate::core::whitelist::check_unchanged(&home, &fingerprint)?;
-                    }
-                    let change = request.draft.change()?;
-                    let unlock = (!request.unlock.is_empty()).then_some(wallet::WhitelistUnlock {
-                        duration: request.unlock,
-                        allow_ptrace_scope_0,
-                    });
-                    let plan = wallet::whitelist_plan(&home, change, unlock)?;
+                    let plan = app::whitelist::prepare(&home, request, allow_ptrace_scope_0)?;
                     let summary = plan.summary().to_string();
                     *slot.lock().expect("whitelist plan lock") = Some((id, plan));
                     Ok(summary)
