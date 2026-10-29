@@ -35,10 +35,12 @@ pub enum Msg {
     Status(u64, Result<StatusView>),
     /// What `protocol::stop_all_daemons` did (`L`).
     Locked(Result<Vec<i32>>),
+    /// What `wallet::set_active` did (`s`, confirmed): the key's address and what verifies it.
+    Activated(Result<(String, Trust)>),
 }
 
 /// Work the state asks for; its result comes back as a [`Msg`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     /// `wallet::keys`, then [`Msg::Keys`] with this generation: a lock starts a new one, and a
     /// read from an older one is dropped.
@@ -47,6 +49,8 @@ pub enum Effect {
     LoadStatus(u64),
     /// `protocol::stop_all_daemons`: every zwallet daemon of this user, then [`Msg::Locked`].
     LockAll,
+    /// `wallet::set_active` for this key, then [`Msg::Activated`].
+    SetActive(String),
 }
 
 /// A pane's data: being read, read, or the error that stopped it.
@@ -60,6 +64,8 @@ pub enum Pane<T> {
 /// One row of the key list.
 #[derive(Clone, Debug)]
 pub struct KeyLine {
+    /// The key's name in wallet.json, for the work on it; drawn only as `name`.
+    pub key: String,
     pub name: Outside,
     pub index: u32,
     pub address: Option<Outside>,
@@ -117,8 +123,12 @@ pub struct App {
     /// The generation of reads the panes take ([`Effect::LoadKeys`], [`Effect::LoadStatus`]).
     generation: u64,
     locking: bool,
+    /// Only one confirmed metadata write may be running, so writes cannot finish backwards.
+    activating: bool,
     /// An error to show in place of the key hints until the next key.
     notice: Option<Outside>,
+    /// `s` asks before the key becomes the globally active one: the next key says.
+    confirm: Option<KeyLine>,
     quit: bool,
     /// The error of a lock that failed while a quit waited for it, for the CLI to print.
     quit_error: Option<WalletError>,
@@ -138,7 +148,9 @@ impl App {
             status_pending: false,
             generation: 0,
             locking: false,
+            activating: false,
             notice: None,
+            confirm: None,
             quit: false,
             quit_error: None,
         }
@@ -186,21 +198,60 @@ impl App {
                         self.quit_error = Some(e);
                     }
                 }
-                // A read started before the lock may land after it and say unlocked: reads of
-                // the older generation are dropped, fresh ones start, and the bar says it is
-                // checking until the status lands.
-                self.generation += 1;
-                self.status_pending = false;
-                self.keys_pending = false;
+                // A read started before the lock may land after it and say unlocked: the bar
+                // says it is checking until a fresh status lands.
                 self.status = Pane::Loading;
-                let mut work = self.load_status();
-                work.extend(self.load_keys());
-                work
+                self.reload()
+            }
+            Msg::Activated(Ok(_)) => {
+                self.activating = false;
+                self.reload()
+            }
+            // A cache the daemon's answer contradicts names an address not to fund: the whole
+            // error stops the pane (wrapped there), never a line cut before its warning.
+            Msg::Activated(Err(e)) => {
+                self.activating = false;
+                self.invalidate_reads();
+                self.keys = Pane::Failed(Outside::error(&e));
+                if self.quit {
+                    self.quit_error = Some(e);
+                }
+                Vec::new()
             }
         }
     }
 
+    /// The key list and the status read again in a new generation: a read started before (a
+    /// lock, a new active key) is dropped when it lands.
+    fn reload(&mut self) -> Vec<Effect> {
+        self.invalidate_reads();
+        let mut work = self.load_status();
+        work.extend(self.load_keys());
+        work
+    }
+
+    fn invalidate_reads(&mut self) {
+        self.generation += 1;
+        self.status_pending = false;
+        self.keys_pending = false;
+    }
+
     fn key(&mut self, key: Key) -> Vec<Effect> {
+        if self.quit {
+            return Vec::new();
+        }
+        // Any key but `y` says no; Ctrl-C says no and still quits.
+        if let Some(line) = self.confirm.take()
+            && key != Key::Interrupt
+        {
+            return match key {
+                Key::Char('y') => {
+                    self.activating = true;
+                    vec![Effect::SetActive(line.key)]
+                }
+                _ => Vec::new(),
+            };
+        }
         match key {
             Key::Char('q') | Key::Interrupt => self.quit = true,
             Key::Up | Key::Char('k') => self.selected = self.selected.saturating_sub(1),
@@ -215,6 +266,11 @@ impl App {
             Key::Char('L') if !self.locking => {
                 self.locking = true;
                 return vec![Effect::LockAll];
+            }
+            Key::Char('s') if !self.activating => {
+                if let Pane::Ready(list) = &self.keys {
+                    self.confirm = list.rows.get(self.selected).cloned();
+                }
             }
             _ => {}
         }
@@ -244,15 +300,14 @@ impl App {
         }
     }
 
-    /// `q` was pressed, and no lock (`L`) is still stopping daemons: the TUI never leaves while
-    /// one is, or the stop would be cut off with the process.
+    /// `q` was pressed, and no confirmed mutation is running: quitting waits for its result.
     pub fn quitting(&self) -> bool {
-        self.quit && !self.locking
+        self.quit && !self.locking && !self.activating
     }
 
-    /// `q` waits for the lock to finish ([`App::quitting`]).
+    /// `q` waits for a confirmed mutation to finish ([`App::quitting`]).
     pub fn quit_pending(&self) -> bool {
-        self.quit && self.locking
+        self.quit && (self.locking || self.activating)
     }
 
     /// The error of a lock that failed while a quit waited for it.
@@ -296,8 +351,18 @@ impl App {
         self.locking
     }
 
+    /// A confirmed change of the active key is being written.
+    pub fn activating(&self) -> bool {
+        self.activating
+    }
+
     pub fn notice(&self) -> Option<&Outside> {
         self.notice.as_ref()
+    }
+
+    /// The key `s` asks to make active, until the next key answers.
+    pub fn confirming(&self) -> Option<&KeyLine> {
+        self.confirm.as_ref()
     }
 }
 
@@ -307,13 +372,14 @@ fn key_list(keys: Keys) -> KeyList {
             .rows
             .iter()
             .map(|k| KeyLine {
+                key: k.name.clone(),
                 name: Outside::key_name(&k.name),
                 index: k.index,
                 address: k.address.as_deref().map(Outside::address),
                 active: k.active,
             })
             .collect(),
-        warning: keys.warning.as_deref().map(Outside::warning),
+        warning: keys.trust.warning().map(Outside::warning),
     }
 }
 

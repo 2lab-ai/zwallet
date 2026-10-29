@@ -520,7 +520,20 @@ The TUI shows an address's trust as the CLI's `verified` and `verifiedBy` say it
 The last line replaces the trust state, cut to the bar's width; Enter on it shows the whole
 warning (within its own budget, §Display integrity rule 4). A cache that the daemon's answer
 contradicts stops the pane with the CLI's `VALIDATION_ERROR` (commands.rs:520-536): fund neither
-address.
+address. That includes `s`: a key whose cache is contradicted is not made active, and the whole
+error stops the key pane, wrapped, never a notice line cut before its warning (TUI-2a).
+
+**The note under the key list** follows the trust state (A1, the dispatcher's scope addition of
+2026-10-28; the owner: "unlock을 한다음에는 zwallet address 하면 확인할필요 없어야지"). No output
+asks to verify a key whose address the same output shows verified. The rows are never marked
+verified (T1), so the note flags them, except the key the bar shows `verified by session`: then it
+reads ``not verified: the other keys' addresses; `zwallet list --verify` checks them``, and with
+no other key there is no note. Locked, unverified (Linux), or with another process answering,
+it is the CLI's ``not verified: run `zwallet address --verify` before funding``, and the
+impostor's warning line keeps its place. `zwallet list` does the same while this build's session
+derived its rows (`wallet::keys` returns their `Trust`). TUI-2b names the TUI's own check instead
+(Enter and the password), and once that check has derived every named key's address, there is no
+note.
 
 **Pinned for the session.** The addresses the password check derived (the open key's, and the
 active key's) are kept for the life of the TUI. If a later session read (`Daemon::address`,
@@ -542,12 +555,12 @@ keeps drawing. Two entry points do it, in one blocking task:
    `VALIDATION_ERROR`, which says to run `zwallet address --verify`. Then the named keys' (the
    open key's and the active key's) addresses are derived from the seed (`derive_checked`,
    commands.rs:647): `verified by password`, pinned (§Address trust). The seed is dropped before
-   it returns. It returns `Opened { addresses, anchor, salted }` and nothing else: `anchor` is the
+   it returns. It returns `Opened { keys, active, warning, anchor, salted }` and nothing else: `anchor` is the
    sealed `WhitelistAnchor` (public key, generation, digest; core/store.rs:419), read through
    `sealed_whitelist` (:255), and `salted` says whether a salt is sealed with it. The salt itself
    (the private field of `SealedWhitelist`, core/store.rs:461-467) never leaves the blocking task
    and is never in the checked list.
-2. `wallet::check_list(home, anchor, salted)`: an anchor sealed without a salt (zwallet 0.1.0)
+2. `wallet::check_list(home, anchor)` (§Changes on 2026-10-28 item 8): an anchor sealed without a salt (zwallet 0.1.0)
    gets `list --verify`'s message (commands/whitelist.rs:1353-1360). Both list files are read once
    (`ListFiles::read`, core/whitelist.rs:987) and the list the seal names is picked from those
    bytes (`pick_base_from`, :1097, which verifies the signature, generation and digest, `verify`,
@@ -1144,6 +1157,14 @@ Decisions of the dispatcher when TUI-1 was split into three PRs
    four digits or more.
 7. After TUI-1b's review round 3: line 1's key name is sized from the trust words drawn in each
    state (at least 8), so an impostor's warning words are never lost to a long name.
+8. TUI-2a: `wallet::check_list(home, anchor)` takes the anchor result `open_with_password`
+   returns and no `salted` flag: an anchor zwallet 0.1.0 sealed (no salt) or a malformed one
+   arrives as that result's error, with `list --verify`'s message built from
+   `SealedWhitelist::salt`'s own error, so the cause's text is written once; `Opened.salted`
+   stays for the edits (TUI-6). `open_with_password(home, password, keys)` takes `None` for
+   every key (`list --verify`) and returns the named keys as `KeyRow`s with the active key and
+   the index warning, so `list --verify` reads wallet.json once, as before.
+9. TUI-2a: §Address trust, the key list's note (A1) and a refused `s` in the pane.
 
 ## Changes on 2026-10-27
 

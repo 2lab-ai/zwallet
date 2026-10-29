@@ -1,21 +1,24 @@
 //! `zwallet tui` (`.prd/03-tui.md`): its screens drawn on ratatui's `TestBackend` through
 //! `FilteredBackend`, the one write point, and its state machine driven by `Msg`s. Every frame a
 //! test draws goes through [`checked_frame`], which asserts the three display-integrity rules
-//! every later unit's frames keep too (03-tui.md §Display integrity rules 1-3).
+//! every later unit's frames keep too (03-tui.md §Display integrity rules 1-3). The binary itself
+//! runs on a pty ([`tui_on_a_pty`]) where the behaviour needs a real terminal or a real daemon.
 
 mod common;
 
-use common::Home;
+use common::{Frame, Home, PTY_SIZE, PW, PtyChild};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use serde_json::Value;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use zwallet::chains::{self, Net};
 use zwallet::core::error::{ErrorCode, WalletError};
+use zwallet::core::store;
 use zwallet::core::terminal::terminal_ok;
 use zwallet::core::time::{parse_rfc3339_utc, rfc3339_utc, unix_secs};
+use zwallet::core::whitelist::ListFiles;
 use zwallet::tui::app::{App, Effect, Key, Msg};
 use zwallet::tui::style;
 use zwallet::tui::term::FilteredBackend;
@@ -215,7 +218,7 @@ fn keys_ab() -> Keys {
     Keys {
         active: "b".into(),
         rows: vec![row("a", 0, A), row("b", 1, B)],
-        warning: None,
+        trust: Trust::Locked,
     }
 }
 
@@ -798,4 +801,519 @@ fn zwallet_tui_needs_a_terminal_and_has_no_json() {
         .run(&["tui", "--chain", "nope", "--json"])
         .err("CHAIN_UNSUPPORTED");
     assert!(msg.contains("unsupported chain"), "{msg}");
+}
+
+/// How long a pty test waits for a frame or an exit, on a loaded machine too. A bound the
+/// acceptance sets (T10's two refreshes) is asserted on its own.
+const PTY_WAIT: Duration = Duration::from_secs(60);
+
+/// The end of the bar's second line on every pty frame (the default RPC, the environment being
+/// empty): once it is drawn, the frame above it is too.
+const HOST: &str = " | ethereum-rpc.publicnode.com";
+
+/// `zwallet tui` for `home` on a pty of `size`, its controlling terminal, as a human starts it.
+fn tui_on_a_pty(home: &Home, size: (u16, u16)) -> PtyChild {
+    PtyChild::spawn_full_screen(home.command(&["tui"]), size)
+}
+
+/// The bar's two lines of a [`PTY_SIZE`] frame.
+fn bar(frame: &Frame) -> (&str, &str) {
+    let rows = usize::from(PTY_SIZE.1);
+    (&frame.rows[rows - 2], &frame.rows[rows - 1])
+}
+
+/// `q`, then the exit: status 0, nothing on stderr, and the pty back in canonical mode with echo.
+/// Returns the last frame, the TUI's whole output up to giving the terminal back: no stray byte
+/// in all of it, and no sequence left unfinished.
+fn quit(tui: &mut PtyChild) -> Frame {
+    tui.send(b"q");
+    let (status, stderr) = tui.wait_exit(PTY_WAIT);
+    assert!(status.success(), "{status}: {stderr}");
+    assert!(stderr.is_empty(), "{stderr:?}");
+    let modes = tui.local_modes();
+    assert_ne!(modes & libc::ICANON, 0, "canonical mode is off");
+    assert_ne!(modes & libc::ECHO, 0, "echo is off");
+    let last = tui.final_frame(PTY_WAIT);
+    assert!(last.stray.is_empty() && last.pending.is_empty(), "{last}");
+    last
+}
+
+/// A frame as ratatui's crossterm backend writes it at 79x24: the alternate screen, the cursor
+/// hidden, the one line of [`ui::TOO_SMALL`] (its blank cells skipped), the styles reset, the
+/// cursor hidden again; then the terminal given back: ratatui shows the cursor, the guard leaves
+/// the alternate screen and shows it.
+const SMALL_FRAME: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[1;1Hterminal\x1b[1;10Htoo\x1b[1;14Hsmall\
+\x1b[1;20H(80x24\x1b[1;27Hneeded)\x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?25l\x1b[?25h\x1b[?1049l\x1b[?25h";
+
+#[test]
+fn a_valid_stream_cut_anywhere_holds_no_stray_byte() {
+    // A pty read ends anywhere, so a snapshot of the output can end inside a sequence: after a
+    // lone ESC, or inside a CSI before its final byte. That is not a stray byte.
+    let stray: Vec<_> = (0..=SMALL_FRAME.len())
+        .filter_map(|end| {
+            let frame = Frame::parse(&SMALL_FRAME[..end], (79, 24));
+            let tail = String::from_utf8_lossy(&SMALL_FRAME[end.saturating_sub(8)..end]);
+            (!frame.stray.is_empty()).then(|| format!("cut after ...{tail:?}: {:?}", frame.stray))
+        })
+        .collect();
+    assert!(stray.is_empty(), "{stray:#?}");
+    // The unfinished sequence is pending, and only at the end.
+    assert_eq!(Frame::parse(b"x\x1b", (79, 24)).pending, "\u{1b}");
+    assert_eq!(Frame::parse(b"x\x1b[1;2", (79, 24)).pending, "\u{1b}[1;2");
+    assert!(Frame::parse(SMALL_FRAME, (79, 24)).pending.is_empty());
+    // A stray byte before the end still counts.
+    for bad in [&b"x\x1b\x1b[0m"[..], b"x\x1bQ", b"\x1b[1\x07m", b"x\x07"] {
+        assert!(!Frame::parse(bad, (79, 24)).stray.is_empty(), "{bad:?}");
+    }
+}
+
+/// Whether `frame` is the 79x24 frame: the one `terminal too small` line and nothing else.
+fn only_the_warning(frame: &Frame) -> bool {
+    frame.rows[0].trim_end() == ui::TOO_SMALL && frame.rows[1..].iter().all(|r| r.trim().is_empty())
+}
+
+#[test]
+fn the_79x24_check_runs_on_the_last_frame_not_on_a_live_snapshot() {
+    // The warning is drawn, then a later draw (a later pty read) writes on row 5. A snapshot
+    // taken once row 0 shows the warning passes the check; the last frame before the terminal
+    // is given back does not.
+    let leave = b"\x1b[?25h\x1b[?1049l\x1b[?25h";
+    let (warning, given_back) = SMALL_FRAME.split_at(SMALL_FRAME.len() - leave.len());
+    let more = b"\x1b[5;1Hmore\x1b[0m\x1b[?25l";
+    let stream = [warning, &more[..], given_back].concat();
+    assert!(only_the_warning(&Frame::parse(warning, (79, 24))));
+    let last = Frame::last(&stream, (79, 24)).expect("the terminal is given back");
+    assert!(!only_the_warning(&last), "{last}");
+    // Without the later draw the last frame is the warning alone; before the terminal is given
+    // back there is no last frame.
+    assert!(only_the_warning(
+        &Frame::last(SMALL_FRAME, (79, 24)).unwrap()
+    ));
+    assert!(Frame::last(warning, (79, 24)).is_none());
+}
+
+#[test]
+fn a_tui_that_exits_early_is_reported_before_the_wait_ends() {
+    // `zwallet tui` refuses an unknown chain before it takes the terminal, and exits 1. A wait
+    // for a frame it never draws reports the exit once the reader has every byte, not at the
+    // wait's limit.
+    let home = Home::new();
+    let mut tui = PtyChild::spawn_full_screen(home.command(&["tui", "--chain", "nope"]), PTY_SIZE);
+    let start = Instant::now();
+    let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tui.wait_output(PTY_WAIT, |_| false)
+    }));
+    let took = start.elapsed();
+    let said = waited
+        .expect_err("nothing shows what the wait looks for")
+        .downcast::<String>()
+        .map(|m| *m)
+        .unwrap_or_default();
+    assert!(said.contains("exited (exit status: 1)"), "{said}");
+    assert!(
+        took < PTY_WAIT,
+        "reported only at the limit, after {took:?}"
+    );
+}
+
+#[test]
+fn t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo() {
+    let home = Home::new();
+    home.create("main", &[]);
+    // Loaded at 120x40 (the key list and the status drawn), then the window shrinks to 79x24:
+    // the kernel tells the TUI (SIGWINCH), and it draws the warning alone.
+    let mut tui = tui_on_a_pty(&home, PTY_SIZE);
+    tui.wait_frame(PTY_WAIT, |f| {
+        let (one, two) = bar(f);
+        one.starts_with("ethereum | main 0x") && two.starts_with("locked | ") && two.contains(HOST)
+    });
+    // While the TUI holds the terminal: raw mode, no echo.
+    let modes = tui.local_modes();
+    assert_eq!(modes & (libc::ICANON | libc::ECHO), 0, "not raw");
+    tui.resize((79, 24));
+    tui.wait_frame(PTY_WAIT, |f| f.rows[0].trim_end() == ui::TOO_SMALL);
+    let last = quit(&mut tui);
+    assert!(only_the_warning(&last), "{last}");
+    // Started at 79x24: the warning alone, judged on the last frame.
+    let mut tui = tui_on_a_pty(&home, (79, 24));
+    tui.wait_frame(PTY_WAIT, |f| f.rows[0].trim_end() == ui::TOO_SMALL);
+    let modes = tui.local_modes();
+    assert_eq!(modes & (libc::ICANON | libc::ECHO), 0, "not raw at 79x24");
+    let last = quit(&mut tui);
+    assert!(only_the_warning(&last), "{last}");
+}
+
+#[test]
+fn t10_on_a_pty_zwallet_lock_elsewhere_shows_locked_within_two_refreshes() {
+    // `zwallet lock` stops every daemon of a test home.
+    let _serial = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    home.unlock("1h");
+    let mut tui = tui_on_a_pty(&home, PTY_SIZE);
+    let frame = tui.wait_frame(PTY_WAIT, |f| {
+        let (_, two) = bar(f);
+        two.starts_with("signing (agent too) until ") && two.contains(HOST)
+    });
+    if cfg!(target_os = "macos") {
+        // This build's daemon, checked from the zwallet binary (decision 3 of units.md).
+        assert!(
+            bar(&frame).0.trim_end().ends_with(" | verified by session"),
+            "{frame}"
+        );
+    }
+    home.run(&["lock", "--json"]).ok();
+    let locked = Instant::now();
+    let frame = tui.wait_frame(PTY_WAIT, |f| bar(f).1.starts_with("locked | "));
+    let took = locked.elapsed();
+    eprintln!("t10: the bar said locked {took:?} after zwallet lock returned");
+    // Two refreshes, 10 s (03-tui.md T10), written here rather than read from the code.
+    assert!(
+        took <= Duration::from_secs(10),
+        "locked shown {took:?} after the lock, over two refreshes"
+    );
+    let last = quit(&mut tui);
+    assert!(bar(&last).1.starts_with("locked | "), "{frame}\n{last}");
+}
+
+#[test]
+fn an_argv_listed_fake_daemon_s_expiry_reaches_the_terminal_escaped_and_cut() {
+    // A process started with the daemon's argv, so the process table lists it for this home and
+    // `status` takes its reply: unlocked, its own pid, an expiry of 600 characters of ESC and
+    // half blocks (JSON escapes, as the reply carries them).
+    let home = Home::new();
+    home.create("main", &[]);
+    // The cache holds the fake's address, so the status relays its session rather than stopping
+    // at a mismatch.
+    home.edit_wallet(|v| {
+        for (_, a) in v["keys"][0]["addresses"].as_object_mut().unwrap() {
+            *a = serde_json::json!(A);
+        }
+    });
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let expires = "\\u001b\\u2580\\u2584".repeat(200);
+    let fake = common::daemon_argv_impostor(&home, dir.path(), &[("ATTACKER_EXPIRES", &expires)]);
+    assert!(home.daemon_pids().contains(&(fake.0.id() as i32)));
+    let mut tui = tui_on_a_pty(&home, PTY_SIZE);
+    // The fake's status is drawn once its expiry and the separator after it are; then the checks
+    // run on the last frame.
+    let until = "signing (agent too) until ";
+    tui.wait_frame(PTY_WAIT, |f| {
+        let (one, two) = bar(f);
+        one.contains("NOT this build's key daemon: ")
+            && two
+                .strip_prefix(until)
+                .is_some_and(|rest| rest.contains(" | "))
+    });
+    let frame = quit(&mut tui);
+    // Line 2 shows the expiry escaped, cut within its budget, on that line alone.
+    let shown = bar(&frame)
+        .1
+        .strip_prefix(until)
+        .and_then(|rest| rest.split(" | ").next())
+        .unwrap_or_else(|| panic!("{frame}"));
+    assert!(shown.starts_with("\\u{1b}\\u{2580}"), "{shown:?}");
+    assert!(
+        shown.len() <= 64 && common::ascii_printable(shown),
+        "{shown:?}"
+    );
+    let rows = frame.rows.iter().filter(|r| r.contains("\\u{1b}")).count();
+    assert_eq!(rows, 1, "{frame}");
+    // No raw ESC from the value reached the terminal (`quit`: no stray byte in the whole run),
+    // and no half block.
+    let output = String::from_utf8_lossy(&tui.output()).into_owned();
+    assert!(!output.contains(['\u{2580}', '\u{2584}']), "{output:?}");
+    // The address is not marked verified anywhere.
+    assert!(
+        !frame.rows.iter().any(|r| r.contains("verified by")),
+        "{frame}"
+    );
+    drop(fake);
+}
+
+#[test]
+fn the_password_check_derives_the_named_keys_and_checks_the_list_it_reads_once() {
+    let home = Home::new();
+    home.create("a", &[]);
+    home.create("b", &[]);
+    let listed = home.allow("alice", B, &["ethereum"]);
+    let files = ListFiles::read(home.path()).fingerprint();
+    let opened = wallet::open_with_password(home.path(), PW, Some(&["a"])).unwrap();
+    // The named key's address from the seed, as `list --verify` derives it.
+    let stdin = format!("{PW}\n");
+    let verify = ["list", "--verify", "--password-stdin", "--json"];
+    let verify = home.run_stdin(&verify, &stdin).ok();
+    assert_eq!(opened.keys.len(), 1);
+    assert_eq!(opened.keys[0].name, "a");
+    assert_eq!(
+        opened.keys[0].address.as_deref(),
+        verify["keys"][0]["address"].as_str()
+    );
+    assert_eq!((opened.active.as_str(), opened.salted), ("b", true));
+    // The list the seal names, with the fingerprint of the bytes it verified.
+    let checked = wallet::check_list(home.path(), &opened.anchor).unwrap();
+    assert_eq!(checked.list, listed);
+    assert_eq!(checked.list.entries[0].nickname, "alice");
+    assert_eq!(checked.fingerprint, files);
+    // `open_with_password` reads no list file: with both removed it still opens.
+    for file in ["whitelist.json", "whitelist.next.json"] {
+        let _ = std::fs::remove_file(home.path().join(file));
+    }
+    let opened = wallet::open_with_password(home.path(), PW, Some(&[])).unwrap();
+    assert!(opened.keys.is_empty() && matches!(opened.anchor, Ok(Some(_))));
+    assert!(wallet::check_list(home.path(), &opened.anchor).is_err());
+    // A whitelist zwallet 0.1.0 sealed (no salt): `list --verify`'s message, and no list.
+    let lock = store::MetaLock::acquire(home.path()).unwrap();
+    let sealed = lock.open(PW).unwrap();
+    let mut policy = sealed.unsealed().policy.clone();
+    policy.as_object_mut().unwrap().remove("whitelistSalt");
+    lock.reseal(&sealed, &policy).unwrap();
+    drop(lock);
+    let opened = wallet::open_with_password(home.path(), PW, Some(&[])).unwrap();
+    assert!(!opened.salted);
+    let reason = wallet::check_list(home.path(), &opened.anchor).unwrap_err();
+    assert!(reason.contains("made by zwallet 0.1.0"), "{reason}");
+    let verify = [
+        "whitelist",
+        "list",
+        "--verify",
+        "--password-stdin",
+        "--json",
+    ];
+    let cli = home.run_stdin(&verify, &stdin).ok();
+    assert_eq!(cli["reason"].as_str(), Some(reason.as_str()), "{cli}");
+}
+
+#[test]
+fn t2b_on_a_pty_s_then_y_makes_the_selected_key_active() {
+    let home = Home::new();
+    home.create("a", &[]);
+    home.create("b", &[]);
+    let mut tui = tui_on_a_pty(&home, PTY_SIZE);
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("* b ")) && bar(f).1.starts_with("locked | ")
+    });
+    // `s` on `a` (the first row) asks first; `y` confirms.
+    tui.send(b"s");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("make a the active key"))
+    });
+    assert_eq!(home.run(&["list", "--json"]).ok()["active"], "b");
+    tui.send(b"y");
+    tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains("* a ")));
+    assert_eq!(home.run(&["list", "--json"]).ok()["active"], "a");
+    // A later activation is accepted after the first finishes, including another row.
+    tui.send(b"js");
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("make b the active key"))
+    });
+    tui.send(b"y");
+    tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains("* b ")));
+    assert_eq!(home.run(&["list", "--json"]).ok()["active"], "b");
+    quit(&mut tui);
+}
+
+#[test]
+fn activation_is_serial_and_quit_waits_for_the_confirmed_write() {
+    for quit in [Key::Char('q'), Key::Interrupt] {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('s')));
+        assert_eq!(
+            app.update(Msg::Key(Key::Char('y'))),
+            vec![Effect::SetActive("a".into())]
+        );
+        // No second write can race the first and restore the older selection last.
+        app.update(Msg::Key(Key::Down));
+        assert!(app.update(Msg::Key(Key::Char('s'))).is_empty());
+        assert!(app.confirming().is_none());
+        assert!(app.update(Msg::Key(Key::Char('y'))).is_empty());
+        app.update(Msg::Key(quit));
+        assert!(!app.quitting());
+        assert!(app.quit_pending());
+        let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+        assert!(rows[23].contains("setting active key... (quits when done)"));
+        app.update(Msg::Activated(Ok((A.into(), Trust::Locked))));
+        assert!(app.quitting());
+        assert!(!app.quit_pending());
+    }
+}
+
+#[test]
+fn failed_activation_releases_the_gate_and_reports_failure_on_quit() {
+    let mut app = locked_ab();
+    app.update(Msg::Key(Key::Char('s')));
+    app.update(Msg::Key(Key::Char('y')));
+    app.update(Msg::Key(Key::Char('q')));
+    app.update(Msg::Activated(Err(WalletError::validation(
+        "write refused",
+    ))));
+    assert!(app.quitting());
+    assert_eq!(app.take_quit_error().unwrap().message, "write refused");
+}
+
+#[test]
+fn an_old_read_cannot_hide_an_activation_refusal() {
+    let mut app = locked_ab();
+    app.update(Msg::Key(Key::Char('r')));
+    let old = app.generation();
+    app.update(Msg::Key(Key::Char('s')));
+    app.update(Msg::Key(Key::Char('y')));
+    app.update(Msg::Activated(Err(WalletError::validation(
+        "Do not send funds to either address",
+    ))));
+    app.update(Msg::Keys(old, Ok(keys_ab())));
+    let (rows, _) = checked_frame(&mut screen(80, 24), &app);
+    assert!(
+        rows.join("\n")
+            .contains("Do not send funds to either address")
+    );
+    assert!(!rows.join("\n").contains(A));
+}
+
+#[test]
+fn activation_waiting_for_the_metadata_lock_keeps_the_async_loop_running() {
+    let home = Home::new();
+    home.create("a", &[]);
+    let lock = store::MetaLock::acquire(home.path()).unwrap();
+    let (release, receive) = std::sync::mpsc::channel();
+    let owner = std::thread::spawn(move || {
+        // A broken synchronous write eventually releases too; this test never hangs a suite.
+        let _ = receive.recv_timeout(Duration::from_secs(3));
+        drop(lock);
+    });
+    block_on(async {
+        let work = wallet::set_active(home.path(), "a");
+        tokio::pin!(work);
+        let started = Instant::now();
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(30)) => {},
+            _ = &mut work => panic!("the write finished while its lock was held"),
+        }
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        work.await.unwrap();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "event loop blocked for {elapsed:?}"
+        );
+    });
+    owner.join().unwrap();
+}
+
+#[test]
+fn a_key_the_bar_shows_verified_by_session_is_never_asked_to_be_verified() {
+    // One key, verified by session: no row asks for a verify command.
+    let mut keys = keys_ab();
+    keys.rows.remove(0);
+    let mut app = app();
+    app.update(Msg::Keys(app.generation(), Ok(keys)));
+    app.update(Msg::Status(app.generation(), Ok(open_status(now() + 3600))));
+    let mut screen = screen(80, 24);
+    let (rows, _) = checked_frame(&mut screen, &app);
+    assert!(!rows.iter().any(|r| r.contains("--verify")), "{rows:#?}");
+    assert!(
+        rows[22].trim_end().ends_with(" | verified by session"),
+        "{rows:#?}"
+    );
+    // Two keys: the other one stays flagged, with what checks it; the active one is not asked.
+    app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+    let (rows, _) = checked_frame(&mut screen, &app);
+    let note = rows
+        .iter()
+        .find(|r| r.contains("not verified:"))
+        .expect("the other key is flagged");
+    assert!(
+        note.contains("other key") && note.contains("`zwallet list --verify`"),
+        "{note:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("address --verify")),
+        "{rows:#?}"
+    );
+    // Locked, or unverified (Linux, another process answering): the note stays as it was, and
+    // the impostor's warning keeps its place above it.
+    let other = "pid 7 runs other code".to_string();
+    for trust in [
+        Trust::Locked,
+        Trust::Unverified(None),
+        Trust::Unverified(Some(other.clone())),
+    ] {
+        let mut keys = keys_ab();
+        keys.trust = trust.clone();
+        app.update(Msg::Keys(app.generation(), Ok(keys)));
+        let mut status = open_status(now() + 3600);
+        status.address = Some((Some(B.into()), trust.clone()));
+        app.update(Msg::Status(app.generation(), Ok(status)));
+        let (rows, _) = checked_frame(&mut screen, &app);
+        let note = "not verified: run `zwallet address --verify` before funding";
+        let at = rows
+            .iter()
+            .position(|r| r.contains(note))
+            .expect("the note");
+        if trust.warning().is_some() {
+            let warned = format!("warning: {other}");
+            assert!(rows[at - 1].contains(&warned), "{rows:#?}");
+        }
+    }
+}
+
+/// [`keys_ab`] read, and the wallet locked.
+fn locked_ab() -> App {
+    let mut app = app();
+    app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+    app.update(Msg::Status(app.generation(), Ok(locked_status())));
+    app
+}
+
+#[test]
+fn s_on_a_key_another_process_contradicts_stops_the_pane_and_makes_nothing_active() {
+    // A process listed by argv answers `address` with its own address for every key, which
+    // contradicts wallet.json's cache of `a`.
+    let home = Home::new();
+    home.create("a", &[]);
+    home.create("b", &[]);
+    let dir = tempfile::Builder::new()
+        .prefix("zwt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let fake = common::daemon_argv_impostor(&home, dir.path(), &[]);
+    let mut app = locked_ab();
+    app.update(Msg::Key(Key::Char('s')));
+    let work = app.update(Msg::Key(Key::Char('y')));
+    assert_eq!(work, vec![Effect::SetActive("a".into())]);
+    // The work that effect runs, through that process: refused before anything is switched.
+    app.update(Msg::Activated(block_on(wallet::set_active(
+        home.path(),
+        "a",
+    ))));
+    let (_, placed) = checked_frame(&mut screen(80, 24), &app);
+    let error = placed
+        .iter()
+        .find(|p| p.outside.source() == Source::Error)
+        .expect("the refusal is drawn");
+    // The whole error, wrapped in the pane: the address that process gave is never on a line of
+    // its own without the warning.
+    let text = error.outside.text();
+    assert!(
+        text.contains(A) && text.contains("Do not send funds to either address"),
+        "{text}"
+    );
+    assert!(error.area.height > 1, "{:?}", error.area);
+    drop(fake);
+    assert_eq!(home.run(&["list", "--json"]).ok()["active"], "b");
+}
+
+#[test]
+fn while_s_asks_any_key_but_y_says_no_and_ctrl_c_still_quits() {
+    for (key, quits) in [(Key::Char('q'), false), (Key::Interrupt, true)] {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('s')));
+        assert!(app.confirming().is_some());
+        assert_eq!(app.update(Msg::Key(key)), vec![]);
+        assert!(app.confirming().is_none(), "{key:?}");
+        assert_eq!(app.quitting(), quits, "{key:?}");
+    }
 }

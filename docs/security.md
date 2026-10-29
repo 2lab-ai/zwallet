@@ -258,3 +258,7 @@ signs for such an agent. What it does not do:
   `gasLimit × maxFeePerGas`, and the L1 fee for calldata is charged on top. Calldata can be up
   to about 512 KB unless a lower signed byte limit is configured. A calldata limit bounds
   payload size; it does not cap the L1 fee or total transaction cost.
+
+The deferred cumulative-budget contract is recorded in [the budget design](../.prd/08-cumulative-budget-design.md).
+The boundary and future acceptance gates for joint policy rollback are in [the freshness design](../.prd/09-policy-freshness-design.md).
+These are design decisions, not additional runtime protections.

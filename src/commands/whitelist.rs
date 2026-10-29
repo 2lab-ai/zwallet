@@ -42,7 +42,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 const LIST_HINT: &str = "see `zwallet whitelist list`";
-const FIRST_ADD: &str = "`zwallet whitelist add <nick> <addr> --chains <chain>` creates it";
+pub(crate) const FIRST_ADD: &str =
+    "`zwallet whitelist add <nick> <addr> --chains <chain>` creates it";
 /// What a contract entry delegates (`.prd/04-whitelist.md` §Entries).
 const RESIDUAL: &str = "a listed contract may forward value or act on its arguments";
 const VERIFY_NOTE: &str =
@@ -1519,22 +1520,9 @@ fn list(home: &Path, a: WhitelistListArgs) -> Result<Out> {
     store::read_wallet_file(home)?;
     let out = if a.verify {
         let password = read_password(a.password_stdin, "Wallet password: ", false)?;
-        let sealed = store::unlock(home, &password, &chains::derive_addresses)?
-            .0
-            .sealed_whitelist();
+        let opened = crate::wallet::open_with_password(home, &password, Some(&[]))?;
         drop(password);
-        // The anchor as the daemon reads it; for one zwallet 0.1.0 sealed, the cause with what a
-        // human can do about it.
-        let anchor = sealed.and_then(|sealed| {
-            sealed
-                .map(|s| {
-                    s.salt()
-                        .map(|_| s.anchor)
-                        .map_err(|e| WalletError::validation(whitelist::without_salt(&e.message)))
-                })
-                .transpose()
-        });
-        verified_view(home, anchor)
+        verified_view(home, &opened.anchor)
     } else {
         unverified_view(home, None)
     };
@@ -1545,35 +1533,16 @@ fn list(home: &Path, a: WhitelistListArgs) -> Result<Out> {
     Ok(Out::with_text(super::inert_whitelist(&out), text))
 }
 
-fn verified_view(home: &Path, anchor: Result<Option<WhitelistAnchor>>) -> Value {
-    let anchor = match anchor {
-        Err(e) => return unverified_view(home, Some(e.message)),
-        // A list file with no seal is never offered as the first add: that add refuses.
-        Ok(None) => {
-            let reason = match whitelist::unsealed_files_note(&ListFiles::read(home)) {
-                Some(note) => format!(
-                    "{note}: it is not verified, and every edit refuses. {}",
-                    whitelist::recovery()
-                ),
-                None => format!("wallet.json seals no whitelist key yet; {FIRST_ADD}"),
-            };
-            return unverified_view(home, Some(reason));
-        }
-        Ok(Some(a)) => a,
+/// The list the seal names ([`crate::wallet::check_list`]), `verified: true`, or why there is
+/// none.
+fn verified_view(home: &Path, anchor: &Result<Option<WhitelistAnchor>>) -> Value {
+    let mut out = match crate::wallet::check_list(home, anchor) {
+        Ok(checked) => list_view(&checked.list, true, checked.source),
+        Err(reason) => unverified_view(home, Some(reason)),
     };
-    let files = ListFiles::read(home);
-    let base = whitelist::pick_base_from(&files, Some(&anchor), &WHITELIST_RULES);
-    // The same one remedy as an edit's refusal.
-    let mut out = match base.source {
-        BaseSource::Current => list_view(&base.list, true, WHITELIST_FILE),
-        BaseSource::PromotedNext => list_view(&base.list, true, NEXT_FILE),
-        BaseSource::Empty => unverified_view(
-            home,
-            base.discarded
-                .map(|d| format!("{}. {}", d.reason, whitelist::recovery())),
-        ),
-    };
-    out["sealedGen"] = json!(anchor.generation);
+    if let Ok(Some(a)) = anchor {
+        out["sealedGen"] = json!(a.generation);
+    }
     out
 }
 

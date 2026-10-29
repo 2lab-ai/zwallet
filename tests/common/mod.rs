@@ -657,6 +657,198 @@ impl Drop for FakeDaemon {
     }
 }
 
+/// Whether `tool` is on the PATH, for tests that need `cc` or `codesign`.
+pub fn have(tool: &str) -> bool {
+    std::process::Command::new(tool)
+        .arg(if tool == "codesign" {
+            "--help"
+        } else {
+            "--version"
+        })
+        .output()
+        .map(|o| o.status.success() || o.status.code().is_some())
+        .unwrap_or(false)
+}
+
+/// A child process killed and reaped when this drops, so a failing assertion never leaves a test
+/// double's `accept()` loop running (as [`DaemonChild`] does for a daemon).
+pub struct KillOnDrop(pub std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Waits (bounded by `limit`) until the listener on `home`'s `d.sock` answers a request with a
+/// non-empty reply. The socket file exists from `bind`, but a connect before `listen` is refused
+/// (ECONNREFUSED), so existence alone is not readiness. Each attempt is one full exchange, as the
+/// CLI does it (a status request, EOF, then the reply read with a timeout): a probe that hung up
+/// early would leave the listener writing to a gone peer (SIGPIPE), and one that read without a
+/// timeout would hang on a listener that accepts but never replies. A refused connect, an error,
+/// a timeout or an empty reply is retried; after `limit` this panics saying which it last saw.
+pub fn wait_until_answering(home: &Home, limit: Duration) {
+    let start = Instant::now();
+    let sock = home.sock();
+    loop {
+        let last = match std::os::unix::net::UnixStream::connect(&sock) {
+            Err(e) => format!("connect: {e}"),
+            Ok(mut s) => {
+                let exchange = s
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .and_then(|()| s.write_all(b"{\"op\":\"status\"}\n"))
+                    .and_then(|()| s.shutdown(std::net::Shutdown::Write))
+                    .and_then(|()| {
+                        let mut buf = Vec::new();
+                        s.read_to_end(&mut buf).map(|_| buf)
+                    });
+                match exchange {
+                    Ok(reply) if !reply.is_empty() => return,
+                    Ok(_) => "an empty reply".to_string(),
+                    Err(e) => format!("exchange: {e}"),
+                }
+            }
+        };
+        assert!(
+            start.elapsed() < limit,
+            "nothing answered on {} within {limit:?}; last attempt: {last}",
+            sock.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A tiny attacker: binds `$1/d.sock` and answers every request with an ok reply carrying the
+/// POISON address, from its own code. Built with `cc` in the test, so its cdhash and executable
+/// are not zwallet's. `ATTACKER_REPLY` replaces the whole reply (one JSON line), and
+/// `ATTACKER_NONDUMPABLE` makes it non-dumpable on Linux, as a genuine key daemon is, so its
+/// executable cannot be read and who answered is not known (`Unknown`).
+pub const ATTACKER_C: &str = r#"
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/time.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+/* When $ATTACKER_LOG is set, append a timestamped event (sub-second) so a flake can be read from
+   the log rather than guessed. Inert (one getenv) when the variable is unset. */
+static void logev(const char *ev, long n) {
+  const char *p = getenv("ATTACKER_LOG");
+  if (!p) return;
+  FILE *f = fopen(p, "a");
+  if (!f) return;
+  struct timeval tv; gettimeofday(&tv, 0);
+  fprintf(f, "%ld.%06d pid=%d %s %ld\n", (long)tv.tv_sec, (int)tv.tv_usec, (int)getpid(), ev, n);
+  fclose(f);
+}
+/* One connection, in its own process: read what the client sends (bounded by SO_RCVTIMEO so a
+   client that is slow to send its request or its EOF never blocks us), then answer. */
+static void handle(int s, const char *reply) {
+  struct timeval to; to.tv_sec = 2; to.tv_usec = 0;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
+  char b[1024]; ssize_t n; long got = 0;
+  while ((n = read(s, b, sizeof b)) > 0) got += n;
+  logev(n == 0 ? "eof" : "read-stop", got);
+  size_t len = strlen(reply), off = 0;
+  while (off < len) { ssize_t w = write(s, reply + off, len - off); if (w <= 0) break; off += w; }
+  logev("replied", got);
+  shutdown(s, SHUT_WR); close(s);
+}
+int main(int argc, char **argv) {
+  if (argc < 3) return 2;              /* argv: daemon --home <HOME> */
+  signal(SIGPIPE, SIG_IGN);            /* a client that hangs up must not kill us mid-reply */
+  signal(SIGCHLD, SIG_IGN);            /* reap per-connection handlers, no zombies */
+#ifdef __linux__
+  if (getenv("ATTACKER_NONDUMPABLE")) prctl(PR_SET_DUMPABLE, 0);
+#endif
+  /* Release any descriptor inherited from the test (its captured stdout/stderr pipe, say) so
+     nothing waits on this process for EOF and no handler shares one. */
+  int dn = open("/dev/null", O_RDWR);
+  if (dn >= 0) { dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); }
+  char path[512];
+  snprintf(path, sizeof path, "%s/d.sock", argv[argc - 1]);
+  unlink(path);
+  int l = socket(AF_UNIX, SOCK_STREAM, 0);
+  struct sockaddr_un a; memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;
+  strncpy(a.sun_path, path, sizeof a.sun_path - 1);
+  if (bind(l, (struct sockaddr *)&a, sizeof a) || listen(l, 8)) return 3;
+  /* Its own pid, so `status` takes the reply as coming from a listed daemon process. The
+     expiry (JSON string text) and the whitelist (a JSON value) can be set from the environment. */
+  const char *exp = getenv("ATTACKER_EXPIRES");
+  if (!exp) exp = "2099-01-01T00:00:00Z";
+  const char *wl = getenv("ATTACKER_WHITELIST");
+  if (!wl) wl = "null";
+  const char *raw = getenv("ATTACKER_REPLY");
+  size_t cap = (raw ? strlen(raw) : strlen(exp) + strlen(wl)) + 512;
+  char *reply = malloc(cap);
+  if (!reply) return 4;
+  if (raw) snprintf(reply, cap, "%s\n", raw);
+  else snprintf(reply, cap,
+    "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
+    "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"ethereum\",\"index\":0,"
+    "\"active\":\"main\",\"address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"}}\n",
+    (int)getpid(), exp, wl);
+  logev("listening", 0);
+  for (;;) {
+    int s = accept(l, 0, 0);
+    if (s < 0) { logev("accept-err", 0); continue; }
+    logev("accepted", 0);
+    /* Each connection is served in its own child, so a client that is slow on one connection
+       never keeps us from accepting and answering another. */
+    pid_t pid = fork();
+    if (pid == 0) { close(l); handle(s, reply); _exit(0); }
+    close(s);
+  }
+}
+"#;
+
+/// Builds [`ATTACKER_C`] at `bin` with `cc`, ad-hoc signed on macOS where the linker did not sign
+/// it (x86_64), so its code is named by its cdhash on every Mac, as an attacker that signs its
+/// binary is.
+pub fn build_attacker(src_dir: &Path, bin: &Path) {
+    let src = src_dir.join("attacker.c");
+    std::fs::write(&src, ATTACKER_C).unwrap();
+    let cc = std::process::Command::new("cc")
+        .arg("-o")
+        .arg(bin)
+        .arg(&src)
+        .output()
+        .expect("run cc");
+    assert!(
+        cc.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+    sign_if_unsigned(bin);
+}
+
+/// Starts [`ATTACKER_C`] (built into `dir`) as a daemon-argv impostor for `home`, with `env`
+/// set, and waits until it answers.
+pub fn daemon_argv_impostor(home: &Home, dir: &Path, env: &[(&str, &str)]) -> KillOnDrop {
+    assert!(
+        have("cc"),
+        "needs cc (rustc's linker) to build the attacker"
+    );
+    let bin = dir.join("attacker");
+    build_attacker(dir, &bin);
+    let canonical = std::fs::canonicalize(home.path()).unwrap();
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("daemon").arg("--home").arg(&canonical);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let attacker = KillOnDrop(cmd.spawn().expect("spawn attacker"));
+    wait_until_answering(home, Duration::from_secs(15));
+    attacker
+}
+
 /// Whether every byte of `s` is printable ASCII (0x20..=0x7E): no control, no `\n`, no non-ASCII.
 /// The one rule the tests assert of any text that came from outside zwallet — a daemon reply, an
 /// RPC answer, a file. `\n` is NOT exempt: a value from outside must never carry a line break,
@@ -666,20 +858,48 @@ pub fn ascii_printable(s: &str) -> bool {
     s.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
 
-/// A pseudo-terminal pair: `(master, slave)`.
+/// The window [`openpty`] gives a pty, `(columns, rows)`: the acceptance frames' 120x40
+/// (03-tui.md §Acceptance).
+pub const PTY_SIZE: (u16, u16) = (120, 40);
+
+/// A pseudo-terminal pair: `(master, slave)`, its window [`PTY_SIZE`].
 pub fn openpty() -> (File, OwnedFd) {
+    openpty_sized(PTY_SIZE)
+}
+
+/// [`openpty`] with a window of `(columns, rows)`, which `zwallet tui` reads from its controlling
+/// terminal. Both ends are made close-on-exec as soon as `openpty` returns: the child a test wires
+/// them to gets them as its fds 0-2, and a process another thread starts later gets neither, so it
+/// cannot hold the pty open. One started in the moment between `openpty` and the `fcntl` can
+/// still inherit both (macOS has no close-on-exec flag for `openpty`).
+pub fn openpty_sized((columns, rows): (u16, u16)) -> (File, OwnedFd) {
     let (mut master, mut slave) = (-1, -1);
-    // SAFETY: openpty writes two fds into the out-params; null name/termios/winsize are allowed.
+    let mut window = libc::winsize {
+        ws_row: rows,
+        ws_col: columns,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: openpty writes two fds into the out-params and reads the window; a null name and
+    // termios are allowed. The window goes as a raw pointer: libc declares it `*mut` on macOS and
+    // `*const` on Linux, where clippy rejects a `&mut` (unnecessary_mut_passed).
     let rc = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            &raw mut window,
         )
     };
     assert_eq!(rc, 0, "openpty failed");
+    for fd in [master, slave] {
+        // SAFETY: fcntl on an fd openpty just returned.
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+            -1
+        );
+    }
     // SAFETY: both fds were just returned by openpty and are owned by nobody else.
     unsafe { (File::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
 }
@@ -716,17 +936,40 @@ const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
 const TIOCSCTTY: libc::c_ulong = libc::TIOCSCTTY as libc::c_ulong;
 
 /// A process whose stdin and controlling terminal (`/dev/tty`) is a pty, as when a human runs it
-/// at a terminal; stdout and stderr are piped.
+/// at a terminal; stdout and stderr are piped (stdout on the pty too with
+/// [`PtyChild::spawn_full_screen`]).
 pub struct PtyChild {
     pub child: Child,
     pub master: File,
     seen: String,
-    /// Kept open: on macOS the pty drops unread output once every slave is closed.
-    _slave: OwnedFd,
+    /// This process's copy of the slave. Kept for [`PtyChild::spawn`] and
+    /// [`PtyChild::spawn_on_terminal`], whose output is read only from time to time (it was kept
+    /// because macOS was seen to drop unread output once every slave is closed). `None` for
+    /// [`PtyChild::spawn_full_screen`]: with no slave left here, the pty ends with the child and
+    /// the reader ends after the last byte, also on Linux, whose master gives no end while any
+    /// slave is open. Measured on 2026-10-28 (a session leader writing 25,603 bytes, then exiting,
+    /// read all along): with this copy closed every byte arrived, then the end, 200 of 200 runs
+    /// on macOS and on Linux; with it open, Linux gave no end within 10 s.
+    _slave: Option<OwnedFd>,
     /// With [`PtyChild::spawn_on_terminal`]: the master of the terminal stdout is on (and its
     /// slave, kept open), and the bytes it showed.
     out: Option<(File, OwnedFd)>,
     shown: Vec<u8>,
+    /// With [`PtyChild::spawn_full_screen`]: the thread reading the master all along.
+    screen: Option<FullScreen>,
+}
+
+/// What [`PtyChild::spawn_full_screen`] keeps: the grid frames are parsed on, every byte read from
+/// the master so far (by a thread, all along, so a full pty never holds the child's writes), the
+/// thread's stop flag, and the thread reading stderr.
+struct FullScreen {
+    /// The widest and tallest the window has been ([`PtyChild::resize`]): after a shrink nothing
+    /// drawn can lie outside the grid a frame is parsed on.
+    size: (u16, u16),
+    read: Arc<Mutex<Vec<u8>>>,
+    stop: Arc<AtomicBool>,
+    reader: Option<JoinHandle<()>>,
+    stderr: Option<JoinHandle<Vec<u8>>>,
 }
 
 impl PtyChild {
@@ -749,6 +992,44 @@ impl PtyChild {
                 None => Stdio::piped(),
             })
             .stderr(Stdio::piped());
+        Self::start(cmd, master, slave, out)
+    }
+
+    /// `cmd` as a full-screen program runs at a terminal of `(columns, rows)`: stdin and stdout
+    /// on one pty, its controlling terminal; stderr piped. A thread reads the master all along
+    /// ([`PtyChild::frame`] parses what it read), another reads stderr.
+    pub fn spawn_full_screen(mut cmd: Command, size: (u16, u16)) -> Self {
+        let (master, slave) = openpty_sized(size);
+        cmd.stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::piped());
+        let mut pty = Self::start(cmd, master, slave, None);
+        // The child has its own; the reader must see the pty end when the child does.
+        pty._slave = None;
+        let (read, stop) = (
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let reader = read_all_along(pty.master.try_clone().unwrap(), read.clone(), stop.clone());
+        let mut stderr = pty.child.stderr.take().unwrap();
+        let stderr = std::thread::spawn(move || {
+            let mut v = Vec::new();
+            let _ = stderr.read_to_end(&mut v);
+            v
+        });
+        pty.screen = Some(FullScreen {
+            size,
+            read,
+            stop,
+            reader: Some(reader),
+            stderr: Some(stderr),
+        });
+        pty
+    }
+
+    /// Starts `cmd`, its stdio set, in a session of its own with `slave` as its controlling
+    /// terminal.
+    fn start(mut cmd: Command, master: File, slave: OwnedFd, out: Option<(File, OwnedFd)>) -> Self {
         // SAFETY: setsid and ioctl are async-signal-safe; fd 0 is the pty slave by now.
         unsafe {
             cmd.pre_exec(|| {
@@ -763,9 +1044,153 @@ impl PtyChild {
             child,
             master,
             seen: String::new(),
-            _slave: slave,
+            _slave: Some(slave),
             out,
             shown: Vec::new(),
+            screen: None,
+        }
+    }
+
+    fn full_screen(&self) -> &FullScreen {
+        self.screen
+            .as_ref()
+            .expect("spawned with PtyChild::spawn_full_screen")
+    }
+
+    /// Every byte the child wrote to the terminal so far.
+    pub fn output(&self) -> Vec<u8> {
+        self.full_screen().read.lock().unwrap().clone()
+    }
+
+    /// What the terminal shows now ([`Frame`]).
+    pub fn frame(&self) -> Frame {
+        Frame::parse(&self.output(), self.full_screen().size)
+    }
+
+    /// Waits (bounded) until what the child wrote to the terminal so far satisfies `until`, and
+    /// returns it. Panics with the frame (and the exit and stderr, once the child has exited) when
+    /// the child has exited and the reader has every byte (it ends when the pty does, after the
+    /// last one: this process holds no slave of a full-screen child's pty), or past `limit`.
+    pub fn wait_output(&mut self, limit: Duration, until: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+        let start = Instant::now();
+        loop {
+            // Looked at before the bytes: if the reader had ended, they are all of them.
+            let all_read = self
+                .full_screen()
+                .reader
+                .as_ref()
+                .is_none_or(JoinHandle::is_finished);
+            let output = self.output();
+            if until(&output) {
+                return output;
+            }
+            let exited = self.child.try_wait().ok().flatten();
+            if (exited.is_some() && all_read) || start.elapsed() >= limit {
+                let size = self.full_screen().size;
+                let exit = match exited {
+                    Some(status) => format!("exited ({status}), stderr {:?}", self.stderr()),
+                    None => format!("still running after {limit:?}"),
+                };
+                panic!(
+                    "not shown; {exit}; the terminal showed:\n{}",
+                    Frame::parse(&output, size)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// [`PtyChild::wait_output`] for a frame: until the terminal shows what `until` looks for.
+    /// A frame reaches the terminal in pieces (a pty read ends anywhere), so `until` should look
+    /// for the last thing the test reads in it; whether the frame holds a stray byte is decided on
+    /// the whole output ([`PtyChild::final_frame`]).
+    pub fn wait_frame(&mut self, limit: Duration, until: impl Fn(&Frame) -> bool) -> Frame {
+        let size = self.full_screen().size;
+        Frame::parse(
+            &self.wait_output(limit, |output| until(&Frame::parse(output, size))),
+            size,
+        )
+    }
+
+    /// Once the child has exited: its last frame ([`Frame::last`]), from everything it wrote
+    /// before it gave the terminal back. All of it was written before the exit; the wait is for
+    /// the reader to catch up, and fails once the reader has ended (the pty ended with the child)
+    /// if the terminal was never given back.
+    pub fn final_frame(&mut self, limit: Duration) -> Frame {
+        assert!(
+            matches!(self.child.try_wait(), Ok(Some(_))),
+            "the child still runs"
+        );
+        let size = self.full_screen().size;
+        let output = self.wait_output(limit, |output| Frame::last(output, size).is_some());
+        Frame::last(&output, size).unwrap()
+    }
+
+    /// Sets the window to `(columns, rows)`, as a human resizing the terminal does: the kernel
+    /// sends SIGWINCH to the child, its terminal's foreground process group.
+    pub fn resize(&mut self, (columns, rows): (u16, u16)) {
+        use std::os::fd::AsRawFd;
+        let window = libc::winsize {
+            ws_row: rows,
+            ws_col: columns,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: TIOCSWINSZ reads one winsize this frame owns, on an fd this test owns.
+        let set = unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &window) };
+        assert_eq!(set, 0, "TIOCSWINSZ: {}", std::io::Error::last_os_error());
+        let screen = self.screen.as_mut().expect("spawned full screen");
+        screen.size = (screen.size.0.max(columns), screen.size.1.max(rows));
+    }
+
+    /// Keys as typed at the terminal, no newline added (raw mode takes each byte as it comes).
+    pub fn send(&self, keys: &[u8]) {
+        (&self.master).write_all(keys).unwrap();
+    }
+
+    /// Waits (bounded) for the exit and returns its status and stderr; past `limit` the child is
+    /// killed and this panics with the last frame.
+    pub fn wait_exit(&mut self, limit: Duration) -> (std::process::ExitStatus, String) {
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                break status;
+            }
+            if start.elapsed() > limit {
+                let _ = self.child.kill();
+                panic!(
+                    "still running after {limit:?}; the terminal showed:\n{}",
+                    self.frame()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        (status, self.stderr())
+    }
+
+    /// What the child wrote on stderr; called once it has exited, which ends the pipe.
+    fn stderr(&mut self) -> String {
+        let reading = self.screen.as_mut().and_then(|s| s.stderr.take());
+        reading.map_or_else(String::new, |t| {
+            String::from_utf8_lossy(&t.join().unwrap()).into_owned()
+        })
+    }
+
+    /// The pty's local modes now (`c_lflag`: `ICANON`, `ECHO`, ...), as the child left them once
+    /// it has exited. Read through the master, which shares them on macOS and Linux: this process
+    /// keeps no slave of a full-screen child's pty, and on macOS the exit of the child, its
+    /// session's leader, revokes every open slave of its terminal (`ENOTTY` then).
+    pub fn local_modes(&self) -> libc::tcflag_t {
+        use std::os::fd::AsRawFd;
+        // SAFETY: tcgetattr fills a zeroed termios for an fd this test owns.
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(
+                libc::tcgetattr(self.master.as_raw_fd(), &mut t),
+                0,
+                "tcgetattr"
+            );
+            t.c_lflag
         }
     }
 
@@ -995,6 +1420,133 @@ impl Drop for PtyChild {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        if let Some(screen) = &mut self.screen {
+            screen.stop.store(true, Ordering::SeqCst);
+            if let Some(t) = screen.reader.take() {
+                let _ = t.join();
+            }
+        }
+    }
+}
+
+/// Reads `master` into `into` until `stop`, or until the pty is gone: `poll` first, so the read
+/// never blocks past a look at `stop`.
+fn read_all_along(
+    mut master: File,
+    into: Arc<Mutex<Vec<u8>>>,
+    stop: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    use std::os::fd::AsRawFd;
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while !stop.load(Ordering::SeqCst) {
+            let mut ready = libc::pollfd {
+                fd: master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: poll(2) on one pollfd this frame owns.
+            if unsafe { libc::poll(&mut ready, 1, 50) } < 1 {
+                continue;
+            }
+            match master.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) => into.lock().unwrap().extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    })
+}
+
+/// The sequence a full-screen program writes when it gives the terminal back (crossterm's
+/// `LeaveAlternateScreen`); `zwallet tui`'s guard writes it once, last.
+pub const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
+
+/// What a terminal shows after a full-screen program's output, as ratatui's crossterm backend
+/// writes it: `CSI row;col H` moves the cursor, `CSI 2J` and `CSI ?1049h` (the alternate screen)
+/// clear it, any other CSI (styles, the cursor's visibility, leaving the alternate screen) changes
+/// no cell; CR, LF (raw mode: no CR added) and BS move the cursor. Every other ESC and every
+/// other control character is kept in `stray`: none may come from a cell's content (03-tui.md
+/// §Display integrity rule 1). A sequence the bytes end inside (a lone ESC, or a CSI before its
+/// final byte) is `pending`, not stray: a read of a live terminal ends anywhere.
+pub struct Frame {
+    /// One string per row, every column (trailing spaces included).
+    pub rows: Vec<String>,
+    pub stray: Vec<String>,
+    /// The unfinished sequence the bytes end with, if any.
+    pub pending: String,
+}
+
+impl Frame {
+    pub fn parse(bytes: &[u8], (columns, rows): (u16, u16)) -> Self {
+        let blank = || vec![vec![' '; usize::from(columns)]; usize::from(rows)];
+        let (mut cells, mut stray, mut pending) = (blank(), Vec::new(), String::new());
+        let (mut x, mut y) = (0usize, 0usize);
+        let text = String::from_utf8_lossy(bytes);
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\u{1b}' if chars.peek() == Some(&'[') => {
+                    chars.next();
+                    let mut params = String::new();
+                    let end = loop {
+                        match chars.next() {
+                            Some(c) if ('\u{20}'..='\u{3f}').contains(&c) => params.push(c),
+                            other => break other,
+                        }
+                    };
+                    match (end, params.as_str()) {
+                        (None, _) => pending = format!("\u{1b}[{params}"),
+                        (Some('H'), at) => {
+                            let mut at = at.split(';').map(|n| n.parse().unwrap_or(1).max(1));
+                            y = at.next().unwrap_or(1) - 1;
+                            x = at.next().unwrap_or(1) - 1;
+                        }
+                        (Some('J'), "2") | (Some('h'), "?1049") => cells = blank(),
+                        (Some('@'..='~'), _) => {}
+                        _ => stray.push(format!("CSI {params:?} {end:?}")),
+                    }
+                }
+                '\u{1b}' if chars.peek().is_none() => pending.push(c),
+                '\r' => x = 0,
+                '\n' => y += 1,
+                '\u{8}' => x = x.saturating_sub(1),
+                c if c.is_control() => stray.push(format!("{c:?}")),
+                c => {
+                    if let Some(cell) = cells.get_mut(y).and_then(|r| r.get_mut(x)) {
+                        *cell = c;
+                    }
+                    x += 1;
+                }
+            }
+        }
+        Self {
+            rows: cells.into_iter().map(String::from_iter).collect(),
+            stray,
+            pending,
+        }
+    }
+
+    /// The last frame of a full-screen program, from its whole output: what the terminal showed
+    /// when the program gave it back (the bytes before [`LEAVE_ALTERNATE_SCREEN`]); `None` before
+    /// it has. Every draw is done by then, so the frame is finished, and its `stray` covers the
+    /// whole run.
+    pub fn last(bytes: &[u8], size: (u16, u16)) -> Option<Self> {
+        let end = bytes
+            .windows(LEAVE_ALTERNATE_SCREEN.len())
+            .position(|w| w == LEAVE_ALTERNATE_SCREEN)?;
+        Some(Self::parse(&bytes[..end], size))
+    }
+}
+
+impl std::fmt::Display for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for row in &self.rows {
+            writeln!(f, "{}", row.trim_end())?;
+        }
+        write!(f, "stray: {:?}, pending: {:?}", self.stray, self.pending)
     }
 }
 
