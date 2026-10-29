@@ -24,9 +24,7 @@ fn add(tui: &mut PtyChild, nickname: &str, address: &str, unlock: &str) {
     wait(tui, "add payee");
     tui.send(format!("{nickname}\r{address}\rbase\r{unlock}\r").as_bytes());
     wait(tui, "The password authorizes");
-    // Review the last page, then switch the input thread into password mode.
-    tui.send(b"\x1b[F\r");
-    wait(tui, "Wallet password");
+    common::open_whitelist_password(tui, WAIT);
     // Raw mode consumes CR as Enter; LF is not a submit key.
     tui.send(format!("{PW}\r").as_bytes());
     wait(tui, &format!("added {nickname}"));
@@ -99,16 +97,6 @@ fn compact(text: &str) -> String {
         .collect()
 }
 
-fn summary_position(frame: &common::Frame) -> Option<(usize, usize)> {
-    frame.rows.iter().find_map(|row| {
-        let (_, caption) = row.split_once("Summary rows ")?;
-        let (range, total) = caption.split_once(" of ")?;
-        let start = range.split_once('-')?.0.parse().ok()?;
-        let total = total.split_whitespace().next()?.parse().ok()?;
-        Some((start, total))
-    })
-}
-
 /// Visit every review page before opening the password reader. The plan must leave all three
 /// authenticated files and the current daemon status intact until the password is submitted.
 fn authorize(
@@ -118,10 +106,12 @@ fn authorize(
     expected: &[&str],
     outcome: &str,
 ) {
-    let mut frame = tui.wait_frame(WAIT, |frame| summary_position(frame).is_some());
+    let mut frame = tui.wait_frame(WAIT, |frame| {
+        common::whitelist_summary_position(frame).is_some()
+    });
     let mut pages = Vec::new();
     loop {
-        let (start, total) = summary_position(&frame).expect("review caption");
+        let (start, total) = common::whitelist_summary_position(&frame).expect("review caption");
         assert!(!frame.rows.join("\n").contains("Wallet password"));
         pages.push(compact(&frame.rows.join("\n")));
         if start - 1 + 10 >= total {
@@ -131,7 +121,7 @@ fn authorize(
         assert!(next > start, "review must make forward progress");
         tui.send(b"\r");
         frame = tui.wait_frame(WAIT, |frame| {
-            summary_position(frame).is_some_and(|(start, _)| start == next)
+            common::whitelist_summary_position(frame).is_some_and(|(start, _)| start == next)
         });
     }
     for text in expected.iter().copied().chain([
@@ -206,8 +196,7 @@ fn t11_whitelist_password_cancel_and_retry_do_not_echo_secret() {
     wait(&mut tui, "add payee");
     tui.send(b"bob\r0x3333333333333333333333333333333333333333\rbase\r\r");
     wait(&mut tui, "The password authorizes");
-    tui.send(b"\x1b[F\r");
-    wait(&mut tui, "Wallet password");
+    common::open_whitelist_password(&mut tui, WAIT);
     tui.send(b"cancelled-secret\x1b");
     wait(&mut tui, "not verified");
     assert_eq!(before, std::fs::read(home.wallet_json()).unwrap());

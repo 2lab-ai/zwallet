@@ -152,10 +152,16 @@ fn review(app: &mut App, summary: &str) {
     app.update(Msg::WhitelistPrepared(id, Ok(summary.into())));
     assert!(matches!(app.whitelist.stage, Stage::Review(_)));
 }
+/// Pages with Enter until every summary row has been on screen; that Enter opens the field. End
+/// no longer jumps there (it pages one screen at a time).
 fn enter_password(app: &mut App) {
-    key(app, Key::End);
-    key(app, Key::Enter);
-    assert!(matches!(app.password_state(), PasswordState::Input { .. }));
+    for _ in 0..64 {
+        key(app, Key::Enter);
+        if matches!(app.password_state(), PasswordState::Input { .. }) {
+            return;
+        }
+    }
+    panic!("Enter never opened the password field");
 }
 
 #[test]
@@ -299,11 +305,7 @@ fn t11_cancel_discards_plan_and_retry_never_retains_password_or_typeahead() {
 fn t10_outcome_keeps_the_global_lock_and_waits_before_quitting() {
     for failed in [false, true] {
         let mut app = new_app();
-        app.whitelist.stage = Stage::Applying(Review {
-            summary: "reviewed change".into(),
-            lines: lines("reviewed change"),
-            scroll: 0,
-        });
+        app.whitelist.stage = Stage::Applying(Review::new("reviewed change".into()));
         app.password = PasswordState::Checking;
         let result = if failed {
             Err(WalletError::validation("session start failed after edit"))
@@ -365,11 +367,8 @@ fn t10_review_lock_discards_the_plan_before_the_global_lock() {
 fn t10_apply_defers_lock_and_quit_until_optional_start_and_lock_finish() {
     for failed in [false, true] {
         let mut app = new_app();
-        app.whitelist.stage = Stage::Applying(Review {
-            summary: "after this change: start a 10m session".into(),
-            lines: lines("after this change: start a 10m session"),
-            scroll: 0,
-        });
+        app.whitelist.stage =
+            Stage::Applying(Review::new("after this change: start a 10m session".into()));
         app.password = PasswordState::Checking;
         for key_event in [
             Key::Char('L'),
@@ -433,11 +432,7 @@ fn t10_apply_defers_lock_and_quit_until_optional_start_and_lock_finish() {
 fn t10_apply_quit_waits_for_outcome_without_implicitly_requesting_lock() {
     for exit_key in [Key::Char('q'), Key::Interrupt] {
         let mut app = new_app();
-        app.whitelist.stage = Stage::Applying(Review {
-            summary: "reviewed change".into(),
-            lines: lines("reviewed change"),
-            scroll: 0,
-        });
+        app.whitelist.stage = Stage::Applying(Review::new("reviewed change".into()));
         app.password = PasswordState::Checking;
         key(&mut app, exit_key);
         assert!(app.quit_pending() && !app.quitting());

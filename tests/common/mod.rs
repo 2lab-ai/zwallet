@@ -1540,6 +1540,38 @@ pub const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
 /// other control character is kept in `stray`: none may come from a cell's content (03-tui.md
 /// §Display integrity rule 1). A sequence the bytes end inside (a lone ESC, or a CSI before its
 /// final byte) is `pending`, not stray: a read of a live terminal ends anywhere.
+/// The whitelist summary's caption, `Summary rows <start>-<end> of <total>`: (start, total).
+pub fn whitelist_summary_position(frame: &Frame) -> Option<(usize, usize)> {
+    frame.rows.iter().find_map(|row| {
+        let (_, caption) = row.split_once("Summary rows ")?;
+        let (range, total) = caption.split_once(" of ")?;
+        let start = range.split_once('-')?.0.parse().ok()?;
+        let total = total.split_whitespace().next()?.parse().ok()?;
+        Some((start, total))
+    })
+}
+
+/// Pages a whitelist summary with Enter until every row has been on screen (10 rows a page),
+/// then opens the password field. End no longer jumps to the last page.
+pub fn open_whitelist_password(tui: &mut PtyChild, limit: Duration) {
+    let mut frame = tui.wait_frame(limit, |frame| whitelist_summary_position(frame).is_some());
+    loop {
+        let (start, total) = whitelist_summary_position(&frame).expect("review caption");
+        if start - 1 + 10 >= total {
+            break;
+        }
+        let next = (start - 1 + 10).min(total.saturating_sub(10)) + 1;
+        tui.send(b"\r");
+        frame = tui.wait_frame(limit, |frame| {
+            whitelist_summary_position(frame).is_some_and(|(start, _)| start == next)
+        });
+    }
+    tui.send(b"\r");
+    tui.wait_frame(limit, |frame| {
+        frame.rows.join("\n").contains("Wallet password")
+    });
+}
+
 pub struct Frame {
     /// One string per row, every column (trailing spaces included).
     pub rows: Vec<String>,

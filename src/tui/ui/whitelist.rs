@@ -246,7 +246,10 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                     )
                     .draw(frame, line(foot, 0), placed);
                 Row::default()
-                    .text("Enter pages to the end, then asks for the password", HINT)
+                    .text(
+                        "Enter pages through every row, then asks for the password",
+                        HINT,
+                    )
                     .draw(frame, line(foot, 1), placed);
             } else {
                 password(frame, foot, app, placed);

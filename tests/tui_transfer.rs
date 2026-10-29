@@ -497,9 +497,8 @@ fn verified_list(home: &Home) -> Value {
 }
 fn authorize_whitelist_edit(tui: &mut PtyChild, outcome: &str) {
     wait(tui, "The password authorizes");
-    // The summary owns Enter until its last page; End makes that review step explicit.
-    tui.send(b"\x1b[F\r");
-    wait(tui, "Wallet password");
+    // The summary owns Enter until every row has been on screen.
+    common::open_whitelist_password(tui, WAIT);
     tui.send(format!("{PW}\r").as_bytes());
     wait(tui, outcome);
 }

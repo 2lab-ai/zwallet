@@ -98,7 +98,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   a message toggle. `a` adds a payee, `C` adds an EVM contract with selectors, `d` removes the
   selected entry, `f` sets the fee cap, `n`/`t`/`b` set native/token/calldata transaction limits,
   `m` toggles message signing and `R` resets the policy. Every edit shows its exact scrollable
-  summary before asking for the password, stops all zwallet daemons before writing, then
+  summary before asking for the password: Enter (and End) page it one screen at a time, and
+  Enter opens the password field only after every row has been on screen. It stops all zwallet
+  daemons before writing, then
   verifies the saved list locally. A blank duration leaves the wallet locked; an explicit
   duration requests a new session and its outcome is shown. `L` during saving locks after the
   edit completes; `q` waits for the edit and that lock. Zero-address adds are refused before

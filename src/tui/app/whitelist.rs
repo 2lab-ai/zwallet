@@ -230,6 +230,33 @@ pub struct Review {
     pub summary: String,
     pub lines: Vec<Outside>,
     pub scroll: usize,
+    /// How many leading rows have all been on screen. Enter opens the password only once this
+    /// covers every row.
+    seen: usize,
+}
+/// Rows the review moves by and counts as drawn; an 80x24 frame draws more (16).
+const PAGE: usize = 10;
+impl Review {
+    pub fn new(summary: String) -> Self {
+        let lines = lines(&summary);
+        Self {
+            seen: lines.len().min(PAGE),
+            lines,
+            summary,
+            scroll: 0,
+        }
+    }
+    /// Shows the page from `scroll`. The seen prefix grows only when that page starts inside it,
+    /// so rows a move jumped over are never counted.
+    fn show(&mut self, scroll: usize) {
+        self.scroll = scroll;
+        if scroll <= self.seen {
+            self.seen = self.seen.max((scroll + PAGE).min(self.lines.len()));
+        }
+    }
+    fn last_page(&self) -> usize {
+        self.lines.len().saturating_sub(PAGE)
+    }
 }
 pub struct Form {
     pub action: ActionId,
@@ -658,16 +685,16 @@ impl App {
                         }
                         return Some(vec![Effect::DiscardWhitelist(self.whitelist.request)]);
                     }
-                    Input::Up => review.scroll = review.scroll.saturating_sub(1),
+                    Input::Up => review.show(review.scroll.saturating_sub(1)),
                     Input::Down => {
-                        review.scroll =
-                            (review.scroll + 1).min(review.lines.len().saturating_sub(1))
+                        review.show((review.scroll + 1).min(review.lines.len().saturating_sub(1)))
                     }
-                    Input::Home => review.scroll = 0,
-                    Input::End => review.scroll = review.lines.len().saturating_sub(10),
-                    Input::Enter if review.scroll + 10 < review.lines.len() => {
-                        review.scroll =
-                            (review.scroll + 10).min(review.lines.len().saturating_sub(10))
+                    Input::Home => review.show(0),
+                    // End pages one screen at a time: a jump would skip rows never drawn.
+                    Input::End => review.show((review.scroll + PAGE).min(review.last_page())),
+                    // Enter first shows the first rows not yet on screen.
+                    Input::Enter if review.seen < review.lines.len() => {
+                        review.show(review.seen.min(review.last_page()))
                     }
                     Input::Enter => {
                         self.password_purpose = PasswordPurpose::WhitelistEdit;
@@ -773,13 +800,7 @@ impl App {
             {
                 self.password = PasswordState::Idle;
                 match result {
-                    Ok(summary) => {
-                        self.whitelist.stage = Stage::Review(Review {
-                            lines: lines(&summary),
-                            summary,
-                            scroll: 0,
-                        })
-                    }
+                    Ok(summary) => self.whitelist.stage = Stage::Review(Review::new(summary)),
                     Err(error) => {
                         self.whitelist.stage = Stage::Outcome {
                             lines: lines(&error.message),

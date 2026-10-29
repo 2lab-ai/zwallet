@@ -629,7 +629,10 @@ rule: `transfer_payees` is EVM-only and `tron_transfer_payees` lists Tron-only e
 T-addresses (§Address trust).
 
 The forms bound every field and validate before preparation. The exact prepared summary wraps
-and scrolls before the password is accepted. Removal and message toggles use only a locally
+and scrolls before the password is accepted, and the password field opens only after every
+summary row has been on screen once: Enter shows the first rows not yet shown, End pages one
+screen at a time (it no longer jumps to the last page, which skipped the rows between), and only
+an Enter with nothing left unseen opens the field (added 2026-10-30). Removal and message toggles use only a locally
 password-checked list. Every edit prepared while a checked list is held compares the plan's own
 fingerprint, taken when the plan read the files, with that list's; a difference refuses with
 `list changed; cancel and verify it again` (added 2026-10-30: the worker had checked the files,
@@ -1109,6 +1112,9 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 3. **The Tron payee picker never offers `*`** (review of #47, NB2). It already used
    `tron_transfer_payees` on this branch; `transfer_payees`, which counts `*` and shows 0x, now
    offers nothing outside EVM (§Address trust; T6b).
+4. **Every summary row is on screen before the password** (review of #47, NB3). End pages one
+   screen at a time instead of jumping to the last page; Enter opens the password only once
+   every row has been shown (§Whitelist edits).
 
 ## Changes on 2026-10-28, v2, review round 3
 
