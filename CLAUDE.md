@@ -1,6 +1,7 @@
 # zwallet — agent notes
 
-Spec: `.prd/01-spec.md` and `.prd/02-architecture.md`. Usage and custody model: `README.md`.
+Spec: `.prd/01-spec.md` and `.prd/02-architecture.md`. Start with `README.md`; command details: `docs/commands.md`; custody model: `docs/security.md`.
+Implementation status and planned work: `docs/features.md`.
 
 ## Gate (run before every commit; all must pass)
 
@@ -29,3 +30,11 @@ Live tests (public mainnet RPC, nothing broadcast): `cargo test -- --ignored`.
   the password-derived key), never in plaintext metadata.
 - **No password file, no password env var, no OS keychain, no network login.**
 - Chain-specific code lives under `src/chains/<family>/`; `src/core` stays chain-agnostic.
+
+## Documentation
+
+Write for the reader: keep the README focused on evaluation, installation and first use.
+Mark planned or incomplete behavior with a WIP badge, including design mockups; check the
+public CLI/TUI path before describing a feature as available. Keep `docs/features.md` in sync.
+
+Every commit must include `Co-authored-by: z <z@2lab.ai>`.

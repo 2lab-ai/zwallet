@@ -1,5 +1,9 @@
 # v0.2 TUI — units and order
 
+![WIP](https://img.shields.io/badge/status-WIP-yellow)
+
+TUI-1a and TUI-1b are merged; the remaining units describe future work. A unit listed here is not evidence that its UI is available. See [feature status](../../docs/features.md).
+
 Status: **planned**, 2026-10-27, revised after review rounds 1 and 2 the same day; TUI-1 split
 into three PRs on 2026-10-28 (§TUI-1 split); rewritten on 2026-10-28 (v2) for every CLI function
 ([`../03-tui.md`](../03-tui.md) §Coverage matrix, §Changes on 2026-10-28, v2), and after review
@@ -427,7 +431,7 @@ The moved text follows.
 - **The zero address (review round 1):** `Change::add` refuses an entry at the zero address, of
   either kind, before the password and before anything is stopped; the CLI's `add_change`
   (commands/whitelist.rs:152-176) becomes `Change::add`, so `zwallet whitelist add` refuses it
-  too, and the README's `whitelist add` paragraph (README.md:276-283) says so in this PR. Not at
+  too, and the README's `whitelist add` paragraph ([README.md:276-283](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L276-L283)) says so in this PR. Not at
   parse and not in `validate` (03-tui.md §Whitelist edits, step 0): a signed list that already
   holds such an entry keeps verifying, 5 whitelist flags it, the picker skips it, `d` removes it.
 - **Entry points added:** `wallet::whitelist_view`, `wallet::whitelist_plan`,
@@ -452,10 +456,10 @@ The moved text follows.
   - T11 (pty, the run of 03-tui.md §Tests: T2 → T6 → T7): no echo; the password is in no captured
     frame; Esc in the middle of the password, then a retry, works.
   - T23 (pty, `common::exclusive()`): `d` on `bob`, `f` base `0.001`, `R`: each shows its
-    summary above the password (the reset's cost as `whitelist reset` spells it, README.md:404-408);
+    summary above the password (the reset's cost as `whitelist reset` spells it, [README.md:404-408](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L404-L408));
     after each, `whitelist list --verify --password-stdin` agrees; locked afterwards.
   - T24 (pty): `a`, kind contract, `router`, ethereum, `0x414bf389`: the outcome has the CLI's
-    contract warning (README.md:281-282); `whitelist list --verify` shows the entry and its
+    contract warning ([README.md:281-282](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L281-L282)); `whitelist list --verify` shows the entry and its
     selector. A registry token's address as a contract: the CLI's refusal, nothing stopped.
   - T25 (pty): `m`: the summary shows the old and the new value; `whitelist list --verify` has
     `allowMessageSigning: true`.
@@ -547,7 +551,7 @@ The moved text follows.
   - T6c (mock node): a journal row whose hash has no receipt while `eth_getTransactionCount` at
     `latest` is past its nonce: the detail's status is `dropped/replaced`.
   - T26 (mock node): `/` and a fixture hash: the detail; a hash the node does not know: `not
-    found` with the CLI's hint (README.md:507-522); 63 hex digits cannot be entered.
+    found` with the CLI's hint ([README.md:507-522](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L507-L522)); 63 hex digits cannot be entered.
   - (`Msg` sequence): a `tx_state` result of `dropped/replaced` on the send-status screen renders
     `dropped/replaced` with the hash and the nonce (moved from the old TUI-5).
 - **Counter-examples:**
@@ -637,7 +641,7 @@ The moved text follows.
     (the `Effect`s are listed).
 - **Counter-examples:**
   - The node reports nonce N mined by another hash before confirm: confirm signs nothing (zero
-    `SignTx`) and shows the CLI's "already mined (nonce consumed)" message (README.md:594-602).
+    `SignTx`) and shows the CLI's "already mined (nonce consumed)" message ([README.md:594-602](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L594-L602)).
   - wallet.json's cached address is edited after the password check: the cancel still pays the
     pinned address; the pane stops with the mismatch error if a session read disagrees (TUI-2).
   - A journal line at nonce N whose `to` is 600 characters of ESC and `█`: `s` is not offered for

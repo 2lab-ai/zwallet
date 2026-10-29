@@ -1,5 +1,9 @@
 # zwallet — TUI screens (v2 mockups)
 
+![WIP](https://img.shields.io/badge/status-WIP-yellow)
+
+Design mockups, not screenshots of the current application. The shipped UI has the basic key list and status bar; the tabs and workflows shown here are planned. See [feature status](../docs/features.md).
+
 Status: **planned**, 2026-10-28, regenerated after review rounds 1 and 2 the same day. ASCII mockups for
 [`03-tui.md`](03-tui.md) §Screens and keys: one per screen at 80x24 (the smallest size the TUI
 draws), and the home screen at 120x40 too. They are generated with exact widths; every cell is
@@ -48,7 +52,7 @@ signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 
 ## 1 keys: `n` new key (popup)
 
-`create <name>` for a further key: the password derives it here (`verified: true`, README.md:103-110), an optional duration is `create --unlock`. The form says the new key becomes the active key, because `create` makes it so. T30.
+`create <name>` for a further key: the password derives it here (`verified: true`, [README.md:103-110](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L103-L110)), an optional duration is `create --unlock`. The form says the new key becomes the active key, because `create` makes it so. T30.
 
 ```text
 zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session

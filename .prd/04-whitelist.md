@@ -579,6 +579,9 @@ request):
 
 ## Not in v0.1 (stays planned)
 
+![WIP](https://img.shields.io/badge/status-WIP-yellow) These items remain unimplemented in the current code; see
+[feature status](../docs/features.md#planned-features).
+
 - Amount caps (a rolling 24 h native cap, per-token caps).
 - The `invoke` duplicate key on calldata, and the duplicate window as a policy setting (R4 N-3 and
   N-4).

@@ -1,5 +1,9 @@
 # zwallet — Tron (TRX and TRC20 USDT)
 
+![WIP](https://img.shields.io/badge/status-WIP-yellow)
+
+Design only: Tron is not implemented in the current CLI. TRX and TRC20 USDT commands below are planned behavior. See [feature status](../docs/features.md).
+
 Status: **planned**, 2026-10-28. Fixed request and scope: [`v0-3-tron/ssot.md`](v0-3-tron/ssot.md).
 Units: [`v0-3-tron/units.md`](v0-3-tron/units.md). Driver: [`v0-3-tron/loop.md`](v0-3-tron/loop.md).
 Every measurement below was taken on 2026-10-28 between 03:13Z and 03:31Z, read-only. Nothing
