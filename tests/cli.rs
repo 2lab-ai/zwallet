@@ -1052,7 +1052,7 @@ fn k5_binary_swapped_during_the_prompt_never_gets_the_password() {
     let home = Home::new();
     home.create("main", &[]);
     let exe = home.path().join("zwallet");
-    fs::copy(env!("CARGO_BIN_EXE_zwallet"), &exe).unwrap();
+    common::executable::copy_executable(env!("CARGO_BIN_EXE_zwallet"), &exe).unwrap();
     let captured = home.path().join("captured");
     let mut cmd = common::zwallet_at(&exe);
     cmd.env("ZWALLET_HOME", home.path())
@@ -3916,7 +3916,7 @@ fn s4_a_byte_copy_runs_the_same_code_so_it_may_verify_by_session() {
         .tempdir_in("/tmp")
         .unwrap();
     let copy = dir.path().join("zwallet");
-    fs::copy(env!("CARGO_BIN_EXE_zwallet"), &copy).unwrap();
+    common::executable::copy_executable(env!("CARGO_BIN_EXE_zwallet"), &copy).unwrap();
     unlock_from(&home, &copy);
     assert_eq!(home.daemon_pids().len(), 1, "one daemon");
     for args in SESSION_VIEWS {
@@ -3948,7 +3948,7 @@ fn s5_a_resigned_copy_is_other_code_so_it_is_not_verified() {
         .tempdir_in("/tmp")
         .unwrap();
     let copy = dir.path().join("zwallet");
-    fs::copy(env!("CARGO_BIN_EXE_zwallet"), &copy).unwrap();
+    common::executable::copy_executable(env!("CARGO_BIN_EXE_zwallet"), &copy).unwrap();
     // Re-sign with a different identifier: same bytes of code, a different code directory, so a
     // different cdhash. The kernel validates the running pages against it.
     let signed = std::process::Command::new("codesign")

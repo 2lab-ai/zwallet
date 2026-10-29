@@ -11,6 +11,7 @@
 
 #![allow(dead_code)]
 
+pub mod executable;
 pub mod tron;
 
 use serde_json::Value;
