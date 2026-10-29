@@ -1699,3 +1699,110 @@ async fn tui_uncertain_retry_disappears_after_a_mined_receipt() {
     );
     assert_eq!(f.signer.count(), 0);
 }
+
+/// A pending invoke of a registry token's `transfer` (value 0) whose journal row is rewritten
+/// to `token-transfer` with the same token and the decoded recipient and amount. The list allows
+/// the recipient's address but holds no contract entry for the token (none can). The journal must
+/// not choose the more permissive token-transfer rule: zero `SignTx`, in the library and on the
+/// screen. A cancel needs no entry and stays available.
+#[tokio::test]
+async fn journal_rewritten_to_token_transfer_cannot_authorize_a_pending_invoke() {
+    const USDC_ETH: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    let invoke_row = |rewritten: &chains::JournalRow| chains::JournalRow {
+        kind: "invoke",
+        to: USDC_ETH.into(),
+        amount_raw: Some(U256::ZERO),
+        token: None,
+        ..rewritten.clone()
+    };
+    // The library.
+    let f = Fixture::new(false);
+    let node = Node::new("ethereum");
+    let rewritten = original(&node, &f, 1, true, false);
+    assert_eq!(rewritten.kind, "token-transfer");
+    let journaled = recovered(&node, &f, &invoke_row(&rewritten)).await;
+    assert!(
+        replacement::review_replacement(
+            f.dir.path(),
+            &node.net,
+            &f.checked,
+            &journaled,
+            &rewritten.tx_hash,
+            Action::SpeedUp,
+            Options::default()
+        )
+        .await
+        .is_err(),
+        "the invoke as journaled needs a contract entry"
+    );
+    let refused =
+        match replacement::replaced_intent(&node.net, &rewritten.tx_hash, &key(&f), 7, &rewritten)
+            .await
+        {
+            Err(e) => Some(e),
+            Ok(original) => match replacement::review_replacement(
+                f.dir.path(),
+                &node.net,
+                &f.checked,
+                &original,
+                &rewritten.tx_hash,
+                Action::SpeedUp,
+                Options::default(),
+            )
+            .await
+            {
+                Err(e) => Some(e),
+                Ok(review) => {
+                    let typed = review.confirmation().to_string();
+                    replacement::send_replacement(review, &typed, None)
+                        .await
+                        .err()
+                }
+            },
+        };
+    assert_eq!(
+        f.signer.count(),
+        0,
+        "the rewritten journal row got a SignTx"
+    );
+    assert_eq!(node.sent.load(Ordering::SeqCst), 0);
+    assert!(refused.is_some());
+    // The screen: a restarted TUI, the rewritten row, `s`.
+    let f = Fixture::new(false);
+    let node = Node::new("ethereum");
+    let rewritten = original(&node, &f, 1, true, false);
+    write_row(&f, &node, &rewritten);
+    let mut app = tui_app(&f, &node);
+    let work = detail(
+        &mut app,
+        &f,
+        &node,
+        &rewritten.tx_hash,
+        zwallet::history::State::Pending,
+    );
+    drive_ui(&mut app, &f, work).await;
+    let work = press(&mut app, Key::Char('s'));
+    drive_ui(&mut app, &f, work).await;
+    assert_eq!(
+        app.replacement().stage,
+        zwallet::tui::app::replacement::Stage::Failed,
+        "{}",
+        frame(&app)
+    );
+    assert_eq!(f.signer.count(), 0, "the screen signed a rewritten row");
+    // A cancel is the same zero self-transfer for either kind, and stays available.
+    let f = Fixture::new(false);
+    let node = Node::new("ethereum");
+    let rewritten = original(&node, &f, 1, true, false);
+    let mut app = tui_app(&f, &node);
+    history_review(&mut app, &f, &node, &rewritten, 'x').await;
+    press(&mut app, Key::Enter);
+    type_text(&mut app, "cancel");
+    let work = press(&mut app, Key::Enter);
+    drive_ui(&mut app, &f, work).await;
+    assert_eq!(f.signer.count(), 1);
+    let actual = signed(&f);
+    assert_eq!(actual.nonce(), 7);
+    assert_eq!(actual.to().to_checksum(None), f.from);
+    assert!(actual.value().is_zero() && actual.input().is_empty());
+}
