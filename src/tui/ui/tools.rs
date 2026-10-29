@@ -284,14 +284,38 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 (review.max_gas_cost().to_string(), NORMAL),
                 ("Execution fee + estimated L1 fee in wei:".into(), HINT),
                 (review.max_total_fee().to_string(), NORMAL),
-                (
-                    format!(
-                        "pending override {} / duplicate override {}",
-                        state.options.allow_pending, state.options.allow_duplicate
-                    ),
-                    HINT,
-                ),
             ];
+            // The send guards' verdicts, as the transfer review shows them: what `p` and `d`
+            // would override, before the nickname is asked for.
+            let pending = review
+                .fields()
+                .get("pendingCount")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let repeats = review
+                .fields()
+                .get("duplicateSends")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len);
+            let verdict = |allowed: bool| if allowed { "OVERRIDE" } else { "blocked" };
+            values.push((
+                format!(
+                    "pending {pending} {} | repeats {repeats} {}",
+                    verdict(state.options.allow_pending),
+                    verdict(state.options.allow_duplicate)
+                ),
+                if pending > 0 || repeats > 0 {
+                    WARNING
+                } else {
+                    NORMAL
+                },
+            ));
+            if state.options.allow_pending || state.options.allow_duplicate {
+                values.push((
+                    "Override: a new send is a new payment and may pay twice.".into(),
+                    WARNING,
+                ));
+            }
             match review.verdict() {
                 Ok(()) => values.push(("Checked whitelist: allowed".into(), NORMAL)),
                 Err(error) => values.push((Outside::error(error).text().into(), ERROR)),

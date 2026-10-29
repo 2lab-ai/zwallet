@@ -907,7 +907,10 @@ a new nonce may pay twice even without `d`, since the repeat check uses only a
 On `6 tools`, `C` reads an ABI call, `i` invokes a checked contract using a function
 signature and arguments, and `d` uses raw calldata. Invokes require a listed selector
 and a password-checked key/list, show the decoded intent and fee review, and require
-the contract nickname before signing. Use `j`/`k` to scroll the complete calldata
+the contract nickname before signing. The review shows the pending and repeat guards'
+verdicts (`pending N blocked`, `repeats N blocked`) before that; `p` and `d` override them.
+As in the CLI, a repeat is the same contract, value and token within 10 minutes, whatever
+the calldata. Use `j`/`k` to scroll the complete calldata
 and exact quantities; Home returns to the review's beginning. Their status uses the same `w`, `s`, `x` and
 `R` controls and original-intent checks as transfers.
 

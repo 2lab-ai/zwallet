@@ -935,7 +935,11 @@ and one rule covers every one of them.
 **Invoke and sign-message (added 2026-10-28).** An invoke's review holds chainId, from, the
 contract (from the checked list), the calldata, the value and the nonce, and shows zwallet's own
 decode of the unsigned transaction (`tx::decode_unsigned`, chains/evm/tx.rs:378); confirm follows
-the same exact-intent rule. A message's review shows the whole message in rule 4's message block
+the same exact-intent rule. Like the transfer review it shows the send guards' verdicts before
+the nickname is asked for, `pending N blocked|OVERRIDE | repeats N blocked|OVERRIDE`, so `p` and
+`d` are chosen knowingly (added 2026-10-30, D3). The repeat key is the CLI `invoke`'s (chain,
+kind, contract, value, token; `send_summary`, wallet/send.rs): another calldata to the same
+contract with the same value is a repeat in both. A message's review shows the whole message in rule 4's message block
 and holds its bytes, the key and the chain, and the list's message-signing flag from the checked
 list; an edit drops the review; confirm sends exactly those bytes (`message_hex` of
 `Request::SignMessage`, commands.rs:1799-1803), and the signature is checked against the key's
@@ -1133,6 +1137,10 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
    `unknown` for every journal row; each shown one is now looked up in the background and says
    `checking` until then. The status column is 16 wide, so `dropped/replaced` reads in full
    (§History; T3).
+8. **The invoke review shows the guards' verdicts** (D3). The invoke and raw-invoke reviews said
+   only `pending override false / duplicate override false`; they now show `pending N` and
+   `repeats N`, blocked or overridden, before the nickname (§Status of a send, Invoke and
+   sign-message).
 
 ## Changes on 2026-10-28, v2, review round 3
 
