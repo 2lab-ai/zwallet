@@ -842,3 +842,108 @@ fn summary_review_and_outcome_pass_the_global_tab_keys() {
     key(&mut app, Key::Char(']'));
     assert_eq!(app.nav.tab, Tab::Tools);
 }
+
+/// Fix 11 (real-terminal acceptance): the list pane never wraps. One row per entry and one per
+/// fee cap, cut with `...` at the pane width; the selected entry shows its full fields.
+#[test]
+fn the_list_pane_never_wraps_and_the_selection_shows_full_fields() {
+    use crate::core::whitelist::{TransactionLimits, WHITELIST_FILE, WhitelistKey};
+    use alloy::primitives::U256;
+    let home = tempfile::Builder::new()
+        .prefix("zwt-wl-rows-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let mut list = Whitelist::empty(&crate::chains::WHITELIST_RULES);
+    list.generation = 8;
+    list.add(Entry::new_address(
+        "bob",
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        &["base", "arbitrum"],
+    ))
+    .unwrap();
+    list.add(Entry::new_contract(
+        "qa",
+        "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+        &["base"],
+        &["0x55241077"],
+    ))
+    .unwrap();
+    for chain in crate::chains::CHAINS {
+        list.policy
+            .set_max_fee_wei(chain.key, U256::from(1_000_000u64));
+    }
+    list.policy.transaction_limits.insert(
+        "base".into(),
+        TransactionLimits {
+            max_native_wei: Some("500000000000000000".into()),
+            max_calldata_bytes: Some(256),
+            max_token_base_units: [(
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
+                "1000000".to_string(),
+            )]
+            .into(),
+        },
+    );
+    let key = WhitelistKey::from_secret(&[7; 32]);
+    let signed = key.sign(&list);
+    std::fs::write(
+        home.path().join(WHITELIST_FILE),
+        signed.to_file_bytes().unwrap(),
+    )
+    .unwrap();
+    let checked =
+        crate::wallet::check_list(home.path(), &Ok(Some(key.anchor_for(&signed)))).unwrap();
+    let view = crate::wallet::whitelist::checked_view(home.path(), &checked).unwrap();
+    let mut app = new_app();
+    app.whitelist.request = 1;
+    app.whitelist.read_generation = Some(app.generation);
+    app.update(Msg::WhitelistRead(
+        1,
+        Ok(Read {
+            checked: Some(checked),
+            text: view.text,
+            reason: None,
+        }),
+    ));
+    let draw = |app: &App, width: u16, height: u16| -> Vec<String> {
+        let mut terminal =
+            Terminal::new(FilteredBackend::new(TestBackend::new(width, height))).unwrap();
+        terminal.draw(|f| drop(ui::draw(f, app))).unwrap();
+        assert_eq!(terminal.backend().replaced(), 0);
+        let b = terminal.backend().inner().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| b[(x, y)].symbol()).collect::<String>())
+            .collect()
+    };
+    for (width, height) in [(120, 40), (80, 24)] {
+        let rows = draw(&app, width, height);
+        let text = rows.join("\n");
+        let bob = rows
+            .iter()
+            .find(|r| r.contains("bob") && r.contains("address"))
+            .unwrap_or_else(|| panic!("{text}"));
+        if width == 120 {
+            assert!(bob.contains("base, arbitrum"), "{text}");
+        }
+        // A row never starts with the rest of the previous one.
+        for fragment in ["|ase", "|ia ", "|taBytes", "|x833589"] {
+            assert!(!text.contains(fragment), "{width}x{height} wraps:\n{text}");
+        }
+        // One fee cap per chain, each on its own row.
+        for chain in crate::chains::CHAINS {
+            let with: Vec<_> = rows
+                .iter()
+                .filter(|r| r.contains(&format!("fee cap {} ", chain.key)))
+                .collect();
+            assert_eq!(with.len(), 1, "{}:\n{text}", chain.key);
+        }
+    }
+    // The selected entry's full fields, whatever the width.
+    let text = draw(&app, 80, 24).join("\n");
+    assert!(text.contains("selected for d: bob"), "{text}");
+    assert!(text.contains("chains base, arbitrum"), "{text}");
+    assert!(
+        text.contains("address 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"),
+        "{text}"
+    );
+}
