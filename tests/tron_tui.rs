@@ -967,3 +967,42 @@ fn tron_menu_aliases_require_explicit_chain_selection() {
         assert_eq!(f.count(), 0);
     }
 }
+
+/// A checked list with a `*` EVM entry and a Tron entry: the Tron payee picker lists only the
+/// Tron entry, as its T-address, and the EVM payee function offers nothing on Tron (its entries
+/// are 0x bodies, and `*` covers EVM chains only).
+#[tokio::test]
+async fn tron_picker_lists_only_tron_entries_as_t_addresses_never_wildcards() {
+    const WILD: &str = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+    let mut f = Fixture::new(0);
+    let mut list = Whitelist::empty(&chains::WHITELIST_RULES);
+    list.generation = 2;
+    list.entries.push(Entry::new_address("wild", WILD, &["*"]));
+    list.entries
+        .push(Entry::new_address("alice", &body(TO), &["tron"]));
+    f.checked = write_list(f.dir.path(), list);
+    // The screen.
+    let n = Node::new();
+    let mut app = app(&f, &n);
+    let work = key(&mut app, Key::Char('3'));
+    drive(&mut app, &f, work).await;
+    let work = key(&mut app, Key::Enter);
+    drive(&mut app, &f, work).await;
+    assert_eq!(app.transfer().stage, Stage::Payees);
+    let view = screen(&app);
+    assert!(view.contains("alice") && view.contains(TO), "{view}");
+    assert!(!view.contains("wild") && !view.contains("0x"), "{view}");
+    let payees = &app.transfer().tron.payees;
+    assert_eq!(payees.len(), 1);
+    assert_eq!((payees[0].nickname(), payees[0].address()), ("alice", TO));
+    // The library: the EVM payee function, which counts `*`, offers nothing on Tron.
+    let tron_chain = chains::find("tron").unwrap();
+    let offered: Vec<_> = wallet::transfer_payees(&f.checked, tron_chain)
+        .into_iter()
+        .map(|p| format!("{} {}", p.nickname(), p.address()))
+        .collect();
+    assert!(
+        offered.is_empty(),
+        "the screen passed; the EVM payee list offers on Tron: {offered:?}"
+    );
+}
