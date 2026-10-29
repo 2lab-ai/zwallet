@@ -135,6 +135,12 @@ const IMPLEMENTED: &[ActionId] = &[
     ActionId::Startup,
     ActionId::SelectKey,
     ActionId::Version,
+    ActionId::Call,
+    ActionId::Invoke,
+    ActionId::RawInvoke,
+    ActionId::SignMessage,
+    ActionId::TokenBalance,
+    ActionId::InvokeOptions,
     ActionId::Transfer,
     ActionId::TokenTransfer,
     ActionId::DryRun,
@@ -574,8 +580,7 @@ impl App {
             return self.load_whitelist();
         }
         if self.nav.tab == Tab::Tools {
-            self.nav.lines = Pane::Ready(vec![Outside::detail("in a later version")]);
-            return Vec::new();
+            return self.show_tools();
         }
         let Some(key) = self.open_key.clone() else {
             self.nav.lines = Pane::Ready(vec![Outside::detail("Open a key with Enter on 1 keys.")]);
@@ -874,6 +879,13 @@ impl App {
                 return self.begin_create();
             }
             ActionId::Backup => return self.backup_hint(),
+            ActionId::Call => return self.start_tool(super::tools::Tool::Call),
+            ActionId::Invoke | ActionId::InvokeOptions => {
+                return self.start_tool(super::tools::Tool::Invoke);
+            }
+            ActionId::RawInvoke => return self.start_tool(super::tools::Tool::RawInvoke),
+            ActionId::SignMessage => return self.start_tool(super::tools::Tool::Message),
+            ActionId::TokenBalance => return self.start_tool(super::tools::Tool::Token),
             ActionId::List => self.nav.tab = Tab::Keys,
             ActionId::VerifyKeys => {
                 return self.begin_password(PasswordPurpose::Verify { all: true });

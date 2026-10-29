@@ -150,7 +150,7 @@ pub async fn balance_detail(
     let read = match net.chain.family {
         Family::Evm(_) => AssetRead {
             balance: match token {
-                Some(token) => Evm.token_balance(net, &owner, token).await?,
+                Some(token) => super::token_balance(net, &owner, token).await?,
                 None => Evm.native_balance(net, &owner).await?,
             },
             activated: None,

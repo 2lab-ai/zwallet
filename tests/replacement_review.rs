@@ -1,5 +1,6 @@
 //! Replacement proof/review/confirm boundary tests. Only an isolated mock signer and loopback RPC; no wallet,
 //! password, real daemon, or external network is used.
+mod common;
 use alloy::consensus::TxEnvelope;
 use alloy::eips::eip2718::Decodable2718;
 use alloy::primitives::{Address, Bytes, U128};
@@ -891,6 +892,11 @@ async fn drive_ui(app: &mut App, f: &Fixture, work: Vec<Effect>) -> Vec<Effect> 
     while let Some(effect) = queue.pop_front() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         match effect {
+            Effect::Tools(id) => {
+                let job = app.take_tool_job(id).expect("single use tool job");
+                assert!(app.take_tool_job(id).is_none());
+                job.run(id, f.dir.path(), &tx).await;
+            }
             Effect::Replacement(id) => {
                 let job = app
                     .take_replacement_job(id)
@@ -929,6 +935,330 @@ fn write_row(f: &Fixture, node: &Node, row: &chains::JournalRow) {
         format!("{value}\n"),
     )
     .unwrap();
+}
+
+// T34's integration proof uses real App forms/jobs and counts the entire wire path at
+// FakeDaemon.received. Its upstream is only the deterministic test signer above.
+fn invoke_fixture() -> (Fixture, common::FakeDaemon) {
+    let mut f = Fixture::new(false);
+    f.checked.list.entries = vec![Entry::new_contract(
+        "router",
+        OTHER,
+        &["ethereum"],
+        &["0x414bf389"],
+    )];
+    resign_invoke_list(&mut f);
+    let upstream = f.dir.path().join("signer.sock");
+    std::fs::rename(f.dir.path().join("d.sock"), &upstream).unwrap();
+    let capture = common::FakeDaemon::proxy(&f.dir.path().join("d.sock"), upstream);
+    (f, capture)
+}
+fn resign_invoke_list(f: &mut Fixture) {
+    f.checked.list.generation += 1;
+    let key = WhitelistKey::from_secret(&[7; 32]);
+    let signed = key.sign(&f.checked.list);
+    std::fs::write(
+        f.dir.path().join(WHITELIST_FILE),
+        signed.to_file_bytes().unwrap(),
+    )
+    .unwrap();
+    f.checked = wallet::check_list(f.dir.path(), &Ok(Some(key.anchor_for(&signed)))).unwrap();
+}
+fn captured(capture: &common::FakeDaemon) -> Vec<tx::DecodedUnsigned> {
+    capture
+        .received
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|bytes| {
+            let request: Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(request["op"], "sign_tx");
+            tx::decode_unsigned(&alloy::hex::decode(request["tx"].as_str().unwrap()).unwrap())
+                .unwrap()
+        })
+        .collect()
+}
+async fn invoke_from_tools(f: &Fixture, node: &Node, capture: &common::FakeDaemon) -> App {
+    use zwallet::tui::app::tools::Stage;
+    node.pending.store(7, Ordering::SeqCst);
+    let mut app = tui_app(f, node);
+    press(&mut app, Key::Char('6'));
+    let work = press(&mut app, Key::Char('i'));
+    drive_ui(&mut app, f, work).await;
+    assert_eq!(app.tools().stage, Stage::Contracts);
+    press(&mut app, Key::Enter);
+    type_text(
+        &mut app,
+        "exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))",
+    );
+    press(&mut app, Key::Enter);
+    type_text(&mut app, &format!("({OTHER},{OTHER},3000,{OTHER},1,2,3,0)"));
+    press(&mut app, Key::Enter);
+    // Replace the default zero, without a second authoritative input path.
+    press(&mut app, Key::Home);
+    press(&mut app, Key::Delete);
+    type_text(&mut app, "0.001");
+    let work = press(&mut app, Key::Enter);
+    drive_ui(&mut app, f, work).await;
+    assert_eq!(app.tools().stage, Stage::InvokeReview, "{}", frame(&app));
+    let reviewed = app.tools().invoke.as_ref().unwrap().intent().clone();
+    assert_eq!(&reviewed.input()[..4], &[0x41, 0x4b, 0xf3, 0x89]);
+    assert_eq!(reviewed.value(), U256::from(1_000_000_000_000_000u64));
+    assert!(captured(capture).is_empty());
+    press(&mut app, Key::Enter);
+    type_text(&mut app, "router");
+    let work = press(&mut app, Key::Enter);
+    assert!(press(&mut app, Key::Enter).is_empty(), "replayed submit");
+    drive_ui(&mut app, f, work).await;
+    assert_eq!(captured(capture), vec![reviewed]);
+    let status = app.transfer().status.as_ref().unwrap();
+    assert_eq!(
+        app.tools().retained[&status.hash].intent.decoded(),
+        &captured(capture)[0]
+    );
+    assert_eq!(
+        SendJournal::new(f.dir.path(), node.net.chain, &f.from)
+            .recent()
+            .unwrap()[0]
+            .kind,
+        "invoke"
+    );
+    node.pending.store(8, Ordering::SeqCst);
+    app
+}
+fn node_invoke(node: &Node, f: &Fixture, decoded: &tx::DecodedUnsigned, signer: u8) -> String {
+    let private: PrivateKeySigner = format!("{signer:064x}").parse().unwrap();
+    let signed = tx::sign_decoded(&private, decoded).unwrap();
+    let envelope = TxEnvelope::decode_2718(&mut signed.raw.as_ref()).unwrap();
+    let mut value = serde_json::to_value(envelope).unwrap();
+    let hash = format!("{:#x}", signed.hash);
+    value["hash"] = json!(hash);
+    value["from"] = json!(f.from);
+    value["blockNumber"] = Value::Null;
+    value["blockHash"] = Value::Null;
+    *node.original.lock().unwrap() = Some(value);
+    hash
+}
+async fn confirm_invoke_replacement(app: &mut App, f: &Fixture, nickname: &str) {
+    assert_eq!(
+        app.replacement().stage,
+        zwallet::tui::app::replacement::Stage::Review,
+        "{}",
+        frame(app)
+    );
+    press(app, Key::Enter);
+    type_text(app, nickname);
+    let work = press(app, Key::Enter);
+    assert!(press(app, Key::Enter).is_empty());
+    drive_ui(app, f, work).await;
+}
+fn assert_invoke_replacement(before: &tx::DecodedUnsigned, after: &tx::DecodedUnsigned) {
+    assert_eq!(after.nonce(), before.nonce());
+    assert_eq!(after.to(), before.to());
+    assert_eq!(after.value(), before.value());
+    assert_eq!(after.input(), before.input());
+    assert!(after.fees().max_price() >= before.fees().max_price() * 5 / 4);
+    match (before.fees(), after.fees()) {
+        (
+            tx::EvmFees::Eip1559 {
+                max_priority_fee_per_gas: old,
+                ..
+            },
+            tx::EvmFees::Eip1559 {
+                max_priority_fee_per_gas: new,
+                ..
+            },
+        ) => assert!(new >= old * U128::from(5) / U128::from(4)),
+        other => panic!("expected type-2 fees: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn t34_g_j_tools_progress_authorizes_only_same_nonce_invoke_or_zero_self_cancel() {
+    for action in ['s', 'x'] {
+        let (f, capture) = invoke_fixture();
+        let node = Node::new("ethereum");
+        let mut app = invoke_from_tools(&f, &node, &capture).await;
+        let original = captured(&capture)[0].clone();
+        // The node proves pending status, but no local journal can supply the intent.
+        // Only the opaque Tools review can authorize this same-session replacement.
+        let hash = node_invoke(&node, &f, &original, 1);
+        assert_eq!(app.transfer().status.as_ref().unwrap().hash, hash);
+        std::fs::remove_file(SendJournal::new(f.dir.path(), node.net.chain, &f.from).path())
+            .unwrap();
+        let work = press(&mut app, Key::Char(action));
+        drive_ui(&mut app, &f, work).await;
+        confirm_invoke_replacement(
+            &mut app,
+            &f,
+            if action == 'x' { "cancel" } else { "router" },
+        )
+        .await;
+        let requests = captured(&capture);
+        assert_eq!(
+            requests.len(),
+            2,
+            "one original plus exactly one replacement"
+        );
+        if action == 's' {
+            assert_invoke_replacement(&original, &requests[1]);
+        } else {
+            assert_eq!(requests[1].nonce(), original.nonce());
+            assert_eq!(requests[1].to().to_checksum(None), f.from);
+            assert!(requests[1].value().is_zero());
+            assert!(requests[1].input().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn t34_g_restarted_invoke_proves_node_bytes_and_retains_every_argument() {
+    let (f, capture) = invoke_fixture();
+    let node = Node::new("ethereum");
+    let first = invoke_from_tools(&f, &node, &capture).await;
+    let original = captured(&capture)[0].clone();
+    let hash = node_invoke(&node, &f, &original, 1);
+    assert_eq!(first.transfer().status.as_ref().unwrap().hash, hash);
+    let row = SendJournal::new(f.dir.path(), node.net.chain, &f.from)
+        .recent()
+        .unwrap()
+        .remove(0);
+    let mut restarted = tui_app(&f, &node);
+    history_review(&mut restarted, &f, &node, &row, 's').await;
+    confirm_invoke_replacement(&mut restarted, &f, "router").await;
+    let requests = captured(&capture);
+    assert_eq!(requests.len(), 2);
+    assert_invoke_replacement(&original, &requests[1]);
+}
+
+#[tokio::test]
+async fn t34_h_current_resigned_contract_or_selector_refuses_speedup_and_retry() {
+    for (remove_contract, action) in [(true, 's'), (false, 's'), (true, 'R'), (false, 'R')] {
+        let (mut f, capture) = invoke_fixture();
+        let node = Node::new("ethereum");
+        node.uncertain.store(action == 'R', Ordering::SeqCst);
+        let mut app = invoke_from_tools(&f, &node, &capture).await;
+        f.checked.list.entries = if remove_contract {
+            vec![]
+        } else {
+            vec![Entry::new_contract(
+                "router",
+                OTHER,
+                &["ethereum"],
+                &["0x12345678"],
+            )]
+        };
+        resign_invoke_list(&mut f);
+        app.update(Msg::Checked(Ok((
+            wallet::Opened {
+                keys: vec![key(&f)],
+                active: "main".into(),
+                warning: None,
+                anchor: Ok(None),
+                salted: true,
+            },
+            Ok(f.checked.clone()),
+        ))));
+        press(&mut app, Key::Char('3'));
+        let work = press(&mut app, Key::Char(action));
+        drive_ui(&mut app, &f, work).await;
+        assert_eq!(
+            app.replacement().stage,
+            zwallet::tui::app::replacement::Stage::Failed,
+            "{}",
+            frame(&app)
+        );
+        assert_eq!(
+            captured(&capture).len(),
+            1,
+            "policy refusal must add zero SignTx"
+        );
+    }
+}
+
+#[tokio::test]
+async fn t34_i_l_restart_refuses_rewritten_journal_forged_signer_and_changed_arguments() {
+    for attack in ["journal-to", "journal-value", "signer", "arguments"] {
+        let (f, capture) = invoke_fixture();
+        let node = Node::new("ethereum");
+        let _first = invoke_from_tools(&f, &node, &capture).await;
+        let original = captured(&capture)[0].clone();
+        let mut row = SendJournal::new(f.dir.path(), node.net.chain, &f.from)
+            .recent()
+            .unwrap()
+            .remove(0);
+        let hash = node_invoke(&node, &f, &original, if attack == "signer" { 2 } else { 1 });
+        row.tx_hash = hash.clone();
+        match attack {
+            "journal-to" => row.to = f.from.clone(),
+            "journal-value" => row.amount_raw = Some(U256::from(999)),
+            "arguments" => {
+                let mut fields = node.original.lock().unwrap();
+                let fields = fields.as_mut().unwrap();
+                let mut bytes = original.input().to_vec();
+                *bytes.last_mut().unwrap() ^= 1;
+                fields["input"] = json!(format!("0x{}", alloy::hex::encode(bytes)));
+            }
+            _ => {}
+        }
+        write_row(&f, &node, &row);
+        let mut restarted = tui_app(&f, &node);
+        let work = detail(
+            &mut restarted,
+            &f,
+            &node,
+            &hash,
+            zwallet::history::State::Pending,
+        );
+        drive_ui(&mut restarted, &f, work).await;
+        assert!(
+            !restarted.replacement_available().0,
+            "{attack}: {}",
+            frame(&restarted)
+        );
+        for key in ['s', 'x'] {
+            assert!(press(&mut restarted, Key::Char(key)).is_empty());
+        }
+        assert_eq!(
+            captured(&capture).len(),
+            1,
+            "{attack}: zero additional SignTx"
+        );
+    }
+}
+
+#[tokio::test]
+async fn t34_k_uncertain_tools_invoke_retries_retained_intent_but_restart_cannot() {
+    let (f, capture) = invoke_fixture();
+    let node = Node::new("ethereum");
+    node.uncertain.store(true, Ordering::SeqCst);
+    let mut app = invoke_from_tools(&f, &node, &capture).await;
+    let original = captured(&capture)[0].clone();
+    let hash = app.transfer().status.as_ref().unwrap().hash.clone();
+    assert!(app.tools().retained[&hash].uncertain);
+    assert!(app.replacement_available().1);
+    // The missing local row cannot create or change retry authority.
+    std::fs::remove_file(SendJournal::new(f.dir.path(), node.net.chain, &f.from).path()).unwrap();
+    let mut restarted = tui_app(&f, &node);
+    let work = detail(
+        &mut restarted,
+        &f,
+        &node,
+        &hash,
+        zwallet::history::State::NotFound,
+    );
+    drive_ui(&mut restarted, &f, work).await;
+    assert!(!restarted.replacement_available().1);
+    assert!(frame(&restarted).contains("pay twice"));
+    assert!(press(&mut restarted, Key::Char('R')).is_empty());
+    assert_eq!(captured(&capture).len(), 1);
+    let work = press(&mut app, Key::Char('R'));
+    drive_ui(&mut app, &f, work).await;
+    node.uncertain.store(false, Ordering::SeqCst);
+    confirm_invoke_replacement(&mut app, &f, "router").await;
+    let requests = captured(&capture);
+    assert_eq!(requests.len(), 2);
+    assert_invoke_replacement(&original, &requests[1]);
 }
 fn detail(
     app: &mut App,

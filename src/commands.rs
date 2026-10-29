@@ -1,7 +1,7 @@
 //! Command handlers. Everything here runs in the one-shot CLI process; the only key access is
 //! through the daemon socket (or, for `create`/`backup`, a password typed by the human).
 
-use crate::chains::evm::{self, Evm, abi, rpc as evm_rpc};
+use crate::chains::evm::{self, Evm, rpc as evm_rpc};
 use crate::chains::tron;
 use crate::chains::{
     self, CHAINS, Chain, ChainFamily, Family, Net, PRIMARY_CHAIN, PreparedTx, TransferRequest,
@@ -1282,9 +1282,13 @@ async fn signing_key(home: &Path, key: &KeyArg, chain: &Chain) -> Result<(String
 async fn call(home: &Path, a: CallArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
     chains::require_contract_calls(chain)?;
-    let to = evm::parse_address(&a.to)?;
-    let func = abi::parse_function(&a.sig)?;
-    let data = abi::encode_call(&func, &a.args)?;
+    let mut input = wallet::CallInput {
+        from: None,
+        to: a.to,
+        sig: a.sig,
+        args: a.args,
+    };
+    input.validate()?;
     // eth_call from the wallet's address when there is one; reads work without a wallet too.
     let from = match store::read_wallet_file(home) {
         Ok(file) => {
@@ -1295,37 +1299,10 @@ async fn call(home: &Path, a: CallArgs) -> Result<Out> {
         Err(e) => return Err(e),
     };
     let net = net(chain, a.rpc.as_deref());
-    let p = evm_rpc::connect(&net).await?;
-    let raw = evm_rpc::eth_call(&p, from, to, data).await?;
-    let result = if func.outputs.is_empty() {
-        Value::Null
-    } else {
-        Value::Array(abi::decode_output(&func, &raw)?)
-    };
-    let sig = if func.outputs.is_empty() {
-        func.signature()
-    } else {
-        func.signature_with_outputs()
-    };
-    let out = json!({
-        "chain": chain.key,
-        "from": from.map(|f| f.to_checksum(None)),
-        "to": to.to_checksum(None),
-        "sig": sig,
-        "args": a.args,
-        "result": result,
-        "raw": format!("0x{}", hex::encode(&raw)),
-    });
-    // A decoded `string` is data the caller asked for: `--json` keeps it exactly as the contract
-    // returned it; `render_human` makes the `result` and every other nested value inert and
-    // bounded, since a contract chose that text. The human text also cuts `raw` (the returned
-    // bytes as hex, whatever their length) to a prose budget; `--json` keeps it whole.
-    let mut shown = out.clone();
-    shown["raw"] = json!(crate::core::text::ascii_inert(
-        out["raw"].as_str().unwrap_or_default(),
-        crate::core::text::PROSE_MAX
-    ));
-    Ok(Out::with_text(out, render_human(&shown)))
+    input.from = from.map(|f| f.to_checksum(None));
+    let result = wallet::call(&net, &input).await?;
+    let text = result.cli_text();
+    Ok(Out::with_text(result.fields, text))
 }
 
 async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
@@ -1334,17 +1311,18 @@ async fn invoke(home: &Path, a: InvokeArgs) -> Result<Out> {
     let (to, nickname) = whitelist::recipient(home, &a.to)?;
     let to = evm::parse_address(&to)?;
     let (input, sig) = match (&a.sig, &a.data) {
-        (Some(sig), None) => {
-            let func = abi::parse_function(sig)?;
-            (abi::encode_call(&func, &a.args)?, Some(func.signature()))
+        (Some(sig), None) => wallet::InvokeData::Signature {
+            sig: sig.clone(),
+            args: a.args.clone(),
         }
+        .encode()?,
         (None, Some(data)) => {
             if !a.args.is_empty() {
                 return Err(WalletError::validation(
                     "positional arguments need --sig; --data is the complete calldata",
                 ));
             }
-            (abi::parse_calldata(data)?, None)
+            wallet::InvokeData::Raw(data.clone()).encode()?
         }
         _ => {
             return Err(WalletError::validation(
@@ -1611,28 +1589,10 @@ async fn sign_message(home: &Path, a: SignMessageArgs) -> Result<Out> {
     let file = store::read_wallet_file(home)?;
     let key = file.key(a.key.key.as_deref())?;
     let expected = key_address(home, key, chain).await?;
-    let signed = protocol::send_unlocked(
-        home,
-        &Request::SignMessage {
-            chain: chain.key.into(),
-            index: key.index,
-            message_hex: hex::encode(a.message.as_bytes()),
-        },
-        SIGN_TIMEOUT,
-    )
-    .await?;
-    match &chain.family {
-        Family::Evm(_) => Evm.verify_message(a.message.as_bytes(), &signed, &expected)?,
-        Family::Tron(_) => return Err(unsupported(chain, "message signing")),
-    }
-    Ok(Out::json(json!({
-        "chain": chain.key,
-        "key": key.name,
-        "address": expected,
-        "message": a.message,
-        "signature": signed["signature"],
-        "digest": signed["digest"],
-    })))
+    Ok(Out::json(
+        wallet::tools::sign_message_bytes(home, chain, key.index, &key.name, &expected, &a.message)
+            .await?,
+    ))
 }
 
 async fn status(home: &Path, no_qr: bool) -> Result<Out> {

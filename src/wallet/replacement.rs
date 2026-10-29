@@ -67,6 +67,18 @@ impl OriginalIntent {
         })
     }
 
+    /// Only the invoke review can construct this retained provenance-bearing value.
+    pub fn from_invoke(review: &super::tools::RetainedInvoke) -> Result<Self> {
+        Ok(Self {
+            chain: review.chain(),
+            key_name: review.key_name().to_string(),
+            index: review.index(),
+            from: evm::parse_address(review.from())?,
+            decoded: review.decoded().clone(),
+            kind: Kind::Invoke,
+            node_hash: None,
+        })
+    }
     pub fn chain(&self) -> &'static Chain {
         self.chain
     }
