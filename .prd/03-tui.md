@@ -894,7 +894,14 @@ and one rule covers every one of them.
   review runs; the contract's nickname is typed at confirm. A cancel, of a transfer or an invoke,
   is 0 of the chain's coin to the pinned own address, needs no entry, and takes `cancel`. Where
   the checked list no longer allows a speed-up or a retry, its review refuses and nothing is
-  signed.
+  signed. The kind comes from (a) the session's review or (b) the bytes of the node's verified
+  transaction, never from the journal row, which must only agree with them (added 2026-10-30):
+  a row rewritten to another kind is refused, never judged by the rule it names. Under (b), a
+  registry token's `transfer` with no value is the same bytes as an invoke of that token, so its
+  speed-up is refused: the stricter rule, the invoke's, cannot be met, because a registry token is
+  never a contract entry (`Whitelist::validate`). Only `x` is offered for it; the review says so
+  and names the CLI's `transfer --token` with `--nonce` and `--replace`, where the human states
+  the intent. Under (a) it keeps its review's kind (T27 (i)).
 - **Review and confirm as any send.** The review holds nonce N and the replaced hash with the
   intent; confirm re-prepares with them and signs only on the exact intent with a fee at most the
   reviewed one. The checked list's fee cap applies to the bumped fee and to a cancel's 0-value
@@ -1049,7 +1056,7 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T24 | `a`, kind contract, `router`, ethereum, `0x414bf389` | the outcome has `warning: a listed contract may forward value or act on its arguments`; `whitelist list --verify` shows the contract entry with its selector |
 | T25 | `m` (off → on) | the summary shows the old and the new value (off, on); `whitelist list --verify` has `allowMessageSigning: true` |
 | T26 | 2 wallet `/`, a hash on the mock; a hash the node does not know | the transaction screen (T4's fields); `not found` with the CLI's hint; a 63-digit hash cannot be entered (the field's alphabet and length) |
-| T27 | (a) this session's own send pending at nonce N, `s`, the payee's nickname typed; (b) the same from a history row after a restart, the node's pending transaction equal to the journal row; (c) the journal row rewritten (the amount raised, or `to` another listed payee), the node's transaction unchanged; (d) no password check in this session; (e) the bumped fee over the checked list's cap; (f) the fee rising past the reviewed maximum between review and confirm; (g) after a restart, the mock's pending transaction for the hash has `from` the pinned address but a signature that recovers to another key; (h) its fields do not hash to the replaced hash | (a), (b): one `SignTx` with nonce N and the same `to`, `value` and `input` as the review's (a) or the node's (b) transaction, fees at least 1.25x the replaced transaction's (`--bump`, [README.md:615-617](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L615-L617)); the journal line; the status follows the new hash. (c): `s` and `x` are not offered; the screen says the journal and the node disagree. (d): `s` shows `needs: V`. (e), (f): zero `SignTx`. Every `SignTx` is counted at `FakeDaemon.received` (tests/common/mod.rs:586-587). (g), (h): `s` and `x` are not offered; zero `SignTx` |
+| T27 | (a) this session's own send pending at nonce N, `s`, the payee's nickname typed; (b) the same from a history row after a restart, the node's pending transaction equal to the journal row; (c) the journal row rewritten (the amount raised, or `to` another listed payee), the node's transaction unchanged; (d) no password check in this session; (e) the bumped fee over the checked list's cap; (f) the fee rising past the reviewed maximum between review and confirm; (g) after a restart, the mock's pending transaction for the hash has `from` the pinned address but a signature that recovers to another key; (h) its fields do not hash to the replaced hash | (a), (b): one `SignTx` with nonce N and the same `to`, `value` and `input` as the review's (a) or the node's (b) transaction, fees at least 1.25x the replaced transaction's (`--bump`, [README.md:615-617](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L615-L617)); the journal line; the status follows the new hash. (c): `s` and `x` are not offered; the screen says the journal and the node disagree. (d): `s` shows `needs: V`. (e), (f): zero `SignTx`. Every `SignTx` is counted at `FakeDaemon.received` (tests/common/mod.rs:586-587). (g), (h): `s` and `x` are not offered; zero `SignTx`. (i) after a restart, the node's pending transaction is a registry token's `transfer` with no value and its journal row says `token-transfer` (also when rewritten from `invoke`), under a list with the recipient's address entry: `s` refuses at its review, zero `SignTx`; `x` signs T28's self-transfer; in the session that sent it, `s` signs once with the review's bytes |
 | T28 | the same send, `x`, type `cancel`; again with no password check in this session; with the cancel's fee over the checked list's cap; with the fee rising past the reviewed maximum at confirm | one `SignTx`: nonce N, `to` the key's own pinned address, `value` 0, no calldata, and the review says the cancel races the original and may lose; without the check `x` shows `needs: V`; over the cap or past the maximum: zero `SignTx` (counted as in T27) |
 | T29 | (a) in this session, the mock times out `eth_sendRawTransaction` after accepting it, then `R` and the nickname; (b) the journal row rewritten (amount raised, or `to` another listed payee) before `R` in the same session; (c) a restart, the node not knowing the hash, then again with the journal row aged past 10 minutes and with it deleted; (d) a restart, the node knowing the hash and matching the journal | (a): `BROADCAST_UNCERTAIN` and `R`; one `SignTx` at nonce N with the review's `to`, `value` and `input` and `--replace` the first hash. (b): the same, the review's intent, not the journal's. (c): `R` is not offered; the screen shows the warning of §Status of a send (Retry after `BROADCAST_UNCERTAIN`) that a new send can pay twice even without `d`, also with the journal row older than 10 minutes and with the row deleted; zero `SignTx`. (d): `R` is not offered, `s` and `x` are (T27 (b)). No action on that screen reaches a send without a nonce. Counted at `FakeDaemon.received` (tests/common/mod.rs:586-587) |
 | T30 | 1 keys `n`, `trading`, the password; again with `10m` | `zwallet list --json` has `trading` active and verified; with `10m`, unlocked until about now+10m |
@@ -1080,6 +1087,14 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 - At least one counter-example per unit ([`v0-2-tui/units.md`](v0-2-tui/units.md)): an outside
   string with a control character or a QR glyph, a 600-character name, a forged explorer row, a
   rewritten whitelist.json, a forged session view, a password in a frame.
+
+## Changes on 2026-10-30, integration fix round (PR #51)
+
+1. **The journal never picks a replacement's kind** (review of #46). The node-recovered original's
+   kind comes from its bytes; the journal row must agree or the action is refused. A registry
+   token's `transfer` recovered from the node is refused for speed-up (an invoke has the same
+   bytes and the invoke's rule cannot be met); `x` stays (§Status of a send, Replacements, judged
+   by kind; T27 (i)).
 
 ## Changes on 2026-10-28, v2, review round 3
 

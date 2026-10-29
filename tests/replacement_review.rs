@@ -126,6 +126,16 @@ impl Node {
                                 }
                                 "eth_gasPrice" => hex(base + GWEI / 10),
                                 "eth_estimateGas" => json!("0x5208"),
+                                // decimals() answers the registry's USDC units; anything else
+                                // reads the L1 fee (or a balance) from `l1`.
+                                "eth_call"
+                                    if args[0]["data"]
+                                        .as_str()
+                                        .or(args[0]["input"].as_str())
+                                        .is_some_and(|d| d.starts_with("0x313ce567")) =>
+                                {
+                                    json!(format!("0x{:064x}", 6))
+                                }
                                 "eth_call" => json!(format!("0x{:064x}", l.load(Ordering::SeqCst))),
                                 "eth_sendRawTransaction" => {
                                     n.fetch_add(1, Ordering::SeqCst);
@@ -445,10 +455,13 @@ fn signed(f: &Fixture) -> tx::DecodedUnsigned {
 
 #[tokio::test]
 async fn t27_restart_speedup_proves_original_and_signs_once_at_same_nonce() {
-    for token in [false, true] {
+    // A registry token's transfer recovered from the node is also an invoke's bytes: its restart
+    // speed-up is refused and only a cancel is offered
+    // (journal_rewritten_to_token_transfer_cannot_authorize_a_pending_invoke).
+    {
         let f = Fixture::new(false);
         let node = Node::new("ethereum");
-        let row = original(&node, &f, 1, token, false);
+        let row = original(&node, &f, 1, false, false);
         let original = recovered(&node, &f, &row).await;
         let review = review(&node, &f, &original, &row.tx_hash, Action::SpeedUp).await;
         assert_eq!(f.signer.count(), 0);
@@ -1790,6 +1803,7 @@ async fn journal_rewritten_to_token_transfer_cannot_authorize_a_pending_invoke()
         frame(&app)
     );
     assert_eq!(f.signer.count(), 0, "the screen signed a rewritten row");
+    assert!(frame(&app).contains("same bytes"), "{}", frame(&app));
     // A cancel is the same zero self-transfer for either kind, and stays available.
     let f = Fixture::new(false);
     let node = Node::new("ethereum");
@@ -1805,4 +1819,38 @@ async fn journal_rewritten_to_token_transfer_cannot_authorize_a_pending_invoke()
     assert_eq!(actual.nonce(), 7);
     assert_eq!(actual.to().to_checksum(None), f.from);
     assert!(actual.value().is_zero() && actual.input().is_empty());
+}
+
+/// This session's own token-transfer review keeps its category: its speed-up signs once with the
+/// reviewed bytes, whatever the journal row says.
+#[tokio::test]
+async fn t27_session_token_speedup_keeps_the_reviewed_category() {
+    let f = Fixture::new(false);
+    let node = Node::new("ethereum");
+    node.pending.store(7, Ordering::SeqCst);
+    let mut input = f.input(&node);
+    input.token = Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".into());
+    let reviewed = wallet::review_transfer(f.dir.path(), &node.net, &f.checked, input)
+        .await
+        .unwrap();
+    assert!(matches!(
+        reviewed.intent().action(),
+        tx::Action::TransferCall { .. }
+    ));
+    let retained = OriginalIntent::from_transfer(&reviewed.retained_intent()).unwrap();
+    assert_eq!(retained.kind(), "token-transfer");
+    let hash = node_invoke(&node, &f, reviewed.intent(), 1);
+    node.pending.store(8, Ordering::SeqCst);
+    let r = review(&node, &f, &retained, &hash, Action::SpeedUp).await;
+    assert!(matches!(
+        replacement::send_replacement(r, "alice", None)
+            .await
+            .unwrap(),
+        SendReplacementOutcome::Sent(_)
+    ));
+    assert_eq!(f.signer.count(), 1);
+    let actual = signed(&f);
+    assert_eq!(actual.nonce(), reviewed.intent().nonce());
+    assert_eq!(actual.to(), reviewed.intent().to());
+    assert_eq!(actual.input(), reviewed.intent().input());
 }

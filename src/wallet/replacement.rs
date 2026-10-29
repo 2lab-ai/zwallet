@@ -1,4 +1,6 @@
-//! Fixed-nonce replacements. A journal claim alone can never construct an original intent.
+//! Fixed-nonce replacements. A journal claim alone can never construct an original intent, and
+//! never chooses its policy category: that comes from this session's review or from the bytes of
+//! the verified pending transaction.
 use super::send::{RetainedTransfer, SendOptions, SendOutput, send_prepared};
 use super::{CheckedList, KeyRow};
 use crate::chains::evm::{self, Evm, policy, rpc, tx};
@@ -14,12 +16,21 @@ use std::path::{Path, PathBuf};
 pub const CANCEL_RACE: &str = "a cancel replaces nonce N only if it is mined first; if the original is mined first, the payment stands and the cancel fails";
 pub const RETRY_WARNING: &str = "the node does not know this hash; that is no proof the send failed. A new send is a new payment at a new nonce: it can pay twice, also without d (the repeat check looks back 10 minutes, in a journal any process of this user can edit). Look the hash up first.";
 const DISAGREE: &str = "the journal and the node disagree about the original transaction; look it up with zwallet tx; nothing was signed";
+const TOKEN_OR_INVOKE: &str = "a token transfer and an invoke of that token have the same bytes, and only the review of the session that sent it can tell them apart: speed-up and retry are refused here, cancel is offered; the CLI's transfer --token with --nonce and --replace states the intent; nothing was signed";
 
+/// The policy category a replacement is judged by (`.prd/03-tui.md` §Replacements, judged by
+/// kind): a transfer's and a token transfer's payee needs an address entry, an invoke's contract
+/// a contract entry listing its selector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Transfer,
     Token,
     Invoke,
+    /// A registry token's `transfer` with no value, recovered from the node. A token transfer and
+    /// an invoke of that token sign the same bytes; only this session's review knows which one it
+    /// was, and the journal is never trusted to say. The stricter rule, the invoke's, cannot be
+    /// met (no list holds a contract entry at a registry token), so only a cancel is offered.
+    TokenOrInvoke,
 }
 impl Kind {
     fn label(self) -> &'static str {
@@ -27,6 +38,22 @@ impl Kind {
             Self::Transfer => "transfer",
             Self::Token => "token-transfer",
             Self::Invoke => "invoke",
+            Self::TokenOrInvoke => "token-transfer-or-invoke",
+        }
+    }
+
+    /// The category the authenticated bytes alone allow.
+    fn of_bytes(net: &Net, decoded: &tx::DecodedUnsigned) -> Self {
+        match decoded.action() {
+            tx::Action::NativeTransfer { .. } => Self::Transfer,
+            tx::Action::TransferCall { token, .. }
+                if decoded.value().is_zero()
+                    && evm::config(net.chain)
+                        .is_ok_and(|c| evm::registry::lookup(c.chain_id, token).is_some()) =>
+            {
+                Self::TokenOrInvoke
+            }
+            _ => Self::Invoke,
         }
     }
 }
@@ -129,6 +156,9 @@ fn evm_chain(net: &Net) -> Result<()> {
     Ok(())
 }
 
+/// The category is the bytes' ([`Kind::of_bytes`]). The journal row, which any process of this
+/// user can write, must agree with them in its own shape or the replacement is refused; it never
+/// chooses the category, so rewriting it can only refuse, never allow more.
 fn matches_journal(
     net: &Net,
     hash: B256,
@@ -137,38 +167,31 @@ fn matches_journal(
     row: &JournalRow,
 ) -> Result<Kind> {
     let addr = |s: &str| evm::parse_address(s).ok();
+    let kind = Kind::of_bytes(net, decoded);
     let common = row.chain == net.chain.key
         && row.tx_hash.parse::<B256>().ok() == Some(hash)
         && addr(&row.from) == Some(from)
         && Into::<Option<u64>>::into(row.nonce) == Some(decoded.nonce());
-    let kind = match (row.kind, decoded.action()) {
-        ("transfer", tx::Action::NativeTransfer { to, value })
-            if row.token.is_none()
-                && addr(&row.to) == Some(*to)
-                && row.amount_raw == Some(*value) =>
-        {
-            Kind::Transfer
+    let agrees = match (row.kind, decoded.action()) {
+        ("transfer", tx::Action::NativeTransfer { to, value }) => {
+            row.token.is_none() && addr(&row.to) == Some(*to) && row.amount_raw == Some(*value)
         }
-        ("token-transfer", tx::Action::TransferCall { token, to, amount })
-            if decoded.value().is_zero()
+        ("token-transfer", tx::Action::TransferCall { token, to, amount }) => {
+            kind == Kind::TokenOrInvoke
                 && row.token.as_deref().and_then(addr) == Some(*token)
                 && addr(&row.to) == Some(*to)
                 && row.amount_raw == Some(*amount)
-                && evm::config(net.chain)
-                    .is_ok_and(|c| evm::registry::lookup(c.chain_id, token).is_some()) =>
-        {
-            Kind::Token
         }
-        ("invoke", _)
-            if row.token.is_none()
+        // zwallet's invokes always carry a listed selector, never empty calldata.
+        ("invoke", action) => {
+            !matches!(action, tx::Action::NativeTransfer { .. })
+                && row.token.is_none()
                 && addr(&row.to) == Some(decoded.to())
-                && row.amount_raw == Some(decoded.value()) =>
-        {
-            Kind::Invoke
+                && row.amount_raw == Some(decoded.value())
         }
-        _ => return Err(WalletError::validation(DISAGREE)),
+        _ => false,
     };
-    if !common {
+    if !common || !agrees {
         return Err(WalletError::validation(DISAGREE));
     }
     Ok(kind)
@@ -334,6 +357,9 @@ fn confirmation(
 ) -> Result<String> {
     if action == Action::Cancel || original.is_cancel() {
         return Ok("cancel".into());
+    }
+    if original.kind == Kind::TokenOrInvoke {
+        return Err(WalletError::validation(TOKEN_OR_INVOKE));
     }
     let expected = if original.kind == Kind::Invoke {
         EntryKind::Contract

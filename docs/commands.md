@@ -876,6 +876,14 @@ original hash and nonce; `b` changes the fee bump (default 1.25, range 1.1–3).
 Type the payee's nickname, the allowed contract's nickname for an invoke, or
 `cancel` for a zero-value native transfer to the verified own address.
 
+What a restarted session's `s` is judged by (the payee's address entry, or the
+contract entry and its selector) comes from the original's bytes, never from
+the journal, which must only agree with them. A registry-token transfer has the
+same bytes as an invoke of that token, so after a restart its `s` is refused and
+only `x` is offered; speed it up from the session that sent it, or with
+`zwallet transfer --token <token> --to <payee> --amount <amount> --nonce N
+--replace <txHash>`, which states the intent.
+
 Confirmation rechecks the current policy, nonce, funds and total fee. A higher
 fee produces another review without requesting a signature. A cancel races the
 original: if the original is mined first, the original payment stands.
