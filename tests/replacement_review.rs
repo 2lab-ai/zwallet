@@ -1918,3 +1918,35 @@ async fn tools_invoke_and_raw_reviews_show_the_pending_and_repeat_verdicts() {
     }
     assert_eq!(captured(&capture).len(), 1, "a review signs nothing");
 }
+
+/// Round-2 audit: a replacement review left with 4 and reopened with 3 still confirms, with
+/// exactly one SignTx at the replaced nonce.
+#[tokio::test]
+async fn tui_replacement_review_survives_a_tab_round_trip_and_signs_once() {
+    use zwallet::tui::actions::Tab;
+    let f = Fixture::new(false);
+    let node = Node::new("ethereum");
+    let row = original(&node, &f, 1, false, false);
+    let mut app = tui_app(&f, &node);
+    history_review(&mut app, &f, &node, &row, 's').await;
+    assert_eq!(app.tab(), Tab::Send);
+    for k in ['3', '4', '3'] {
+        let work = press(&mut app, Key::Char(k));
+        drive_ui(&mut app, &f, work).await;
+    }
+    assert_eq!(app.tab(), Tab::Send);
+    assert_eq!(
+        app.replacement().stage,
+        zwallet::tui::app::replacement::Stage::Review,
+        "{}",
+        frame(&app)
+    );
+    press(&mut app, Key::Enter);
+    type_text(&mut app, "alice");
+    let work = press(&mut app, Key::Enter);
+    drive_ui(&mut app, &f, work).await;
+    assert_eq!(f.signer.count(), 1, "{}", frame(&app));
+    let actual = signed(&f);
+    assert_eq!(actual.nonce(), 7);
+    assert_eq!(actual.to().to_checksum(None), OTHER);
+}

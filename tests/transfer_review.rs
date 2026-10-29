@@ -1182,3 +1182,35 @@ async fn tui_payee_step_passes_the_global_tab_keys() {
     }
     assert_eq!(f.signer.count(), 0);
 }
+
+/// Round-2 audit: leaving the send review with a tab key and coming back re-reviews it, and
+/// confirming then sends exactly once. The nickname field is a text field: a digit typed there
+/// stays in it.
+#[tokio::test]
+async fn tui_send_review_survives_a_tab_round_trip_and_sends_once() {
+    use zwallet::tui::actions::Tab;
+    let f = Fixture::new(false);
+    let node = Node::new("base");
+    let mut app = tui_app(&f, &node);
+    to_review(&mut app, &f).await;
+    key(&mut app, Key::Char('2'));
+    assert_eq!(app.tab(), Tab::Wallet);
+    let work = key(&mut app, Key::Char('3'));
+    drive(&mut app, &f, work).await;
+    assert_eq!(app.tab(), Tab::Send);
+    assert_eq!(app.transfer().stage, Stage::Review, "{}", frame(&app));
+    key(&mut app, Key::Enter);
+    assert_eq!(app.transfer().stage, Stage::Confirm);
+    key(&mut app, Key::Char('2'));
+    assert_eq!(
+        app.tab(),
+        Tab::Send,
+        "a digit in the nickname field is typed"
+    );
+    key(&mut app, Key::Backspace);
+    type_text(&mut app, "alice");
+    let work = key(&mut app, Key::Enter);
+    drive(&mut app, &f, work).await;
+    assert_eq!(f.signer.count(), 1);
+    assert_eq!(app.transfer().stage, Stage::Status, "{}", frame(&app));
+}

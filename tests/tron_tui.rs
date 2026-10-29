@@ -1143,3 +1143,22 @@ async fn tron_unmined_status_keeps_its_warning_instead_of_a_new_payment() {
     assert_eq!(app.transfer().stage, Stage::Status, "{}", screen(&app));
     assert_eq!(f.count(), 1);
 }
+
+/// Round-2 audit on Tron: the review survives a tab round trip and confirming sends once.
+#[tokio::test]
+async fn tron_send_review_survives_a_tab_round_trip_and_sends_once() {
+    use zwallet::tui::actions::Tab;
+    let f = Fixture::new(0);
+    let n = Node::new();
+    let mut app = app(&f, &n);
+    review(&mut app, &f, false).await;
+    key(&mut app, Key::Char('2'));
+    assert_eq!(app.tab(), Tab::Wallet);
+    let work = key(&mut app, Key::Char('3'));
+    drive(&mut app, &f, work).await;
+    assert_eq!(app.transfer().stage, Stage::Review, "{}", screen(&app));
+    let work = confirm(&mut app);
+    drive(&mut app, &f, work).await;
+    assert_eq!(f.count(), 1);
+    assert_eq!(app.transfer().stage, Stage::Status, "{}", screen(&app));
+}

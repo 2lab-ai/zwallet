@@ -1433,3 +1433,65 @@ async fn locking_blocks_new_message_reviews_before_the_daemon_has_stopped() {
     assert_eq!(app.tools().stage, ToolStage::Error);
     assert!(daemon.received.lock().unwrap().is_empty());
 }
+
+/// Round-2 audit: the raw-invoke review survives a tab round trip; confirming signs once.
+#[tokio::test]
+async fn tools_invoke_review_survives_a_tab_round_trip_and_signs_once() {
+    let mut f = Fixture::new(true);
+    f.router();
+    let node = Node::new("ethereum");
+    let (signer, _) = TxSigner::new(f.dir.path(), false);
+    let mut app = opened_app(&f, &node);
+    let effects = app.update(Msg::Key(Key::Char('d')));
+    tool_jobs(&mut app, effects, f.dir.path()).await;
+    app.update(Msg::Key(Key::Enter));
+    paste(&mut app, "0x414bf389");
+    app.update(Msg::Key(Key::Enter));
+    let effects = app.update(Msg::Key(Key::Enter));
+    tool_jobs(&mut app, effects, f.dir.path()).await;
+    assert_eq!(app.tools().stage, ToolStage::InvokeReview);
+    app.update(Msg::Key(Key::Char('2')));
+    assert_eq!(app.tab(), zwallet::tui::actions::Tab::Wallet);
+    app.update(Msg::Key(Key::Char('6')));
+    assert_eq!(
+        app.tools().stage,
+        ToolStage::InvokeReview,
+        "{}",
+        screen(&app)
+    );
+    app.update(Msg::Key(Key::Enter));
+    paste(&mut app, "router");
+    let effects = app.update(Msg::Key(Key::Enter));
+    tool_jobs(&mut app, effects, f.dir.path()).await;
+    assert_eq!(signer.count(), 1);
+    assert_eq!(node.sent.load(Ordering::SeqCst), 1);
+}
+
+/// Round-2 audit: the sign-message review survives a tab round trip; typing `sign` sends one
+/// signature request.
+#[tokio::test]
+async fn tools_message_review_survives_a_tab_round_trip_and_signs_once() {
+    let f = Fixture::new(true);
+    let node = Node::new("ethereum");
+    let daemon = FakeDaemon::answering(&f.dir.path().join("d.sock"), signed(b"held"));
+    let mut app = opened_app(&f, &node);
+    app.update(Msg::Key(Key::Char('m')));
+    paste(&mut app, "held");
+    let effects = app.update(Msg::Key(Key::Enter));
+    tool_jobs(&mut app, effects, f.dir.path()).await;
+    assert_eq!(app.tools().stage, ToolStage::MessageReview);
+    app.update(Msg::Key(Key::Char(']')));
+    assert_eq!(app.tab(), zwallet::tui::actions::Tab::Session);
+    app.update(Msg::Key(Key::Char('[')));
+    assert_eq!(
+        app.tools().stage,
+        ToolStage::MessageReview,
+        "{}",
+        screen(&app)
+    );
+    app.update(Msg::Key(Key::Enter));
+    paste(&mut app, "sign");
+    let effects = app.update(Msg::Key(Key::Enter));
+    tool_jobs(&mut app, effects, f.dir.path()).await;
+    assert_eq!(daemon.received.lock().unwrap().len(), 1);
+}

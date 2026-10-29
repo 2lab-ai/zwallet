@@ -2524,6 +2524,32 @@ mod creation {
         )));
         assert!(work.contains(&Effect::LockAll));
     }
+    /// Round-2 audit: creation is a modal. Its fields keep digits as input, and its result
+    /// stays (it is not a dead end) until Enter or Esc closes it; then the tab keys act.
+    #[test]
+    fn create_cannot_be_stranded_by_a_tab_key() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('n')));
+        app.update(Msg::Key(Key::Char('2')));
+        assert_eq!(app.tab(), zwallet::tui::actions::Tab::Keys);
+        assert!(app.creation().stage.active());
+        app.update(Msg::Key(Key::Backspace));
+        let id = form(&mut app, "trading", false, "10m");
+        app.update(Msg::Create(CreateMsg::Prepared(id, Ok(false))));
+        app.update(Msg::PasswordSubmitted);
+        app.update(Msg::Create(CreateMsg::Finished(
+            id,
+            Ok(created("trading", false)),
+        )));
+        assert!(matches!(app.creation().stage, CreateStage::Done(_)));
+        app.update(Msg::Key(Key::Char('2')));
+        assert!(matches!(app.creation().stage, CreateStage::Done(_)));
+        assert!(frame(&app).contains("trading"));
+        app.update(Msg::Key(Key::Enter));
+        assert!(!app.creation().stage.active());
+        app.update(Msg::Key(Key::Char('2')));
+        assert_eq!(app.tab(), zwallet::tui::actions::Tab::Wallet);
+    }
     #[test]
     fn create_completed_view_keeps_emergency_lock_available() {
         let mut app = locked_ab();
