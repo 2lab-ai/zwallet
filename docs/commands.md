@@ -83,7 +83,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
   repairs cached addresses and shows old/new values. `u` asks for a duration and then the wallet
   password before starting that signing session. `7 session` shows the home, expiry, daemon
   pids, and the daemon's reported whitelist generation/count as information only. The startup
-  ptrace flag cannot be changed by any TUI key. Whitelist forms, key creation and tools
+  ptrace flag cannot be changed by any TUI key. Whitelist forms and key creation
   remain ![WIP](https://img.shields.io/badge/status-WIP-yellow).
   See [feature status](features.md#planned-features).
   On the wallet tab, `Tab` switches between balance scrolling and history selection, Enter opens
@@ -785,3 +785,19 @@ same nonce, even if the journal has changed. After restarting, look the hash up
 with `/` or `zwallet tx`. An unknown hash does not prove failure: a fresh send at
 a new nonce may pay twice even without `d`, since the repeat check uses only a
 10-minute window in a journal editable by any process of this user.
+
+
+## TUI contract and message tools
+
+On `6 tools`, `C` reads an ABI call, `i` invokes a checked contract using a function
+signature and arguments, and `d` uses raw calldata. Invokes require a listed selector
+and a password-checked key/list, show the decoded intent and fee review, and require
+the contract nickname before signing. Use `j`/`k` to scroll the complete calldata
+and exact quantities; Home returns to the review's beginning. Their status uses the same `w`, `s`, `x` and
+`R` controls and original-intent checks as transfers.
+
+`m` reviews an EIP-191 message of up to 512 printable ASCII bytes. The bracketed
+review preserves spaces and every byte; type `sign` to authorize it. Editing drops
+the review, and the current checked policy must allow message signing. Use the CLI
+for multiline or non-ASCII messages. `t` reads any ERC-20 balance by contract
+address, with a bounded escaped symbol; it provides no send action.

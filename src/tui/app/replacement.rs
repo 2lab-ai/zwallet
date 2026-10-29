@@ -336,6 +336,12 @@ impl App {
                 OriginalIntent::from_transfer(self.transfer.retained.as_ref()?).ok()
             })
             .or_else(|| {
+                self.tools
+                    .retained
+                    .get(hash)
+                    .and_then(|send| OriginalIntent::from_invoke(&send.intent).ok())
+            })
+            .or_else(|| {
                 let (request, Pane::Ready(original)) = self.replacement.proof.as_ref()? else {
                     return None;
                 };

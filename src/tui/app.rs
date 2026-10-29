@@ -5,6 +5,7 @@
 pub mod history;
 mod navigation;
 pub mod replacement;
+pub mod tools;
 pub mod transfer;
 use history::{DetailRead, DetailRequest, HistoryRead, HistoryScope, HistoryTarget, HistoryView};
 pub use navigation::{FieldPurpose, Navigation, Popup, RpcChoice, UserText};
@@ -41,6 +42,7 @@ pub enum Key {
 /// Everything that changes the state: a key, the refresh timer, or the result of work.
 #[derive(Debug)]
 pub enum Msg {
+    Tools(u64, tools::ToolMsg),
     Replacement(u64, replacement::Event),
     Transfer(u64, transfer::TransferMsg),
     HistoryOwner(HistoryTarget, Result<(String, Trust)>),
@@ -82,6 +84,7 @@ pub enum Msg {
 /// Work the state asks for; its result comes back as a [`Msg`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
+    Tools(u64),
     Replacement(u64),
     Transfer(u64),
     HistoryOwner(HistoryTarget),
@@ -198,6 +201,7 @@ pub enum PasswordPurpose {
 }
 
 pub struct App {
+    tools: tools::Tools,
     replacement: replacement::Replacement,
     transfer: transfer::Transfer,
     nav: Navigation,
@@ -236,6 +240,7 @@ impl App {
     /// The TUI on `net`'s chain and endpoint; `warm` is how long a warm-up unlocks for.
     pub fn new(net: &Net, warm: Duration) -> Self {
         Self {
+            tools: tools::Tools::default(),
             replacement: replacement::Replacement::default(),
             transfer: transfer::Transfer::default(),
             nav: Navigation::new(net),
@@ -275,6 +280,10 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        let msg = match self.tools_update(msg) {
+            std::ops::ControlFlow::Continue(work) => return work,
+            std::ops::ControlFlow::Break(msg) => msg,
+        };
         let msg = match self.replacement_update(msg) {
             std::ops::ControlFlow::Continue(work) => return work,
             std::ops::ControlFlow::Break(msg) => msg,
@@ -559,7 +568,8 @@ impl App {
                 Vec::new()
             }
             // The navigation dispatcher consumes these variants before this match.
-            Msg::Transfer(..)
+            Msg::Tools(..)
+            | Msg::Transfer(..)
             | Msg::HistoryOwner(..)
             | Msg::History(..)
             | Msg::Transaction(..)
@@ -589,7 +599,9 @@ impl App {
         self.nav.lines = Pane::Failed(Outside::error(&error));
         self.keys = Pane::Failed(Outside::error(&error));
         if self.quit {
-            self.quit_error = Some(error);
+            // Reads can finish while a submitted operation waits for its deferred lock.
+            // Keep that operation's original error and recovery details for the exit.
+            self.quit_error.get_or_insert(error);
         }
     }
 
@@ -717,6 +729,7 @@ impl App {
         self.locking
             || self.activating
             || self.sending()
+            || self.tools.stage == tools::Stage::Signing
             || self.password == PasswordState::Checking
     }
 

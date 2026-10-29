@@ -1754,7 +1754,7 @@ mod navigation {
                     .trim_end()
                     .ends_with("? actions")
             );
-            if matches!(app.tab(), Tab::Whitelist | Tab::Tools) {
+            if app.tab() == Tab::Whitelist {
                 assert!(text.contains("in a later version"));
             }
         }
@@ -1762,6 +1762,31 @@ mod navigation {
         assert_eq!(app.tab(), Tab::Keys);
         app.update(Msg::Key(Key::Char('[')));
         assert_eq!(app.tab(), Tab::Session);
+    }
+
+    #[test]
+    fn nav_tools_idle_hint_fits_and_opens_the_action_menu() {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Char('6')));
+        assert_eq!(app.tools().stage, zwallet::tui::app::tools::Stage::Menu);
+        let text = view(&app);
+        let hint = text.lines().nth(21).unwrap().trim_end();
+        assert!(hint.len() <= 80, "{hint}");
+        for control in [
+            "Enter open",
+            "C call",
+            "i invoke",
+            "d raw",
+            "m message",
+            "t token",
+        ] {
+            assert!(hint.contains(control), "missing {control}: {hint}");
+        }
+        assert!(hint.ends_with("? actions"), "{hint}");
+        assert!(!text.contains("in a later version"), "{text}");
+        app.update(Msg::Key(Key::Char('?')));
+        assert!(matches!(app.navigation().popup, Some(Popup::Menu(_))));
+        assert!(view(&app).contains("actions (55)"));
     }
 
     #[test]
