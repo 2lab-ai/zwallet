@@ -5,9 +5,10 @@
 //! do (no network), [`ChainFamily`] adds what the one-shot CLI does over RPC.
 
 pub mod evm;
+pub mod policy;
 pub mod tron;
 
-use crate::chains::evm::policy::ListView;
+use crate::chains::policy::ListView;
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
 use crate::core::store;
@@ -22,6 +23,60 @@ use std::ops::RangeInclusive;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Default signed fee caps: wei on EVM, sun on Tron. Historical field names stay stable.
+pub const DEFAULT_FEE_CAPS_WEI: &[(&str, &str)] = &[
+    ("ethereum", "3000000000000000"),
+    ("base", "500000000000000"),
+    ("arbitrum", "500000000000000"),
+    ("optimism", "500000000000000"),
+    ("polygon", "2000000000000000000"),
+    ("bsc", "3000000000000000"),
+    ("avalanche", "50000000000000000"),
+    ("sepolia", "10000000000000000"),
+    ("tron", "30000000"),
+];
+
+/// Family-aware facts used to validate a list before it is signed.
+pub const WHITELIST_RULES: crate::core::whitelist::ChainRules =
+    crate::core::whitelist::ChainRules {
+        chain_known: |key| CHAINS.iter().any(|c| c.key == key),
+        family_of: |key| {
+            CHAINS
+                .iter()
+                .find(|c| c.key == key)
+                .map_or("", |c| c.family.name())
+        },
+        is_registry_token: is_registry_token_body,
+        registry_token_on_chain: registry_token_body_on_chain,
+        default_fee_caps_wei: DEFAULT_FEE_CAPS_WEI,
+    };
+
+fn tron_payload(body: &str) -> Option<[u8; 21]> {
+    let body = body.parse::<alloy::primitives::Address>().ok()?;
+    let mut payload = [0u8; 21];
+    payload[0] = tron::address::PREFIX;
+    payload[1..].copy_from_slice(body.as_slice());
+    Some(payload)
+}
+
+fn is_registry_token_body(body: &str) -> bool {
+    body.parse::<alloy::primitives::Address>()
+        .is_ok_and(|a| evm::registry::is_token_anywhere(&a))
+        || tron_payload(body).is_some_and(|a| tron::registry::is_token(&a))
+}
+
+fn registry_token_body_on_chain(key: &str, body: &str) -> bool {
+    let Some(chain) = CHAINS.iter().find(|c| c.key == key) else {
+        return false;
+    };
+    match chain.family {
+        Family::Evm(c) => body
+            .parse::<alloy::primitives::Address>()
+            .is_ok_and(|a| evm::registry::lookup(c.chain_id, &a).is_some()),
+        Family::Tron(_) => tron_payload(body).is_some_and(|a| tron::registry::is_token(&a)),
+    }
+}
 
 /// Family plus its family-specific configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

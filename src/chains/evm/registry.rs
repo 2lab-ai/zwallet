@@ -12,7 +12,6 @@
 //! WETH on Polygon (PoS bridge, not Maker); DAI.e, WETH.e and USDT.e on Avalanche; the wrapped
 //! natives WPOL, WBNB and WAVAX; USDT, DAI and WETH on Sepolia.
 
-use crate::core::whitelist::ChainRules;
 use alloy::hex;
 use alloy::primitives::Address;
 
@@ -118,55 +117,8 @@ pub fn is_token_anywhere(address: &Address) -> bool {
     TOKENS.iter().any(|t| same_address(t, address))
 }
 
-/// The whitelist's default fee cap per chain key, in wei (`.prd/04-whitelist.md` §Policy): the
-/// most `gasLimit × max price` may cost. Set at the first `whitelist add`.
-pub const DEFAULT_FEE_CAPS_WEI: &[(&str, &str)] = &[
-    // 0.003 ETH
-    ("ethereum", "3000000000000000"),
-    // 0.0005 ETH
-    ("base", "500000000000000"),
-    ("arbitrum", "500000000000000"),
-    ("optimism", "500000000000000"),
-    // 2 POL
-    ("polygon", "2000000000000000000"),
-    // 0.003 BNB
-    ("bsc", "3000000000000000"),
-    // 0.05 AVAX
-    ("avalanche", "50000000000000000"),
-    // 0.01 ETH
-    ("sepolia", "10000000000000000"),
-];
-
-/// The chain facts the whitelist's validation needs: the supported chain keys, the registry
-/// tokens, and the default fee caps.
-pub const WHITELIST_RULES: ChainRules = ChainRules {
-    chain_known,
-    is_registry_token: is_token_anywhere_str,
-    registry_token_on_chain: is_token_on_chain,
-    default_fee_caps_wei: DEFAULT_FEE_CAPS_WEI,
-};
-
-fn chain_known(key: &str) -> bool {
-    crate::chains::CHAINS.iter().any(|c| c.key == key)
-}
-
-fn is_token_on_chain(key: &str, address: &str) -> bool {
-    let Some(chain) = crate::chains::CHAINS.iter().find(|c| c.key == key) else {
-        return false;
-    };
-    let Ok(config) = super::config(chain) else {
-        return false;
-    };
-    address
-        .parse::<Address>()
-        .is_ok_and(|address| lookup(config.chain_id, &address).is_some())
-}
-
-fn is_token_anywhere_str(address: &str) -> bool {
-    address
-        .parse::<Address>()
-        .is_ok_and(|a| is_token_anywhere(&a))
-}
+// Compatibility re-exports for callers of the original EVM-only registry.
+pub use crate::chains::{DEFAULT_FEE_CAPS_WEI, WHITELIST_RULES};
 
 #[cfg(test)]
 mod tests {
@@ -447,10 +399,9 @@ mod tests {
         assert!(err.message.contains("registry token"), "{}", err.message);
     }
 
-    /// One built-in cap per EVM chain. Tron has none until its signer comes
-    /// (`.prd/v0-3-tron/units.md` TRON-1; B2 gives it one with the signer).
+    /// One built-in cap per supported chain, in that chain's smallest native units.
     #[test]
-    fn default_fee_caps_match_the_spec_for_every_evm_chain() {
+    fn default_fee_caps_match_the_spec_for_every_chain() {
         let spec = [
             ("ethereum", "0.003"),
             ("base", "0.0005"),
@@ -460,11 +411,10 @@ mod tests {
             ("bsc", "0.003"),
             ("avalanche", "0.05"),
             ("sepolia", "0.01"),
+            ("tron", "30"),
         ];
-        let evm: Vec<_> = CHAINS.iter().filter(|c| evm::config(c).is_ok()).collect();
-        assert_eq!(DEFAULT_FEE_CAPS_WEI.len(), evm.len());
-        assert!(!DEFAULT_FEE_CAPS_WEI.iter().any(|(k, _)| *k == "tron"));
-        for c in evm {
+        assert_eq!(DEFAULT_FEE_CAPS_WEI.len(), CHAINS.len());
+        for c in CHAINS {
             let (_, human) = spec.iter().find(|(k, _)| *k == c.key).unwrap();
             let (_, wei) = DEFAULT_FEE_CAPS_WEI
                 .iter()

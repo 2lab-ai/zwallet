@@ -2,7 +2,7 @@
 
 ![WIP](https://img.shields.io/badge/status-WIP-yellow)
 
-Tron addresses and TRX/TRC20 USDT balance reads are implemented. Signing, transfers and transaction lookup below remain planned. See [feature status](../docs/features.md).
+Tron addresses, balance reads, canonical transaction decoding and the daemon signing policy are implemented. Public transfers and transaction lookup below remain planned. See [feature status](../docs/features.md).
 
 Status: **in-progress**, 2026-10-29. Fixed request and scope: [`v0-3-tron/ssot.md`](v0-3-tron/ssot.md).
 Units: [`v0-3-tron/units.md`](v0-3-tron/units.md). Driver: [`v0-3-tron/loop.md`](v0-3-tron/loop.md).
@@ -12,8 +12,8 @@ was signed or broadcast, and no faucet was used. Evidence IDs (E1…) are listed
 ## Implementation boundary
 
 Tron A implements address derivation, exact-case cache checks, verified receive addresses,
-TRX and USDT reads, and the owner-permission warning. Signing, transfer policy, broadcasting
-and transaction lookup remain planned until B1, B2 and C pass their gates. This document
+TRX and USDT reads, and the owner-permission warning. B1/B2 add the strict codec and
+Tron-only signed policy; broadcasting and public transaction lookup remain C. This document
 retains those later contracts; it does not claim they are shipped.
 
 ## Problem

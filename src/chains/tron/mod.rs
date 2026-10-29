@@ -1,13 +1,14 @@
 //! The Tron family: secp256k1 keys at `m/44'/195'/0'/0/{index}`, base58check `T…` addresses,
-//! TRX and TRC20 balances over Tron's HTTP API (`/wallet/*`). This version reads; it signs
-//! nothing (`.prd/05-tron.md`).
+//! TRX and TRC20 balances over Tron's HTTP API (`/wallet/*`), and strict whitelist-gated
+//! native and registry-token signing (`.prd/05-tron.md`).
 
 pub mod address;
+pub mod policy;
 pub mod registry;
 pub mod rpc;
 pub mod tx;
 
-use crate::chains::evm::policy::ListView;
+use crate::chains::policy::ListView;
 use crate::chains::{Balance, Chain, Family, FamilyKeys, Net, TokenBalance};
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::seed::Seed;
@@ -15,8 +16,16 @@ use crate::core::store::KEY_INDEX_LIMIT;
 use alloy::primitives::U256;
 use alloy::signers::local::coins_bip39::English;
 use alloy::signers::local::{MnemonicBuilder, PrivateKeySigner};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::time::Duration;
+
+#[cfg(test)]
+thread_local! { static SIGNATURE_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(test)]
+pub(crate) fn signature_attempts() -> usize {
+    SIGNATURE_ATTEMPTS.with(std::cell::Cell::get)
+}
 
 /// Tron-specific registry configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,15 +106,47 @@ impl FamilyKeys for Tron {
 
     fn sign_tx(
         &self,
-        _seed: &Seed,
-        _index: u32,
-        _chain: &Chain,
-        _unsigned: &Value,
-        _list: &ListView<'_>,
+        seed: &Seed,
+        index: u32,
+        chain: &Chain,
+        unsigned: &Value,
+        list: &ListView<'_>,
     ) -> Result<Value> {
-        // The Tron signer, with its decoder and policy, comes with a later version
-        // (`.prd/v0-3-tron/units.md` TRON-4, TRON-5); until then the daemon signs nothing here.
-        Err(unsupported("signing transactions in this version"))
+        config(chain)?;
+        let hex = unsigned
+            .as_str()
+            .and_then(|s| s.strip_prefix("0x"))
+            .filter(|s| s.len() <= tx::MAX_RAW_BYTES * 2)
+            .ok_or_else(|| {
+                WalletError::validation(
+                    "refusing to sign: Tron sign_tx expects at most 1 KiB of 0x-hex raw_data bytes",
+                )
+            })?;
+        let raw = alloy::hex::decode(hex).map_err(|_| {
+            WalletError::validation("refusing to sign: Tron raw_data is not 0x hex")
+        })?;
+        let decoded = tx::decode_raw(&raw)?;
+        let signer = signer_at(seed, index)?;
+        let mut owner = [0u8; 21];
+        owner[0] = address::PREFIX;
+        owner[1..].copy_from_slice(signer.address().as_slice());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| {
+                WalletError::validation("refusing to sign: daemon clock is before Unix epoch")
+            })?
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        policy::check_tx(list, owner, &decoded, now_ms)?;
+        #[cfg(test)]
+        SIGNATURE_ATTEMPTS.with(|n| n.set(n.get() + 1));
+        let signature = tx::sign(&signer, &decoded)?;
+        Ok(json!({
+            "rawData": format!("0x{}", alloy::hex::encode(&raw)),
+            "signature": format!("0x{}", alloy::hex::encode(signature)),
+            "txHash": alloy::hex::encode(tx::txid(&raw)),
+            "decoded": decoded.to_json()?,
+        }))
     }
 }
 
@@ -319,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn tr24_the_daemon_never_signs_a_message_or_a_transaction_for_tron() {
+    fn tr24_messages_and_transactions_for_another_family_are_refused() {
         let mut list = Whitelist::empty(&WHITELIST_RULES);
         list.generation = 1;
         list.policy.allow_message_signing = true;
@@ -332,6 +373,6 @@ mod tests {
         let e = Tron
             .sign_tx(&seed(), 0, chain, &serde_json::json!("0x0a02"), &view)
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::CapabilityUnsupported, "{}", e.message);
+        assert_eq!(e.code, ErrorCode::ValidationError, "{}", e.message);
     }
 }

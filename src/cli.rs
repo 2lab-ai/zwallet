@@ -349,7 +349,8 @@ pub enum WhitelistCommand {
     Add(WhitelistAddArgs),
     /// Remove the entry NICKNAME.
     Remove(WhitelistRemoveArgs),
-    /// Set CHAIN's fee cap, in its coin: the most gasLimit × max price may cost.
+    /// Set CHAIN's fee cap, in its coin: EVM gas cost or Tron contract fee_limit.
+    /// Tron bandwidth and activation fees are outside this signed cap.
     FeeCap(WhitelistFeeCapArgs),
     /// Cap native value per transaction in CHAIN's coin; `none` removes the cap.
     NativeCap(WhitelistNativeCapArgs),
@@ -394,10 +395,10 @@ pub struct WhitelistAddArgs {
     /// 1-32 of a-z 0-9 _ -, starting with a letter or digit; `@NICKNAME` then works as
     /// `transfer --to` and `invoke --to`.
     pub nickname: String,
-    /// The 0x address (mixed case must be a valid EIP-55 checksum).
+    /// An EVM 0x address (mixed case needs EIP-55), or a Tron T... base58check address.
     pub address: String,
-    /// Chain keys the entry applies on, comma-separated, or "*" (quoted) for every chain (not
-    /// for a contract). Default: ethereum.
+    /// Chain keys, comma-separated, or "*" (quoted) for every EVM chain (not a contract).
+    /// Default: ethereum for 0x addresses; tron for T... addresses. Tron must stand alone.
     #[arg(
         long,
         visible_alias = "chain",

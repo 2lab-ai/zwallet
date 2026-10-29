@@ -64,7 +64,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
   the warm-up (`--warm`, checked but not used yet), home, transfer and whitelist screens are
   ![WIP](https://img.shields.io/badge/status-WIP-yellow). See [feature status](features.md#planned-features).
 - **Tron** ([Tron design](../.prd/05-tron.md)): this version shows the Tron address of each
-  key and reads TRX and USDT; it signs nothing on Tron. `create` caches `addresses.tron`, the
+  key and reads TRX and USDT; the daemon also enforces the Tron signing policy. `create` caches `addresses.tron`, the
   key's address at `m/44'/195'/0'/0/<index>` (key 0's is the one TronWeb derives by default from the
   same phrase), as base58check `T…` (34 characters, payload `0x41` and the 20-byte body, a
   4-byte double-SHA-256 checksum). Tron addresses are compared byte for byte, never ignoring case:
@@ -74,9 +74,16 @@ Commands that act on a key take `--key <name>` (default: the active key).
   --verify`, which adds it and says so in `added`), and its `addresses` row shows that error. After
   `unlock`, `address --chain tron` is verified by the session as for EVM, with no prompt.
   `sign-message`, `call` and `invoke` on `tron` are `CAPABILITY_UNSUPPORTED`, and so are
-  `transfer` and `tx` until the Tron send path comes. Tron payees and a `tron` fee cap come with
-  the Tron signer: until then `whitelist add` of a `T…` address or with `--chains tron`, and
-  `whitelist fee-cap tron`, are `VALIDATION_ERROR` before the password.
+  `transfer` and `tx` until the Tron send path comes. `whitelist add <nick> <T…>` adds a
+  Tron-only payee; `--chains tron` is the only allowed scope for it. EVM `*` entries cover
+  EVM chains only, never Tron. Tron contract entries and selectors are unsupported.
+  `whitelist fee-cap tron <TRX>` bounds signed `fee_limit`, with a default of 30 TRX.
+  It does not bound bandwidth or account activation fees. Historical JSON fields named
+  `maxFeeWei` and `maxNativeWei` store sun on Tron (1 TRX = 1,000,000 sun). Token caps use
+  the token's smallest units; calldata caps bound bytes, not bandwidth charges. The daemon
+  accepts only strict native transfers and the registry USDT's exact transfer call, from
+  its own derived address to a listed Tron payee, under the signed limits. It refuses
+  approvals, arbitrary contracts, permissions, memo, malformed protobuf and self-TRX.
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
   reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's
@@ -298,7 +305,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
     cap bounds each transaction, not a total: repeated transactions can each spend up to it. On
     the OP-stack chains (Base, Optimism) the L1 data fee is charged on top of it. The defaults
     are ethereum 0.003 ETH; base, arbitrum and optimism 0.0005 ETH; polygon 2 POL; bsc 0.003
-    BNB; avalanche 0.05 AVAX; sepolia 0.01 ETH, changed with `whitelist fee-cap <chain>
+    BNB; avalanche 0.05 AVAX; sepolia 0.01 ETH; tron 30 TRX (signed fee_limit only),
+    changed with `whitelist fee-cap <chain>
     <amount>`.
   - **Optional transaction limits.** A verified list can also cap decoded native value,
     direct registry-token amounts and calldata size per chain. Exceeding one is

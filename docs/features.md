@@ -4,7 +4,7 @@
 
 This page is for people deciding whether zwallet fits their workflow and contributors
 checking what still needs to be built. Reviewed on 2026-10-29 against main `99fff4e`
-with the Tron read paths from [PR #33](https://github.com/2lab-ai/zwallet/pull/33).
+with the Tron address/balance and strict codec/policy handoff changes.
 “Implemented” means a reachable code path exists in this source revision; it
 does not mean every published binary includes it or every public RPC is reachable.
 
@@ -24,6 +24,7 @@ implementation does not make the corresponding TUI workflow implemented.
 | Signed whitelist | Password-authorized payees, contracts/selectors, execution-fee caps and message-signing toggle. | [whitelist commands](../src/commands/whitelist.rs), [daemon policy tests](../tests/whitelist_daemon.rs), [seed tests](../tests/whitelist_seed.rs) |
 | Per-transaction limits | Optional signed native-value, direct registry-token amount and calldata byte caps. Enforced by the daemon on decoded bytes; not a cumulative budget or a constraint on indirect contract effects. | [commands](commands.md#per-transaction-limits), [policy](../src/chains/evm/policy.rs), [integration tests](../tests/policy_limits.rs) |
 | Receipt deadline | `--wait-timeout` bounds in-flight receipt RPC calls and polling sleeps after broadcast. Expiry returns pending, and late receipts are not accepted. | [RPC](../src/chains/evm/rpc.rs), [deadline tests](../tests/review_receipt_deadline.rs) |
+| Tron signing policy | Canonical bounded protobuf, owner/expiration validation, Tron-only payees, registry USDT transfers and signed fee/value/token/calldata limits. Legacy wildcard entries cover EVM only. Signed fee_limit excludes bandwidth and activation fees; no public Tron transfer command yet. | [codec](../src/chains/tron/tx.rs), [policy](../src/chains/tron/policy.rs), [daemon rejection tests](../src/daemon/mod.rs) |
 | Token registry | 19 EVM deployments across seven networks, plus USDT on Tron. BSC has none. Registry additions require a code change. | [exact deployments and tests](../src/chains/evm/registry.rs) |
 | Message signing | EIP-191 `sign-message`, only when explicitly allowed by the whitelist. | [CLI](../src/cli.rs), [daemon](../src/daemon/mod.rs), [policy tests](../tests/whitelist_daemon.rs) |
 | Send recovery | Journal, one-send lock, pending/recent-duplicate guards, fixed-nonce replacement and hash lookup. Duplicate matching is not calldata-aware. | [send guards and journal](../src/chains/mod.rs), [CLI tests](../tests/cli.rs) |
@@ -36,7 +37,7 @@ implementation does not make the corresponding TUI workflow implemented.
 |---|---|---|
 | Full TUI workflows | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [TUI design](../.prd/03-tui.md), [mockups](../.prd/03-tui-screens.md), [work units](../.prd/v0-2-tui/units.md). Current effects only load keys, load status and lock all. Warm-up/unlock, tabs/actions, balances/history, receive, transfers, whitelist forms, key creation, contract calls and message signing are not wired into the UI. |
 | TUI warm-up | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | `--warm` is parsed and stored, but starts no unlock. Use `zwallet unlock <duration>` in the CLI. |
-| Tron signing and transfers | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [v0.3 design](../.prd/05-tron.md). Reads work; the signer, Tron whitelist policy, transfer preflight, broadcast and transaction lookup are still planned. These operations return `CAPABILITY_UNSUPPORTED`. |
+| Tron transfers and lookup | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [v0.3 design](../.prd/05-tron.md). Reads, whitelist editing and the daemon policy exist. Transfer preflight, broadcast and transaction lookup remain planned and return `CAPABILITY_UNSUPPORTED`. |
 | Solana and TON | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [Architecture extension plans](../.prd/02-architecture.md). No family implementation or chain entry. |
 | Cumulative spending budgets (rolling 24-hour native and per-token) | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [Deferred whitelist work](../.prd/04-whitelist.md#not-in-v01-stays-planned). Per-transaction limits do not track total spending; repeated transfers can still spend the full balance ([#26](https://github.com/2lab-ai/zwallet/issues/26)). |
 | Calldata-aware duplicate detection for `invoke`; configurable duplicate window | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | [Deferred whitelist work](../.prd/04-whitelist.md#not-in-v01-stays-planned). Current matching uses chain, kind, recipient and amount (plus token for token transfers), over a fixed ten-minute window. |

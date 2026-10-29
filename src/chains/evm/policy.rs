@@ -26,32 +26,7 @@ use crate::core::whitelist::{EntryKind, Whitelist};
 use alloy::hex;
 use alloy::primitives::{Address, U256};
 
-/// Why a wallet without a whitelist refuses: its first edit creates one.
-pub const NO_WHITELIST: &str = "this wallet has no whitelist yet; the first `zwallet whitelist add \
-                                <nick> <addr> --chains <chain>` creates it";
-
-/// The command that lets `sign-message` sign.
-pub const MESSAGE_SIGNING_COMMAND: &str = "zwallet whitelist allow-message-signing on";
-
-/// What a human runs when the list cannot be trusted: it shows whether it verifies, and why not.
-pub const VERIFY_COMMAND: &str = "zwallet whitelist list --verify";
-
-/// The list a signature is checked against.
-#[derive(Debug)]
-pub enum ListView<'a> {
-    /// A list that verified against the sealed anchor (the daemon), or the unverified list the CLI
-    /// explains a dry-run with.
-    Usable(&'a Whitelist),
-    /// This wallet has no whitelist yet (wallet.json seals no anchor). Only a native transfer to
-    /// the signing key's own address is signed, under the built-in fee cap. Refusals name the edit
-    /// that would allow the request; that first edit creates the list.
-    NoList,
-    /// There is a list or an anchor, but nothing that can be trusted, and why: it does not
-    /// verify, cannot be read (in time), or the sealed anchor is malformed. Nothing is signed,
-    /// self-transfers included. Refusals name no edit (one would rebuild the list around whatever
-    /// the request asks for); they point to [`VERIFY_COMMAND`].
-    Unusable(String),
-}
+pub use crate::chains::policy::{ListView, MESSAGE_SIGNING_COMMAND, NO_WHITELIST, VERIFY_COMMAND};
 
 /// Decides one decoded unsigned transaction against the list. `Ok(())` = may sign.
 ///
@@ -489,7 +464,7 @@ fn decide(list: &Whitelist, chain: &Chain, action: &Action) -> std::result::Resu
 /// `to` must be an address entry that covers `chain`.
 fn payee(list: &Whitelist, chain: &Chain, to: &Address) -> std::result::Result<(), Denial> {
     let addr = to.to_checksum(None);
-    if list.payee(&addr, chain.key).is_some() {
+    if list.payee(&addr, chain.key, true).is_some() {
         return Ok(());
     }
     Err(match list.by_address(&addr) {

@@ -33,7 +33,7 @@ remain available where the corresponding TUI screen is WIP.
 | Feature | Status | What is still missing |
 |---|---|---|
 | Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Password warm-up/unlock, navigation and actions, balances/history, receive, send, whitelist editing and other CLI workflows in the TUI. `tui --warm` currently validates a duration but does not unlock. |
-| Tron signing and transfers | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Addresses, TRX and USDT balances work now. Signing, transfers and transaction lookup are still planned. |
+| Tron transfers and lookup | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Addresses, balances, Tron-only whitelist editing and daemon policy work now. Transfer and transaction lookup commands remain planned. |
 | Solana and TON | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Chain implementations; currently future extension plans |
 | Cumulative spending budgets | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Rolling 24-hour native and per-token budgets; optional per-transaction limits do not track total spending |
 | User-added tokens | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Adding transfer tokens outside the built-in registry |

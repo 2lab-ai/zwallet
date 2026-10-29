@@ -19,8 +19,9 @@
 //!    duration or expiry is taken from a running daemon.
 
 use super::start_session;
+use crate::chains::WHITELIST_RULES;
 use crate::chains::evm::policy::{self, ListView};
-use crate::chains::evm::{self, registry::WHITELIST_RULES, tx};
+use crate::chains::evm::{self, tx};
 use crate::chains::{self, Chain, Family, PRIMARY_CHAIN};
 use crate::cli::{
     Out, Toggle, WhitelistAddArgs, WhitelistCommand, WhitelistEditArgs, WhitelistListArgs,
@@ -47,11 +48,6 @@ const FIRST_ADD: &str = "`zwallet whitelist add <nick> <addr> --chains <chain>` 
 const RESIDUAL: &str = "a listed contract may forward value or act on its arguments";
 const VERIFY_NOTE: &str =
     "not verified: run `zwallet whitelist list --verify` to check the signature";
-/// Why a Tron payee or fee cap is refused in this version: nothing signs on Tron yet, and a list
-/// holding either would stop older builds from editing it (`.prd/05-tron.md` §The whitelist).
-const TRON_LATER: &str = "Tron payees and fee caps come with the Tron signer, in a later zwallet \
-                          version; nothing is signed on tron yet";
-
 pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
     match cmd {
         WhitelistCommand::List(a) => list(home, a),
@@ -65,9 +61,6 @@ pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
         }
         WhitelistCommand::FeeCap(a) => {
             let chain = chains::find(&a.chain)?;
-            if let Family::Tron(_) = chain.family {
-                return Err(WalletError::validation(TRON_LATER));
-            }
             let bad = |why: String| WalletError::validation(format!("fee cap: {why}"));
             let wei = parse_units(&a.amount, chain.decimals).map_err(|e| bad(e.message))?;
             if wei.is_zero() {
@@ -77,9 +70,6 @@ pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
         }
         WhitelistCommand::NativeCap(a) => {
             let chain = chains::find(&a.chain)?;
-            if let Family::Tron(_) = chain.family {
-                return Err(WalletError::validation(TRON_LATER));
-            }
             let cap = optional_amount(&a.amount, chain.decimals)?;
             edit(
                 home,
@@ -93,11 +83,15 @@ pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
         }
         WhitelistCommand::TokenCap(a) => {
             let chain = chains::find(&a.chain)?;
-            if let Family::Tron(_) = chain.family {
-                return Err(WalletError::validation(TRON_LATER));
-            }
-            let token = evm::parse_address(&a.token)?;
-            if evm::registry::lookup(evm::config(chain)?.chain_id, &token).is_none() {
+            let token = match chain.family {
+                Family::Evm(_) => format!("0x{}", hex::encode(evm::parse_address(&a.token)?)),
+                Family::Tron(_) => {
+                    let payload = chains::tron::address::parse(&a.token)
+                        .map_err(|e| WalletError::validation(e.message))?;
+                    format!("0x{}", hex::encode(&payload[1..]))
+                }
+            };
+            if !(WHITELIST_RULES.registry_token_on_chain)(chain.key, &token) {
                 return Err(WalletError::validation(
                     "token-cap needs a registry token on this chain",
                 ));
@@ -107,10 +101,7 @@ pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
                 home,
                 Change::Limit {
                     chain,
-                    limit: Limit::Token {
-                        token: format!("0x{}", hex::encode(token)),
-                        amount,
-                    },
+                    limit: Limit::Token { token, amount },
                 },
                 &a.edit,
             )
@@ -118,9 +109,6 @@ pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
         }
         WhitelistCommand::CalldataCap(a) => {
             let chain = chains::find(&a.chain)?;
-            if let Family::Tron(_) = chain.family {
-                return Err(WalletError::validation(TRON_LATER));
-            }
             let cap = if a.bytes == "none" {
                 None
             } else {
@@ -173,10 +161,27 @@ impl Limit {
             Self::Calldata(_) => "calldata-cap",
         }
     }
-    fn target(&self) -> String {
+    fn target(&self, chain: &Chain) -> String {
         match self {
-            Self::Native(_) => "native value (wei)".into(),
+            Self::Native(_) => format!(
+                "native value ({})",
+                if matches!(chain.family, Family::Tron(_)) {
+                    "sun"
+                } else {
+                    "wei"
+                }
+            ),
+            Self::Token { token, .. } if matches!(chain.family, Family::Tron(_)) => {
+                let shown = token
+                    .parse::<alloy::primitives::Address>()
+                    .map(|a| chains::tron::address::from_body(&a.0.0))
+                    .unwrap_or_else(|_| INVALID.to_string());
+                format!("token {shown} (stored as {token}; smallest base units)")
+            }
             Self::Token { token, .. } => format!("token {token} (smallest base units)"),
+            Self::Calldata(_) if matches!(chain.family, Family::Tron(_)) => {
+                "calldata bytes (not a bandwidth fee cap)".into()
+            }
             Self::Calldata(_) => "calldata bytes (not an L1 fee cap)".into(),
         }
     }
@@ -241,7 +246,14 @@ pub(super) fn recipient(home: &Path, to: &str) -> Result<(String, Option<String>
         .list
         .by_nickname(nickname)
         .ok_or_else(|| unresolved("the whitelist has no entry by that name"))?;
-    Ok((entry.address.clone(), Some(nickname.to_string())))
+    Ok((
+        if entry.chains == ["tron"] {
+            entry_address(entry)
+        } else {
+            entry.address.clone()
+        },
+        Some(nickname.to_string()),
+    ))
 }
 
 /// One password-backed change.
@@ -300,20 +312,21 @@ impl Change {
 }
 
 /// `whitelist add`: the entry, checked as the list will check it before anything is asked or
-/// stopped. `--chains` defaults to the default chain ([`PRIMARY_CHAIN`]); `"*"` only when given.
+/// stopped. `--chains` defaults to Tron for T addresses, [`PRIMARY_CHAIN`] for EVM; `"*"` is
+/// explicit and applies only to EVM chains.
 fn add_change(a: &WhitelistAddArgs) -> Result<Change> {
     whitelist::validate_nickname(&a.nickname)?;
-    // No Tron payee yet, by its T... address or by `--chains tron`.
-    let tron_chain = a
-        .chains
-        .iter()
-        .any(|c| chains::find(c.trim()).is_ok_and(|chain| matches!(chain.family, Family::Tron(_))));
-    if tron_chain || chains::tron::address::is_address(a.address.trim()) {
-        return Err(WalletError::validation(TRON_LATER));
-    }
-    let address = format!("0x{}", hex::encode(evm::parse_address(&a.address)?));
+    let given = a.address.trim();
+    let is_tron = !given.starts_with("0x");
+    let address = if is_tron {
+        let payload =
+            chains::tron::address::parse(given).map_err(|e| WalletError::validation(e.message))?;
+        format!("0x{}", hex::encode(&payload[1..]))
+    } else {
+        format!("0x{}", hex::encode(evm::parse_address(given)?))
+    };
     let keys: Vec<String> = if a.chains.is_empty() {
-        vec![PRIMARY_CHAIN.to_string()]
+        vec![if is_tron { "tron" } else { PRIMARY_CHAIN }.to_string()]
     } else {
         a.chains
             .iter()
@@ -323,6 +336,16 @@ fn add_change(a: &WhitelistAddArgs) -> Result<Change> {
             })
             .collect::<Result<_>>()?
     };
+    if is_tron && (keys != ["tron"] || a.contract) {
+        return Err(WalletError::validation(
+            "a Tron payee must name only --chains tron and cannot be a contract entry",
+        ));
+    }
+    if !is_tron && keys.iter().any(|c| c == "tron") {
+        return Err(WalletError::validation(
+            "a Tron payee is given as its T... address, with --chains tron only",
+        ));
+    }
     let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
     let entry = if a.contract {
         let selectors: Vec<&str> = a.selectors.iter().map(String::as_str).collect();
@@ -614,7 +637,10 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
     match change {
         Change::Add(e) => {
             lines.push(format!("  add {}: {}", e.nickname, kind_text(e.kind)));
-            lines.push(format!("    address: {}", checksummed(&e.address)));
+            lines.push(format!("    address: {}", entry_address(e)));
+            if e.chains == ["tron"] {
+                lines.push(format!("    (stored as {}, the same 20 bytes)", e.address));
+            }
             lines.push(format!("    chains: {}", chains_text(&e.chains)));
             if let Some(sels) = &e.selectors {
                 lines.push(format!("    selectors: {}", sels.join(", ")));
@@ -647,7 +673,7 @@ fn summary(files: &ListFiles, change: &Change, unlock: Option<(&str, Duration)>)
             "  {} {}: {}: {limit_was} -> {}; per transaction, not cumulative",
             limit.name(),
             chain.key,
-            limit.target(),
+            limit.target(chain),
             limit.value()
         )),
         Change::MessageSigning(on) => {
@@ -933,7 +959,7 @@ fn headline(change: &Change) -> String {
                     EntryKind::Address => "a payee",
                     EntryKind::Contract => "a contract",
                 },
-                checksummed(&e.address),
+                entry_address(e),
                 chains_text(&e.chains)
             );
             if let Some(sels) = &e.selectors {
@@ -947,7 +973,7 @@ fn headline(change: &Change) -> String {
             "{} {} {} = {} per transaction",
             limit.name(),
             chain.key,
-            limit.target(),
+            limit.target(chain),
             limit.value()
         ),
         Change::MessageSigning(on) => format!("allow-message-signing {}", on_off(*on)),
@@ -981,7 +1007,7 @@ fn entry_text(list: &Whitelist, nickname: &str, file: &str) -> String {
                 EntryKind::Address => "a payee",
                 EntryKind::Contract => "a contract",
             },
-            checksummed(&e.address),
+            entry_address(e),
             chains_text(&e.chains)
         ),
         None => format!("{file} has no entry by that name"),
@@ -1040,6 +1066,28 @@ fn kind_text(kind: EntryKind) -> String {
 }
 
 /// An address for a human: EIP-55, or escaped as found when it is not one.
+/// The family is fixed by the entry's chain scope, never guessed from the stored body.
+fn entry_address(entry: &Entry) -> String {
+    if entry.chains == ["tron"] {
+        if let Ok(body) = entry.address.parse::<alloy::primitives::Address>() {
+            return chains::tron::address::from_body(&body.0.0);
+        }
+        return INVALID.to_string();
+    }
+    checksummed(&entry.address)
+}
+
+fn shown_entry(entry: &Entry) -> Value {
+    let mut value = json!(entry);
+    value["family"] = json!(if entry.chains == ["tron"] {
+        "tron"
+    } else {
+        "evm"
+    });
+    value["address"] = json!(entry_address(entry));
+    value
+}
+
 fn checksummed(address: &str) -> String {
     evm::parse_address(address)
         .map(|a| a.to_checksum(None))
@@ -1050,7 +1098,7 @@ fn checksummed(address: &str) -> String {
 /// does not know), at most [`ITEMS_SHOWN`], then how many more.
 fn chains_text(chains: &[String]) -> String {
     if chains.len() == 1 && chains[0] == ANY_CHAIN {
-        return "every chain (*)".to_string();
+        return "every EVM chain (*)".to_string();
     }
     let mut shown: Vec<String> = chains
         .iter()
@@ -1065,9 +1113,14 @@ fn chains_text(chains: &[String]) -> String {
 
 fn fee_text(chain: &Chain, wei: U256) -> String {
     format!(
-        "{} {} ({wei} wei)",
+        "{} {} ({wei} {})",
         format_units(wei, chain.decimals),
-        chain.symbol
+        chain.symbol,
+        if matches!(chain.family, Family::Tron(_)) {
+            "sun"
+        } else {
+            "wei"
+        }
     )
 }
 
@@ -1162,10 +1215,6 @@ pub(super) fn dry_run_check(
     from: &str,
     unsigned: &Value,
 ) -> Result<DryRunCheck> {
-    match &chain.family {
-        Family::Evm(_) => {}
-        Family::Tron(_) => return Err(WalletError::validation(TRON_LATER)),
-    }
     let read = whitelist::read_list(&home.join(WHITELIST_FILE));
     let view = match &read {
         Ok(None) => return Ok(DryRunCheck::NotChecked),
@@ -1177,9 +1226,27 @@ pub(super) fn dry_run_check(
         .and_then(|s| s.strip_prefix("0x"))
         .and_then(|h| hex::decode(h).ok())
         .ok_or_else(|| WalletError::validation("the unsigned transaction is not 0x hex"))?;
-    let decoded = tx::decode_unsigned(&payload)?;
-    let signer = evm::parse_address(from)?;
-    let Err(e) = policy::check_tx(&view, chain, &signer, &decoded) else {
+    let check = match chain.family {
+        Family::Evm(_) => {
+            let decoded = tx::decode_unsigned(&payload)?;
+            policy::check_tx(&view, chain, &evm::parse_address(from)?, &decoded)
+        }
+        Family::Tron(_) => {
+            let decoded = chains::tron::tx::decode_raw(&payload)?;
+            let now_ms = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| WalletError::validation("clock is before Unix epoch"))?
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
+            chains::tron::policy::check_tx(
+                &view,
+                chains::tron::address::parse(from)?,
+                &decoded,
+                now_ms,
+            )
+        }
+    };
+    let Err(e) = check else {
         return Ok(DryRunCheck::Allowed);
     };
     let mut denied = e.details.clone();
@@ -1224,13 +1291,17 @@ fn edit_output(
     match change {
         Change::Add(entry) => {
             let signed = list.by_nickname(&entry.nickname).unwrap_or(entry);
-            out["entry"] = json!(signed);
+            out["entry"] = shown_entry(signed);
             if signed.kind == EntryKind::Contract {
                 out["warning"] = json!(RESIDUAL);
             }
         }
         Change::Remove(nickname) => {
-            out["entry"] = json!(base.list.by_nickname(nickname));
+            out["entry"] = base
+                .list
+                .by_nickname(nickname)
+                .map(shown_entry)
+                .unwrap_or(Value::Null);
         }
         Change::FeeCap { chain, wei } => {
             out["feeCap"] = json!({
@@ -1240,7 +1311,7 @@ fn edit_output(
             });
         }
         Change::Limit { chain, limit } => {
-            out["transactionLimit"] = json!({"chain": chain.key, "target": limit.target(), "value": limit.value(), "perTransaction": true});
+            out["transactionLimit"] = json!({"chain": chain.key, "target": limit.target(chain), "value": limit.value(), "perTransaction": true});
             out["policy"] = json!(list.policy);
         }
         Change::MessageSigning(on) => out["allowMessageSigning"] = json!(on),
@@ -1495,7 +1566,8 @@ fn entry_line(e: &Value) -> String {
         "  {:<16} {:<8} {} {}",
         valid_or_invalid(&e["nickname"], |s| whitelist::validate_nickname(s).is_ok()),
         valid_or_invalid(&e["kind"], |s| matches!(s, "address" | "contract")),
-        valid_or_invalid(&e["address"], |s| is_hex(s, 40)),
+        valid_or_invalid(&e["address"], |s| is_hex(s, 40)
+            || chains::tron::address::is_address(s)),
         items_shown(&e["chains"], chain_shown)
     );
     if !e["selectors"].is_null() {
@@ -1605,7 +1677,7 @@ fn verified_view(home: &Path, anchor: Result<Option<WhitelistAnchor>>) -> Value 
 fn list_view(list: &Whitelist, verified: bool, source: &str) -> Value {
     json!({
         "gen": list.generation,
-        "entries": list.entries,
+        "entries": list.entries.iter().map(shown_entry).collect::<Vec<_>>(),
         "policy": list.policy,
         "verified": verified,
         "source": source,
@@ -1803,6 +1875,28 @@ mod tests {
             .unwrap();
         std::io::Write::write_all(&mut f, &signed.to_file_bytes().unwrap()).unwrap();
         tmp
+    }
+
+    #[test]
+    fn tron_list_and_nickname_show_the_family_address_not_its_evm_body() {
+        let address = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C";
+        let body = "0x9705bf55c3dcc6d277ebb8fe2a68762268822ba2";
+        let entry = Entry::new_address("bob", body, &["tron"]);
+        let tmp = home_with(std::slice::from_ref(&entry));
+        assert_eq!(
+            recipient(tmp.path(), "@bob").unwrap(),
+            (address.into(), Some("bob".into()))
+        );
+        let value = unverified_view(tmp.path(), None);
+        assert_eq!(value["entries"][0]["family"], "tron");
+        assert_eq!(value["entries"][0]["address"], address);
+        assert!(list_text(&value, false).contains(address));
+        assert!(!list_text(&value, false).contains(body));
+        let raw: Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join(WHITELIST_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(raw["entries"][0]["address"], body);
+        assert!(raw["entries"][0].get("family").is_none());
     }
 
     #[test]
@@ -2170,7 +2264,7 @@ mod tests {
             "The password authorizes this whitelist change:",
             "add alice: a payee",
             "address: 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
-            "chains: every chain (*)",
+            "chains: every EVM chain (*)",
             "whitelist.json: none yet",
             "if wallet.json seals no whitelist yet: a new list from the built-in defaults with a \
              new key, gen 1",
@@ -2184,7 +2278,7 @@ mod tests {
         assert_eq!(
             text.lines().last().unwrap(),
             "The password authorizes: add alice, a payee 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed \
-             on every chain (*); after the change: the wallet stays locked"
+             on every EVM chain (*); after the change: the wallet stays locked"
         );
         let cap = Change::FeeCap {
             chain: base,
@@ -2303,7 +2397,7 @@ mod tests {
             text.contains(
                 "remove bob: whitelist.json lists it as a payee \
                  0x3333333333333333333333333333333333333333 on base; whitelist.next.json lists \
-                 it as a payee 0x4444444444444444444444444444444444444444 on every chain (*)"
+                 it as a payee 0x4444444444444444444444444444444444444444 on every EVM chain (*)"
             ),
             "{text}"
         );

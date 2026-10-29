@@ -2243,7 +2243,8 @@ fn w1_first_add_makes_the_key_and_the_list_reads_while_locked() {
         json!({
             "nickname": "alice",
             "kind": "address",
-            "address": PAYEE.to_ascii_lowercase(),
+            "address": PAYEE,
+            "family": "evm",
             "chains": ["base"],
         }),
         "{added}"
@@ -2341,6 +2342,7 @@ fn whitelist_verbs_change_one_generation_each_and_refuse_before_writing() {
             "nickname": "router",
             "kind": "contract",
             "address": ROUTER,
+            "family": "evm",
             "chains": ["base", "arbitrum"],
             "selectors": ["0x12345678", "0xabcdef01"],
         }),
@@ -2890,7 +2892,7 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
         &["add", "bob", BOB, "--chains", "*"],
         PW,
         &[
-            "chains: every chain (*)",
+            "chains: every EVM chain (*)",
             "now: gen 1, 1 entry (alice)",
             "if whitelist.json is the list wallet.json seals: the change lands on it, making gen 2",
             "otherwise: nothing changes",
@@ -2935,7 +2937,7 @@ fn m1_the_change_is_shown_before_the_password_is_read() {
         &[
             "remove bob: whitelist.json lists it as a payee",
             BOB,
-            "every chain (*)",
+            "every EVM chain (*)",
         ],
     )
     .ok();
@@ -6273,44 +6275,86 @@ fn tr24_sign_message_call_and_invoke_on_tron_are_unsupported_and_so_for_now_are_
 }
 
 #[test]
-fn whitelist_entries_and_fee_caps_for_tron_wait_for_the_tron_signer() {
+fn tron_whitelist_add_defaults_to_tron_and_shows_its_family_without_changing_signed_shape() {
     let _exclusive = common::exclusive();
     let home = Home::new();
     home.create("main", &[]);
+    let address = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C";
+    let stored = "0x9705bf55c3dcc6d277ebb8fe2a68762268822ba2";
     let pw = format!("{PW}\n");
-    for args in [
+    let out = home.run_stdin(
         &[
             "whitelist",
             "add",
             "bob",
-            "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
-            "--chains",
-            "tron",
-        ][..],
-        &[
-            "whitelist",
-            "add",
-            "bob",
-            "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+            address,
+            "--password-stdin",
+            "--json",
         ],
-        &["whitelist", "add", "bob", BOB, "--chains", "tron"],
-        &["whitelist", "add", "bob", BOB, "--chains", "base,tron"],
-        &["whitelist", "fee-cap", "tron", "30"],
-        &["whitelist", "native-cap", "tron", "30"],
-        &["whitelist", "calldata-cap", "tron", "128"],
-        &["whitelist", "token-cap", "tron", "usdt", "1000000"],
+        &pw,
+    );
+    out.ok();
+    assert!(out.stderr.contains(address));
+    assert!(out.stderr.contains(&format!("stored as {stored}")));
+    let file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("whitelist.json")).unwrap())
+            .unwrap();
+    assert_eq!(file["entries"][0]["address"], stored);
+    assert_eq!(file["entries"][0]["chains"], json!(["tron"]));
+    let list = home
+        .run_stdin(
+            &[
+                "whitelist",
+                "list",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
+            &pw,
+        )
+        .ok();
+    assert_eq!(list["verified"], true);
+    assert_eq!(list["entries"][0]["address"], address);
+    assert_eq!(list["entries"][0]["family"], "tron");
+    for args in [
+        vec!["fee-cap", "tron", "30"],
+        vec!["native-cap", "tron", "2"],
+        vec![
+            "token-cap",
+            "tron",
+            "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+            "1000000",
+        ],
+        vec!["calldata-cap", "tron", "68"],
     ] {
-        let mut args = args.to_vec();
+        let mut cmd = vec!["whitelist"];
+        cmd.extend(args);
+        cmd.extend(["--password-stdin", "--json"]);
+        home.run_stdin(&cmd, &pw).ok();
+    }
+}
+
+#[test]
+fn tron_whitelist_rejects_wrong_families_checksums_and_contract_entries_before_password() {
+    let home = Home::new();
+    home.create("main", &[]);
+    let addr = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C";
+    let bad = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6D";
+    for (address, extra) in [
+        (addr, vec!["--chains", "base"]),
+        (addr, vec!["--chains", "*"]),
+        (BOB, vec!["--chains", "tron"]),
+        (addr, vec!["--chains", "tron,base"]),
+        (bad, vec![]),
+        (addr, vec!["--contract", "--selectors", "0xa9059cbb"]),
+    ] {
+        let mut args = vec!["whitelist", "add", "bob", address];
+        args.extend(extra);
         args.extend(["--password-stdin", "--json"]);
-        let out = home.run_stdin(&args, &pw);
-        let msg = out.err("VALIDATION_ERROR");
-        assert!(
-            msg.contains("Tron payees and fee caps come with the Tron signer"),
-            "{args:?}: {msg}"
-        );
-        // Refused before the password: no summary, nothing written.
-        assert!(!out.stderr.contains("password"), "{args:?}: {}", out.stderr);
-        assert!(!home.path().join("whitelist.json").exists(), "{args:?}");
+        let out = home.run_stdin(&args, "wrong\n");
+        out.err("VALIDATION_ERROR");
+        assert!(!out.stderr.contains("password"), "{}", out.stderr);
+        assert!(!home.path().join("whitelist.json").exists());
     }
 }
 
