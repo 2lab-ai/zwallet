@@ -26,6 +26,7 @@ Status: in-progress, 2026-10-29.
 | H18 | TUI12 family integration: selected-chain address, Tron history/send adapters | root | 🟡 | Review found primary EVM address must not appear under a Tron label before opening a key |
 | H19 | TUI9 trusted original intent and fixed-nonce replacements | tui_foundation_review | 🟡 | Separate replacement boundary on reviewed send/history APIs; no journal-only authority |
 | H20 | One tree for #35 and #37–#49 plus main (#36): merges in the brief's order, conflict resolutions, combined gate | integration | 🟡 | Branch `integ/tui-tron-final` on 2lab-ai/zwallet; one merge commit per PR with its remerge diff; merging it marks every handoff PR merged |
+| H21 | Fix round on `integ/tui-tron-final` (PR #51): #46 MUST-FIX (the replacement's kind from the bytes, never the journal), #47 NB1–NB3 (plan fingerprint compare, Tron picker, summary paging), the README receipt sentence, the Keys hint, real-terminal D1–D4, the whitelist list wrap, `ZWALLET_EXPLORER_<CHAIN>` | integration | 🟡 | One RED commit then one fix commit per item; RED outputs `red-fix1.txt`–`red-fix12.txt` (fix 5 is docs only) and the gate's `fix-full.log`, `fix-linux.txt` under the epic's `logs/integ/`; closes with PR #51 |
 
 Run only one full CLI suite at once. Agent worktrees are under .worktrees; each unit
 owns its isolated tree and reports changes for integration before heavy gates.
