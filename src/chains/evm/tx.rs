@@ -462,6 +462,31 @@ pub fn decode_signed(raw: &[u8]) -> Result<DecodedEvmTx> {
     })
 }
 
+/// Independently bind the returned signature to exactly the payload we requested, including
+/// calldata and fees. Recovering the right sender alone does not establish this.
+pub fn verify_signed_payload(raw: &str, expected: &[u8]) -> Result<()> {
+    let bytes = alloy::hex::decode(raw.trim_start_matches("0x"))
+        .map_err(|_| WalletError::validation("malformed signed transaction"))?;
+    let mut remaining = bytes.as_slice();
+    let envelope = TxEnvelope::decode_2718(&mut remaining)
+        .map_err(|_| WalletError::validation("malformed signed transaction"))?;
+    let hash = match envelope {
+        TxEnvelope::Eip1559(s) => s.tx().signature_hash(),
+        TxEnvelope::Legacy(s) => s.tx().signature_hash(),
+        _ => {
+            return Err(WalletError::validation(
+                "unexpected signed transaction type",
+            ));
+        }
+    };
+    if !remaining.is_empty() || hash != alloy::primitives::keccak256(expected) {
+        return Err(WalletError::validation(
+            "the key daemon signed a different transaction; not broadcasting",
+        ));
+    }
+    Ok(())
+}
+
 pub fn erc20_transfer_calldata(to: Address, amount: U256) -> Bytes {
     IERC20::transferCall { to, amount }.abi_encode().into()
 }

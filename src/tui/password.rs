@@ -8,8 +8,6 @@ pub struct PasswordBuf {
     len: usize,
 }
 
-impl zeroize::ZeroizeOnDrop for PasswordBuf {}
-
 impl Default for PasswordBuf {
     fn default() -> Self {
         Self {
@@ -65,6 +63,9 @@ impl PasswordBuf {
         }
     }
 }
+
+// The fixed allocation is zeroized by its Zeroizing owner on drop.
+impl zeroize::ZeroizeOnDrop for PasswordBuf {}
 
 #[cfg(test)]
 mod tests {

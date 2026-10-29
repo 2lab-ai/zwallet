@@ -12,6 +12,9 @@ use crate::core::time::{parse_rfc3339_utc, rfc3339_utc};
 /// Where a value shown in the TUI comes from: one row of rule 3's table each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
+    WhitelistName,
+    Quantity,
+    TransactionHash,
     /// A bounded read-only pane line, built from independently checked values.
     Detail,
     /// Public wallet-home path.
@@ -36,6 +39,9 @@ impl Source {
     /// The most characters a value of this source shows.
     pub const fn budget(self) -> usize {
         match self {
+            Self::WhitelistName => 32,
+            Self::Quantity => 78,
+            Self::TransactionHash => 66,
             Self::Detail => 72,
             Self::Home => 64,
             Self::Input => 512,
@@ -58,6 +64,29 @@ pub struct Outside {
 const ONE_DAY: u64 = 86_400;
 
 impl Outside {
+    pub fn nickname(text: &str) -> Self {
+        Self::inert(Source::WhitelistName, text)
+    }
+    pub fn quantity(text: &str) -> Self {
+        Self::inert(
+            Source::Quantity,
+            if text.len() <= 78 && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+                text
+            } else {
+                "<invalid>"
+            },
+        )
+    }
+    pub fn transaction_hash(text: &str) -> Self {
+        Self::inert(
+            Source::TransactionHash,
+            if text.parse::<alloy::primitives::B256>().is_ok() {
+                text
+            } else {
+                "<invalid>"
+            },
+        )
+    }
     pub fn detail(text: &str) -> Self {
         Self::inert(Source::Detail, text)
     }

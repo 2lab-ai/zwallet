@@ -606,6 +606,10 @@ pub fn bump_label(bump: u128) -> String {
 /// An unsigned transaction plus the output fields describing it (nonce, fees, shortfall, ...).
 #[derive(Debug, Clone)]
 pub struct PreparedTx {
+    /// Maximum execution fee in base units, retained before display formatting.
+    pub max_gas_cost: U256,
+    /// OP-stack L1 data fee estimate, retained before display formatting.
+    pub l1_fee: Option<U256>,
     pub unsigned: Value,
     pub fields: Map<String, Value>,
 }
@@ -1164,7 +1168,11 @@ pub fn nonce_label(nonces: &RangeInclusive<u64>) -> String {
 }
 
 /// A signed transaction about to be broadcast, and its journal line.
+/// Receives the fsynced journal announcement immediately before broadcast.
+pub type SendProgress = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct SendRecord {
+    progress: Option<SendProgress>,
     pub journal: SendJournal,
     pub entry: Value,
 }
@@ -1189,13 +1197,22 @@ impl SendRecord {
         if let Some(token) = &send.token {
             entry["token"] = json!(token);
         }
-        Self { journal, entry }
+        Self {
+            journal,
+            entry,
+            progress: None,
+        }
     }
 
-    /// Call right before the transaction is broadcast: appends the journal line (fsynced) and
-    /// prints the same fields as one line on stderr, so that a run cut off after the broadcast
-    /// still leaves the hash behind. A failure here means nothing was broadcast.
-    pub fn write(&self) -> Result<()> {
+    /// Install the caller's progress observer. The library itself never prints.
+    pub fn with_progress(mut self, progress: Option<SendProgress>) -> Self {
+        self.progress = progress;
+        self
+    }
+
+    /// Fsync the journal immediately before broadcast, notify the caller, and return the
+    /// announcement. A failure here means nothing was broadcast.
+    pub fn write(&self) -> Result<String> {
         self.journal.append(&self.entry)?;
         let hash = self.entry["txHash"].as_str().unwrap_or("?");
         let chain = self.journal.chain.key;
@@ -1211,13 +1228,11 @@ impl SendRecord {
                  hash up before sending again ({lookup})"
             ),
         };
-        // A closed stderr must not panic the send (`eprint_line` ignores it).
-        crate::core::terminal::eprint_line(&format!(
-            "{line}. Journal {}: {}",
-            self.journal.display(),
-            self.entry
-        ));
-        Ok(())
+        let line = format!("{line}. Journal {}: {}", self.journal.display(), self.entry);
+        if let Some(progress) = &self.progress {
+            progress(&line);
+        }
+        Ok(line)
     }
 }
 

@@ -809,6 +809,8 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
     fields.insert("sufficientFunds".into(), json!(shortfall.is_empty()));
     fields.insert("shortfall".into(), Value::Array(shortfall));
     Ok(PreparedTx {
+        max_gas_cost,
+        l1_fee,
         // The daemon gets the signing payload bytes only and decodes them itself.
         unsigned: json!(format!(
             "0x{}",
@@ -816,6 +818,38 @@ pub async fn prepare(p: &EvmProvider, net: &Net, intent: Intent) -> Result<Prepa
         )),
         fields,
     })
+}
+
+/// Apply live-send guards to a freshly prepared dry-run after comparing its review. This
+/// lets an interactive confirmation return a changed funds verdict without asking for a
+/// signature, while keeping the CLI's pending/shortfall errors for unchanged reviews.
+pub(crate) fn check_transfer_sendable(
+    net: &Net,
+    req: &TransferRequest,
+    prepared: &PreparedTx,
+) -> Result<()> {
+    if req.nonce.is_none()
+        && !req.allow_pending
+        && let Some(range) = prepared
+            .fields
+            .get("pendingRange")
+            .and_then(Value::as_array)
+    {
+        let first = range.first().and_then(Value::as_u64);
+        let last = range.get(1).and_then(Value::as_u64);
+        if let (Some(first), Some(last)) = (first, last) {
+            return Err(pending_guard_error(net, first..=last, req.journal.as_ref()));
+        }
+    }
+    let shortfall = prepared
+        .fields
+        .get("shortfall")
+        .and_then(Value::as_array)
+        .ok_or_else(|| WalletError::validation("prepared transaction has no funds verdict"))?;
+    if !shortfall.is_empty() {
+        return Err(insufficient(shortfall));
+    }
+    Ok(())
 }
 
 /// Most pending nonces `pendingNonces` lists.

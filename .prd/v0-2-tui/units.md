@@ -366,6 +366,15 @@ trust state, 03-tui.md §Address trust) lands in TUI-2a, its rule 4 in TUI-2b.
 
 ## TUI-5 — transfer
 
+- **Library boundary (2026-10-29):** implemented in `src/wallet/send.rs`, with typed checked
+  payees, immutable reviews, held overrides, integer execution plus L1 fee comparison, and the
+  shared CLI signing/broadcast tail. `tests/transfer_review.rs` counts mock `SignTx` requests.
+  Screen wiring and bounded receipt polling are implemented in `src/tui/app/transfer.rs` and
+  `src/tui/ui/transfer.rs`; 21 focused mock tests pass. The worker owns each send once, reports
+  durable journal progress, and defers quit/lock until mutation finishes. Independent review,
+  actual PTY acceptance and the integrated full gate remain open at dispatcher handoff. See
+  [the current API](flow.md#transfer-library-boundary-added-on-2026-10-29) and
+  [the evidence](../research/handoff-tui-send-2026-10-29.md).
 - **Closes:** T6, T6b, T21, T22, T43.
 - **PR:** TUI-5 alone; TUI-6 merges right after it, in its own review (§PRs and previews).
 - **The owner can afterwards:** send the coin or a registry token to a listed payee, override

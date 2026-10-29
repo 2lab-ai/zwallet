@@ -3,8 +3,8 @@
 
 use crate::chains::evm::{self, Evm, abi, rpc as evm_rpc};
 use crate::chains::{
-    self, Broadcast, CHAINS, Chain, ChainFamily, Family, Net, PRIMARY_CHAIN, PreparedTx,
-    TransferRequest, redact_url,
+    self, CHAINS, Chain, ChainFamily, Family, Net, PRIMARY_CHAIN, PreparedTx, TransferRequest,
+    redact_url,
 };
 use crate::cli::{
     AddressArgs, AddressesArgs, BalanceArgs, CallArgs, Cli, Command, CreateArgs, InvokeArgs,
@@ -31,10 +31,6 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 pub(crate) mod whitelist;
-
-/// How long `--wait` polls for a receipt before reporting `status: "pending"`, unless
-/// `--wait-timeout` says otherwise.
-const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn home() -> Result<PathBuf> {
     store::resolve_home(std::env::var_os("ZWALLET_HOME"), std::env::home_dir())
@@ -257,7 +253,7 @@ pub(crate) fn inert_whitelist(value: &Value) -> Value {
 /// What the key holder decoded from the bytes it signed, for `signerDecoded`: an object from a
 /// genuine daemon, made inert with its structure kept; anything else (whatever answers on `d.sock`
 /// may send a 1 MiB string) one string, made inert and cut as [`inert_whitelist`] does.
-fn signer_decoded(view: &Value) -> Value {
+pub(crate) fn signer_decoded(view: &Value) -> Value {
     use crate::core::text::{PROSE_MAX, ascii_inert, inert_json};
     if view.is_object() {
         inert_json(view)
@@ -1458,17 +1454,10 @@ fn replacement(send: &SendArgs) -> Result<(Option<u128>, Option<B256>)> {
 
 /// `--max-fee-gwei` in wei (gwei = 10^9 wei), validated before any RPC.
 fn max_fee_wei(send: &SendArgs) -> Result<Option<u128>> {
-    let Some(gwei) = send.max_fee_gwei.as_deref() else {
-        return Ok(None);
-    };
-    let bad = |why: String| WalletError::validation(format!("--max-fee-gwei: {why}"));
-    let wei = parse_units(gwei, 9).map_err(|e| bad(e.message))?;
-    if wei.is_zero() {
-        return Err(bad("must be greater than zero".into()));
-    }
-    u128::try_from(wei)
-        .map(Some)
-        .map_err(|_| bad(format!("'{gwei}' is too large")))
+    send.max_fee_gwei
+        .as_deref()
+        .map(wallet::parse_fee_ceiling)
+        .transpose()
 }
 
 async fn transfer(home: &Path, a: TransferArgs) -> Result<Out> {
@@ -1532,45 +1521,7 @@ async fn transfer_with<F: ChainFamily>(
     .await
 }
 
-/// What `out` (the command's fields merged with `prepare`'s) says the send does: the recipient
-/// (the contract for an invoke), the amount with its symbol (`amount` and the asset's `symbol`
-/// for a transfer, the native `value` for an invoke), the same amount in base units
-/// (`amountRaw` for a transfer, `valueRaw` for an invoke), and the token contract of a token
-/// transfer. The duplicate check keys on the base units, never on the symbol the node reported.
-fn send_summary(out: &Map<String, Value>, chain: &Chain, kind: &str) -> chains::SendSummary {
-    let text = |k: &str| out.get(k).and_then(Value::as_str);
-    chains::SendSummary {
-        kind: kind.to_string(),
-        to: text("to").unwrap_or("?").to_string(),
-        value: format!(
-            "{} {}",
-            text("amount").or_else(|| text("value")).unwrap_or("?"),
-            text("symbol").unwrap_or(chain.symbol)
-        ),
-        amount_raw: text("amountRaw")
-            .or_else(|| text("valueRaw"))
-            .map(str::to_string),
-        token: text("token").map(str::to_string),
-    }
-}
-
-/// Shared tail of `transfer` and `invoke`: refuse a likely repeat, sign through the daemon,
-/// check the raw bytes really come from `from`, then either report (dry-run) or broadcast (and
-/// optionally wait). Right before the broadcast the send is written to the account's journal and
-/// announced on stderr (`kind` names the command). `_lock` is held until this returns, through
-/// any `--wait`, so no other send from the key starts while this one's outcome is still being
-/// read.
-///
-/// A send without `--nonce` whose journal has the same send from the last 10 minutes is refused
-/// before signing (unless `--allow-duplicate`): a run cut off after the broadcast and run again
-/// once the first is mined passes the pending check and would pay twice. A dry-run reports the
-/// matches (`duplicateSends`) instead. A `--nonce` send is an explicit replacement or retry at a
-/// fixed nonce, so it cannot add a second payment and skips the check.
-///
-/// A dry-run first runs the daemon's whitelist check on whitelist.json as it is on disk, when
-/// there is one; if that refuses, it reports `whitelist: {allowed: false, …}` and asks the daemon
-/// for nothing. Without a whitelist.json the daemon decides, as for a live send, which is decided
-/// by the daemon alone.
+/// CLI adapter for the common signing, journaling and broadcast tail.
 #[allow(clippy::too_many_arguments)]
 async fn sign_and_send<F: ChainFamily>(
     fam: &F,
@@ -1580,115 +1531,32 @@ async fn sign_and_send<F: ChainFamily>(
     from: &str,
     prepared: PreparedTx,
     send: &SendArgs,
-    mut out: Map<String, Value>,
-    _lock: Option<chains::SendLock>,
+    out: Map<String, Value>,
+    lock: Option<chains::SendLock>,
     kind: &str,
 ) -> Result<Out> {
-    let PreparedTx { unsigned, fields } = prepared;
-    for (k, v) in fields {
-        out.entry(k).or_insert(v);
-    }
-    let journal = chains::SendJournal::new(home, net.chain, from);
-    let summary = send_summary(&out, net.chain, kind);
-    let mut duplicates_text = None;
-    if send.nonce.is_none() {
-        let now = crate::core::time::unix_secs(std::time::SystemTime::now());
-        let duplicates = journal.recent_duplicates(&summary, now)?;
-        if !duplicates.is_empty() && !send.dry_run && !send.allow_duplicate {
-            return Err(journal.duplicate_error(duplicates));
-        }
-        // The journal's own lines, which anyone of this user can write: escaped in `--json`,
-        // and for a human each field only in the shape zwallet writes it, within one budget.
-        out.insert(
-            "duplicateSends".into(),
-            duplicates
-                .iter()
-                .map(crate::core::text::inert_json)
-                .collect(),
-        );
-        if !duplicates.is_empty() {
-            duplicates_text = Some(journal.entries_text(&duplicates));
-        }
-    }
-    // A dry-run the whitelist on disk refuses is explained without asking the daemon to sign.
-    let checked = if send.dry_run {
-        whitelist::dry_run_check(home, net.chain, from, &unsigned)?
-    } else {
-        whitelist::DryRunCheck::NotChecked
+    let options = wallet::send::SendOptions {
+        dry_run: send.dry_run,
+        nonce: send.nonce,
+        allow_duplicate: send.allow_duplicate,
+        wait: send.wait,
+        wait_timeout: send.wait_timeout,
     };
-    if let whitelist::DryRunCheck::Denied(denied) = checked {
-        out.insert("dryRun".into(), json!(true));
-        out.insert("whitelist".into(), denied);
-        return Ok(send_out(out, duplicates_text.as_deref()));
-    }
-    let signed_value = protocol::send_unlocked(
+    let result = wallet::send::send_prepared(
+        fam,
+        net,
         home,
-        &Request::SignTx {
-            chain: net.chain.key.into(),
-            index,
-            tx: unsigned,
-        },
-        SIGN_TIMEOUT,
+        index,
+        from,
+        prepared,
+        &options,
+        out,
+        lock,
+        kind,
+        Some(std::sync::Arc::new(crate::core::terminal::eprint_line)),
     )
     .await?;
-    let signed = fam.inspect_signed(net.chain, &signed_value)?;
-    if !signed.signer.eq_ignore_ascii_case(from) {
-        return Err(WalletError::validation(format!(
-            "the key daemon signed as {}, expected {from}; not broadcasting",
-            signed.signer
-        )));
-    }
-    // The nonce the signed bytes actually consume.
-    if let Some(n) = signed.nonce {
-        out.insert("nonce".into(), json!(n));
-    }
-    out.insert("dryRun".into(), json!(send.dry_run));
-    // What the key holder decoded from the bytes it signed (not what this process intended).
-    if let Some(view) = signed_value.get("decoded") {
-        out.insert("signerDecoded".into(), signer_decoded(view));
-    }
-    // The hash is computed from the signed bytes, never taken from the node.
-    out.insert("txHash".into(), json!(signed.tx_hash));
-    if send.dry_run {
-        // Checked here against the list on disk, then by the daemon against the sealed one.
-        if matches!(checked, whitelist::DryRunCheck::Allowed) {
-            out.insert("whitelist".into(), json!({ "allowed": true }));
-        }
-        // No rawTx: a dry-run must not hand out a transaction that can be broadcast without
-        // zwallet.
-        out.insert("recoveredFrom".into(), json!(signed.signer));
-        return Ok(send_out(out, duplicates_text.as_deref()));
-    }
-    let record = chains::SendRecord::new(journal, &signed, &summary);
-    let outcome = fam
-        .broadcast(net, &signed, send.nonce.is_some(), &record)
-        .await?;
-    out.insert(
-        "explorerUrl".into(),
-        json!(net.chain.explorer_tx_url(&signed.tx_hash)),
-    );
-    out.insert("journal".into(), json!(record.journal.display()));
-    if let Broadcast::KnownDespite {
-        warning,
-        rpc_tx_hash,
-    } = outcome
-    {
-        out.insert(
-            "broadcastWarning".into(),
-            json!(format!(
-                "{warning}; the node reports the transaction by its own hash, so it was sent"
-            )),
-        );
-        if let Some(h) = rpc_tx_hash {
-            out.insert("rpcTxHash".into(), json!(h));
-        }
-    }
-    if send.wait {
-        let timeout = send.wait_timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT);
-        let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
-        chains::record_receipt(&mut out, net.chain, receipt);
-    }
-    Ok(send_out(out, duplicates_text.as_deref()))
+    Ok(send_out(result.fields, result.duplicates_text.as_deref()))
 }
 
 /// A send's result: `--json` as it is; the human text the same, but with `duplicateSends` as

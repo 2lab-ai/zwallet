@@ -1117,7 +1117,7 @@ impl FileNames {
 }
 
 /// What the dry-run's whitelist check found ([`dry_run_check`]).
-pub(super) enum DryRunCheck {
+pub(crate) enum DryRunCheck {
     /// There is no whitelist.json, so nothing was checked here: the daemon decides, against the
     /// anchor it holds (this process cannot tell a wallet with no whitelist yet from one whose
     /// list was deleted).
@@ -1133,7 +1133,7 @@ pub(super) enum DryRunCheck {
 /// against whitelist.json as it is on disk, unverified: the list if it parses, or unusable (with
 /// the reason) if it cannot be read. Without a whitelist.json nothing is checked here. Only the
 /// daemon's check, against the list the seal names, decides a send.
-pub(super) fn dry_run_check(
+pub(crate) fn dry_run_check(
     home: &Path,
     chain: &Chain,
     from: &str,

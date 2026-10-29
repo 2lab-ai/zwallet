@@ -90,6 +90,9 @@ fn checked_frame(screen: &mut Screen, app: &App) -> (Vec<String>, Vec<Placed>) {
 /// budget raised in the code fails the tests.
 fn budget(source: Source) -> usize {
     match source {
+        Source::WhitelistName => 32,
+        Source::Quantity => 78,
+        Source::TransactionHash => 66,
         Source::KeyName | Source::RpcHost => 32,
         Source::Address => 42,
         Source::Expiry | Source::Home => 64,
@@ -1751,7 +1754,7 @@ mod navigation {
                     .trim_end()
                     .ends_with("? actions")
             );
-            if matches!(app.tab(), Tab::Send | Tab::Whitelist | Tab::Tools) {
+            if matches!(app.tab(), Tab::Whitelist | Tab::Tools) {
                 assert!(text.contains("in a later version"));
             }
         }

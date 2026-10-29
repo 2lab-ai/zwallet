@@ -267,7 +267,7 @@ pub static ACTIONS: [Action; 55] = [
     action!(TokenBalance, 18, "balance --token", "token", Tools, "read an arbitrary token balance", OpenKey, Evm),
     action!(Chains, 19, "chains", "c", Wallet, "choose a chain", Always, Any),
     action!(Rpc, 20, "--rpc", "e", Wallet, "choose a session RPC endpoint", Always, Any),
-    action!(Transfer, 21, "transfer", "3", Send, "transfer to a checked payee", Signing, Any),
+    action!(Transfer, 21, "transfer", "3/n", Send, "transfer to a checked payee", Signing, Any),
     action!(TokenTransfer, 22, "transfer --token", "Enter", Send, "transfer a registry token", Signing, Any),
     action!(DryRun, 23, "transfer --dry-run", "Enter", Send, "review a transfer without signing", Verified, Any),
     action!(Wait, 24, "transfer --wait-timeout", "w", Send, "wait for a send result", Pending, Any),

@@ -10,6 +10,43 @@ this page names the code that does it today, with `file:line`, what it returns, 
 call it as it is. Every line reference is to that commit, except §Functions added on 2026-10-28
 (24f4b5b). The units TUI-1 … TUI-12 in [`units.md`](units.md) close the gaps named here.
 
+## Transfer library boundary added on 2026-10-29
+
+`wallet::review_transfer(home, net, checked_list, TransferInput)` is implemented in
+`src/wallet/send.rs`. It uses the checked list in memory, takes no send lock and sends no
+`SignTx`. `transfer_payees` creates the typed payee choices; no raw-address constructor is
+exposed. A review owns the checked list, payee address, key, RPC and overrides, and exposes
+read-only decoded intent, integer execution/L1 fees, funds and policy verdicts.
+
+`wallet::send_transfer(review, progress)` rechecks the fingerprint before and after fresh
+preparation under the send lock. A fee increase or changed decoded intent returns
+`ReviewChanged` without signing; a decrease may proceed. An unavailable OP L1 estimate refuses
+review instead of treating the missing estimate as zero. The estimate can still rise after
+confirmation: it is not a cap on the sequencer's eventual L1 charge.
+
+CLI transfer/invoke and this boundary share `send_prepared`, including signature recovery,
+exact signing-payload verification, duplicate protection and journaling before broadcast.
+`SendRecord::write` returns the fsynced announcement and optionally calls a progress observer;
+only the CLI adapter prints it.
+
+`src/tui/app/transfer.rs` and `src/tui/ui/transfer.rs` now wire asset selection, checked payees,
+amount, immutable review, typed nickname confirmation and send status into the Send tab. The
+80×24 review shows full addresses, the exact base-unit amount, token contract, nonce, execution
+maximum, OP L1 estimate, total and policy execution cap. Registry units are checked independently
+of RPC token metadata. `p`, `d` and `g` rerun review with explicit held overrides.
+
+The worker owns each confirmed request once. Progress is emitted after the journal is durable,
+then the UI follows the computed hash for 90 seconds. `w` accepts a new bounded duration and
+cancels only the previous receipt poll. `q` waits for broadcast, and `L` requested during send
+runs after it. No signing request is cancelled by a navigation or receipt deadline.
+`App::verified_key` shares the lifetime password-derived index/address checks with other forms.
+`begin_external_send` allows reviewed invoke/replacement workers to reuse the same status path.
+
+Twenty-one local mock tests in `tests/transfer_review.rs` are green, including state transitions,
+TestBackend display budgets and signer request counts. Independent review, actual PTY acceptance
+and the integrated full gate remain assigned to the dispatcher; this receipt does not close those
+gates. See [the handoff evidence](../research/handoff-tui-send-2026-10-29.md).
+
 ## Labels
 
 - **exists**: a `pub` function the TUI can call as it is. It takes plain values (a home path, a

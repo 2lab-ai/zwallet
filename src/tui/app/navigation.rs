@@ -116,6 +116,13 @@ const IMPLEMENTED: &[ActionId] = &[
     ActionId::Startup,
     ActionId::SelectKey,
     ActionId::Version,
+    ActionId::Transfer,
+    ActionId::TokenTransfer,
+    ActionId::DryRun,
+    ActionId::Wait,
+    ActionId::AllowPending,
+    ActionId::AllowDuplicate,
+    ActionId::GasCap,
 ];
 
 impl App {
@@ -205,6 +212,9 @@ impl App {
                 let result = result.and_then(|(checked, list)| {
                     // Validate the whole result before inserting even one new lifetime pin.
                     for row in &checked.opened.keys {
+                        if self.verified_indices.get(&row.name).is_some_and(|index| *index != row.index) {
+                            return Err(WalletError::validation("the key index changed after the password check; close and verify this wallet again"));
+                        }
                         if let Some(address) = &row.address {
                             self.check_pin(&row.name, address)?;
                         }
@@ -474,7 +484,10 @@ impl App {
             self.render_session();
             return self.load_status();
         }
-        if matches!(self.nav.tab, Tab::Send | Tab::Whitelist | Tab::Tools) {
+        if self.nav.tab == Tab::Send {
+            return self.show_transfer();
+        }
+        if matches!(self.nav.tab, Tab::Whitelist | Tab::Tools) {
             self.nav.lines = Pane::Ready(vec![Outside::detail("in a later version")]);
             return Vec::new();
         }
@@ -554,6 +567,10 @@ impl App {
             Key::Esc => {
                 self.nav.every = false;
                 Some(self.load_view())
+            }
+            Key::Enter if self.nav.tab == Tab::Wallet => {
+                self.nav.tab = Tab::Send;
+                Some(self.show_transfer())
             }
             Key::Enter | Key::Char('s') if self.nav.tab != Tab::Keys => Some(Vec::new()),
             _ => None,
@@ -704,6 +721,9 @@ impl App {
     }
 
     fn run_action(&mut self, action: ActionId) -> Vec<Effect> {
+        if let Some(work) = self.transfer_action(action) {
+            return work;
+        }
         match action {
             ActionId::List => self.nav.tab = Tab::Keys,
             ActionId::VerifyKeys => {
@@ -825,7 +845,7 @@ impl App {
     }
 }
 
-fn input(key: Key) -> Input<'static> {
+pub(super) fn input(key: Key) -> Input<'static> {
     match key {
         Key::Char(c) => Input::Char(c),
         Key::Up => Input::Up,

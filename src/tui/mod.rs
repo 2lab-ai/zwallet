@@ -74,8 +74,18 @@ pub async fn run(
     // The first tick is now, and the state reads the status at the start already.
     tick.tick().await;
     let mut work = app.start();
+    let mut terminal_failure = None;
     let result = loop {
         for effect in work.drain(..) {
+            if let Effect::Transfer(id) = effect {
+                if let Some(job) = app.take_transfer_job(id) {
+                    let (home, tx) = (home.clone(), tx.clone());
+                    tokio::spawn(async move {
+                        job.run(id, &home, &tx).await;
+                    });
+                }
+                continue;
+            }
             start(
                 effect,
                 &home,
@@ -88,10 +98,22 @@ pub async fn run(
                 app.nets(),
             );
         }
-        if let Err(e) = terminal.draw(|f| {
-            ui::draw(f, &app);
+        if let Err(error) = terminal_frame(&app, &mut terminal_failure, || {
+            terminal
+                .draw(|f| {
+                    ui::draw(f, &app);
+                })
+                .map(|_| ())
         }) {
-            break Err(terminal_error(e));
+            break Err(error);
+        }
+        if terminal_failure.is_some() {
+            // A failed screen cannot authorize more work. The submitted worker already owns
+            // its password; drop any unsubmitted owner and drain only completion messages.
+            stop.store(true, Ordering::SeqCst);
+            let _ = ack_tx.try_send(InputMode::Discard);
+            secret.lock().expect("secret handoff lock").take();
+            input_waiting = false;
         }
         if app.quitting() {
             break Ok(());
@@ -113,16 +135,8 @@ pub async fn run(
             Some(msg) = rx.recv() => msg,
             _ = tick.tick() => Msg::Tick,
         };
-        input_waiting |= matches!(
-            &msg,
-            Msg::Key(_)
-                | Msg::Paste(_)
-                | Msg::Resize
-                | Msg::PasswordLength(..)
-                | Msg::PasswordSubmitted
-                | Msg::PasswordCancelled
-        );
-        work = app.update(msg);
+        input_waiting |= terminal_failure.is_none() && input_message(&msg);
+        work = terminal_update(&mut app, &terminal_failure, msg);
     };
     stop.store(true, Ordering::SeqCst);
     drop(ack_tx);
@@ -130,6 +144,49 @@ pub async fn run(
     match app.take_quit_error() {
         Some(e) => result.and(Err(e)),
         None => result,
+    }
+}
+
+fn terminal_frame(
+    app: &App,
+    failure: &mut Option<WalletError>,
+    draw: impl FnOnce() -> std::io::Result<()>,
+) -> Result<()> {
+    if failure.is_none()
+        && let Err(error) = draw()
+    {
+        *failure = Some(WalletError::validation(format!("terminal: {error}")));
+    }
+    // Already-submitted writes and optional session starts are not cancellable. Their
+    // outcome may schedule a deferred lock, so wait for that mutation too, without redrawing.
+    if app.mutation_pending() {
+        return Ok(());
+    }
+    match failure.take() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn input_message(msg: &Msg) -> bool {
+    matches!(
+        msg,
+        Msg::Key(_)
+            | Msg::Paste(_)
+            | Msg::Resize
+            | Msg::PasswordLength(..)
+            | Msg::PasswordSubmitted
+            | Msg::PasswordCancelled
+    )
+}
+
+/// Stop queued user input from authorizing an action after its review can no longer be drawn.
+/// Worker results still advance the state and may schedule a requested, deferred daemon stop.
+fn terminal_update(app: &mut App, failure: &Option<WalletError>, msg: Msg) -> Vec<Effect> {
+    if failure.is_some() && input_message(&msg) {
+        Vec::new()
+    } else {
+        app.update(msg)
     }
 }
 
@@ -152,6 +209,7 @@ fn start(
         other => other,
     };
     match effect {
+        Effect::Transfer(_) => unreachable!("transfer jobs are moved out of App by the loop"),
         Effect::PrepareDuration(ttl) => {
             let plan = plan.clone();
             tokio::task::spawn_blocking(move || {
@@ -417,4 +475,222 @@ fn key(k: KeyEvent) -> Option<Key> {
         KeyCode::Esc => Key::Esc,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod terminal_send_failure_tests {
+    use super::*;
+    use crate::wallet::Trust;
+    use app::transfer::TransferMsg;
+
+    const ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+    fn app() -> App {
+        let net = Net {
+            chain: crate::chains::find("ethereum").unwrap(),
+            rpc_url: "http://127.0.0.1:1".into(),
+        };
+        let mut app = App::new(&net, Duration::from_secs(600));
+        app.update(Msg::Keys(
+            app.generation(),
+            Ok(wallet::Keys {
+                active: "main".into(),
+                trust: Trust::Locked,
+                rows: vec![wallet::KeyRow {
+                    name: "main".into(),
+                    index: 0,
+                    address: Some(ADDRESS.into()),
+                    active: true,
+                }],
+            }),
+        ));
+        app.update(Msg::Status(
+            app.generation(),
+            Ok(wallet::StatusView {
+                configured: true,
+                locked: true,
+                daemon_pids: vec![],
+                other_daemon_pids: vec![],
+                serving: None,
+                active: Some("main".into()),
+                address: Some((Some(ADDRESS.into()), Trust::Locked)),
+            }),
+        ));
+        app
+    }
+    fn failed_frame(app: &App, failure: &mut Option<WalletError>) -> Result<()> {
+        terminal_frame(app, failure, || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "original fixture terminal failure",
+            ))
+        })
+    }
+    fn drain_frame(app: &App, failure: &mut Option<WalletError>) -> Result<()> {
+        terminal_frame(app, failure, || {
+            panic!("must never redraw after terminal failure")
+        })
+    }
+    fn assert_original(error: WalletError) {
+        assert_eq!(error.message, "terminal: original fixture terminal failure");
+    }
+
+    #[test]
+    fn broken_terminal_waits_for_send_progress_outcome_and_deferred_lock() {
+        for deferred_lock in [false, true] {
+            let mut app = app();
+            let id = app.begin_external_send();
+            if deferred_lock {
+                assert!(app.update(Msg::Key(Key::Char('L'))).is_empty());
+            }
+            app.update(Msg::Key(Key::Char('q')));
+            let mut failure = None;
+            assert!(
+                failed_frame(&app, &mut failure).is_ok(),
+                "send must finish before terminal error escapes"
+            );
+            app.update(Msg::Transfer(
+                id,
+                TransferMsg::Progress {
+                    hash: format!("0x{}", "1".repeat(64)),
+                    nonce: 7,
+                    journal: "/tmp/unused-journal".into(),
+                },
+            ));
+            assert!(
+                app.transfer().status.is_some(),
+                "durable progress must still land"
+            );
+            assert!(drain_frame(&app, &mut failure).is_ok());
+            let work = app.update(Msg::Transfer(
+                id,
+                TransferMsg::Sent(Err(WalletError::validation("send worker failure"))),
+            ));
+            assert!(!app.sending());
+            if deferred_lock {
+                assert!(work.contains(&Effect::LockAll));
+                assert!(drain_frame(&app, &mut failure).is_ok());
+                app.update(Msg::Locked(Err(WalletError::validation(
+                    "deferred lock failure",
+                ))));
+                assert!(app.take_quit_error().is_some());
+            }
+            assert_original(drain_frame(&app, &mut failure).unwrap_err());
+        }
+    }
+
+    #[test]
+    fn broken_terminal_waits_for_unlock_outcome_and_deferred_lock() {
+        let mut app = app();
+        assert_eq!(
+            app.update(Msg::Key(Key::Enter)),
+            vec![Effect::PrepareUnlock]
+        );
+        app.update(Msg::Prepared(Ok(())));
+        assert!(matches!(
+            app.update(Msg::PasswordSubmitted).as_slice(),
+            [Effect::CheckPassword {
+                start_session: true,
+                ..
+            }]
+        ));
+        app.update(Msg::Key(Key::Char('L')));
+        let mut failure = None;
+        assert!(failed_frame(&app, &mut failure).is_ok());
+        assert!(drain_frame(&app, &mut failure).is_ok());
+        let work = app.update(Msg::Checked(Err(WalletError::validation(
+            "unlock worker finished",
+        ))));
+        assert!(work.contains(&Effect::LockAll));
+        assert!(drain_frame(&app, &mut failure).is_ok());
+        app.update(Msg::Locked(Ok(vec![])));
+        assert_original(drain_frame(&app, &mut failure).unwrap_err());
+    }
+
+    #[test]
+    fn broken_terminal_waits_for_active_write_and_existing_lock() {
+        for activate in [false, true] {
+            let mut app = app();
+            if activate {
+                app.update(Msg::Key(Key::Char('s')));
+                assert_eq!(
+                    app.update(Msg::Key(Key::Char('y'))),
+                    vec![Effect::SetActive("main".into())]
+                );
+            } else {
+                assert_eq!(app.update(Msg::Key(Key::Char('L'))), vec![Effect::LockAll]);
+            }
+            let mut failure = None;
+            assert!(failed_frame(&app, &mut failure).is_ok());
+            assert!(drain_frame(&app, &mut failure).is_ok());
+            if activate {
+                app.update(Msg::Activated(Ok((ADDRESS.into(), Trust::Locked))));
+            } else {
+                app.update(Msg::Locked(Ok(vec![])));
+            }
+            assert_original(drain_frame(&app, &mut failure).unwrap_err());
+        }
+    }
+
+    #[test]
+    fn queued_input_cannot_authorize_work_but_worker_results_still_drain() {
+        let failure = Some(WalletError::validation(
+            "terminal: original fixture terminal failure",
+        ));
+        let mut active = app();
+        active.update(Msg::Key(Key::Char('s')));
+        assert!(terminal_update(&mut active, &failure, Msg::Key(Key::Char('y'))).is_empty());
+        assert!(!active.activating());
+        assert_eq!(
+            terminal_update(&mut active, &None, Msg::Key(Key::Char('y'))),
+            vec![Effect::SetActive("main".into())]
+        );
+        terminal_update(
+            &mut active,
+            &failure,
+            Msg::Activated(Ok((ADDRESS.into(), Trust::Locked))),
+        );
+        assert!(!active.mutation_pending());
+
+        let mut warm = app();
+        warm.update(Msg::Key(Key::Enter));
+        warm.update(Msg::Prepared(Ok(())));
+        assert!(terminal_update(&mut warm, &failure, Msg::PasswordSubmitted).is_empty());
+        assert!(matches!(warm.password_state(), PasswordState::Input { .. }));
+        assert!(matches!(
+            terminal_update(&mut warm, &None, Msg::PasswordSubmitted).as_slice(),
+            [Effect::CheckPassword {
+                start_session: true,
+                ..
+            }]
+        ));
+        terminal_update(
+            &mut warm,
+            &failure,
+            Msg::Checked(Err(WalletError::validation("worker done"))),
+        );
+        assert!(!warm.mutation_pending());
+
+        for msg in [
+            Msg::Key(Key::Char('L')),
+            Msg::Resize,
+            Msg::PasswordCancelled,
+            Msg::PasswordLength(7, false),
+            Msg::Paste(UserText(zeroize::Zeroizing::new("queued".into()))),
+        ] {
+            assert!(terminal_update(&mut warm, &failure, msg).is_empty());
+        }
+        assert!(!warm.mutation_pending());
+    }
+
+    #[test]
+    fn broken_terminal_does_not_wait_for_unsubmitted_password_or_read_preparation() {
+        for prepared in [false, true] {
+            let mut app = app();
+            app.update(Msg::Key(Key::Enter));
+            if prepared {
+                app.update(Msg::Prepared(Ok(())));
+            }
+            assert_original(failed_frame(&app, &mut None).unwrap_err());
+        }
+    }
 }

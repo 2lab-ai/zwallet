@@ -8,6 +8,12 @@ pub use read::{
     balances, brief, every_balance, every_balance_with, net_with, validate_rpc,
 };
 
+pub mod send;
+pub use send::{
+    CheckedPayee, SendOutput, SendTransferOutcome, TransferInput, TransferOptions, TransferReview,
+    parse_fee_ceiling, review_transfer, send_transfer, transfer_payees,
+};
+
 use crate::chains::evm::registry::WHITELIST_RULES;
 use crate::chains::{self, Chain, Net, PRIMARY_CHAIN};
 pub use crate::commands::Trust;

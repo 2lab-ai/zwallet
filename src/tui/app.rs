@@ -3,6 +3,7 @@
 //! the loop's (`tui::run`). What comes in from outside is made [`Outside`] here, where it arrives.
 
 mod navigation;
+pub mod transfer;
 pub use navigation::{FieldPurpose, Navigation, Popup, RpcChoice, UserText};
 
 use crate::chains::{Chain, Net};
@@ -37,6 +38,7 @@ pub enum Key {
 /// Everything that changes the state: a key, the refresh timer, or the result of work.
 #[derive(Debug)]
 pub enum Msg {
+    Transfer(u64, transfer::TransferMsg),
     Key(Key),
     Paste(UserText),
     Verified(
@@ -72,6 +74,7 @@ pub enum Msg {
 /// Work the state asks for; its result comes back as a [`Msg`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
+    Transfer(u64),
     /// `wallet::keys`, then [`Msg::Keys`] with this generation: a lock starts a new one, and a
     /// read from an older one is dropped.
     LoadKeys(u64),
@@ -182,6 +185,7 @@ pub enum PasswordPurpose {
 }
 
 pub struct App {
+    transfer: transfer::Transfer,
     nav: Navigation,
     password_purpose: PasswordPurpose,
     activating: bool,
@@ -195,6 +199,7 @@ pub struct App {
     password: PasswordState,
     pending_key: Option<String>,
     pins: BTreeMap<String, String>,
+    verified_indices: BTreeMap<String, u32>,
     checked_list: Option<CheckedList>,
     list_reason: Option<Outside>,
     keys_pending: bool,
@@ -216,6 +221,7 @@ impl App {
     /// The TUI on `net`'s chain and endpoint; `warm` is how long a warm-up unlocks for.
     pub fn new(net: &Net, warm: Duration) -> Self {
         Self {
+            transfer: transfer::Transfer::default(),
             nav: Navigation::new(net),
             password_purpose: PasswordPurpose::Warm,
             activating: false,
@@ -229,6 +235,7 @@ impl App {
             password: PasswordState::Idle,
             pending_key: None,
             pins: BTreeMap::new(),
+            verified_indices: BTreeMap::new(),
             checked_list: None,
             list_reason: None,
             keys_pending: false,
@@ -251,6 +258,10 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        let msg = match self.transfer_update(msg) {
+            std::ops::ControlFlow::Continue(work) => return work,
+            std::ops::ControlFlow::Break(msg) => msg,
+        };
         let msg = match self.navigation_update(msg) {
             std::ops::ControlFlow::Continue(work) => return work,
             std::ops::ControlFlow::Break(msg) => msg,
@@ -323,6 +334,9 @@ impl App {
                 // original derivations stay authoritative for this TUI's whole lifetime.
                 let result = result.and_then(|(opened, checked)| {
                     for row in &opened.keys {
+                        if self.verified_indices.get(&row.name).is_some_and(|index| *index != row.index) {
+                            return Err(WalletError::validation("the key index changed after the password check; close and verify this wallet again"));
+                        }
                         if let Some(address) = &row.address {
                             self.check_pin(&row.name, address)?;
                         }
@@ -335,6 +349,9 @@ impl App {
                             .filter(|key| !key.is_empty())
                             .unwrap_or_else(|| opened.active.clone());
                         for k in opened.keys {
+                            self.verified_indices
+                                .entry(k.name.clone())
+                                .or_insert(k.index);
                             if let Some(address) = k.address {
                                 self.pins.insert(k.name, address);
                             }
@@ -485,7 +502,9 @@ impl App {
                 if let Err(e) = stopped {
                     self.notice = Some(Outside::error(&e));
                     if self.quit {
-                        self.quit_error = Some(e);
+                        // A deferred stop must not replace an earlier send failure and its
+                        // hash/nonce recovery details while the same quit is waiting.
+                        self.quit_error.get_or_insert(e);
                     }
                 }
                 // A read started before the lock may land after it and say unlocked: the bar
@@ -508,7 +527,8 @@ impl App {
                 Vec::new()
             }
             // The navigation dispatcher consumes these variants before this match.
-            Msg::Paste(_)
+            Msg::Transfer(..)
+            | Msg::Paste(_)
             | Msg::Verified(_)
             | Msg::Balances(..)
             | Msg::EveryBalances(..)
@@ -572,6 +592,9 @@ impl App {
                 }
                 _ => Vec::new(),
             };
+        }
+        if let Some(work) = self.transfer_key(key) {
+            return work;
         }
         if let Some(work) = self.navigation_key(key) {
             return work;
@@ -647,22 +670,22 @@ impl App {
         }
     }
 
-    /// `q` was pressed, and no confirmed mutation is running: quitting waits for its result.
-    pub fn quitting(&self) -> bool {
-        self.quit
-            && !self.locking
-            && !self.activating
-            && self.password != PasswordState::Checking
-            && self.password != PasswordState::Preparing
+    /// A submitted operation must report its outcome before terminal failure or quit can
+    /// release its runtime. Later forms extend this predicate for their submitted workers.
+    pub fn mutation_pending(&self) -> bool {
+        self.locking
+            || self.activating
+            || self.sending()
+            || self.password == PasswordState::Checking
     }
 
-    /// `q` waits for a confirmed mutation to finish ([`App::quitting`]).
+    /// `q` waits for every submitted mutation, including a deferred daemon stop.
+    pub fn quitting(&self) -> bool {
+        self.quit && !self.mutation_pending() && self.password != PasswordState::Preparing
+    }
+
     pub fn quit_pending(&self) -> bool {
-        self.quit
-            && (self.locking
-                || self.activating
-                || self.password == PasswordState::Checking
-                || self.password == PasswordState::Preparing)
+        self.quit && (self.mutation_pending() || self.password == PasswordState::Preparing)
     }
 
     /// The error of a lock that failed while a quit waited for it.
@@ -695,6 +718,40 @@ impl App {
     }
     pub fn checked_list(&self) -> Option<&CheckedList> {
         self.checked_list.as_ref()
+    }
+    /// The current open key from this session's password-derived address and index pins.
+    /// Fresh public metadata must still agree; it never supplies the index for a signature.
+    pub fn verified_key(&self) -> Result<crate::wallet::KeyRow> {
+        let key = self
+            .open_key
+            .as_ref()
+            .ok_or_else(|| WalletError::validation("needs: an open key"))?;
+        let index = self.verified_indices.get(key).ok_or_else(|| {
+            WalletError::validation("needs: V; verify the key index with the password")
+        })?;
+        let address = self.family_pin(key, self.chain).ok_or_else(|| {
+            WalletError::validation("needs: V; verify the address with the password")
+        })?;
+        let row = match &self.keys {
+            Pane::Ready(keys) => keys.rows.iter().find(|row| &row.key == key),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            WalletError::validation(
+                "key metadata is unavailable; refresh and verify before signing",
+            )
+        })?;
+        if row.index != *index {
+            return Err(WalletError::validation(
+                "the key index changed after the password check; nothing signed",
+            ));
+        }
+        Ok(crate::wallet::KeyRow {
+            name: key.clone(),
+            index: *index,
+            address: Some(address.clone()),
+            active: row.active,
+        })
     }
     pub fn open_key(&self) -> Option<&str> {
         self.open_key.as_deref()

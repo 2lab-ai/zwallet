@@ -3,6 +3,8 @@
 //! pane is wrapped there, 03-tui.md §Display integrity rule 4); the chrome is ASCII; every style
 //! is one of `style`'s. [`draw`] returns where it put each outside value, for the tests.
 
+mod transfer;
+
 use crate::tui::actions::{Availability, Tab};
 use crate::tui::app::{
     App, Bar, FieldPurpose, KeyList, LockLine, Pane, PasswordPurpose, PasswordState, Popup,
@@ -110,6 +112,8 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         keys_pane(frame, pane, app, &mut placed);
     } else if let Some(popup) = &app.navigation().popup {
         popup_pane(frame, pane, app, popup, &mut placed);
+    } else if app.tab() == Tab::Send {
+        transfer::pane(frame, pane, app, &mut placed);
     } else if app.tab() == Tab::Keys {
         keys_pane(frame, pane, app, &mut placed);
     } else {
@@ -126,6 +130,17 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
             "arrows move/edit   Enter choose   Esc back   Ctrl-C quit",
             HINT,
         )
+    } else if app.tab() == Tab::Send {
+        if let Some(notice) = &app.transfer().notice {
+            Row::default()
+                .outside(
+                    &notice.cut(usize::from(hint.width).saturating_sub(12)),
+                    ERROR,
+                )
+                .text("   ? actions", HINT)
+        } else {
+            Row::default().text(app.transfer_hint(), HINT)
+        }
     } else if let Some(key) = app.confirming() {
         let room = usize::from(hint.width).saturating_sub(5 + MAKE_ACTIVE.len());
         Row::default()
@@ -665,6 +680,9 @@ fn cut_words(words: &str, room: usize) -> String {
 }
 
 fn lock_line(app: &App, bar: &Bar) -> Row {
+    if app.sending() && app.quit_pending() {
+        return Row::default().text("sending... (quits when done)", WARNING);
+    }
     if app.activating() {
         return Row::default().text(
             if app.quit_pending() {

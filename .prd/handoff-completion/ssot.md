@@ -23,3 +23,14 @@ local-only/no-external-store/no-daemon-file-write boundaries for #26 and #27.
   by code and receipts; final upstream permission limits are reported precisely.
 
 GitHub source snapshots under sources are the self-contained handoff inputs.
+
+## Supervisor continuation, 2026-10-29
+
+Trusted main-conversation user instruction relayed by the parent (verbatim):
+
+> 내 지시를 끝까지 완수 안하는대 저거 세션들이 니가 채찍질해서 끝까지 내 첫 지시를 goal 처럼 완료 시켜
+
+Scope is unchanged: finish the existing handoff and verify final-head CI. The
+completion-checklist maps original requests, approvals, design-only exclusions and
+all issues. Marketing README/video work in PR #36 is preserved. No additional
+merge, release, visibility, security-permission or real-fund authorization is inferred.
