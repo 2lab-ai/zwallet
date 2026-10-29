@@ -360,8 +360,14 @@ mod tests {
                 "{bad}"
             );
         }
-        // The reason names the variable, never the value.
-        assert!(!Unavailable::BadOverride.reason().contains("passwd"));
+        // The reason names the chain's own variable, never the value.
+        let error = base_url(ethereum, Some("file:///etc/passwd")).unwrap_err();
+        assert!(!error.reason().contains("passwd"));
+        assert!(
+            error.reason().contains("ZWALLET_EXPLORER_ETHEREUM"),
+            "{}",
+            error.reason()
+        );
         assert_eq!(ethereum.explorer_env_var(), "ZWALLET_EXPLORER_ETHEREUM");
     }
     use std::sync::{
