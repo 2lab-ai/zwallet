@@ -20,8 +20,8 @@ pub enum Unavailable {
     TooLarge,
     Timeout,
     Network,
-    /// `ZWALLET_EXPLORER_<CHAIN>` is set but is not an http(s) URL with a host.
-    BadOverride,
+    /// `ZWALLET_EXPLORER_<CHAIN>` is set but is not an http(s) URL with a host; the chain's key.
+    BadOverride(&'static str),
 }
 impl Unavailable {
     /// Fixed text and a numeric HTTP status only: never any server-provided body or URL.
@@ -33,9 +33,10 @@ impl Unavailable {
             Self::TooLarge => "response exceeds 1 MiB".into(),
             Self::Timeout => "timed out after 8s".into(),
             Self::Network => "network error".into(),
-            Self::BadOverride => {
-                "ZWALLET_EXPLORER_<CHAIN> is not an http(s) URL with a host".into()
-            }
+            Self::BadOverride(chain) => format!(
+                "ZWALLET_EXPLORER_{} is not an http(s) URL with a host",
+                chain.to_ascii_uppercase()
+            ),
         }
     }
 }
@@ -53,9 +54,9 @@ pub fn base_url(chain: &Chain, env_value: Option<&str>) -> Result<String, Unavai
     match env_value.map(str::trim).filter(|v| !v.is_empty()) {
         Some(value) => {
             let url = alloy::transports::http::reqwest::Url::parse(value)
-                .map_err(|_| Unavailable::BadOverride)?;
+                .map_err(|_| Unavailable::BadOverride(chain.key))?;
             if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-                return Err(Unavailable::BadOverride);
+                return Err(Unavailable::BadOverride(chain.key));
             }
             Ok(value.trim_end_matches('/').to_string())
         }
@@ -356,7 +357,7 @@ mod tests {
         ] {
             assert_eq!(
                 base_url(ethereum, Some(bad)),
-                Err(Unavailable::BadOverride),
+                Err(Unavailable::BadOverride("ethereum")),
                 "{bad}"
             );
         }

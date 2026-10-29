@@ -29,7 +29,8 @@ enum Kind {
     /// A registry token's `transfer` with no value, recovered from the node. A token transfer and
     /// an invoke of that token sign the same bytes; only this session's review knows which one it
     /// was, and the journal is never trusted to say. The stricter rule, the invoke's, cannot be
-    /// met (no list holds a contract entry at a registry token), so only a cancel is offered.
+    /// met (no list holds a contract entry at a registry token), so a speed-up or retry review
+    /// refuses; only a cancel can sign.
     TokenOrInvoke,
 }
 impl Kind {

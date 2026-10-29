@@ -860,8 +860,9 @@ issues [#26](https://github.com/2lab-ai/zwallet/issues/26) and
 Explorer for TUI history: `ZWALLET_EXPLORER_<KEY>` (e.g. `ZWALLET_EXPLORER_ETHEREUM`) names a
 Blockscout v2 API base URL for an EVM chain, replacing the built-in one (ethereum, optimism,
 sepolia) or adding one. It must be an http(s) URL with a host; like an RPC URL it is never
-printed, and a value that is not one makes history say `explorer unavailable` with the variable's
-name. No flag, file, cookie, login or redirect changes the explorer.
+printed, and a value that is not one makes history say `explorer unavailable` naming the
+variable, e.g. `ZWALLET_EXPLORER_ETHEREUM is not an http(s) URL with a host`. No flag, file,
+cookie, login or redirect changes the explorer.
 
 RPC precedence: `--rpc <url>`, then `ZWALLET_RPC_<KEY>` (e.g. `ZWALLET_RPC_BASE`,
 `ZWALLET_RPC_TRON`), then the default. zwallet checks the endpoint's `eth_chainId` before using
@@ -897,8 +898,8 @@ Type the payee's nickname, the allowed contract's nickname for an invoke, or
 What a restarted session's `s` is judged by (the payee's address entry, or the
 contract entry and its selector) comes from the original's bytes, never from
 the journal, which must only agree with them. A registry-token transfer has the
-same bytes as an invoke of that token, so after a restart its `s` is refused and
-only `x` is offered; speed it up from the session that sent it, or with
+same bytes as an invoke of that token, so after a restart its `s` review refuses
+(nothing is signed) while `x` still cancels; speed it up from the session that sent it, or with
 `zwallet transfer --token <token> --to <payee> --amount <amount> --nonce N
 --replace <txHash>`, which states the intent.
 

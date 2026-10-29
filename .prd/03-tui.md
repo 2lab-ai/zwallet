@@ -706,8 +706,8 @@ Sources:
    return a Cloudflare challenge (HTTP 403); bsc and avalanche have no Blockscout instance.
    `ZWALLET_EXPLORER_<CHAIN>` (added 2026-10-30) names another Blockscout v2 API base for an EVM
    chain, in place of the built-in one or where there is none: an http(s) URL with a host, never
-   printed (an unusable value reads `explorer unavailable (ZWALLET_EXPLORER_<CHAIN> is not an
-   http(s) URL with a host)`). The test harness sets it to a closed loopback port for every
+   printed (an unusable value reads, for ethereum, `explorer unavailable (ZWALLET_EXPLORER_ETHEREUM
+   is not an http(s) URL with a host)`). The test harness sets it to a closed loopback port for every
    chain, so no test reaches a public explorer.
 
 **Reachability, measured 2026-10-27 11:53:24Z** with `curl 8.7.1`, no key, `GET
@@ -935,7 +935,8 @@ and one rule covers every one of them.
   a row rewritten to another kind is refused, never judged by the rule it names. Under (b), a
   registry token's `transfer` with no value is the same bytes as an invoke of that token, so its
   speed-up is refused: the stricter rule, the invoke's, cannot be met, because a registry token is
-  never a contract entry (`Whitelist::validate`). Only `x` is offered for it; the review says so
+  never a contract entry (`Whitelist::validate`). `s` is still offered and its review refuses
+  (zero `SignTx`); `x` signs as for any original. The refusal says so
   and names the CLI's `transfer --token` with `--nonce` and `--replace`, where the human states
   the intent. Under (a) it keeps its review's kind (T27 (i)).
 - **Review and confirm as any send.** The review holds nonce N and the replaced hash with the
@@ -1059,7 +1060,8 @@ dispatcher reads the frames. Behaviour is checked against fixed fixtures on the 
 Every `TestBackend` frame of every test is drawn through `FilteredBackend` with zero replacements
 and passes the style assertion (§Display integrity rules 1 and 2). T3 and T3b are checked on
 `TestBackend` frames of the `App` built in the test with a fixture explorer server, because the
-binary's explorer URLs are fixed (§History); a live test (`cargo test -- --ignored`) reads
+binary reaches an explorer only at a built-in URL or at `ZWALLET_EXPLORER_<CHAIN>`, which the test
+harness points at a closed loopback port (§History); a live test (`cargo test -- --ignored`) reads
 `eth.blockscout.com` through the same parser.
 
 T12–T44 were added on 2026-10-28 for the functions of §Coverage matrix (T42–T44 after review round 1); the unit that closes
