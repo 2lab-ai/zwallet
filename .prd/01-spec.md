@@ -8,8 +8,10 @@ unlocked, a small daemon holds the key, so the agent can sign without the human 
 `zwallet lock` (or the end of that duration, or a reboot) locks it again. EVM chains ship first;
 Solana and TON are ![WIP](https://img.shields.io/badge/status-WIP-yellow); the architecture leaves room for them.
 
-Status: **in-progress**, reviewed 2026-10-29. Implementation status: the EVM CLI and signed whitelist are
-implemented; the TUI is partial and additional chain families are WIP. See
+Status: **in-progress**, reviewed 2026-10-29. Implementation status (2026-10-30): the EVM CLI and
+signed whitelist are implemented; the TUI covers every CLI function ([`03-tui.md`](03-tui.md));
+Tron's address, balances and send are implemented ([`05-tron.md`](05-tron.md)), both shipped to
+preview 2026.10.29.2134 (PR #51); Solana and TON are WIP. See
 [feature status](../docs/features.md) for the code-backed boundary. The goals and
 acceptance scenarios below include future work and are not a release checklist.
 Fixed user statement and scope: [`v0-1/ssot.md`](v0-1/ssot.md). Driver: [`v0-1/loop.md`](v0-1/loop.md).

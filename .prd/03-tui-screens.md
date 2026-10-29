@@ -1,10 +1,12 @@
 # zwallet — TUI screens (v2 mockups)
 
-![WIP](https://img.shields.io/badge/status-WIP-yellow)
+Status: **shipped** (preview 2026.10.29.2134, PR #51, 2026-10-30). The screens below are
+implemented; this page is their as-built layout, not a future target. The frames are generated
+ASCII mockups with illustrative values, not captures: the real frames are the acceptance captures
+of [`v0-2-tui/loop.done.md`](v0-2-tui/loop.done.md) R1, and where a mockup and the code differ in
+a detail, [`03-tui.md`](03-tui.md) and the code win. See [feature status](../docs/features.md).
 
-Design mockups, not screenshots of the current application. The shipped UI has the basic key list and status bar; the tabs and workflows shown here are planned. See [feature status](../docs/features.md).
-
-Status: **planned**, 2026-10-28, regenerated after review rounds 1 and 2 the same day. ASCII mockups for
+Generated 2026-10-28, regenerated after review rounds 1 and 2 the same day. ASCII mockups for
 [`03-tui.md`](03-tui.md) §Screens and keys: one per screen at 80x24 (the smallest size the TUI
 draws), and the home screen at 120x40 too. They are generated with exact widths; every cell is
 printable ASCII, as rule 1 asks, and the generator checks the hint rule on every frame (a frame

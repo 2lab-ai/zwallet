@@ -1,20 +1,23 @@
 # zwallet — TUI
 
-![WIP](https://img.shields.io/badge/status-WIP-yellow)
+Status: **shipped** (preview 2026.10.29.2134, PR #51, 2026-10-30). `zwallet tui` has a path for
+every CLI function in §Coverage matrix, and acceptance T1–T44 is met except T18's QR code, which
+waits on the owner's trade-off Q (§Open trade-offs; Q1 and B1 are the shipped defaults). This page
+is the as-built contract of the TUI (v0.2), not a future target. Receipts:
+[`v0-2-tui/loop.done.md`](v0-2-tui/loop.done.md) R1 — the gate at 2a1ee64 and the real-terminal
+acceptance on the installed preview, where the coverage matrix's 59 TUI rows PASS at 120x40 and
+80x24. Code-backed boundary: [feature status](../docs/features.md).
 
-Partial implementation: navigation/actions, balances, receive, verification/repair, warm-up and timed unlock, the session pane, refresh and lock-all have reachable handlers. The full workflows below are a design, not the current UI. See [feature status](../docs/features.md).
-
-Status: **in-progress** (v0.2), revised 2026-10-20 after two spec reviews, revised 2026-10-27 against
-PRs #6–#12 (`origin/main` c7d3f13) and after review rounds 1 and 2 the same day, on 2026-10-28
-for TUI-1b (§Changes on 2026-10-28), and the same day, against `origin/main` 24f4b5b, to cover
-every CLI function (§Changes on 2026-10-28, v2: the coverage matrix, the re-decided non-goals,
-the navigation model; mockups in [`03-tui-screens.md`](03-tui-screens.md), research in
-[`research/tui-ux.md`](research/tui-ux.md)), then after review rounds 1 to 3 of v2 (§Changes
-on 2026-10-28, v2, review rounds 1 to 3). The signed
-whitelist shipped in v0.1 (WU1b, PR #4, [`04-whitelist.md`](04-whitelist.md)). TUI-1 starts once the
-agent-side v0.1 work is merged; G3 and G4 wait on owner actions only and do not block TUI code
-([`v0-2-tui/loop.md`](v0-2-tui/loop.md) §Start condition). Fixed user statement:
-[`v0-2-tui/ssot.md`](v0-2-tui/ssot.md). What the TUI would call today, function by function:
+History: revised 2026-10-20 after two spec reviews, 2026-10-27 against PRs #6–#12 (`origin/main`
+c7d3f13) and after review rounds 1 and 2 the same day, on 2026-10-28 for TUI-1b (§Changes on
+2026-10-28), and the same day, against `origin/main` 24f4b5b, to cover every CLI function
+(§Changes on 2026-10-28, v2: the coverage matrix, the re-decided non-goals, the navigation model;
+mockups in [`03-tui-screens.md`](03-tui-screens.md), research in
+[`research/tui-ux.md`](research/tui-ux.md)), then after review rounds 1 to 3 of v2, and on
+2026-10-30 for PR #51's fix rounds (§Changes on 2026-10-30). The signed whitelist shipped in v0.1
+(WU1b, PR #4, [`04-whitelist.md`](04-whitelist.md)); G3 and G4 of v0.1 wait on owner actions only
+and did not block TUI code. Fixed user statement: [`v0-2-tui/ssot.md`](v0-2-tui/ssot.md). The
+function-by-function call map the units were planned from (2026-10-27):
 [`v0-2-tui/flow.md`](v0-2-tui/flow.md). Units and order: [`v0-2-tui/units.md`](v0-2-tui/units.md).
 
 ## Problem
@@ -734,7 +737,7 @@ id>/address/<a>/transactions`) was probed in the same minutes:
 | sepolia | `eth-sepolia.blockscout.com` | 200 | `application/json` | 50 items; `token-transfers` 200; no-UA 200 |
 
 The table was measured again on 2026-10-28, before the TUI-7+8 PR, Routescan's other path for
-base, arbitrum and polygon included ([`v0-2-tui/loop.md`](v0-2-tui/loop.md) §Entry conditions;
+base, arbitrum and polygon included ([`v0-2-tui/loop.done.md`](v0-2-tui/loop.done.md), the entry-condition block;
 the data and the decision below). The coverage note per chain follows the table: ethereum,
 optimism and sepolia show the explorer and the journal; base, arbitrum, polygon, bsc and
 avalanche show "this machine's sends only; incoming transfers not indexed".

@@ -1,10 +1,11 @@
 # zwallet — Tron (TRX and TRC20 USDT)
 
-![WIP](https://img.shields.io/badge/status-WIP-yellow)
-
-Tron address, balance, strict signing, policy, transfer and transaction lookup paths are implemented in source. Funded owner acceptance (TR23) and the separate TUI coverage remain open. See [feature status](../docs/features.md).
-
-Status: **in-progress**, 2026-10-29. Fixed request and scope: [`v0-3-tron/ssot.md`](v0-3-tron/ssot.md).
+Status: **shipped** (preview 2026.10.29.2134, PR #51, 2026-10-30). The Tron address, TRX and
+TRC20 USDT balances, strict signing, policy, transfer and transaction lookup are implemented in
+the CLI and the TUI; acceptance TR1–TR22, TR24 and TR25 is met. This page is the as-built
+contract, not a future target. TR23, the funded mainnet send, stays with the owner. Receipts:
+[`v0-3-tron/loop.done.md`](v0-3-tron/loop.done.md) R1. See [feature status](../docs/features.md).
+Fixed request and scope: [`v0-3-tron/ssot.md`](v0-3-tron/ssot.md).
 Units: [`v0-3-tron/units.md`](v0-3-tron/units.md). Driver: [`v0-3-tron/loop.md`](v0-3-tron/loop.md).
 The original design measurements below were taken on 2026-10-28 between 03:13Z and 03:31Z,
 read-only. C evidence separately records the 2026-10-29 unsigned-envelope validation probe.
@@ -15,8 +16,8 @@ No funded live transaction was signed or broadcast, and no faucet was used. Evid
 The source includes A (reads), B1 (codec), B2 (policy) and C (send lifecycle). C covers
 preflight, exact signer-reply checks, journal-before-broadcast, receipt deadlines and
 fresh-node expiration observations. Offline checks and the keyless unsigned Q3 probe are
-recorded in [C evidence](v0-3-tron/c-evidence.md). They do not claim funded live sends (TR23),
-wallet import interoperability (Q2), or completion of the separate TUI task (TR22).
+recorded in [C evidence](v0-3-tron/c-evidence.md). They do not claim funded live sends (TR23)
+or wallet import interoperability (Q2). The TUI task (TR22) shipped in PR #51.
 
 ## Problem
 

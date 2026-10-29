@@ -3,8 +3,8 @@
 Status: **shipped** (WU1b, 2026-10-21, PR #4; built 2026-10-20 in three parts: A core, B daemon
 enforcement, C CLI and docs). This page is the as-built contract of all three, not a future
 target for that shipped baseline. The optional transaction-limit extension described below
-is implemented in [PR #29](https://github.com/2lab-ai/zwallet/pull/29) and remains **in-progress**
-until merged; see [`06-review-hardening.md`](06-review-hardening.md).
+shipped in [PR #29](https://github.com/2lab-ai/zwallet/pull/29) (merged 2026-10-29, 99fff4e);
+see [`06-review-hardening.md`](06-review-hardening.md).
 Planned after two spec reviews (gpt6 and zhuge, both "change before implementing"); it
 ships in v0.1, before the v0.1.0 tag and before the wallet is funded. The v0.1 SSOT fixed a
 daemon-enforced signing policy as v0.1 scope (v0-1/ssot.md §Fixed scope), and this is that

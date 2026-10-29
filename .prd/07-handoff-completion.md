@@ -1,6 +1,10 @@
 # Zwallet handoff completion
 
-Status: in-progress, 2026-10-29.
+Status: **shipped** (preview 2026.10.29.2134, PR #51, 2026-10-30). PR #51 merged #35 and
+#37–#49, superseded the drafts #31–#33 and closed issue #34. This page is the contract the
+handoff was delivered under, not a future target. What shipped, its receipts and what stays
+with the owner (TR23, trade-offs Q and B, a stable release; #26 and #27 design-only):
+[`handoff-completion/completion-checklist.md`](handoff-completion/completion-checklist.md).
 
 ## Goal
 
