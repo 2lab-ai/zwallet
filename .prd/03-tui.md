@@ -616,6 +616,22 @@ trusted: `protocol::status` is a plain request with no peer check (core/protocol
 
 ## Whitelist edits
 
+The shared backend is implemented in `src/wallet/whitelist.rs`; TUI forms and rendering use it
+through `src/tui/app/whitelist.rs` and `src/tui/ui/whitelist.rs`. `Change` has validated constructors for add/remove, fee cap,
+native/token/calldata per-transaction limits, message signing and reset. `WhitelistPlan` owns
+the exact bounded summary and both-file fingerprint. The CLI uses the same plan/apply/view
+functions. `checked_payees` checks that fingerprint and excludes contracts and zero-address
+entries; Tron requires exact scope, while `*` remains EVM-only.
+
+The forms bound every field and validate before preparation. The exact prepared summary wraps
+and scrolls before the password is accepted. Removal and message toggles use only a locally
+password-checked list, with its fingerprint checked again by the worker. The owned password
+and prepared plan move once into a blocking worker for authentication, stop/write, optional
+session start and local recheck. While that worker runs, lock is queued after optional session
+start and quit waits for the mutation and any queued lock; navigation, cancellation and
+repeated submission cannot abandon or duplicate the mutation. A terminal draw failure
+also waits for its outcome. Only a successful local recheck can replace the checked-list cache.
+
 Every change in the TUI runs the edit protocol of 04-whitelist.md §Edits, through the two entry
 points flow.md §T7 names, and nothing else:
 
@@ -650,8 +666,11 @@ points flow.md §T7 names, and nothing else:
    locked**, unless the human typed a duration with the change (`--unlock <dur>`), when a new
    session runs for that duration from now. No duration or expiry is taken from the session that
    was running.
-4. With the same password the TUI runs the password check again (§Password check), so the
-   checked list is the new one, then clears the password.
+4. The shared `wallet::whitelist_apply` takes one owned zeroizing password (`PasswordBuf` in the
+   TUI), runs the local password check again (§Password check) after the edit, and returns the new `CheckedList`
+   in its outcome before dropping the password. No password is retained by the UI. If the
+   recheck fails or the list changed, the outcome still reports the landed edit and carries
+   the check error instead of a verified list.
 5. The TUI shows the outcome (generation, entries, stopped daemons, warning, session) and every
    pane reloads: the old session has ended.
 

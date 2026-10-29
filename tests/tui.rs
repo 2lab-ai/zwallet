@@ -1779,7 +1779,7 @@ mod navigation {
                     .trim_end()
                     .ends_with("? actions")
             );
-            if matches!(app.tab(), Tab::Whitelist | Tab::Tools) {
+            if app.tab() == Tab::Tools {
                 assert!(text.contains("in a later version"));
             }
         }
@@ -1797,14 +1797,14 @@ mod navigation {
         assert!(text.contains("actions (55)"));
         assert!(text.contains(&zwallet::version_line()));
         assert!(!text.lines().nth(21).unwrap().contains("? actions"));
-        paste(&mut app, "whitelist add");
+        paste(&mut app, "create --unlock");
         assert!(app.update(Msg::Key(Key::Enter)).is_empty());
         assert!(view(&app).contains("in a later version"));
         for c in ['q', '?', '1'] {
             app.update(Msg::Key(Key::Char(c)));
         }
         match app.navigation().popup.as_ref().unwrap() {
-            Popup::Menu(menu) => assert_eq!(menu.filter().value(), "whitelist addq?1"),
+            Popup::Menu(menu) => assert_eq!(menu.filter().value(), "create --unlockq?1"),
             _ => panic!("menu should stay open"),
         }
         paste(&mut app, "\u{1b}evil\u{2588}");

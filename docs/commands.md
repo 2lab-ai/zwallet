@@ -83,9 +83,20 @@ Commands that act on a key take `--key <name>` (default: the active key).
   repairs cached addresses and shows old/new values. `u` asks for a duration and then the wallet
   password before starting that signing session. `7 session` shows the home, expiry, daemon
   pids, and the daemon's reported whitelist generation/count as information only. The startup
-  ptrace flag cannot be changed by any TUI key. Whitelist forms and tools
+  ptrace flag cannot be changed by any TUI key. Key creation and tools
   remain ![WIP](https://img.shields.io/badge/status-WIP-yellow).
   See [feature status](features.md#planned-features).
+  `3 send` reviews and sends EVM native/registry-token transfers using the pinned open key.
+  `5 whitelist` lists the policy; `V` checks it locally with the password before selection or
+  a message toggle. `a` adds a payee, `C` adds an EVM contract with selectors, `d` removes the
+  selected entry, `f` sets the fee cap, `n`/`t`/`b` set native/token/calldata transaction limits,
+  `m` toggles message signing and `R` resets the policy. Every edit shows its exact scrollable
+  summary before asking for the password, stops all zwallet daemons before writing, then
+  verifies the saved list locally. A blank duration leaves the wallet locked; an explicit
+  duration requests a new session and its outcome is shown. `L` during saving locks after the
+  edit completes; `q` waits for the edit and that lock. Zero-address adds are refused before
+  the password; legacy zero entries remain viewable/removable and unavailable as payees.
+
   On the wallet tab, `Tab` switches between balance scrolling and history selection, Enter opens
   a transaction, and `/` accepts a `0x` + 64-hex-digit EVM hash. The ten-row history combines this
   home's selected-key journal with fixed Blockscout sources on Ethereum, Optimism and Sepolia;
@@ -120,11 +131,15 @@ Commands that act on a key take `--key <name>` (default: the active key).
   --verify`, which adds it and says so in `added`), and its `addresses` row shows that error. After
   `unlock`, `address --chain tron` is verified by the session as for EVM, with no prompt.
   `sign-message`, `call` and `invoke` on `tron` are `CAPABILITY_UNSUPPORTED`.
-  `whitelist add bob <T-address> --chains tron` adds a payee; `*` covers EVM only.
+  `whitelist add bob <T-address> --chains tron` adds a payee; `*` covers EVM only, never Tron.
+  Tron contract entries and selectors are unsupported.
   A first edit/reset adds the default 30-TRX fee cap; `whitelist fee-cap tron 30`
   sets it explicitly. Historical JSON fields named `maxFeeWei` and `maxNativeWei`
   store sun on Tron (1 TRX = 1,000,000 sun). Token caps use smallest token units,
   and calldata caps bound bytes. These caps remain per transaction, not cumulative.
+  The daemon accepts only strict native transfers and the registry USDT's exact transfer call,
+  from its own derived address to a listed Tron payee, under the signed limits. It refuses
+  approvals, arbitrary contracts, permissions, memo, malformed protobuf and self-TRX.
   `transfer --chain tron --to @bob --amount 1 [--token usdt] [--dry-run] [--wait]`
   sends only TRX or registry USDT. A contract address is accepted for token balance reads,
   but transfer's token flag accepts only `usdt`. Nonce/replacement/bump/pending/gwei flags

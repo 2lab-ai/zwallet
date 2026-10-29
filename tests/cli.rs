@@ -6275,3 +6275,49 @@ fn tr3_a_key_without_a_tron_cache_is_locked_until_unlock_or_verify_adds_it() {
     );
     assert!(!human.stdout.contains("warning"), "{}", human.stdout);
 }
+
+#[test]
+fn t44_zero_whitelist_add_refuses_before_password_and_keeps_running_session() {
+    let _exclusive = common::exclusive();
+    let home = Home::new();
+    let pid = home.create("main", &["--unlock", "10m"])["daemonPid"]
+        .as_i64()
+        .unwrap() as i32;
+    let before = fs::read(home.wallet_json()).unwrap();
+    let tron_zero = chains::tron::address::from_body(&[0; 20]);
+    for address in [
+        "0x0000000000000000000000000000000000000000",
+        tron_zero.as_str(),
+    ] {
+        for contract in [false, true] {
+            let mut args = vec![
+                "whitelist",
+                "add",
+                "zero",
+                address,
+                "--password-stdin",
+                "--json",
+            ];
+            if contract {
+                args.extend(["--contract", "--selectors", "0x12345678"]);
+            }
+            // EOF would be a password-input failure if the command ever reached the prompt.
+            let out = home.run_stdin(&args, "");
+            let message = out.err("VALIDATION_ERROR");
+            assert!(message.contains("zero address"), "{message}");
+            assert!(
+                !out.stderr.contains("The password authorizes"),
+                "{}",
+                out.stderr
+            );
+            assert_eq!(before, fs::read(home.wallet_json()).unwrap());
+            assert!(!home.path().join("whitelist.json").exists());
+            assert!(!home.path().join("whitelist.next.json").exists());
+            assert!(pid_alive(pid));
+            assert_eq!(
+                home.run(&["status", "--json"]).ok()["daemonPids"],
+                json!([pid])
+            );
+        }
+    }
+}

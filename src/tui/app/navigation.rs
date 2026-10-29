@@ -101,6 +101,18 @@ impl Navigation {
 }
 
 const IMPLEMENTED: &[ActionId] = &[
+    ActionId::WhitelistList,
+    ActionId::WhitelistVerify,
+    ActionId::WhitelistAdd,
+    ActionId::WhitelistContract,
+    ActionId::WhitelistRemove,
+    ActionId::FeeCap,
+    ActionId::NativeCap,
+    ActionId::TokenCap,
+    ActionId::CalldataCap,
+    ActionId::MessagePolicy,
+    ActionId::Reset,
+    ActionId::WhitelistUnlock,
     ActionId::List,
     ActionId::VerifyKeys,
     ActionId::SetActive,
@@ -150,6 +162,7 @@ impl App {
         self.nav.nets.values().cloned().collect()
     }
     pub fn configure(&mut self, home: &std::path::Path, allow_ptrace_scope_0: bool) {
+        self.whitelist.home = home.to_path_buf();
         self.nav.home = Outside::home(&home.to_string_lossy());
         self.nav.allow_ptrace_scope_0 = allow_ptrace_scope_0;
     }
@@ -548,7 +561,10 @@ impl App {
         if self.nav.tab == Tab::Send {
             return self.show_transfer();
         }
-        if matches!(self.nav.tab, Tab::Whitelist | Tab::Tools) {
+        if self.nav.tab == Tab::Whitelist {
+            return self.load_whitelist();
+        }
+        if self.nav.tab == Tab::Tools {
             self.nav.lines = Pane::Ready(vec![Outside::detail("in a later version")]);
             return Vec::new();
         }
@@ -572,6 +588,9 @@ impl App {
             return Some(work);
         }
         if let Some(work) = self.history_key(key) {
+            return Some(work);
+        }
+        if let Some(work) = self.whitelist_input(input(key)) {
             return Some(work);
         }
         if let Key::Char(c @ '1'..='7') = key {
@@ -659,7 +678,7 @@ impl App {
         }
     }
 
-    fn begin_password(&mut self, purpose: PasswordPurpose) -> Vec<Effect> {
+    pub(super) fn begin_password(&mut self, purpose: PasswordPurpose) -> Vec<Effect> {
         if self.locking || self.activating {
             return Vec::new();
         }
@@ -679,7 +698,10 @@ impl App {
         vec![match purpose {
             PasswordPurpose::Warm => Effect::PrepareUnlock,
             PasswordPurpose::Unlock(ttl) => Effect::PrepareDuration(ttl),
-            PasswordPurpose::Verify { .. } | PasswordPurpose::Repair => Effect::PrepareRead,
+            PasswordPurpose::Verify { .. }
+            | PasswordPurpose::Repair
+            | PasswordPurpose::WhitelistVerify => Effect::PrepareRead,
+            PasswordPurpose::WhitelistEdit => unreachable!("whitelist owns its plan"),
         }]
     }
     fn chain_picker(&mut self) {
@@ -829,6 +851,9 @@ impl App {
         } else {
             action
         };
+        if let Some(work) = self.whitelist_action(action) {
+            return work;
+        }
         if let Some(work) = self.transfer_action(action) {
             return work;
         }
