@@ -100,12 +100,60 @@ pub fn check_tx(
             d.error(ErrorCode::WhitelistDenied, chain, message)
         })?;
     }
+    check_transaction_limits(list, chain, decoded)?;
     check_fee(
         CapSource::List,
         list.policy.max_fee_wei(chain.key),
         chain,
         decoded,
     )
+}
+
+/// Stateless limits on the decoded signing payload, including self-transfers and native
+/// value attached to allowed contract calls. Never a cumulative budget or L1 fee guarantee.
+fn check_transaction_limits(
+    list: &Whitelist,
+    chain: &Chain,
+    decoded: &DecodedUnsigned,
+) -> Result<()> {
+    let Some(limits) = list.policy.transaction_limits.get(chain.key) else {
+        return Ok(());
+    };
+    let denied = |reason: &str| {
+        WalletError::new(
+            ErrorCode::WhitelistDenied,
+            format!(
+                "refusing to sign: per-transaction {reason} exceeded on {}",
+                chain.key
+            ),
+        )
+        .with_detail("chain", chain.key)
+        .with_detail("counterparty", decoded.to().to_checksum(None))
+    };
+    if let Some(cap) = &limits.max_native_wei {
+        let cap =
+            U256::from_str_radix(cap, 10).map_err(|_| denied("native value cap is invalid or"))?;
+        if decoded.value() > cap {
+            return Err(denied("native value cap"));
+        }
+    }
+    if limits
+        .max_calldata_bytes
+        .is_some_and(|cap| decoded.input().len() as u64 > u64::from(cap))
+    {
+        return Err(denied("calldata byte cap (not an L1 fee cap)"));
+    }
+    if let Action::TransferCall { token, amount, .. } = decoded.action() {
+        let key = format!("0x{}", hex::encode(token));
+        if let Some(cap) = limits.max_token_base_units.get(&key) {
+            let cap = U256::from_str_radix(cap, 10)
+                .map_err(|_| denied("token amount cap is invalid or"))?;
+            if *amount > cap {
+                return Err(denied("token amount cap (smallest base units)"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The `sign-message` gate: refused unless the list verifies and has `allowMessageSigning` on
@@ -1317,6 +1365,7 @@ mod tests {
         l.policy = Policy {
             max_fee_wei: BTreeMap::new(),
             allow_message_signing: false,
+            transaction_limits: Default::default(),
         };
         let e = check(
             &ListView::Usable(&l),

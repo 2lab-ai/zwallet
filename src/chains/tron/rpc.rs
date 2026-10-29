@@ -69,6 +69,11 @@ impl TronClient {
         url
     }
 
+    /// One node-supplied diagnostic value, with endpoint credentials removed before escaping.
+    fn shown(&self, value: &Value) -> String {
+        ascii_inert(&self.net.redact(&text_of(value)), VALUE_SHOWN)
+    }
+
     /// `POST /wallet/<call>` with `body`; the reply must be a JSON object without java-tron's
     /// `Error` field. Every failure is `RPC_ERROR` naming the call.
     async fn post(&self, call: &str, body: &Value) -> Result<Map<String, Value>> {
@@ -171,7 +176,7 @@ pub async fn connect(net: &Net) -> Result<TronClient> {
             "RPC {} serves a network whose block 0 is {}, but {}'s genesis block is {want}; not \
              reading from it",
             redact_url(&net.rpc_url),
-            shown(other),
+            client.shown(other),
             net.chain.key
         ))),
         None => Err(WalletError::rpc(format!(
@@ -213,7 +218,7 @@ pub async fn account(c: &TronClient, owner: &str) -> Result<Account> {
         other => {
             return Err(WalletError::rpc(format!(
                 "/wallet/getaccount answered about the account {}, not {owner}",
-                other.map_or_else(|| "<none>".to_string(), shown)
+                other.map_or_else(|| "<none>".to_string(), |v| c.shown(v))
             )));
         }
     }
@@ -224,14 +229,14 @@ pub async fn account(c: &TronClient, owner: &str) -> Result<Account> {
             WalletError::rpc(format!(
                 "/wallet/getaccount answered a balance of {}, which is not a whole number of sun \
                  from 0 to 2^63 - 1",
-                shown(v)
+                c.shown(v)
             ))
         })?,
     };
     Ok(Account {
         activated: true,
         balance,
-        warning: owner_warning(a.get("owner_permission"), owner),
+        warning: owner_warning_with(a.get("owner_permission"), owner, |v| c.shown(v)),
     })
 }
 
@@ -241,6 +246,14 @@ pub async fn account(c: &TronClient, owner: &str) -> Result<Account> {
 /// address alone. The keys and the threshold come from the node: each escaped and cut, all of
 /// them within one 512-character budget, then how many more.
 pub fn owner_warning(permission: Option<&Value>, owner: &str) -> Option<String> {
+    owner_warning_with(permission, owner, shown)
+}
+
+fn owner_warning_with(
+    permission: Option<&Value>,
+    owner: &str,
+    shown: impl Fn(&Value) -> String,
+) -> Option<String> {
     let p = permission?;
     let threshold = p.get("threshold");
     let keys = p.get("keys").and_then(Value::as_array);
@@ -263,9 +276,9 @@ pub fn owner_warning(permission: Option<&Value>, owner: &str) -> Option<String> 
         let one = format!(
             "{} weight {}",
             key.get("address")
-                .map_or_else(|| "<none>".to_string(), shown),
+                .map_or_else(|| "<none>".to_string(), &shown),
             key.get("weight")
-                .map_or_else(|| "<none>".to_string(), shown)
+                .map_or_else(|| "<none>".to_string(), &shown)
         );
         if used + one.len() > PROSE_MAX {
             break;
@@ -285,7 +298,7 @@ pub fn owner_warning(permission: Option<&Value>, owner: &str) -> Option<String> 
     Some(format!(
         "this Tron account's owner permission is not this wallet's key alone (threshold {}; \
          keys: {list}): funds here may not be controlled by this wallet's key; do not fund it",
-        threshold.map_or_else(|| "<none>".to_string(), shown)
+        threshold.map_or_else(|| "<none>".to_string(), &shown)
     ))
 }
 
@@ -314,9 +327,18 @@ async fn constant_call(
     let ok = r.get("result").and_then(|x| x.get("result")) == Some(&Value::Bool(true));
     let failed = r
         .get("transaction")
-        .and_then(|t| t.pointer("/ret/0/ret"))
-        .and_then(Value::as_str)
-        == Some("FAILED");
+        .and_then(|t| t.get("ret"))
+        .is_some_and(|results| {
+            results.as_array().is_none_or(|results| {
+                results.iter().any(|result| {
+                    // Request acceptance (result.result) is separate from VM execution. A
+                    // failed contract must never turn its apparent return word into a balance.
+                    !result.is_object()
+                        || result.get("ret").is_some_and(|s| s != "SUCESS")
+                        || result.get("contractRet").is_some_and(|s| s != "SUCCESS")
+                })
+            })
+        });
     if !ok || failed {
         let why = r
             .get("result")
@@ -419,7 +441,7 @@ pub async fn trc20_meta(c: &TronClient, token: &str, owner: &str) -> Result<Toke
             from_registry: true,
         },
         None => TokenMeta {
-            symbol: ascii_inert(&symbol, SYMBOL_SHOWN),
+            symbol: ascii_inert(&c.net.redact(&symbol), SYMBOL_SHOWN),
             decimals,
             from_registry: false,
         },

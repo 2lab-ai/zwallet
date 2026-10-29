@@ -31,7 +31,10 @@
 //! the clock: on `lock`, on expiry (wall clock, so system sleep counts), on SIGTERM/SIGINT, or as
 //! soon as wallet.json's ciphertext changes or `d.sock` is no longer its socket (checked every
 //! tick and on every request), it drops the seed (zeroized) and exits, even while connections are
-//! open. A daemon process exists only while the wallet is unlocked.
+//! open. Socket and wallet checks use at most `MAX_INSPECTORS` secret-free worker threads,
+//! with `INSPECT_WAIT` including permit wait; a timeout ends the session. Clock checks and lock
+//! never wait for filesystem I/O. Socket cleanup after wiping the seed is also bounded. A daemon
+//! process exists only while the wallet is unlocked (apart from bounded shutdown cleanup).
 
 use crate::chains;
 use crate::chains::evm::policy::{self, ListView};
@@ -141,6 +144,31 @@ impl Loaded {
 /// Reads the list a sealed anchor names (`whitelist::load_verified`; a seam for tests).
 type ListReader = Arc<dyn Fn(&Path, &WhitelistAnchor) -> Result<Whitelist> + Send + Sync>;
 
+/// Inspect only public filesystem state. The worker never receives a session or seed.
+type Inspector = Arc<dyn Fn(&Path, &Path, (u64, u64), &str) -> Option<&'static str> + Send + Sync>;
+const INSPECT_WAIT: Duration = Duration::from_secs(2);
+const MAX_INSPECTORS: usize = 4;
+
+fn socket_is_ours(sock: &Path, sock_id: (u64, u64)) -> bool {
+    fs::symlink_metadata(sock)
+        .is_ok_and(|m| m.file_type().is_socket() && (m.dev(), m.ino()) == sock_id)
+}
+
+fn inspect_files(
+    home: &Path,
+    sock: &Path,
+    sock_id: (u64, u64),
+    sealed: &str,
+) -> Option<&'static str> {
+    if !socket_is_ours(sock, sock_id) {
+        return Some("the daemon socket was replaced or removed");
+    }
+    if !store::read_wallet_file(home).is_ok_and(|f| f.crypto.ciphertext == sealed) {
+        return Some("wallet.json changed since unlock");
+    }
+    None
+}
+
 /// How long a request waits for the list to be read before deciding without it.
 const LIST_WAIT: Duration = Duration::from_secs(2);
 /// The most list reads in flight at once. A read holds its permit until it really returns, so
@@ -162,20 +190,16 @@ struct Shared {
     list_wait_ms: AtomicU64,
     /// [`MAX_READERS`] permits, one per list read in flight.
     readers: Arc<Semaphore>,
+    inspector: Inspector,
+    inspect_wait_ms: AtomicU64,
+    inspectors: Arc<Semaphore>,
 }
 
 impl Shared {
-    /// Whether the session must end now, and why. Ends it (zeroizing the seed) if so.
+    /// Pure memory/clock check: never waits for the filesystem under the session lock.
     fn check(&self, session: &mut Option<Session>) -> Option<&'static str> {
         let reason = match session.as_ref() {
             None => Some("the wallet is locked"),
-            Some(s) if SystemTime::now() >= s.expires_at => Some("the unlock expired"),
-            Some(_) if !self.socket_is_ours() => Some("the daemon socket was replaced or removed"),
-            Some(s) if !self.wallet_unchanged(&s.sealed) => {
-                Some("wallet.json changed since unlock")
-            }
-            // Again after reading wallet.json, so the last time sample is the final check
-            // before a signature.
             Some(s) if SystemTime::now() >= s.expires_at => Some("the unlock expired"),
             Some(_) => None,
         };
@@ -185,13 +209,59 @@ impl Shared {
         reason
     }
 
-    fn socket_is_ours(&self) -> bool {
-        fs::symlink_metadata(&self.sock)
-            .is_ok_and(|m| m.file_type().is_socket() && (m.dev(), m.ino()) == self.sock_id)
-    }
-
-    fn wallet_unchanged(&self, sealed: &str) -> bool {
-        store::read_wallet_file(&self.home).is_ok_and(|f| f.crypto.ciphertext == sealed)
+    /// A fresh check before answering any request other than lock, and on the monitor's tick.
+    /// The deadline includes waiting for a permit; abandoned workers retain their permits
+    /// until the syscall returns. Detached threads cannot delay runtime shutdown. Any failed
+    /// inspection ends the session, so another concurrent successful result cannot revive it.
+    async fn inspect(&self) -> Option<&'static str> {
+        let sealed = {
+            let mut session = self.session();
+            if let Some(reason) = self.check(&mut session) {
+                return Some(reason);
+            }
+            session.as_ref().unwrap().sealed.clone()
+        };
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(self.inspect_wait_ms.load(Ordering::Relaxed));
+        let inspect = async {
+            let permit = self.inspectors.clone().acquire_owned().await.ok()?;
+            let (home, sock, sock_id, inspector, marker) = (
+                self.home.clone(),
+                self.sock.clone(),
+                self.sock_id,
+                self.inspector.clone(),
+                sealed.clone(),
+            );
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::Builder::new()
+                .name("wallet-inspect".into())
+                .spawn(move || {
+                    let result = inspector(&home, &sock, sock_id, &marker);
+                    drop(permit);
+                    let _ = tx.send(result);
+                })
+                .ok()?;
+            rx.await.ok()
+        };
+        let result = match tokio::time::timeout_at(deadline, inspect).await {
+            Ok(Some(result)) if tokio::time::Instant::now() < deadline => result,
+            Ok(None) => Some("wallet state could not be inspected"),
+            Ok(Some(_)) | Err(_) => Some("wallet state could not be inspected in time"),
+        };
+        let mut session = self.session();
+        if let Some(reason) = self.check(&mut session) {
+            return Some(reason);
+        }
+        let reason = if session.as_ref().is_none_or(|s| s.sealed != sealed) {
+            Some("the session changed while wallet state was inspected")
+        } else {
+            result
+        };
+        if reason.is_some() {
+            *session = None;
+            self.stop.notify_one();
+        }
+        reason
     }
 
     fn session(&self) -> std::sync::MutexGuard<'_, Option<Session>> {
@@ -269,12 +339,12 @@ pub async fn run(home: PathBuf) -> Result<()> {
     // timed out or was killed), nobody is waiting for this key: wipe it and leave.
     if !report_last(&Response::ok(ready)) {
         *shared.session() = None;
-        remove_own_socket(&shared);
+        remove_own_socket(&shared).await;
         return Err(WalletError::validation("the unlocking process went away"));
     }
     serve_until_done(listener, &shared).await;
     *shared.session() = None; // zeroizes the seed
-    remove_own_socket(&shared);
+    remove_own_socket(&shared).await;
     Ok(())
 }
 
@@ -360,6 +430,9 @@ async fn start(home: &Path) -> Result<Started> {
         reader: Arc::new(whitelist::load_verified),
         list_wait_ms: AtomicU64::new(LIST_WAIT.as_millis() as u64),
         readers: Arc::new(Semaphore::new(MAX_READERS)),
+        inspector: Arc::new(inspect_files),
+        inspect_wait_ms: AtomicU64::new(INSPECT_WAIT.as_millis() as u64),
+        inspectors: Arc::new(Semaphore::new(MAX_INSPECTORS)),
     });
     let ready = json!({
         "locked": false,
@@ -371,8 +444,8 @@ async fn start(home: &Path) -> Result<Started> {
         "whitelist": shared.load(&anchor).await.summary(&anchor),
     });
     // wallet.json may have changed while this daemon waited for the go byte.
-    if let Some(reason) = shared.check(&mut shared.session()) {
-        remove_own_socket(&shared);
+    if let Some(reason) = shared.inspect().await {
+        remove_own_socket(&shared).await;
         return Err(WalletError::validation(format!(
             "{reason}; not unlocked, run `zwallet unlock` again"
         )));
@@ -447,9 +520,22 @@ fn redirect_to_null(fd: libc::c_int) {
     }
 }
 
-fn remove_own_socket(shared: &Shared) {
-    if shared.socket_is_ours() {
-        let _ = fs::remove_file(&shared.sock);
+async fn remove_own_socket(shared: &Shared) {
+    // The seed is already gone. Cleanup also must not strand the exiting process on a hung
+    // mount. This one detached worker has no secret, and is never joined during shutdown.
+    let (sock, sock_id) = (shared.sock.clone(), shared.sock_id);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if std::thread::Builder::new()
+        .name("socket-cleanup".into())
+        .spawn(move || {
+            if socket_is_ours(&sock, sock_id) {
+                let _ = fs::remove_file(sock);
+            }
+            let _ = tx.send(());
+        })
+        .is_ok()
+    {
+        let _ = tokio::time::timeout(INSPECT_WAIT, rx).await;
     }
 }
 
@@ -464,6 +550,15 @@ async fn serve_until_done(listener: UnixListener, shared: &Arc<Shared>) {
         return;
     };
     let uid = protocol::current_uid();
+    let monitor = async {
+        loop {
+            if shared.inspect().await.is_some() {
+                return;
+            }
+            tokio::time::sleep(TICK).await;
+        }
+    };
+    tokio::pin!(monitor);
     loop {
         let wait = {
             let mut session = shared.session();
@@ -483,6 +578,7 @@ async fn serve_until_done(listener: UnixListener, shared: &Arc<Shared>) {
                 }
             }
             _ = tokio::time::sleep(wait) => {}
+            _ = &mut monitor => return,
             _ = shared.stop.notified() => return,
             _ = term.recv() => return,
             _ = int.recv() => return,
@@ -544,6 +640,17 @@ async fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
         let e = WalletError::validation("malformed daemon request");
         return (Response::err(&e), false);
     };
+    // Lock needs no filesystem evidence: erase the seed immediately, even if all workers hang.
+    if matches!(req, Request::Lock) {
+        let mut session = shared.session();
+        if let Some(reason) = shared.check(&mut session) {
+            return ended(&req, reason);
+        }
+        return respond(&mut session, &req, None);
+    }
+    if let Some(reason) = shared.inspect().await {
+        return ended(&req, reason);
+    }
     let snapshot = {
         let mut session = shared.session();
         if let Some(reason) = shared.check(&mut session) {
@@ -558,6 +665,9 @@ async fn handle(shared: &Shared, bytes: &[u8]) -> (Response, bool) {
     };
     let (anchor, sealed) = snapshot;
     let loaded = shared.load(&anchor).await;
+    if let Some(reason) = shared.inspect().await {
+        return ended(&req, reason);
+    }
     let mut session = shared.session();
     if let Some(reason) = shared.check(&mut session) {
         return ended(&req, reason);
@@ -680,6 +790,22 @@ mod tests {
     }
 
     fn fixture(reader: ListReader, list_wait: Duration, ttl: Duration) -> Fixture {
+        fixture_with_inspector(
+            reader,
+            list_wait,
+            ttl,
+            Arc::new(inspect_files),
+            INSPECT_WAIT,
+        )
+    }
+
+    fn fixture_with_inspector(
+        reader: ListReader,
+        list_wait: Duration,
+        ttl: Duration,
+        inspector: Inspector,
+        inspect_wait: Duration,
+    ) -> Fixture {
         let dir = tempfile::Builder::new()
             .prefix("zwt-")
             .tempdir_in("/tmp")
@@ -722,6 +848,9 @@ mod tests {
             reader,
             list_wait_ms: AtomicU64::new(list_wait.as_millis() as u64),
             readers: Arc::new(Semaphore::new(MAX_READERS)),
+            inspector,
+            inspect_wait_ms: AtomicU64::new(inspect_wait.as_millis() as u64),
+            inspectors: Arc::new(Semaphore::new(MAX_INSPECTORS)),
         });
         Fixture {
             shared,
@@ -789,19 +918,32 @@ mod tests {
             })
         }
 
+        fn block(&self) {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_live.fetch_max(live, Ordering::SeqCst);
+            let open = self.open.lock().unwrap();
+            let _ = self
+                .cv
+                .wait_timeout_while(open, Duration::from_secs(30), |open| !*open)
+                .unwrap();
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            self.finished.fetch_add(1, Ordering::SeqCst);
+        }
+
         fn reader(self: &Arc<Self>) -> ListReader {
             let g = self.clone();
             Arc::new(move |_, _| {
-                g.entered.fetch_add(1, Ordering::SeqCst);
-                let live = g.live.fetch_add(1, Ordering::SeqCst) + 1;
-                g.max_live.fetch_max(live, Ordering::SeqCst);
-                let open = g.open.lock().unwrap();
-                let _ =
-                    g.cv.wait_timeout_while(open, Duration::from_secs(30), |open| !*open)
-                        .unwrap();
-                g.live.fetch_sub(1, Ordering::SeqCst);
-                g.finished.fetch_add(1, Ordering::SeqCst);
+                g.block();
                 Ok(list())
+            })
+        }
+
+        fn inspector(self: &Arc<Self>) -> Inspector {
+            let g = self.clone();
+            Arc::new(move |home, sock, id, sealed| {
+                g.block();
+                inspect_files(home, sock, id, sealed)
             })
         }
 
@@ -1055,6 +1197,200 @@ mod tests {
             assert_locked(&h.await.unwrap());
         }
         assert!(gate.count(&gate.max_live) <= MAX_READERS);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lock_does_not_wait_for_wallet_or_socket_inspection() {
+        let gate = Gate::new();
+        let f = fixture_with_inspector(
+            Arc::new(|_, _| Ok(list())),
+            GENEROUS,
+            Duration::from_secs(60),
+            gate.inspector(),
+            GENEROUS,
+        );
+        let pending: Vec<_> = (0..MAX_INSPECTORS * 2)
+            .map(|_| spawn_handle(&f.shared, sign_tx(BOB)))
+            .collect();
+        gate.wait(&gate.entered, MAX_INSPECTORS).await;
+        let start = Instant::now();
+        let (response, stop) = handle(&f.shared, &lock_request()).await;
+        assert!(response.ok && stop);
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert!(f.shared.session().is_none());
+        assert_eq!(gate.count(&gate.finished), 0);
+        gate.release();
+        for request in pending {
+            assert_locked(&request.await.unwrap());
+        }
+        assert!(gate.count(&gate.max_live) <= MAX_INSPECTORS);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspection_workers_stay_bounded_when_queued_requests_time_out() {
+        let gate = Gate::new();
+        let f = fixture_with_inspector(
+            Arc::new(|_, _| Ok(list())),
+            GENEROUS,
+            Duration::from_secs(60),
+            gate.inspector(),
+            Duration::from_millis(300),
+        );
+        // Twelve requests compete for four workers. All four workers remain inside the
+        // simulated syscall until after EVERY request, including queued ones, has returned.
+        let pending: Vec<_> = (0..MAX_INSPECTORS * 3)
+            .map(|_| spawn_handle(&f.shared, sign_tx(BOB)))
+            .collect();
+        gate.wait(&gate.entered, MAX_INSPECTORS).await;
+        assert_eq!(f.shared.inspectors.available_permits(), 0);
+        let responses = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut responses = Vec::new();
+            for request in pending {
+                responses.push(request.await.unwrap());
+            }
+            responses
+        })
+        .await
+        .expect("queued requests did not respect the inspection deadline");
+        assert!(
+            responses.iter().any(|r| r
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("inspected in time"))),
+            "no inspection timed out"
+        );
+        for response in &responses {
+            assert_locked(response);
+        }
+        assert!(
+            f.shared.session().is_none(),
+            "inspection timeout retained the seed"
+        );
+        assert_eq!(
+            gate.count(&gate.entered),
+            MAX_INSPECTORS,
+            "queued request started another worker"
+        );
+        assert_eq!(gate.count(&gate.max_live), MAX_INSPECTORS);
+        assert_eq!(gate.count(&gate.finished), 0);
+        assert_eq!(
+            f.shared.inspectors.available_permits(),
+            0,
+            "timed-out syscall released its permit before returning"
+        );
+        gate.release();
+        gate.wait(&gate.finished, MAX_INSPECTORS).await;
+        // The counter is updated inside the inspector, just before its caller releases the
+        // permit. Wait for that separate action, instead of racing the worker's final steps.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while f.shared.inspectors.available_permits() != MAX_INSPECTORS {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(gate.count(&gate.live), 0);
+        assert_eq!(gate.count(&gate.entered), MAX_INSPECTORS);
+        assert_locked(&handle(&f.shared, &sign_tx(BOB)).await.0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn expiry_does_not_wait_for_wallet_or_socket_inspection() {
+        let gate = Gate::new();
+        let f = fixture_with_inspector(
+            Arc::new(|_, _| Ok(list())),
+            GENEROUS,
+            Duration::from_millis(500),
+            gate.inspector(),
+            GENEROUS,
+        );
+        f._listener.set_nonblocking(true).unwrap();
+        let listener = UnixListener::from_std(f._listener.try_clone().unwrap()).unwrap();
+        let shared = f.shared.clone();
+        // Exercise the real server loop: this test never calls Shared::check directly.
+        // Only its independent expiry path can wipe the seed while its monitor is blocked.
+        let serving = tokio::spawn(async move { serve_until_done(listener, &shared).await });
+        gate.wait(&gate.entered, 1).await;
+        let request = spawn_handle(&f.shared, sign_tx(BOB));
+        tokio::time::timeout(Duration::from_secs(3), serving)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(f.shared.session().is_none(), "the seed outlived expiry");
+        assert_eq!(
+            gate.count(&gate.finished),
+            0,
+            "the test did not stall the inspector"
+        );
+        gate.release();
+        assert_locked(&request.await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspection_timeout_ends_session_and_late_success_cannot_sign() {
+        let gate = Gate::new();
+        let f = fixture_with_inspector(
+            Arc::new(|_, _| Ok(list())),
+            GENEROUS,
+            Duration::from_secs(60),
+            gate.inspector(),
+            Duration::from_millis(100),
+        );
+        let start = Instant::now();
+        let (response, stop) = handle(&f.shared, &sign_tx(BOB)).await;
+        assert_locked(&response);
+        assert!(stop);
+        assert!(response.error.unwrap().contains("inspected in time"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(f.shared.session().is_none());
+        gate.wait(&gate.entered, 1).await;
+        gate.release();
+        gate.wait(&gate.finished, 1).await;
+        assert_locked(&handle(&f.shared, &sign_tx(BOB)).await.0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn socket_replacement_during_inspection_ends_session() {
+        let gate = Gate::new();
+        let f = fixture_with_inspector(
+            Arc::new(|_, _| Ok(list())),
+            GENEROUS,
+            Duration::from_secs(60),
+            gate.inspector(),
+            GENEROUS,
+        );
+        let pending = spawn_handle(&f.shared, sign_tx(BOB));
+        gate.wait(&gate.entered, 1).await;
+        fs::remove_file(&f.shared.sock).unwrap();
+        let _replacement = std::os::unix::net::UnixListener::bind(&f.shared.sock).unwrap();
+        gate.release();
+        let response = pending.await.unwrap();
+        assert_locked(&response);
+        assert!(response.error.unwrap().contains("socket was replaced"));
+    }
+
+    #[test]
+    fn inspector_does_not_keep_runtime_alive_after_timeout() {
+        let gate = Gate::new();
+        let f = fixture_with_inspector(
+            Arc::new(|_, _| Ok(list())),
+            GENEROUS,
+            Duration::from_secs(60),
+            gate.inspector(),
+            Duration::from_millis(100),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_locked(&rt.block_on(handle(&f.shared, &sign_tx(BOB))).0);
+        gate.wait_blocking(&gate.entered, 1);
+        let start = Instant::now();
+        drop(rt);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(gate.count(&gate.finished), 0);
+        gate.release();
+        gate.wait_blocking(&gate.finished, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -142,11 +142,24 @@ pub const DEFAULT_FEE_CAPS_WEI: &[(&str, &str)] = &[
 pub const WHITELIST_RULES: ChainRules = ChainRules {
     chain_known,
     is_registry_token: is_token_anywhere_str,
+    registry_token_on_chain: is_token_on_chain,
     default_fee_caps_wei: DEFAULT_FEE_CAPS_WEI,
 };
 
 fn chain_known(key: &str) -> bool {
     crate::chains::CHAINS.iter().any(|c| c.key == key)
+}
+
+fn is_token_on_chain(key: &str, address: &str) -> bool {
+    let Some(chain) = crate::chains::CHAINS.iter().find(|c| c.key == key) else {
+        return false;
+    };
+    let Ok(config) = super::config(chain) else {
+        return false;
+    };
+    address
+        .parse::<Address>()
+        .is_ok_and(|address| lookup(config.chain_id, &address).is_some())
 }
 
 fn is_token_anywhere_str(address: &str) -> bool {

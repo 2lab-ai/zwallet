@@ -6274,6 +6274,7 @@ fn tr24_sign_message_call_and_invoke_on_tron_are_unsupported_and_so_for_now_are_
 
 #[test]
 fn whitelist_entries_and_fee_caps_for_tron_wait_for_the_tron_signer() {
+    let _exclusive = common::exclusive();
     let home = Home::new();
     home.create("main", &[]);
     let pw = format!("{PW}\n");
@@ -6295,6 +6296,9 @@ fn whitelist_entries_and_fee_caps_for_tron_wait_for_the_tron_signer() {
         &["whitelist", "add", "bob", BOB, "--chains", "tron"],
         &["whitelist", "add", "bob", BOB, "--chains", "base,tron"],
         &["whitelist", "fee-cap", "tron", "30"],
+        &["whitelist", "native-cap", "tron", "30"],
+        &["whitelist", "calldata-cap", "tron", "128"],
+        &["whitelist", "token-cap", "tron", "usdt", "1000000"],
     ] {
         let mut args = args.to_vec();
         args.extend(["--password-stdin", "--json"]);

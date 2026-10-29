@@ -6,10 +6,13 @@ are generated and kept on the machine. Chain access is plain JSON-RPC to public 
 **unlocks** the wallet for a duration they choose (`zwallet unlock 24h`, `365d`, `1y`). While it is
 unlocked, a small daemon holds the key, so the agent can sign without the human present. A human
 `zwallet lock` (or the end of that duration, or a reboot) locks it again. EVM chains ship first;
-Solana and TON are planned and the architecture leaves room for them.
+Solana and TON are ![WIP](https://img.shields.io/badge/status-WIP-yellow); the architecture leaves room for them.
 
-Status: **in-progress**, 2026-10-20. Branch `feat/1-evm-wallet-core`. Fixed user statement and
-scope: [`v0-1/ssot.md`](v0-1/ssot.md). Driver: [`v0-1/loop.md`](v0-1/loop.md).
+Status: **in-progress**, reviewed 2026-10-29. Implementation status: the EVM CLI and signed whitelist are
+implemented; the TUI is partial and additional chain families are WIP. See
+[feature status](../docs/features.md) for the code-backed boundary. The goals and
+acceptance scenarios below include future work and are not a release checklist.
+Fixed user statement and scope: [`v0-1/ssot.md`](v0-1/ssot.md). Driver: [`v0-1/loop.md`](v0-1/loop.md).
 
 ## Problem
 
@@ -46,13 +49,14 @@ no account, no API key, no telemetry and no OS keychain.
 - **G5 Human unlock.** `zwallet unlock <duration>` with a positional duration (s, m, h, d, w, y;
   `1y` = 365d), and `zwallet lock`. A daemon holds **only the key** for that duration. Everything
   else runs in a one-shot CLI process.
-- **G6 Chain families.** EVM is implemented. Solana and TON slot in later behind the same family
+- **G6 Chain families.** EVM is implemented. Solana and TON
+  ![WIP](https://img.shields.io/badge/status-WIP-yellow) slot in later behind the same family
   boundary without changing the wallet file or the daemon protocol. Tron (TRX, TRC20 USDT) is the
   first such family, planned for v0.3: [`05-tron.md`](05-tron.md).
 - **G8 Signed whitelist (v0.1, WU1b).** Funds leave only to entries of a list signed with a key
   separate from the seed, enforced by the daemon. Approvals are revoke-only, there is a per-chain
   fee cap, and `sign-message` is gated ([`04-whitelist.md`](04-whitelist.md)).
-- **G9 TUI (v0.2).** `zwallet tui`: keys, warm-up, balance + last 10 tx, tx detail, assets →
+- **G9 TUI (v0.2).** ![WIP](https://img.shields.io/badge/status-WIP-yellow) Full workflows planned; the basic key/status screen is implemented. `zwallet tui`: keys, warm-up, balance + last 10 tx, tx detail, assets →
   transfer to whitelisted recipients ([`03-tui.md`](03-tui.md)).
 - **G7 Distribution.** The llmux/harn pattern: CI, preview prereleases on every `main` push, stable
   releases on `v*` tags, Homebrew formulae `2lab-ai/tap/zwallet` and `2lab-ai/tap/zwallet-preview`,
@@ -78,7 +82,14 @@ and Solana/TON implementations in v0.1.
 | A7 | `transfer --dry-run` on ethereum mainnet (0-value self-transfer) | `recoveredFrom == from`; nonce and fees come from the live chain |
 | A8 | `call` USDC `decimals()(uint8)` on ethereum; `invoke --dry-run` | `6`; `recoveredFrom == from` |
 | A9 | `backup` from a non-TTY shell | refused; the mnemonic is never printed to an agent |
-| A9b | the signed whitelist ([`04-whitelist.md`](04-whitelist.md) W1–W12): a send to an unlisted payee, a non-zero approve, an unlisted contract or selector, a hand-edited list, a fee over the cap | the daemon refuses with `WHITELIST_DENIED` / `WHITELIST_INVALID` / `FEE_CAP_EXCEEDED`; editing the list needs the password. (Amount caps were deferred on 2026-10-20: 04 §Not in v0.1.) |
+| A9b | the signed whitelist ([`04-whitelist.md`](04-whitelist.md) W1–W12): a send to an unlisted payee, a non-zero approve, an unlisted contract or selector, a hand-edited list, a fee over the cap | the daemon refuses with `WHITELIST_DENIED` / `WHITELIST_INVALID` / `FEE_CAP_EXCEEDED`; editing the list needs the password. (Optional per-transaction amount/calldata limits: [06](06-review-hardening.md); cumulative budgets remain ![WIP](https://img.shields.io/badge/status-WIP-yellow): 04 §Not in v0.1.) |
 | A10 | `brew install 2lab-ai/tap/zwallet` and `…/zwallet-preview` | `zwallet --version` shows the release version and the preview channel respectively |
 | A11 | `xbrew install zwallet` | installs it (macOS through the tap formula; Arch through the verified release binary) |
 | A12 | the user creates and unlocks the real wallet on fable-m5max | the agent reads the address and balance without the human present, and after funding broadcasts a transfer with a receipt |
+
+## Review hardening (2026-10-29)
+
+The active implementation contract for deadline enforcement, validation-gated publishing,
+bounded daemon inspection and optional signed transaction limits is
+[`06-review-hardening.md`](06-review-hardening.md). Cumulative budgets and joint rollback
+remain design issues under the existing custody constraints.

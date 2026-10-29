@@ -458,6 +458,13 @@ fn a_balance_of_that_is_not_one_word_or_that_failed_is_rpc_error_escaped_and_bou
             "result": { "result": false, "code": "CONTRACT_EXE_ERROR", "message": alloy::hex::encode(&revert) },
             "constant_result": [tron::word(5)],
         }),
+        // The request was accepted, but the VM reports a failed execution. Its apparent
+        // return word must not be presented as a balance.
+        json!({
+            "result": {"result": true},
+            "transaction": {"ret": [{"contractRet": "REVERT"}]},
+            "constant_result": [tron::word(5)],
+        }),
         // No result at all.
         json!({ "constant_result": [tron::word(5)] }),
         // Not hex.
@@ -558,4 +565,62 @@ fn tr7_tr8_the_tron_row_has_trx_usdt_and_its_own_address_and_a_failed_usdt_read_
         "{usdt}"
     );
     assert!(usdt.get("raw").is_none(), "{usdt}");
+}
+
+#[test]
+fn reflected_rpc_credentials_never_reach_errors_warnings_or_token_symbols() {
+    const SECRET: &str = "SECRETKEY99";
+    let home = Home::new();
+    home.create("main", &[]);
+    let me = cached_tron(&home);
+    for field in ["block", "address", "balance", "permission", "symbol"] {
+        let me = me.clone();
+        let node = MockTron::start(move |path, body| {
+            let path = path.split('?').next().unwrap();
+            if field == "block" && path == "/wallet/getblockbynum" {
+                return Reply::Json(tron::block0(SECRET));
+            }
+            if field == "symbol" && body["function_selector"] == "symbol()" {
+                return Reply::Json(tron::constant(&tron::abi_string(SECRET)));
+            }
+            let mut account = tron::account(&me, 1);
+            match field {
+                "address" => account["address"] = json!(SECRET),
+                "balance" => account["balance"] = json!(SECRET),
+                "permission" => {
+                    account["owner_permission"] = json!({
+                        "threshold": SECRET,
+                        "keys": [{"address": SECRET, "weight": SECRET}]
+                    })
+                }
+                _ => {}
+            }
+            tron::node(account, 0)(path, body)
+        });
+        let url = format!("{}?apikey={SECRET}", node.url);
+        let mut args = vec!["balance", "--chain", "tron", "--rpc", &url, "--json"];
+        if field == "symbol" {
+            args.extend(["--token", TWER]);
+        }
+        let out = home.run(&args);
+        assert!(
+            !out.stdout.contains(SECRET) && !out.stderr.contains(SECRET),
+            "credential leaked from {field}"
+        );
+        let value = out.json();
+        if matches!(field, "permission" | "symbol") {
+            assert_eq!(out.code, 0, "{field}: {value}");
+            let key = if field == "symbol" {
+                "symbol"
+            } else {
+                "warning"
+            };
+            assert!(
+                value[key].as_str().unwrap().contains("<redacted>"),
+                "{value}"
+            );
+        } else {
+            assert_eq!(value["errorCode"], "RPC_ERROR");
+        }
+    }
 }
