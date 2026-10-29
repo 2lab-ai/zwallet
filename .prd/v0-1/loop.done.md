@@ -140,3 +140,28 @@ The test suite stops no daemon outside its own test homes; the v0.2 TUI spec is 
 - **PR #13.** RED: `the_suite_stops_no_daemon_outside_its_test_homes` (lock and whitelist add both stopped a `/tmp/zwx-` daemon before the fix); mutation (the filter line removed) fails it; `a_release_profile_run_starts_no_zwallet` goes through the launcher. Gate on b64e2cd: lib 263, cli 110 (110/110 ×3 on a pty), evm_offline 65, whitelist 5+3, live 11/11; Linux Docker lib 263, cli 111. Reviews: gpt-6 evidence review and code-reviewer, round 1 both REJECT (a `cargo test --release` run was still destructive), round 2 both APPROVE. CI green on 403e15f (test-only delta after the gate).
 - **PR #14.** Trinity (grok-4.7, gpt-6-astra, fable): R1 0/3 approve (payee address not authenticated, confirm not bound to the reviewed transaction, contract-routed token movements, no runtime write point), R2 2:1 (a test contract a correct backend could not pass), R3 unanimous APPROVE. `loop-lint` 0 FAIL.
 - **PR #15.** RED: `list_names_a_listener_whose_answers_match_an_edited_cache`; `a_started_daemon_that_runs_other_code_is_given_nothing` (the real `drive_daemon` with `/bin/sh` as the child read the 22 password bytes); `the_started_code_verdict_refuses_when_this_build_has_no_cdhash`; `the_started_daemon_refusal_claims_no_lock_state`. Mutations: the cdhash comparison, `CS_VALID`, and accept-without-own-cdhash each fail a test. Gate on b1626cc: lib 269, cli 111 (111/111 ×3 on a pty), evm_offline 65, whitelist 5+3, live 11/11; Linux Docker lib 263, cli 112. The whole suite for `x86_64-apple-darwin` under Rosetta on 4ef17b3 (rustc 1.96.1, the rustup toolchain): lib 266, cli 111, evm_offline 65, whitelist 5+3. The round-2 delta (fde617f, 4ef17b3: messages, a quoting helper with its test, the CI control step, docs) was checked by targeted tests, a mutation and CI on both OS. Reviews: gpt-6 evidence review REJECT (fail-open without an own cdhash; N6 overclaimed) then APPROVE; code-reviewer REJECT (refusal message claimed a lock state; then a README sentence) then APPROVE.
+
+## R8 — closed (WU6: the owner's unlock and the agent's read, A12)
+
+The agent reads the owner's wallet without a password once the owner has unlocked it: the address comes
+back verified by the session, and the balance of every network reads.
+
+### Closed rows
+
+| WU | Repo · branch · worktree | Scope | Owner | State |
+|---|---|---|---|---|
+| WU6 | live | user runs create and unlock on fable-m5max, then the agent reads address and balance (A12) | user TTY + dispatcher | done 2026-10-28: the owner unlocked at 12:01:03 KST (`unlock 1y`, preview 2026.10.28.0227); the dispatcher read `address`, `status` and `balance` (read-only, no password) |
+
+| ID | Acceptance | Gap | Source | Status |
+|---|---|---|---|---|
+| G4 | A12 | the wallet exists; the agent's read of the session-verified address and the balance waits for the user's unlock at a TTY | WU6 | ✅ 2026-10-28 |
+
+- **A12, 2026-10-28 12:02 KST**, with the preview 2026.10.28.0227 (24f4b5b), after the owner's `zwallet unlock 1y`
+  at a TTY (the daemon started 12:01:03 KST):
+  - `zwallet address --json`: key `zbrain`, the address in its cache (the owner's; not written in this public repo), `verified: true`,
+    `verifiedBy: "session"`, no warning.
+  - `zwallet status --json`: `locked: false`, `expiresAt` 2027-10-28T03:01:04Z, `verifiedBy: "session"`.
+  - `zwallet balance --json`: 0 native and 0 of every registry token on ethereum, base, arbitrum, optimism,
+    polygon, bsc, avalanche and sepolia; no network errored.
+  - `zwallet tui` on the real home (read-only, `q`): the key, its shortened address and `verified by session`,
+    `signing (agent too) until 2027-10-28 03:01Z`.
