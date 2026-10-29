@@ -45,7 +45,7 @@ zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
-Enter open  s make active  n new key  V verify  A repair  B backup  ? actions
+Enter open  n new  B backup  V verify  A repair  s active  u unlock  ? actions
 ethereum | alpha 0xCDe5...9E7E | verified by password
 signing (agent too) until 14:32Z | ethereum-rpc.publicnode.com
 ```

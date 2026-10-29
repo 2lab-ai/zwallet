@@ -1115,6 +1115,9 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 4. **Every summary row is on screen before the password** (review of #47, NB3). End pages one
    screen at a time instead of jumping to the last page; Enter opens the password only once
    every row has been shown (§Whitelist edits).
+5. **The Keys tab's hint names `u unlock` again** (review of merge #43). The merge kept `n new`
+   and `B backup` and dropped `u unlock`, which still opens the duration field there; the hint is
+   78 columns ([`03-tui-screens.md`](03-tui-screens.md) §1 keys).
 
 ## Changes on 2026-10-28, v2, review round 3
 

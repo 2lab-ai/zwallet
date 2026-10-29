@@ -192,7 +192,9 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
             .text("   ? actions", HINT)
     } else {
         let words = match app.tab() {
-            Tab::Keys => "Enter open  n new  B backup  V verify  A repair  s active  ? actions",
+            Tab::Keys => {
+                "Enter open  n new  B backup  V verify  A repair  s active  u unlock  ? actions"
+            }
             Tab::Wallet => {
                 "Tab focus  j/k  Enter detail  / hash  a networks  c chain  r  ? actions"
             }
