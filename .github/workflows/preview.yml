@@ -48,6 +48,12 @@ jobs:
             echo "tag=preview-$build_id"
           } >> "$GITHUB_OUTPUT"
 
+  validate:
+    needs: preflight
+    uses: ./.github/workflows/validate.yml
+    with:
+      revision: ${{ needs.preflight.outputs.commit }}
+
   build:
     needs: preflight
     permissions:
@@ -86,7 +92,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: stable
+          toolchain: 1.95.0
           targets: ${{ matrix.target }}
 
       - name: Restore cargo cache
@@ -223,7 +229,7 @@ jobs:
             ${{ matrix.name }}.sha256
 
   publish:
-    needs: [preflight, build]
+    needs: [preflight, validate, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -128,11 +128,15 @@ processes running as the same OS user.
   runs in the one-shot CLI process, which checks every signature it gets back by recovering the
   signer.
 - **Daemon lifetime**: each connection is served in its own task with a 10 s I/O budget, so a
-  silent client never delays expiry. Every second and on every request (including `status`) the
-  daemon also checks that `wallet.json`'s ciphertext is still the one it decrypted and that
-  `d.sock` is still its own socket; otherwise it wipes the seed and exits. The socket check is
-  best effort (a same-user process can race it); `lock` does not depend on it. Every zwallet
-  process disables core dumps as its first step, and on Linux also becomes non-dumpable (out of
+  silent client never delays expiry. A separate monitor and requests other than `lock`
+  (including `status`) check that `wallet.json`'s ciphertext is still the one it decrypted and
+  that `d.sock` is still its own socket; otherwise the daemon wipes the seed and exits. The socket check is
+  best effort (a same-user process can race it); `lock` does not depend on it. Wallet and socket
+  inspection runs off the async event loop and outside the session mutex, on at most four
+  secret-free workers with a two-second deadline including slot wait. Expiry and lock do not
+  wait for those workers. Inspection failure or timeout erases the session, and late results
+  cannot revive it or sign. The password/decrypt startup sequence is outside this guarantee.
+  Every zwallet process disables core dumps as its first step, and on Linux also becomes non-dumpable (out of
   reach of same-user `/proc/<pid>/mem`, `/proc/<pid>/fd` and new ptrace attachments) from that
   step on; not before it, since exec makes every process dumpable again.
 - **Secrets are never printed**: the mnemonic, password and private keys appear in no output, log
@@ -199,11 +203,15 @@ things a same-user process can still do, and what to do about them:
 The whitelist ([`.prd/04-whitelist.md`](../.prd/04-whitelist.md)) limits what an unlocked daemon
 signs for such an agent. What it does not do:
 
-- **No amount caps.** An agent can send the whole balance, in one transfer, to any listed payee
-  on its chains. List only payees you would accept that for; amount caps are ![WIP](https://img.shields.io/badge/status-WIP-yellow) ([scope](features.md#planned-features)).
+- **Optional per-transaction limits.** Without configured signed limits, an agent can send the
+  whole balance in one transfer to a listed payee. [Native/token/calldata limits](commands.md#per-transaction-limits)
+  constrain individual decoded transactions, not cumulative spending or authority granted by
+  message signatures. Repeated transfers can still drain the balance. Cumulative budgets remain
+  ![WIP](https://img.shields.io/badge/status-WIP-yellow), tracked in [#26](https://github.com/2lab-ai/zwallet/issues/26).
 - **Listed contracts.** A contract entry lets the agent call its listed selectors with any
-  arguments and native value, and the contract may forward value or act on those arguments. List
-  only contracts and selectors whose effects you accept from any caller.
+  arguments, within configured native-value and calldata limits. The contract may forward
+  value or move tokens indirectly; direct token-transfer caps do not constrain those effects.
+  List only contracts and selectors whose effects you accept from any caller.
 - **Joint rollback.** The seal is authenticated but not fresh: an older `wallet.json` still opens
   with the password. Restoring an older `wallet.json` and `whitelist.json` together brings back the
   older list, revoked entries included; nothing stored in the home can tell. (The older
@@ -217,7 +225,8 @@ signs for such an agent. What it does not do:
   finished sealing, or a foreign file. If wallet.json is an older copy, restore the current one if
   you have it; zwallet keeps no copy of `wallet.json` (`zwallet backup` prints only the recovery
   phrase), so keep your own copy after each whitelist change. Otherwise `whitelist reset`, and set
-  the list up again.
+  the list up again. Strong joint-rollback protection remains a design issue
+  [#27](https://github.com/2lab-ai/zwallet/issues/27); no external freshness store is added.
 - **zwallet never suggests restoring an older whitelist.json.** A copy restored by hand that
   verifies against the sealed digest is the older list, so restoring one can complete a
   rollback (W5b). zwallet keeps no counter outside the home, so it cannot tell such a copy from
@@ -230,7 +239,7 @@ signs for such an agent. What it does not do:
   which may be looser than the caps you signed. `unlock` and `status` show it (`whitelist:
   { gen: null, verified: false }`), and every whitelist edit refuses while a list file exists;
   put the current `wallet.json` back (your own copy from after the last change), or `whitelist
-  reset` (every fee cap back to the default, no payee and no contract).
+  reset` (every fee cap back to the default, no optional transaction limits, no payee and no contract).
 - **Same password.** The whitelist key is derived from the wallet password, so the whitelist
   adds no second factor: whoever has the password can change the list. What it buys is that the
   daemon never holds the key that signs the list. Any change to the password or to
@@ -246,5 +255,6 @@ signs for such an agent. What it does not do:
 - **The fee cap is per transaction.** It bounds each signature, not a total: repeated
   transactions can each spend up to the cap.
 - **The L1 data fee is outside the cap** on the OP-stack chains (Base, Optimism): the cap covers
-  `gasLimit × maxFeePerGas`, and the L1 fee for the calldata (which can be up to about 512 KB)
-  is charged on top.
+  `gasLimit × maxFeePerGas`, and the L1 fee for calldata is charged on top. Calldata can be up
+  to about 512 KB unless a lower signed byte limit is configured. A calldata limit bounds
+  payload size; it does not cap the L1 fee or total transaction cost.

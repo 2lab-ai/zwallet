@@ -351,6 +351,12 @@ pub enum WhitelistCommand {
     Remove(WhitelistRemoveArgs),
     /// Set CHAIN's fee cap, in its coin: the most gasLimit × max price may cost.
     FeeCap(WhitelistFeeCapArgs),
+    /// Cap native value per transaction in CHAIN's coin; `none` removes the cap.
+    NativeCap(WhitelistNativeCapArgs),
+    /// Cap registry-token transfers per transaction in smallest base units; `none` removes it.
+    TokenCap(WhitelistTokenCapArgs),
+    /// Cap calldata bytes per transaction; `none` removes it. Not an L1 fee cap.
+    CalldataCap(WhitelistCalldataCapArgs),
     /// Let `sign-message` sign (on) or refuse it (off, the default).
     AllowMessageSigning(WhitelistToggleArgs),
     /// A new whitelist key and an empty list, for a list that does not verify (or one made by
@@ -417,6 +423,35 @@ pub struct WhitelistAddArgs {
 #[derive(Debug, Args)]
 pub struct WhitelistRemoveArgs {
     pub nickname: String,
+    #[command(flatten)]
+    pub edit: WhitelistEditArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct WhitelistNativeCapArgs {
+    pub chain: String,
+    /// Exact amount in the chain's coin (zero is allowed), or `none` to remove the cap.
+    pub amount: String,
+    #[command(flatten)]
+    pub edit: WhitelistEditArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct WhitelistTokenCapArgs {
+    pub chain: String,
+    /// Registry token contract address (not a symbol).
+    pub token: String,
+    /// Integer smallest units, e.g. 1000000 for 1 USDC, or `none`.
+    pub amount_raw: String,
+    #[command(flatten)]
+    pub edit: WhitelistEditArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct WhitelistCalldataCapArgs {
+    pub chain: String,
+    /// Maximum number of calldata bytes, including selector, or `none`.
+    pub bytes: String,
     #[command(flatten)]
     pub edit: WhitelistEditArgs,
 }

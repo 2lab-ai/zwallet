@@ -4,6 +4,10 @@
 
 ## Checks
 
+The repository pins Rust 1.95.0 in `rust-toolchain.toml`; local checks, CI and publishing
+use that toolchain. CI validates macOS and Linux through the reusable
+[validation workflow](../.github/workflows/validate.yml), with a read-only token.
+
 Gate (must be green before every commit):
 
 ```sh
@@ -25,6 +29,12 @@ live in [`.prd/`](../.prd/); they include features that have not shipped. Use
 [feature status](features.md) for the current implementation boundary.
 
 ## Release
+
+Preview and stable publication depend on successful validation and builds for the exact
+commit being published. The reusable gate runs fmt, strict Clippy, tests and a version-line
+smoke test. Fork pull requests run validation without publish credentials; GitHub may require
+a maintainer to approve the run. Maintainers should confirm required-check settings match
+the reusable workflow's check names before merging.
 
 - **Stable**: set `version` in `Cargo.toml`, merge to `main`, then push the tag `vX.Y.Z` with the
   same version. `release.yml` refuses a tag that does not match `Cargo.toml`, builds the four

@@ -10,7 +10,7 @@ endpoints by default; you can supply your own.
 
 ## What you can use today
 
-These capabilities describe the code on `main`. Stable releases can lag behind it;
+These capabilities describe the code in this revision. Published releases can lag behind it;
 `zwallet --version` shows your build's channel and revision.
 
 | What you want to do | Available now | Boundary to know |
@@ -19,7 +19,7 @@ These capabilities describe the code on `main`. Stable releases can lag behind i
 | Check funds | Native and ERC-20 balances on eight EVM networks; all-network balance view | Automatic token listing uses the built-in registry, not discovery of every token you own |
 | Send funds | Native coin and registry-token transfers, signed dry-runs, receipt waiting and transaction lookup | Requires an unlocked session and the daemon's signing policy |
 | Use contracts | Read-only ABI calls; writes using ABI arguments or raw calldata | Writes need an allowed contract and selector; token approvals are revoke-only |
-| Control an agent's signing | Timed unlock, immediate lock, signed recipient/contract whitelist, per-chain execution-fee caps | No spend-amount or daily budget caps yet; see the WIP items below |
+| Control an agent's signing | Timed unlock, immediate lock, signed recipient/contract whitelist, execution-fee caps and optional per-transaction amount/calldata limits | Limits must be configured; cumulative budgets remain WIP |
 | Integrate an agent | `--json`, structured error codes, send journal, pending/repeat guards and fixed-nonce replacement | A pending or unknown receipt is not permission to send the payment again |
 | Inspect from a terminal UI | Key list, active-key marker, lock status, refresh and lock-all | The full wallet UI is still WIP |
 
@@ -34,7 +34,7 @@ remain available where the corresponding TUI screen is WIP.
 | Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Password warm-up/unlock, navigation and actions, balances/history, receive, send, whitelist editing and other CLI workflows in the TUI. `tui --warm` currently validates a duration but does not unlock. |
 | Tron | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | TRX and TRC20 USDT addresses, balances, signing, transfers and transaction lookup; currently a v0.3 design only |
 | Solana and TON | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Chain implementations; currently future extension plans |
-| Spend-amount limits | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Rolling 24-hour native and per-token caps; today's fee cap only bounds execution gas per transaction |
+| Cumulative spending budgets | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Rolling 24-hour native and per-token budgets; optional per-transaction limits do not track total spending |
 | User-added tokens | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Adding transfer tokens outside the built-in registry |
 | More precise repeat protection | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Calldata-aware `invoke` duplicate matching and a configurable duplicate window |
 | Hardware-backed whitelist key | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Moving whitelist authority to Secure Enclave or hardware |
@@ -106,9 +106,10 @@ zwallet unlock 30m
 ```
 
 A whitelist edit asks for your password and ends existing signing sessions, so unlock
-**after** editing the list. A listed recipient can receive the entire balance:
-spend-amount caps are WIP. Unlocking also lets other processes under your OS user
-request signatures within the policy.
+**after** editing the list. Without configured limits, a listed recipient can receive
+the entire balance in one transfer. Configure optional [per-transaction limits](docs/commands.md#per-transaction-limits)
+before unlocking; repeated transactions can still spend the full balance. Unlocking also lets
+other processes under your OS user request signatures within the policy.
 
 ### 3. Let the agent read and preview
 
@@ -175,8 +176,9 @@ UI shows keys and signing status; use the CLI for the remaining workflows. See
 
 ## Before funding a wallet
 
-- The whitelist limits recipients and contract selectors. It is not a per-payment
-  approval screen, a daily budget, or isolation from processes under your OS user.
+- The whitelist limits recipients and contract selectors, with optional amount and calldata
+  limits per transaction. It is not a per-payment approval screen, a daily budget, or
+  isolation from processes under your OS user.
 - Non-zero token approvals and `transferFrom` are refused. Token transfers use only
   registry deployments; reading an arbitrary token balance does not authorize sending it.
 - Fee caps apply per transaction. On Base and Optimism, L1 data fees are outside that cap.

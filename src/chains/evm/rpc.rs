@@ -1442,35 +1442,48 @@ fn outcome_unknown_hint(chain: &Chain, hash: &str, has_receipt: bool) -> String 
 /// with `success: null` when its status says nothing ([`receipt_success`]), with a `hint`.
 pub async fn wait_receipt(p: &EvmProvider, hash: B256, timeout: Duration) -> Result<Option<Value>> {
     let deadline = Instant::now().checked_add(timeout);
-    loop {
-        if let Some(r) = fetch_receipt(p, hash).await? {
-            let number = |k: &str| {
-                quantity(r.get(k).and_then(Value::as_str)).and_then(|n| u64::try_from(n).ok())
-            };
-            let success = receipt_success(&r);
-            let mut out = json!({
-                "status": match success {
-                    Some(true) => "success",
-                    Some(false) => "reverted",
-                    None => "mined",
-                },
-                "success": success,
-                "blockNumber": number("blockNumber"),
-                "gasUsed": number("gasUsed"),
-            });
-            if success.is_none() {
-                out["hint"] = json!(outcome_unknown_hint(
-                    p.net.chain,
-                    &format!("{hash:#x}"),
-                    true
-                ));
+    let poll = async {
+        loop {
+            let receipt = fetch_receipt(p, hash).await;
+            // An executor may resume this future after its deadline with a ready RPC result.
+            // Do not accept that late receipt (or report a late RPC error as a failed send).
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Ok(None);
             }
-            return Ok(Some(out));
+            if let Some(r) = receipt? {
+                let number = |k: &str| {
+                    quantity(r.get(k).and_then(Value::as_str)).and_then(|n| u64::try_from(n).ok())
+                };
+                let success = receipt_success(&r);
+                let mut out = json!({
+                    "status": match success {
+                        Some(true) => "success",
+                        Some(false) => "reverted",
+                        None => "mined",
+                    },
+                    "success": success,
+                    "blockNumber": number("blockNumber"),
+                    "gasUsed": number("gasUsed"),
+                });
+                if success.is_none() {
+                    out["hint"] = json!(outcome_unknown_hint(
+                        p.net.chain,
+                        &format!("{hash:#x}"),
+                        true
+                    ));
+                }
+                return Ok(Some(out));
+            }
+            tokio::time::sleep(RECEIPT_POLL).await;
         }
-        if deadline.is_some_and(|d| Instant::now() + RECEIPT_POLL > d) {
-            return Ok(None);
-        }
-        tokio::time::sleep(RECEIPT_POLL).await;
+    };
+    // The one deadline includes both the in-flight RPC and every polling sleep. Expiry
+    // means unconfirmed, not a rejected or reverted transaction: it may still be mined.
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline.into(), poll)
+            .await
+            .unwrap_or(Ok(None)),
+        None => poll.await,
     }
 }
 
