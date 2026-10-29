@@ -64,7 +64,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
   the warm-up (`--warm`, checked but not used yet), home, transfer and whitelist screens are
   ![WIP](https://img.shields.io/badge/status-WIP-yellow). See [feature status](features.md#planned-features).
 - **Tron** ([Tron design](../.prd/05-tron.md)): this version shows the Tron address of each
-  key and reads TRX and USDT; the daemon also enforces the Tron signing policy. `create` caches `addresses.tron`, the
+  key, reads TRX and USDT, and sends both under the Tron whitelist policy. `create` caches `addresses.tron`, the
   key's address at `m/44'/195'/0'/0/<index>` (key 0's is the one TronWeb derives by default from the
   same phrase), as base58check `T…` (34 characters, payload `0x41` and the 20-byte body, a
   4-byte double-SHA-256 checksum). Tron addresses are compared byte for byte, never ignoring case:
@@ -73,17 +73,36 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `address --chain tron` is `WALLET_LOCKED` (unlock once, or run `zwallet address --chain tron
   --verify`, which adds it and says so in `added`), and its `addresses` row shows that error. After
   `unlock`, `address --chain tron` is verified by the session as for EVM, with no prompt.
-  `sign-message`, `call` and `invoke` on `tron` are `CAPABILITY_UNSUPPORTED`, and so are
-  `transfer` and `tx` until the Tron send path comes. `whitelist add <nick> <T…>` adds a
-  Tron-only payee; `--chains tron` is the only allowed scope for it. EVM `*` entries cover
-  EVM chains only, never Tron. Tron contract entries and selectors are unsupported.
-  `whitelist fee-cap tron <TRX>` bounds signed `fee_limit`, with a default of 30 TRX.
-  It does not bound bandwidth or account activation fees. Historical JSON fields named
-  `maxFeeWei` and `maxNativeWei` store sun on Tron (1 TRX = 1,000,000 sun). Token caps use
-  the token's smallest units; calldata caps bound bytes, not bandwidth charges. The daemon
-  accepts only strict native transfers and the registry USDT's exact transfer call, from
-  its own derived address to a listed Tron payee, under the signed limits. It refuses
-  approvals, arbitrary contracts, permissions, memo, malformed protobuf and self-TRX.
+  `sign-message`, `call` and `invoke` on `tron` are `CAPABILITY_UNSUPPORTED`.
+  `whitelist add bob <T-address> --chains tron` adds a payee; `*` covers EVM only.
+  A first edit/reset adds the default 30-TRX fee cap; `whitelist fee-cap tron 30`
+  sets it explicitly. Historical JSON fields named `maxFeeWei` and `maxNativeWei`
+  store sun on Tron (1 TRX = 1,000,000 sun). Token caps use smallest token units,
+  and calldata caps bound bytes. These caps remain per transaction, not cumulative.
+  `transfer --chain tron --to @bob --amount 1 [--token usdt] [--dry-run] [--wait]`
+  sends only TRX or registry USDT. A contract address is accepted for token balance reads,
+  but transfer's token flag accepts only `usdt`. Nonce/replacement/bump/pending/gwei flags
+  are refused before RPC. `--force` cannot bypass the daemon's payee policy.
+  Preflight refuses unactivated or changed-owner senders, failed simulations and insufficient
+  TRX for `fees.maxCostSun`, even when `fees.estimatedCostSun` is affordable. Prices and
+  resource availability come from the node; `fees.pricesAtBlock` identifies the head read
+  during this preflight. Maximum cost assumes resources are spent by another transaction
+  first, but does not bound a governance price change. `feeLimit` bounds contract energy;
+  bandwidth and new-account activation are protocol fees outside that signature bound.
+  Dry-runs return independently verified `signerDecoded`, `txHash` and `recoveredFrom`, never
+  raw broadcastable bytes. The CLI compares the daemon's raw payload to the requested bytes.
+  The send journal uses the 21-byte `41…` hex address in its filename, records `expiresAt`
+  and no nonce, and is fsynced before broadcast. The ten-minute duplicate guard remains active.
+  `tx --chain tron <txid> [--wait [--wait-timeout 30s]]` accepts 64 hex digits with or without
+  `0x`, verifies returned raw bytes against the requested hash, and shows burned `feeSun`.
+  `expired-unseen` needs a known journal expiration, no mined/pending record, and a fresh
+  node head more than 60 seconds past expiration. Its `asOf` identifies the block, time and
+  host; a lagging node instead reports `nodeBehindSecs` and suggests another RPC.
+  This node's absence report is not proof of non-payment. Sending this payment again is a
+  second payment if this one was included. A failed execution can still burn fees. Missing or
+  unrecognized execution results stay `success: null` with an execution-unknown warning; a
+  mined receipt alone does not prove whether the payment succeeded.
+
 - **`create <name>`**: on first run it creates the master seed (BIP39, 24 words by default) and key
   `<name>` at index 0, under a new password of at least 12 characters. On a terminal it then
   reminds the human (on stderr) to run `zwallet backup` before funding the wallet. The home's

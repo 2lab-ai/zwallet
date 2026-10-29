@@ -13,7 +13,7 @@ cap, each PR reviewable as one argument). Worktrees at `.worktrees/<branch with 
 | A, see it | `handoff/tron-a` (continues PR #33) | TRON-1, TRON-2 (no `tron` default fee cap) | TR1–TR8, TR24 | coding agent + dispatcher gate | implementation and focused tests; full gate and review pending |
 | B1, codec | `feat/tron-b1-codec` | TRON-4 | TR12, TR13 | coding agent + dispatcher gate | planned, after A |
 | B2, guard | `feat/tron-b2-guard` | TRON-3, TRON-5, the `tron` default fee cap; review evidence carries B1's refusal list | TR9–TR11, TR14, TR15 | coding agent + dispatcher gate | planned, after B1 |
-| C, send it | `feat/tron-c-send` | TRON-6, TRON-7 | TR16–TR21, TR25 | coding agent + dispatcher gate | planned, after B2 and Q3 (units.md §Before C starts); preview after merge |
+| C, send it | `handoff/tron-send` | TRON-6, TRON-7 | TR16–TR21, TR25 | coding agent + dispatcher gate | implementation and focused checks passed; independent review/full gate pending; Q3 closed |
 | TR23 | — | the live mainnet send; closes Q2 | TR23 | owner (funds, decision) + dispatcher | waits for C and its preview |
 
 ## Build facts
@@ -51,16 +51,19 @@ cap, each PR reviewable as one argument). Worktrees at `.worktrees/<branch with 
 | TR13 | every non-canonical or foreign input refused | no strict decoder | B1 | 🚪 |
 | TR14 | the action table, zero signatures per refusal | no Tron policy | B2 | 🚪 |
 | TR15 | fee cap, missing cap, expiration window | no Tron policy | B2 | 🚪 |
-| TR16 | a forged daemon reply is refused, nothing broadcast | no `inspect_signed` for Tron | C | 🚪 |
-| TR17 | dry-run with `fees`; a refused dry-run asks no signature; activation at the prices read, staked bandwidth assumed gone in the maximum | no `prepare_transfer` for Tron | C | 🚪 |
-| TR18 | `INSUFFICIENT_FUNDS` ×4 (one above the estimate, below the maximum), revert `RPC_ERROR`, before signing | no preflight | C | 🚪 |
-| TR19 | nonce flags refused on `tron` | flags apply to every chain | C | 🚪 |
-| TR20 | TRX and USDT sent and confirmed against the mock; fee above the estimate stays within the maximum | no broadcast | C | 🚪 |
-| TR21 | each broadcast outcome; uncertain and duplicate messages name `expiresAt` and the second-payment risk | no outcome mapping, no `expiresAt` | C | 🚪 |
-| TR25 | `expired-unseen` only by the node's head and a node within 60 s of the local clock; never a safe-resend message | no Tron lookup | C | 🚪 |
+| TR16 | a forged daemon reply is refused, nothing broadcast | implemented; focused mock checks pass; independent review/full gate pending | C | 🟡 |
+| TR17 | dry-run with `fees`; a refused dry-run asks no signature; activation at the prices read, staked bandwidth assumed gone in the maximum | implemented; focused mock checks pass; independent review/full gate pending | C | 🟡 |
+| TR18 | `INSUFFICIENT_FUNDS` ×4 (one above the estimate, below the maximum), revert `RPC_ERROR`, before signing | implemented; focused mock checks pass; independent review/full gate pending | C | 🟡 |
+| TR19 | nonce flags refused on `tron` | implemented; focused mock checks pass; independent review/full gate pending | C | 🟡 |
+| TR20 | TRX and USDT sent and confirmed against the mock; fee above the estimate stays within the maximum | implemented; focused mock checks pass; independent review/full gate pending | C | 🟡 |
+| TR21 | each broadcast outcome; uncertain and duplicate messages name `expiresAt` and the second-payment risk | implemented; focused mock checks pass; independent review/full gate pending | C | 🟡 |
+| TR25 | `expired-unseen` only by the node's head and a node within 60 s of the local clock; never a safe-resend message | implemented; focused mock checks pass; independent review/full gate pending | C | 🟡 |
 | TR22 | every row of 05 §TUI is in the TUI coverage matrix | `03-tui.md` is being rewritten | TUI task | 🚪 |
 | TR23 | owner-gated mainnet TRX and USDT send | needs TRON-7 and the owner's funds and decision | owner | 🚪 |
 | TR24 | `sign-message`, `call`, `invoke` on `tron` → `CAPABILITY_UNSUPPORTED` | implemented; full integration gate/review pending | A | 🟡 |
+
+C focused results, the production-client Q3 receipt and the remaining owner-only evidence are
+recorded in [`c-evidence.md`](c-evidence.md).
 
 ## Next
 

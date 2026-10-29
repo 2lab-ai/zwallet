@@ -2,19 +2,21 @@
 
 ![WIP](https://img.shields.io/badge/status-WIP-yellow)
 
-Tron addresses, balance reads, canonical transaction decoding and the daemon signing policy are implemented. Public transfers and transaction lookup below remain planned. See [feature status](../docs/features.md).
+Tron address, balance, strict signing, policy, transfer and transaction lookup paths are implemented in source. Funded owner acceptance (TR23) and the separate TUI coverage remain open. See [feature status](../docs/features.md).
 
 Status: **in-progress**, 2026-10-29. Fixed request and scope: [`v0-3-tron/ssot.md`](v0-3-tron/ssot.md).
 Units: [`v0-3-tron/units.md`](v0-3-tron/units.md). Driver: [`v0-3-tron/loop.md`](v0-3-tron/loop.md).
-Every measurement below was taken on 2026-10-28 between 03:13Z and 03:31Z, read-only. Nothing
-was signed or broadcast, and no faucet was used. Evidence IDs (E1…) are listed in §Evidence.
+The original design measurements below were taken on 2026-10-28 between 03:13Z and 03:31Z,
+read-only. C evidence separately records the 2026-10-29 unsigned-envelope validation probe.
+No funded live transaction was signed or broadcast, and no faucet was used. Evidence IDs (E1…) are listed in §Evidence.
 
 ## Implementation boundary
 
-Tron A implements address derivation, exact-case cache checks, verified receive addresses,
-TRX and USDT reads, and the owner-permission warning. B1/B2 add the strict codec and
-Tron-only signed policy; broadcasting and public transaction lookup remain C. This document
-retains those later contracts; it does not claim they are shipped.
+The source includes A (reads), B1 (codec), B2 (policy) and C (send lifecycle). C covers
+preflight, exact signer-reply checks, journal-before-broadcast, receipt deadlines and
+fresh-node expiration observations. Offline checks and the keyless unsigned Q3 probe are
+recorded in [C evidence](v0-3-tron/c-evidence.md). They do not claim funded live sends (TR23),
+wallet import interoperability (Q2), or completion of the separate TUI task (TR22).
 
 ## Problem
 
@@ -538,8 +540,10 @@ so:
     until <expiresAt>. Sending this payment again is a second payment if this one was included".
     `NOT_ENOUGH_EFFECTIVE_CONNECTION` can come after the node already holds it (`Wallet.java:578-580`).
 - **`--wait`** polls `gettransactioninfobyid` until `blockNumber` appears (`--wait-timeout`, 90 s
-  default). Type 31: `success` = `receipt.result == "SUCCESS"`; any other value (`REVERT`,
-  `OUT_OF_ENERGY`, …) is `success: false`. Type 1 has no `receipt.result` (M4): `success` =
+  default). Type 31: `success` = `receipt.result == "SUCCESS"`; a recognized failure (`REVERT`,
+  `OUT_OF_ENERGY`, or another known failure enum) is `success: false`. A missing, null,
+  `DEFAULT`, `UNKNOWN` or future result is `success: null`, with an execution-unknown
+  explanation and the second-payment warning. Type 1 has no `receipt.result` (M4): `success` =
   `gettransactionbyid` `ret[0].contractRet == "SUCCESS"`. Output adds `blockNumber`, `energyUsed`,
   `netUsage`, `feeSun`. A wait that ends unmined reports `pending`, `not found` or
   `expired-unseen` by the rules above.
@@ -619,7 +623,7 @@ For the `03-tui.md` coverage matrix (owned by the parallel TUI task; this spec d
 |---|---|---|---|
 | Q1 | Tronscan's URL form `https://tronscan.org/#/transaction/<id>`, `/#/address/<T…>` | Tronscan is a script-rendered page; not fetched | TRON-7 opens one live URL and reads the page |
 | Q2 | Which level other wallets (TronLink, Ledger Live) count for their second account | Not published in a source read here; the spec claims key 0 only (TronWeb's default path) | TR23: the owner imports the mnemonic in their Tron wallet and compares key 0 |
-| Q3 | Does `POST /wallet/broadcasthex` work without a key on PublicNode and TronGrid? | Not called with a payload: this spec's brief allowed read-only calls only. GET → 405 shows the servlet is there (M9) | Before PR C starts, run by the dispatcher: one `POST /wallet/broadcasthex` per endpoint whose `transaction` is a serialized `Transaction {raw_data: 1}` with no `signature` field (not the bare `raw_data` hex, which would fail as a parse error and test nothing). No node can include it; java-tron refuses it, `TransactionCapsule.java:654-656` "miss sig or contract". A `SIGERROR` reply shows a keyless POST reaches validation; it is not evidence that a signed broadcast succeeds (that is TR23). A 401/403 means PR C needs another default |
+| Q3 (closed) | Does `POST /wallet/broadcasthex` work without a key on PublicNode and TronGrid? | Both returned HTTP 200 `SIGERROR` with the production User-Agent on 2026-10-29 ([receipt](v0-3-tron/c-evidence.md)). Original design rationale: not called with a payload: this spec's brief allowed read-only calls only. GET → 405 shows the servlet is there (M9) | Before PR C starts, run by the dispatcher: one `POST /wallet/broadcasthex` per endpoint whose `transaction` is a serialized `Transaction {raw_data: 1}` with no `signature` field (not the bare `raw_data` hex, which would fail as a parse error and test nothing). No node can include it; java-tron refuses it, `TransactionCapsule.java:654-656` "miss sig or contract". A `SIGERROR` reply shows a keyless POST reaches validation; it is not evidence that a signed broadcast succeeds (that is TR23). A 401/403 means PR C needs another default |
 
 Closed while writing: staked energy is spent before any TRX is burned
 (`ReceiptCapsule.java:275-302`), and the energy a call may use is min(staked + balance ÷ price,

@@ -289,7 +289,7 @@ pub struct TransferArgs {
     /// Amount in whole units (e.g. 0.5); exact, no floating point.
     #[arg(long)]
     pub amount: String,
-    /// ERC-20 token contract. Omit for the native coin.
+    /// EVM token contract, or usdt on Tron. Omit for the native coin.
     #[arg(long)]
     pub token: Option<String>,
     /// Allow a recipient that is almost always a mistake: the zero address, or the token
@@ -311,6 +311,11 @@ pub struct TxArgs {
     /// The transaction hash (0x and 64 hex digits).
     #[arg(value_name = "TXHASH")]
     pub tx_hash: String,
+    /// Wait for a Tron receipt or a final node observation (default 90 seconds).
+    #[arg(long)]
+    pub wait: bool,
+    #[arg(long, value_name = "DURATION", requires = "wait", value_parser = duration_arg)]
+    pub wait_timeout: Option<std::time::Duration>,
     /// RPC URL (overrides ZWALLET_RPC_<CHAIN> and the default).
     #[arg(long)]
     pub rpc: Option<String>,

@@ -644,7 +644,7 @@ impl FakeDaemon {
     }
 
     /// Answers each request with what `reply` makes of its bytes.
-    fn bind_with(path: &Path, reply: impl Fn(&[u8]) -> Vec<u8> + Send + 'static) -> Self {
+    pub fn bind_with(path: &Path, reply: impl Fn(&[u8]) -> Vec<u8> + Send + 'static) -> Self {
         let listener = UnixListener::bind(path).expect("bind fake daemon");
         listener.set_nonblocking(true).unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));

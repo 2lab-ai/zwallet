@@ -1693,8 +1693,20 @@ async fn transfer(home: &Path, a: TransferArgs) -> Result<Out> {
     let net = net(chain, a.rpc.as_deref());
     match &chain.family {
         Family::Evm(_) => transfer_with(&Evm, home, &net, a).await,
-        // Before any RPC: the Tron send path comes with a later version (`.prd/v0-3-tron`).
-        Family::Tron(_) => Err(unsupported(chain, "transfers in this version")),
+        Family::Tron(_) => {
+            if a.send.nonce.is_some()
+                || a.send.bump.is_some()
+                || a.send.replace.is_some()
+                || a.send.allow_pending
+                || a.send.max_fee_gwei.is_some()
+            {
+                return Err(WalletError::validation(
+                    "Tron has no nonce; --nonce, --replace, --bump, --allow-pending and --max-fee-gwei do not apply",
+                ));
+            }
+            tron::send::validate_token(a.token.as_deref())?;
+            transfer_with(&tron::Tron, home, &net, a).await
+        }
     }
 }
 
@@ -1705,10 +1717,12 @@ async fn transfer_with<F: ChainFamily>(
     a: TransferArgs,
 ) -> Result<Out> {
     let chain = net.chain;
-    let (to, nickname) = whitelist::recipient(home, &a.to)?;
+    let (to, nickname) = whitelist::recipient_for_chain(home, &a.to, Some(chain))?;
     let to = fam.normalize_address(&to)?;
     if let Some(t) = &a.token {
-        fam.normalize_address(t)?;
+        if matches!(chain.family, Family::Evm(_)) {
+            fam.normalize_address(t)?;
+        }
     } else {
         parse_units(&a.amount, chain.decimals)?;
     }
@@ -1840,6 +1854,7 @@ async fn sign_and_send<F: ChainFamily>(
         out.insert("whitelist".into(), denied);
         return Ok(send_out(out, duplicates_text.as_deref()));
     }
+    let expected_unsigned = unsigned.clone();
     let signed_value = protocol::send_unlocked(
         home,
         &Request::SignTx {
@@ -1850,8 +1865,11 @@ async fn sign_and_send<F: ChainFamily>(
         SIGN_TIMEOUT,
     )
     .await?;
-    let signed = fam.inspect_signed(net.chain, &signed_value)?;
-    if !signed.signer.eq_ignore_ascii_case(from) {
+    let signed = match net.chain.family {
+        Family::Tron(_) => tron::send::inspect_signed(&signed_value, Some(&expected_unsigned))?,
+        Family::Evm(_) => fam.inspect_signed(net.chain, &signed_value)?,
+    };
+    if !same_address(net.chain.key, &signed.signer, from) {
         return Err(WalletError::validation(format!(
             "the key daemon signed as {}, expected {from}; not broadcasting",
             signed.signer
@@ -1863,7 +1881,17 @@ async fn sign_and_send<F: ChainFamily>(
     }
     out.insert("dryRun".into(), json!(send.dry_run));
     // What the key holder decoded from the bytes it signed (not what this process intended).
-    if let Some(view) = signed_value.get("decoded") {
+    if matches!(net.chain.family, Family::Tron(_)) {
+        let raw = expected_unsigned
+            .as_str()
+            .and_then(|s| s.strip_prefix("0x"))
+            .and_then(|s| hex::decode(s).ok())
+            .ok_or_else(|| WalletError::validation("missing Tron intent bytes"))?;
+        out.insert(
+            "signerDecoded".into(),
+            tron::tx::decode_raw(&raw)?.to_json()?,
+        );
+    } else if let Some(view) = signed_value.get("decoded") {
         out.insert("signerDecoded".into(), signer_decoded(view));
     }
     // The hash is computed from the signed bytes, never taken from the node.
@@ -1878,7 +1906,10 @@ async fn sign_and_send<F: ChainFamily>(
         out.insert("recoveredFrom".into(), json!(signed.signer));
         return Ok(send_out(out, duplicates_text.as_deref()));
     }
-    let record = chains::SendRecord::new(journal, &signed, &summary);
+    let mut record = chains::SendRecord::new(journal, &signed, &summary);
+    if matches!(net.chain.family, Family::Tron(_)) {
+        record.entry["expiresAt"] = out.get("expiresAt").cloned().unwrap_or(Value::Null);
+    }
     let outcome = fam
         .broadcast(net, &signed, send.nonce.is_some(), &record)
         .await?;
@@ -1894,9 +1925,13 @@ async fn sign_and_send<F: ChainFamily>(
     {
         out.insert(
             "broadcastWarning".into(),
-            json!(format!(
-                "{warning}; the node reports the transaction by its own hash, so it was sent"
-            )),
+            json!(if matches!(net.chain.family, Family::Tron(_)) {
+                warning
+            } else {
+                format!(
+                    "{warning}; the node reports the transaction by its own hash, so it was sent"
+                )
+            }),
         );
         if let Some(h) = rpc_tx_hash {
             out.insert("rpcTxHash".into(), json!(h));
@@ -1904,8 +1939,32 @@ async fn sign_and_send<F: ChainFamily>(
     }
     if send.wait {
         let timeout = send.wait_timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT);
-        let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
-        chains::record_receipt(&mut out, net.chain, receipt);
+        if matches!(net.chain.family, Family::Tron(_)) {
+            let expiration = out
+                .get("expiresAt")
+                .and_then(Value::as_str)
+                .and_then(tron::send::parse_expiration);
+            match tron::lookup::wait(net, &signed.tx_hash, expiration, timeout).await {
+                Ok(observed) => {
+                    out.extend(observed);
+                }
+                Err(e) => {
+                    out.insert("status".into(), json!("unknown"));
+                    out.insert("receiptError".into(), json!(e.message));
+                    out.insert(
+                        "hint".into(),
+                        json!(format!(
+                            "look it up with `zwallet tx --chain tron {}`. {}",
+                            signed.tx_hash,
+                            tron::lookup::SECOND_PAYMENT
+                        )),
+                    );
+                }
+            }
+        } else {
+            let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
+            chains::record_receipt(&mut out, net.chain, receipt);
+        }
     }
     Ok(send_out(out, duplicates_text.as_deref()))
 }
@@ -1931,8 +1990,38 @@ async fn tx(a: TxArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
     let net = net(chain, a.rpc.as_deref());
     let found = match &chain.family {
-        Family::Evm(_) => Evm.lookup_tx(&net, &a.tx_hash).await?,
-        Family::Tron(_) => return Err(unsupported(chain, "transaction lookups in this version")),
+        Family::Evm(_) => {
+            if a.wait {
+                return Err(WalletError::validation(
+                    "tx --wait is supported on Tron; EVM sends use transfer --wait",
+                ));
+            }
+            Evm.lookup_tx(&net, &a.tx_hash).await?
+        }
+        Family::Tron(_) => {
+            let hash = tron::lookup::parse_hash(&a.tx_hash)?;
+            let expiration = home().ok().and_then(|home| {
+                store::read_wallet_file(&home).ok().and_then(|file| {
+                    file.keys
+                        .iter()
+                        .filter_map(|key| key.addresses.get("tron"))
+                        .find_map(|address| {
+                            chains::SendJournal::new(&home, chain, address).expiration(&hash)
+                        })
+                })
+            });
+            if a.wait {
+                tron::lookup::wait(
+                    &net,
+                    &hash,
+                    expiration,
+                    a.wait_timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT),
+                )
+                .await?
+            } else {
+                tron::lookup::lookup_tx(&net, &hash, expiration).await?
+            }
+        }
     };
     Ok(Out::json(Value::Object(found)))
 }

@@ -232,6 +232,14 @@ impl Limit {
 /// whitelist.json as it is on disk. Unverified on purpose: it only saves typing the address; the
 /// key daemon decides whether a send there is allowed.
 pub(super) fn recipient(home: &Path, to: &str) -> Result<(String, Option<String>)> {
+    recipient_for_chain(home, to, None)
+}
+
+pub(super) fn recipient_for_chain(
+    home: &Path,
+    to: &str,
+    chain: Option<&Chain>,
+) -> Result<(String, Option<String>)> {
     let Some(nickname) = to.trim().strip_prefix('@') else {
         return Ok((to.to_string(), None));
     };
@@ -246,6 +254,12 @@ pub(super) fn recipient(home: &Path, to: &str) -> Result<(String, Option<String>
         .list
         .by_nickname(nickname)
         .ok_or_else(|| unresolved("the whitelist has no entry by that name"))?;
+    if chain.is_some_and(|c| matches!(c.family, Family::Tron(_))) && entry.chains != ["tron"] {
+        return Err(unresolved(&format!(
+            "entry names chains {}, not tron",
+            chains_text(&entry.chains)
+        )));
+    }
     Ok((
         if entry.chains == ["tron"] {
             entry_address(entry)
@@ -2708,7 +2722,7 @@ mod tests {
             "{shown} characters from the files: {text}"
         );
         assert!(text.contains(" more caps from the files"), "{text}");
-        // Tron has no built-in cap yet (`.prd/v0-3-tron/units.md` TRON-1): its line says so.
+        // Each supported chain restores its built-in fee cap; unknown file entries stay bounded.
         for c in chains::CHAINS {
             let line = if WHITELIST_RULES
                 .default_fee_caps_wei

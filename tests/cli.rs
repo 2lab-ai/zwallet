@@ -6234,14 +6234,13 @@ fn a_daemon_answering_an_evm_address_for_tron_is_never_shown_as_one() {
 }
 
 #[test]
-fn tr24_sign_message_call_and_invoke_on_tron_are_unsupported_and_so_for_now_are_transfer_and_tx() {
+fn tr24_sign_message_call_and_invoke_on_tron_are_unsupported() {
     let home = Home::new();
-    let me = home.create("main", &["--unlock", "10m"])["address"]
+    let me = home.create("main", &[])["address"]
         .as_str()
         .unwrap()
         .to_string();
     let tron_payee = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C";
-    let txid = "21b776c7957ba1213b8616414912c9e81643e15e3e55b59fe143b991fa35a690";
     let rpc = "http://127.0.0.1:1";
     for args in [
         &[
@@ -6258,11 +6257,6 @@ fn tr24_sign_message_call_and_invoke_on_tron_are_unsupported_and_so_for_now_are_
         &[
             "invoke", "--chain", "tron", "--to", tron_payee, "--sig", "f()", "--rpc", rpc, "--json",
         ],
-        &[
-            "transfer", "--chain", "tron", "--to", tron_payee, "--amount", "1", "--rpc", rpc,
-            "--json",
-        ],
-        &["tx", "--chain", "tron", txid, "--rpc", rpc, "--json"],
     ] {
         let msg = home.run(args).err("CAPABILITY_UNSUPPORTED");
         assert!(msg.contains("tron"), "{args:?}: {msg}");

@@ -70,13 +70,13 @@ impl TronClient {
     }
 
     /// One node-supplied diagnostic value, with endpoint credentials removed before escaping.
-    fn shown(&self, value: &Value) -> String {
+    pub(super) fn shown(&self, value: &Value) -> String {
         ascii_inert(&self.net.redact(&text_of(value)), VALUE_SHOWN)
     }
 
     /// `POST /wallet/<call>` with `body`; the reply must be a JSON object without java-tron's
     /// `Error` field. Every failure is `RPC_ERROR` naming the call.
-    async fn post(&self, call: &str, body: &Value) -> Result<Map<String, Value>> {
+    pub(super) async fn post(&self, call: &str, body: &Value) -> Result<Map<String, Value>> {
         match tokio::time::timeout(RPC_TIMEOUT, self.exchange(call, body)).await {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(why)) => Err(WalletError::rpc(format!(
@@ -195,6 +195,9 @@ pub struct Account {
     pub activated: bool,
     /// TRX in sun.
     pub balance: u64,
+    /// A contract account can disappear when it self-destructs; fee preflight must allow
+    /// the new-account branch even while this account exists.
+    pub contract: bool,
     /// Why this wallet's key may not control the account, when the owner permission is not this
     /// address alone at threshold 1 ([`owner_warning`]).
     pub warning: Option<String>,
@@ -210,6 +213,7 @@ pub async fn account(c: &TronClient, owner: &str) -> Result<Account> {
         return Ok(Account {
             activated: false,
             balance: 0,
+            contract: false,
             warning: None,
         });
     }
@@ -236,6 +240,18 @@ pub async fn account(c: &TronClient, owner: &str) -> Result<Account> {
     Ok(Account {
         activated: true,
         balance,
+        contract: match a.get("type") {
+            None => false,
+            Some(v) if v == "Normal" || v == &json!(0) || v == "AssetIssue" || v == &json!(1) => {
+                false
+            }
+            Some(v) if v == "Contract" || v == &json!(2) => true,
+            Some(_) => {
+                return Err(WalletError::rpc(
+                    "/wallet/getaccount answered an unsupported account type",
+                ));
+            }
+        },
         warning: owner_warning_with(a.get("owner_permission"), owner, |v| c.shown(v)),
     })
 }
@@ -305,13 +321,13 @@ fn owner_warning_with(
 /// One read-only call of `contract` (`triggerconstantcontract`, from `owner`): the bytes it
 /// returned. A call the node reports as failed, or one whose `result.result` is not `true`, is
 /// `RPC_ERROR` with the node's message (hex-decoded when it is hex), escaped and cut.
-async fn constant_call(
+pub(super) async fn constant_reply(
     c: &TronClient,
     owner: &str,
     contract: &str,
     selector: &str,
     parameter: &[u8],
-) -> Result<Vec<u8>> {
+) -> Result<Map<String, Value>> {
     let r = c
         .post(
             "triggerconstantcontract",
@@ -355,6 +371,17 @@ async fn constant_call(
             ascii_inert(&c.net.redact(&why), PROSE_MAX)
         )));
     }
+    Ok(r)
+}
+
+async fn constant_call(
+    c: &TronClient,
+    owner: &str,
+    contract: &str,
+    selector: &str,
+    parameter: &[u8],
+) -> Result<Vec<u8>> {
+    let r = constant_reply(c, owner, contract, selector, parameter).await?;
     let word = r
         .get("constant_result")
         .and_then(|x| x.get(0))

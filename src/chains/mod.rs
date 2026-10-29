@@ -701,9 +701,9 @@ pub struct SignedTx {
 pub enum Broadcast {
     /// The node accepted it and answered with the transaction's own hash.
     Accepted,
-    /// The send call failed or answered another hash (`warning` says how), but the node reports
-    /// the transaction by its own hash, so it was sent. `rpc_tx_hash` is the other hash, if the
-    /// node answered one.
+    /// The send call failed but the node reports the computed hash, or the node explicitly
+    /// accepted the send while answering another hash (`warning` explains which).
+    /// `rpc_tx_hash` is the other hash, if the node answered one.
     KnownDespite {
         warning: String,
         rpc_tx_hash: Option<String>,
@@ -727,7 +727,7 @@ impl SendLock {
         let path = home.join(format!(
             "nonce-{}-{}.lock",
             chain.chain_id_json(),
-            address.to_ascii_lowercase()
+            journal_address(chain, address)
         ));
         match store::try_lock_exclusive(&path)? {
             Some(file) => Ok(Self { _file: file }),
@@ -781,6 +781,12 @@ const SEND_KINDS: [&str; 3] = ["transfer", "token-transfer", "invoke"];
 /// A journal entry's `txHash` when it is a transaction hash (32 bytes of hex), as alloy writes
 /// one; anything else in that field is not shown, nor made into a lookup command.
 fn entry_hash(e: &Value) -> Option<String> {
+    if e["chain"] == "tron" {
+        return e["txHash"]
+            .as_str()
+            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(str::to_ascii_lowercase);
+    }
     e["txHash"]
         .as_str()
         .and_then(|h| h.parse::<alloy::primitives::B256>().ok())
@@ -789,7 +795,8 @@ fn entry_hash(e: &Value) -> Option<String> {
 
 /// `0x` and 40 hex digits: an address as zwallet writes one.
 fn is_address(s: &str) -> bool {
-    s.len() == 42 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
+    (s.len() == 42 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit()))
+        || tron::address::is_address(s)
 }
 
 /// `<digits>[.<digits>] <symbol>`, as zwallet writes a journal amount (`format_units`, a space,
@@ -820,6 +827,7 @@ fn is_amount_value(s: &str) -> bool {
 /// time re-rendered from the instant it names, never the file's bytes.
 struct EntryText {
     hash: String,
+    expires: Option<String>,
     nonce: String,
     ts: String,
     kind: String,
@@ -837,7 +845,20 @@ impl EntryText {
                 .map_or_else(|| INVALID.to_string(), str::to_string)
         };
         Self {
-            hash: entry_hash(e).unwrap_or_else(|| "?".to_string()),
+            hash: entry_hash(e).unwrap_or_else(|| {
+                if e["chain"] == "tron" {
+                    INVALID.to_string()
+                } else {
+                    "?".to_string()
+                }
+            }),
+            expires: (e["chain"] == "tron").then(|| {
+                e["expiresAt"]
+                    .as_str()
+                    .and_then(tron::send::parse_expiration)
+                    .map(tron::send::expires_at)
+                    .unwrap_or_else(|| INVALID.to_string())
+            }),
             nonce: e["nonce"]
                 .as_u64()
                 .map_or_else(|| "?".to_string(), |n| n.to_string()),
@@ -881,6 +902,17 @@ fn entries_shown(entries: &[Value], text: impl Fn(&EntryText) -> (String, usize)
 /// A journal entry as a message names it: `0xab.. (nonce 6, sent 2026-10-20T04:05:06Z: transfer
 /// 0.01 ETH to 0x..)`, and how many of its characters are the journal's.
 fn describe_entry(e: &EntryText) -> (String, usize) {
+    if let Some(expires) = &e.expires {
+        let line = format!(
+            "{} (expiresAt {expires}, sent {}: {} {} to {})",
+            e.hash, e.ts, e.kind, e.value, e.to
+        );
+        let size = [&e.hash, expires, &e.ts, &e.kind, &e.value, &e.to]
+            .iter()
+            .map(|s| s.chars().count())
+            .sum();
+        return (line, size);
+    }
     let line = format!(
         "{} (nonce {}, sent {}: {} {} to {})",
         e.hash, e.nonce, e.ts, e.kind, e.value, e.to
@@ -928,11 +960,19 @@ pub struct SendSummary {
 }
 
 /// Where [`SendJournal`] keeps `address`'s sends on `chain` in `home`.
+fn journal_address(chain: &Chain, address: &str) -> String {
+    match chain.family {
+        Family::Tron(_) => tron::address::parse(address)
+            .map(|a| tron::address::hex41(&a))
+            .unwrap_or_else(|_| "invalid-address".into()),
+        Family::Evm(_) => address.to_ascii_lowercase(),
+    }
+}
 fn journal_path(home: &Path, chain: &Chain, address: &str) -> PathBuf {
     home.join(format!(
         "sends-{}-{}.jsonl",
         chain.chain_id_json(),
-        address.to_ascii_lowercase()
+        journal_address(chain, address)
     ))
 }
 
@@ -943,6 +983,19 @@ impl SendJournal {
             chain,
             address: address.to_string(),
         }
+    }
+
+    /// Known expiration from this account's journal. The file is an observation aid, not policy.
+    pub fn expiration(&self, hash: &str) -> Option<u64> {
+        self.entries().ok()?.iter().rev().find_map(|e| {
+            (e["chain"] == self.chain.key && entry_hash(e).as_deref() == Some(hash))
+                .then(|| {
+                    e["expiresAt"]
+                        .as_str()
+                        .and_then(tron::send::parse_expiration)
+                })
+                .flatten()
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -1138,7 +1191,10 @@ impl SendJournal {
     /// is an error that says nothing was signed: without it a repeat would go unnoticed.
     pub fn recent_duplicates(&self, send: &SendSummary, now: u64) -> Result<Vec<Value>> {
         let same_addr = |v: &Value, want: Option<&str>| match (v.as_str(), want) {
-            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            (Some(a), Some(b)) => match self.chain.family {
+                Family::Tron(_) => a == b,
+                Family::Evm(_) => a.eq_ignore_ascii_case(b),
+            },
             (None, None) => v.is_null(),
             _ => false,
         };
@@ -1190,6 +1246,10 @@ impl SendJournal {
     /// The refusal of a send without `--nonce` that repeats `duplicates` (from
     /// [`Self::recent_duplicates`], not empty): nothing was signed.
     pub fn duplicate_error(&self, duplicates: Vec<Value>) -> WalletError {
+        if matches!(self.chain.family, Family::Tron(_)) {
+            return WalletError::validation(format!("this looks like a repeat of a recent send: {}; if it was included, this is a second payment; look it up first (`zwallet tx --chain tron <txid>`). Only for an intended second payment, pass --allow-duplicate; nothing was signed", self.entries_text(&duplicates)))
+                .with_detail("duplicateSends", inert_entries(&duplicates)).with_detail("journal", self.display());
+        }
         let shown = entries_shown(&duplicates, |e| {
             let line = format!("{} (nonce {}, sent {})", e.hash, e.nonce, e.ts);
             let len = [&e.hash, &e.nonce, &e.ts]
@@ -1258,6 +1318,9 @@ impl SendRecord {
             "value": send.value,
             "kind": send.kind,
         });
+        if signed.nonce.is_none() {
+            entry.as_object_mut().unwrap().remove("nonce");
+        }
         if let Some(raw) = &send.amount_raw {
             entry["amountRaw"] = json!(raw);
         }

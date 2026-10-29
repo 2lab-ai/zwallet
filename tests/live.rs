@@ -682,3 +682,26 @@ fn balance_without_chain_reads_every_network() {
         human.stdout
     );
 }
+
+/// Fixed historical transaction; no wallet, signature request or broadcast.
+#[tokio::test]
+#[ignore = "live: historical Tron read only"]
+async fn tron_historical_usdt_lookup_checks_raw_hash_and_recipient() {
+    let chain = chains::find("tron").unwrap();
+    let net = Net {
+        chain,
+        rpc_url: chain.default_rpc().to_string(),
+    };
+    let hash = "21b776c7957ba1213b8616414912c9e81643e15e3e55b59fe143b991fa35a690";
+    let v = chains::tron::lookup::lookup_tx(&net, hash, None)
+        .await
+        .unwrap();
+    assert_eq!(v["txHash"], hash);
+    assert_eq!(v["status"], "mined");
+    assert_eq!(v["success"], true);
+    assert_eq!(v["from"], "TPdMMFcLKgJiUSmYsViAFvf6Nsb2WV52vs");
+    assert_eq!(v["symbol"], "USDT");
+    assert!(chains::tron::address::is_address(v["to"].as_str().unwrap()));
+    assert_ne!(v["to"], v["token"]);
+    assert_eq!(v["blockNumber"], 87494658);
+}

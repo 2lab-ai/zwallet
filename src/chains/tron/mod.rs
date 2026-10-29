@@ -3,9 +3,11 @@
 //! native and registry-token signing (`.prd/05-tron.md`).
 
 pub mod address;
+pub mod lookup;
 pub mod policy;
 pub mod registry;
 pub mod rpc;
+pub mod send;
 pub mod tx;
 
 use crate::chains::policy::ListView;
@@ -16,7 +18,7 @@ use crate::core::store::KEY_INDEX_LIMIT;
 use alloy::primitives::U256;
 use alloy::signers::local::coins_bip39::English;
 use alloy::signers::local::{MnemonicBuilder, PrivateKeySigner};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::time::Duration;
 
 #[cfg(test)]
@@ -300,6 +302,63 @@ pub async fn wallet_balances(net: &Net, owner: &str, limit: Duration) -> Result<
         activated: account.activated,
         warning: account.warning,
     })
+}
+
+impl crate::chains::ChainFamily for Tron {
+    fn normalize_address(&self, input: &str) -> Result<String> {
+        Ok(address::encode(&address::parse(input.trim())?))
+    }
+    fn verify_message(&self, _message: &[u8], _signed: &Value, _expected: &str) -> Result<()> {
+        Err(unsupported("message signing"))
+    }
+    fn inspect_signed(&self, chain: &Chain, signed: &Value) -> Result<crate::chains::SignedTx> {
+        config(chain)?;
+        send::inspect_signed(signed, None)
+    }
+    async fn native_balance(&self, net: &Net, owner: &str) -> Result<Balance> {
+        Ok(balance(net, owner, None).await?.balance)
+    }
+    async fn token_balance(&self, net: &Net, owner: &str, token: &str) -> Result<Balance> {
+        Ok(balance(net, owner, Some(token)).await?.balance)
+    }
+    async fn wallet_balances(
+        &self,
+        net: &Net,
+        owner: &str,
+        limit: Duration,
+    ) -> Result<(Balance, Vec<TokenBalance>)> {
+        let read = wallet_balances(net, owner, limit).await?;
+        Ok((read.native, read.tokens))
+    }
+    async fn prepare_transfer(
+        &self,
+        net: &Net,
+        req: &crate::chains::TransferRequest,
+    ) -> Result<crate::chains::PreparedTx> {
+        send::prepare_transfer(net, req).await
+    }
+    async fn broadcast(
+        &self,
+        net: &Net,
+        signed: &crate::chains::SignedTx,
+        _explicit_nonce: bool,
+        record: &crate::chains::SendRecord,
+    ) -> Result<crate::chains::Broadcast> {
+        lookup::broadcast(net, signed, record).await
+    }
+    async fn wait_for_receipt(
+        &self,
+        net: &Net,
+        hash: &str,
+        timeout: Duration,
+    ) -> Result<Option<Value>> {
+        Ok(Some(Value::Object(
+            lookup::wait(net, hash, None, timeout).await?,
+        )))
+    }
+    async fn lookup_tx(&self, net: &Net, hash: &str) -> Result<Map<String, Value>> {
+        lookup::lookup_tx(net, hash, None).await
+    }
 }
 
 #[cfg(test)]

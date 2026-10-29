@@ -260,3 +260,20 @@ signs for such an agent. What it does not do:
   `gasLimit × maxFeePerGas`, and the L1 fee for calldata is charged on top. Calldata can be up
   to about 512 KB unless a lower signed byte limit is configured. A calldata limit bounds
   payload size; it does not cap the L1 fee or total transaction cost.
+
+### Tron send boundary
+
+Tron signs only a single canonical TRX transfer or registry USDT `transfer` to a payee whose
+entry explicitly names `tron`; `*` remains EVM-only. Owner, expiration and fee limit are
+checked by the daemon after independent protobuf decoding. The CLI compares the returned
+raw payload to its original intent and independently recovers the signature before journaling.
+Permission changes, extra protobuf fields, memos and arbitrary token calls are refused.
+
+The signed energy fee limit does not cap bandwidth, activation or a subsequent governance
+price change. CLI preflight checks the liquid TRX balance against the resource-independent
+maximum at the node's current prices. A changed account owner permission is refused before
+signing. A node can lie about state; these reads are not a light-client proof.
+
+Tron has no nonce replacement. The journal and send lock reduce accidental repeats but are
+writable by the same OS user. `expired-unseen` records one fresh node's observation, never a
+non-payment guarantee. Sending this payment again is a second payment if this one was included.

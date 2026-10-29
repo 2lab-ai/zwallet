@@ -1,7 +1,7 @@
 # zwallet
 
 A local wallet for AI agents, controlled by a human. It supports EVM signing and
-read-only Tron addresses and balances. Create keys on your machine,
+Tron TRX/USDT transfers and balances. Create keys on your machine,
 choose which recipients and contracts the wallet may pay, then unlock signing for a
 limited time. Your agent uses the CLI and JSON output; you keep the password.
 
@@ -21,7 +21,7 @@ These capabilities describe the code in this revision. Published releases can la
 | Send funds | Native coin and registry-token transfers, signed dry-runs, receipt waiting and transaction lookup | Requires an unlocked session and the daemon's signing policy |
 | Use contracts | Read-only ABI calls; writes using ABI arguments or raw calldata | Writes need an allowed contract and selector; token approvals are revoke-only |
 | Control an agent's signing | Timed unlock, immediate lock, signed recipient/contract whitelist, execution-fee caps and optional per-transaction amount/calldata limits | Limits must be configured; cumulative budgets remain WIP |
-| Integrate an agent | `--json`, structured error codes, send journal, pending/repeat guards and fixed-nonce replacement | A pending or unknown receipt is not permission to send the payment again |
+| Integrate an agent | `--json`, structured error codes, send journal, pending/repeat guards and EVM fixed-nonce replacement | A pending or unknown receipt is not permission to send the payment again |
 | Inspect from a terminal UI | Key list, active-key marker, lock status, refresh and lock-all | The full wallet UI is still WIP |
 
 ### Planned features
@@ -33,7 +33,6 @@ remain available where the corresponding TUI screen is WIP.
 | Feature | Status | What is still missing |
 |---|---|---|
 | Full terminal wallet UI | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Password warm-up/unlock, navigation and actions, balances/history, receive, send, whitelist editing and other CLI workflows in the TUI. `tui --warm` currently validates a duration but does not unlock. |
-| Tron transfers and lookup | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Addresses, balances, Tron-only whitelist editing and daemon policy work now. Transfer and transaction lookup commands remain planned. |
 | Solana and TON | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Chain implementations; currently future extension plans |
 | Cumulative spending budgets | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Rolling 24-hour native and per-token budgets; optional per-transaction limits do not track total spending |
 | User-added tokens | ![WIP](https://img.shields.io/badge/status-WIP-yellow) | Adding transfer tokens outside the built-in registry |
@@ -154,7 +153,7 @@ For retry and replacement rules, see [send safety](docs/commands.md#send-journal
 | `polygon` | Polygon PoS | POL |
 | `bsc` | BNB Smart Chain | BNB |
 | `avalanche` | Avalanche C-Chain | AVAX |
-| `tron` | Tron (read-only) | TRX |
+| `tron` | Tron | TRX |
 | `sepolia` | Sepolia testnet | ETH |
 
 Run `zwallet chains --json` for chain IDs and endpoints. RPC selection is
@@ -166,6 +165,25 @@ whitelist permissions are still network-specific. Registry-token support varies 
 network; BSC currently has no registry tokens for transfer. The same seed also derives a
 separate Tron address. Use `zwallet address --chain tron --verify`,
 `zwallet balance --chain tron`, or `zwallet balance --chain tron --token usdt`.
+
+Tron sends only TRX and registry USDT to explicitly listed Tron payees:
+
+```sh
+zwallet whitelist add bob <T-address> --chains tron
+zwallet whitelist fee-cap tron 30
+zwallet transfer --chain tron --to @bob --amount 1 --token usdt --dry-run --json
+zwallet transfer --chain tron --to @bob --amount 1 --token usdt --wait
+zwallet tx --chain tron <txid> --wait --wait-timeout 30s
+```
+
+Omit `--token usdt` for TRX. The dry-run shows `fees.estimatedCostSun` and
+`fees.maxCostSun`; the balance check uses the maximum, at the prices of
+`fees.pricesAtBlock`. Bandwidth and account activation are outside the signed energy fee cap.
+Tron has no nonce or replacement flags. Its journal records `expiresAt` and the 64-digit txID;
+`expired-unseen` means only that this node returned no record as of its reported block.
+Sending this payment again is a second payment if this one was included.
+Funded live TRX/USDT sends remain an owner-run acceptance check; offline fixtures and unsigned
+public-node validation are covered by the [Tron evidence](.prd/v0-3-tron/c-evidence.md).
 
 ## Terminal UI
 
