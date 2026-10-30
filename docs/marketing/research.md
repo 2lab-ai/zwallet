@@ -16,7 +16,7 @@ and checking results back to the human. General AI users and people building wit
 coding agents should understand the benefit without reading commands.
 
 Use a short illustrated network story: task funds → agent action → wallet rules →
-result and receipts. Show an allowed request passing, an unapproved destination
+result and receipts. Show an allowed request passing, an over-limit request
 being refused and access being closed. Show investment/payment/shopping possibilities
 with WIP labels. Keep the runnable CLI recording as optional evidence for readers
 who want to inspect the implementation.

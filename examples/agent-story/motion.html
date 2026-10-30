@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>zwallet — your agent, your rules</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#080808;color:#f2f2f2;font-family:'Avenir Next','Apple SD Gothic Neo','Noto Sans CJK KR',sans-serif}main{max-width:1600px;margin:0 auto}svg{width:100%;display:block}text{fill:#f2f2f2;font-family:inherit}button,input{accent-color:#eee}nav{display:flex;align-items:center;gap:20px;padding:20px 6%;font-size:14px;color:#aaa}button{border:1px solid #555;border-radius:30px;background:none;color:white;padding:9px 20px;cursor:pointer}input{flex:1}.meta{font-family:Menlo,monospace;letter-spacing:1px}.sub{fill:#8d8d8d}.route{stroke:#353535;stroke-width:2;fill:none}.node{fill:#131313;stroke:#464646;stroke-width:1.5}.icon{fill:none;stroke:#f0f0f0;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}.shine{stroke:#f5f5f5;stroke-width:3;fill:none;stroke-linecap:round}.white{fill:#f2f2f2}.black{fill:#0a0a0a}.muted{fill:#686868}body.render nav{display:none}
+</style>
+<main>
+<svg id="scene" viewBox="0 0 1600 1000" role="img" aria-label="작업비를 맡기면 에이전트의 결제를 지갑이 검사하고 사용 내역이 돌아오는 흐름">
+ <rect width="1600" height="1000" fill="#080808"/>
+ <text x="88" y="76" font-size="31" font-weight="600">zwallet.</text>
+ <text id="chapter" x="1512" y="70" text-anchor="end" font-size="14" class="sub meta">YOUR AGENT. YOUR RULES.</text>
+ <text id="heading" x="88" y="176" font-size="48" font-weight="500">작업비를 맡기면, 일은 에이전트가.</text>
+ <text id="caption" x="90" y="221" font-size="24" class="sub">“결제 기능 만들고, 테스트까지 끝내줘.”</text>
+
+ <path id="fund-path" class="route" d="M 276 480 V 323 Q 276 303 296 303 H 836 Q 856 303 856 323 V 444"/>
+ <path id="request-path" class="route" d="M 638 500 H 798"/>
+ <path id="payment-path" class="route" d="M 914 500 H 1162"/>
+ <path id="result-path" class="route" d="M 1220 558 V 750 Q 1220 774 1196 774 H 604 Q 580 774 580 750 V 558"/>
+ <path id="task-path" class="route" d="M 334 500 H 522"/>
+
+ <g id="fund-pulse"><path id="fund-light" class="shine" d="M 276 480 V 323 Q 276 303 296 303 H 836 Q 856 303 856 323 V 444"/><g id="fund-label"><rect x="-116" y="-24" width="232" height="48" rx="24" fill="#f2f2f2"/><text text-anchor="middle" y="8" class="black" font-size="22" font-weight="600">50 USDT + 0.01 ETH</text></g></g>
+ <g id="req-pulse"><path id="req-light" class="shine" d="M 638 500 H 798"/><g id="req-label"><rect x="-56" y="-21" width="112" height="42" rx="21" fill="#f2f2f2"/><text text-anchor="middle" y="7" class="black" font-size="21" font-weight="600">2 USDT</text></g></g>
+ <g id="pay-pulse"><path id="pay-light" class="shine" d="M 914 500 H 1162"/><circle id="pay-dot" r="6" fill="#f5f5f5"/></g>
+ <path id="result-light" class="shine" d="M 1220 558 V 750 Q 1220 774 1196 774 H 604 Q 580 774 580 750 V 558"/>
+ <path id="report-light" class="shine" d="M 522 500 H 334"/>
+ <path id="task-light" class="shine" d="M 334 500 H 522"/>
+
+ <g id="you" transform="translate(276 500)">
+  <rect class="node" x="-58" y="-58" width="116" height="116" rx="29"/>
+  <g class="icon"><circle cy="-12" r="12"/><path d="M -23 26 Q -23 5 0 5 Q 23 5 23 26"/></g>
+  <rect x="-145" y="77" width="290" height="78" fill="#080808"/><text y="101" text-anchor="middle" font-size="25">나</text>
+  <text id="you-status" y="135" text-anchor="middle" class="sub" font-size="19">한 번 정해두면</text>
+ </g>
+ <g id="agent" transform="translate(580 500)">
+  <rect class="node" x="-58" y="-58" width="116" height="116" rx="29"/>
+  <rect id="agent-ring" x="-66" y="-66" width="132" height="132" rx="36" fill="none" stroke="#aaa"/>
+  <g class="icon"><path d="M 0 -28 L 7 -8 L 28 0 L 7 8 L 0 28 L -7 8 L -28 0 L -7 -8 Z"/></g>
+  <rect x="-145" y="77" width="290" height="78" fill="#080808"/><text y="101" text-anchor="middle" font-size="25">내 에이전트</text>
+  <text id="agent-status" y="135" text-anchor="middle" class="sub" font-size="19">작업을 받았습니다</text>
+ </g>
+ <g id="wallet" transform="translate(856 500)">
+  <rect x="-58" y="-58" width="116" height="116" rx="29" fill="#f2f2f2"/>
+  <rect id="wallet-ring" x="-66" y="-66" width="132" height="132" rx="36" fill="none" stroke="#aaa"/>
+  <g id="wallet-icon" fill="none" stroke="#080808" stroke-width="2.8" stroke-linejoin="round"><rect x="-29" y="-20" width="58" height="43" rx="6"/><path d="M -27 -20 V -27 H 19 V -20 M 29 -7 H 11 V 11 H 29"/><circle cx="19" cy="2" r="2" fill="#080808"/></g>
+  <g id="wallet-deny" stroke="#080808" stroke-width="4" stroke-linecap="round"><path d="M -16 -16 L 16 16 M 16 -16 L -16 16"/></g>
+  <g id="wallet-lock" fill="none" stroke="#080808" stroke-width="3" stroke-linejoin="round"><rect x="-23" y="-4" width="46" height="36" rx="5"/><path d="M -14 -4 V -17 A 14 14 0 0 1 14 -17 V -4"/><circle cy="12" r="3" fill="#080808"/></g>
+  <rect x="-145" y="77" width="290" height="78" fill="#080808"/><text y="101" text-anchor="middle" font-size="25" font-weight="600">zwallet</text>
+  <text id="wallet-status" y="135" text-anchor="middle" class="sub" font-size="19">내가 정한 규칙</text>
+ </g>
+ <g id="payee" transform="translate(1220 500)">
+  <rect class="node" x="-58" y="-58" width="116" height="116" rx="29"/>
+  <g id="payee-icon" class="icon"><rect x="-28" y="-25" width="56" height="50" rx="4"/><path d="M -28 -10 H 28 M -18 -18 H -15 M -9 -18 H -6 M -13 4 L -20 10 L -13 16 M 13 4 L 20 10 L 13 16"/></g>
+  <g id="payee-check" class="icon"><path d="M -22 0 L -6 16 L 25 -18" stroke-width="4"/></g>
+  <rect x="-145" y="77" width="290" height="78" fill="#080808"/><text y="101" text-anchor="middle" font-size="25">결제 테스트</text>
+  <text id="payee-status" y="135" text-anchor="middle" class="sub" font-size="19">허용한 수취인</text>
+ </g>
+
+ <g id="rules" transform="translate(705 346)">
+  <rect width="390" height="55" rx="12" fill="#111" stroke="#484848"/>
+  <g id="rule-check" class="icon" transform="translate(25 27)"><path d="M -7 0 L -2 5 L 8 -6"/></g>
+  <text id="rule-text" x="52" y="35" font-size="21">수취인 · 1회 한도 · 접근 시간</text>
+ </g>
+ <g id="balance" transform="translate(865 280)">
+  <text x="0" y="0" text-anchor="middle" font-size="19" class="sub">작업용 지갑</text>
+  <text id="balance-main" x="0" y="40" text-anchor="middle" font-size="31" font-weight="500">50 USDT</text>
+ </g>
+ <g id="receipt" transform="translate(470 710)">
+  <rect width="660" height="190" rx="18" fill="#151515" stroke="#777"/>
+  <circle cx="41" cy="42" r="15" fill="#f2f2f2"/>
+  <path d="M 34 42 L 39 47 L 48 37" stroke="#080808" stroke-width="2.2" fill="none"/>
+  <text x="70" y="50" font-size="26" font-weight="600">결제 테스트 완료</text>
+  <text x="28" y="95" font-size="20" class="sub">결제</text><text x="632" y="95" text-anchor="end" font-size="22">2 USDT</text>
+  <text x="28" y="132" font-size="20" class="sub">네트워크 수수료</text><text x="632" y="132" text-anchor="end" font-size="22">0.00002 ETH</text>
+  <text x="28" y="169" font-size="20" class="sub">남은 작업비</text><text x="632" y="169" text-anchor="end" font-size="22">48 USDT + 0.00998 ETH</text>
+ </g>
+ <g id="safety-note" transform="translate(470 723)">
+  <rect width="660" height="150" rx="18" fill="#111" stroke="#555"/>
+  <text id="safety-title" x="30" y="49" font-size="27" font-weight="500"/>
+  <text id="safety-body" x="30" y="87" font-size="22" class="sub"/>
+  <text id="safety-detail" x="30" y="122" font-size="20" class="sub"/>
+ </g>
+ <g id="future">
+  <g fill="none" stroke="#575757" stroke-width="2" stroke-dasharray="6 7">
+   <path d="M 914 500 H 1000 V 354 H 1110"/><path d="M 1000 500 V 524 H 1110"/><path d="M 1000 524 V 694 H 1110"/>
+  </g>
+  <g transform="translate(1110 300)">
+   <rect width="370" height="108" rx="22" class="node"/>
+   <g class="icon" transform="translate(44 49)"><rect x="-21" y="-17" width="42" height="34" rx="4"/><path d="M -12 -6 H 12 M -12 3 H 6"/></g>
+   <text id="future-service" x="82" y="46" font-size="26">서비스 결제</text><text id="future-service-sub" x="82" y="77" font-size="18" class="sub">필요한 API와 도구</text>
+   <rect x="295" y="15" width="58" height="26" rx="6" fill="#303030"/><text x="324" y="34" text-anchor="middle" font-size="15">WIP</text>
+  </g>
+  <g transform="translate(1110 470)">
+   <rect width="370" height="108" rx="22" class="node"/>
+   <g class="icon" transform="translate(44 49)"><path d="M -22 -14 H -15 L -8 14 H 18 L 24 -6 H -12 M -5 23 H -4 M 15 23 H 16"/></g>
+   <text id="future-buy" x="82" y="46" font-size="26">물건 구매</text><text id="future-buy-sub" x="82" y="77" font-size="18" class="sub">내가 요청한 상품</text>
+   <rect x="295" y="15" width="58" height="26" rx="6" fill="#303030"/><text x="324" y="34" text-anchor="middle" font-size="15">WIP</text>
+  </g>
+  <g transform="translate(1110 640)">
+   <rect width="370" height="108" rx="22" class="node"/>
+   <g class="icon" transform="translate(44 49)"><path d="M -18 -22 H 12 L 22 -12 V 24 H -18 Z M 12 -22 V -12 H 22 M -7 -2 H 11 M -7 8 H 11 M -7 18 H 5"/></g>
+   <text id="future-invest" x="82" y="46" font-size="26">투자 실행</text><text id="future-invest-sub" x="82" y="77" font-size="18" class="sub">내가 정한 투자 지시</text>
+   <rect x="295" y="15" width="58" height="26" rx="6" fill="#303030"/><text x="324" y="34" text-anchor="middle" font-size="15">WIP</text>
+  </g>
+  <text id="future-note" x="856" y="840" text-anchor="middle" font-size="21" class="sub">미래 연동 구상 · 아직 구현되지 않았습니다.</text>
+ </g>
+ <text id="closing-url" x="88" y="858" font-size="25" class="sub">github.com/2lab-ai/zwallet</text>
+ <text id="footer" x="88" y="949" font-size="16" class="sub">작동 원리 예시 · 실제 거래 녹화나 제품 화면이 아닙니다.</text>
+ <text id="footer-right" x="1512" y="949" text-anchor="end" font-size="16" class="sub">로컬 키 / 거래별 한도 / 언제든 잠금</text>
+</svg>
+<nav><button id="toggle">일시 정지</button><input id="seek" aria-label="재생 위치" type="range" min="0" max="36" step="0.016667" value="0"><span id="time">0:00 / 0:36</span><button id="replay">다시 보기</button></nav>
+</main>
+<script>
+const $=id=>document.getElementById(id),clamp=x=>Math.max(0,Math.min(1,x));
+const ease=x=>{x=clamp(x);return x*x*(3-2*x)},fade=(id,a)=>$(id).setAttribute('opacity',clamp(a));
+const between=(t,a,b,d=.45)=>ease((t-a)/d)*ease((b-t)/d);
+const ko=new URLSearchParams(location.search).get('lang')==='ko';
+const tr=(a,b)=>ko?a:b,txt=(id,a,b)=>$(id).textContent=tr(a,b);
+document.documentElement.lang=ko?'ko':'en';
+$('scene').setAttribute('aria-label',tr('에이전트에게 작업비를 맡기고, 지갑의 규칙으로 결제를 제어하고, 결과를 받는 흐름','Fund your agent, control payments with wallet rules, and receive the results'));
+const labels={you:['나','You'],agent:['내 에이전트','Your agent'],payee:['결제 테스트','Payment test']};
+for(const [id,label] of Object.entries(labels))$(id).querySelector('text').textContent=tr(...label);
+const receiptTexts=$('receipt').querySelectorAll('text');
+['결제 테스트 완료|Payment test complete','결제|Payment','2 USDT|2 USDT','네트워크 수수료|Network fee','0.00002 ETH|0.00002 ETH','남은 작업비|Funds left','48 USDT + 0.00998 ETH|48 USDT + 0.00998 ETH'].forEach((x,i)=>receiptTexts[i].textContent=tr(...x.split('|')));
+txt('future-service','서비스 결제','Services');txt('future-service-sub','필요한 API와 도구','APIs and tools');
+txt('future-buy','물건 구매','Shopping');txt('future-buy-sub','내가 요청한 상품','Items you ask for');
+txt('future-invest','투자 실행','Investing');txt('future-invest-sub','내가 정한 투자 지시','Your investment mandate');
+txt('future-note','미래 연동 구상 · 아직 구현되지 않았습니다.','Future integrations · Not implemented yet.');
+$('balance').querySelector('text').textContent=tr('작업용 지갑','Task wallet');
+const paths=['fund','req','pay','result','task','report'],lengths={};
+for(const key of paths)lengths[key]=$(key+'-light').getTotalLength();
+function pulse(key,p,span=75){const node=$(key+'-light'),n=lengths[key],pos=clamp(p)*n;node.setAttribute('stroke-dasharray',`${span} ${n+span}`);node.setAttribute('stroke-dashoffset',String(span-pos));fade(key+'-light',p>0&&p<1?ease(p/.12)*ease((1-p)/.12):0);return node.getPointAtLength(pos);}
+const headings=[
+ [0,'작업비를 맡기면, 일은 에이전트가.','Fund the task. Your agent does the work.','“결제 기능 만들고, 테스트까지 끝내줘.”','“Build the payment flow. Test it end to end.”'],
+ [11.3,'내가 받는 건, 결과와 사용 내역.','Get the result. And the receipts.','돈 보내고, 결제하고, 확인하러 돌아오지 않도록.','Your agent handles the payment, verifies it, and reports back.'],
+ [14.5,'정한 선을 넘으면, 여기서 멈춤.','Over the limit? It stops here.','1회 한도는 5 USDT. 20 USDT 요청은 서명하지 않습니다.','A 5 USDT limit per payment. A 20 USDT request gets no signature.'],
+ [20,'접근 종료도, 내가 정합니다.','You decide when access ends.','시간이 만료되거나 내가 잠그면, 새 서명은 종료.','When access expires or you lock the wallet, new signing stops.'],
+ [24.5,'그다음은, 에이전트가 할 수 있는 일들.','A wallet for what agents do next.','내가 지시한 서비스 결제, 구매, 투자로 이어질 수 있도록.','Services, purchases and investing, under your instructions.'],
+ [32,'내 에이전트. 내 돈. 내가 정한 규칙.','Your agent. Your money. Your rules.','오픈소스 지갑. 내 기기의 키. zwallet 서비스 가입 없이.','Open source. Keys on your device. No zwallet service signup.']
+];
+window.duration=36;
+window.draw=t=>{
+ t=Math.max(0,Math.min(window.duration,t));
+ const future=ease((t-24.5)/1.25),denied=between(t,16.5,20.1,.4),locked=between(t,21.5,24.9,.4);
+ let p=t<19?(t-1.25)/2:(t-20.3)/1.2;
+ let point=pulse('fund',p);$('fund-label').setAttribute('transform',`translate(${point.x} ${point.y-35})`);
+ $('fund-label').querySelector('text').textContent=t<19?'50 USDT + 0.01 ETH':tr('잠금','Lock');
+ fade('fund-pulse',t<19?between(t,1,3.8,.35):between(t,20.2,22,.3));
+ p=t<14?(t-4.2)/1.4:t<20?(t-15)/1.5:(t-22.15)/.9;
+ point=pulse('req',p,48);$('req-label').setAttribute('transform',`translate(${point.x} ${point.y-87})`);
+ $('req-label').querySelector('text').textContent=t>=14&&t<20?'20 USDT':'2 USDT';
+ fade('req-pulse',t<14?between(t,4,5.9,.25):t<20?between(t,14.85,16.9,.3):between(t,22.05,23.4,.3));
+ point=pulse('pay',(t-7.4)/1.3,65);$('pay-dot').setAttribute('cx',point.x);$('pay-dot').setAttribute('cy',point.y);fade('pay-pulse',between(t,7.4,8.9,.25));
+ pulse('result',(t-9.1)/1.2,110);pulse('report',(t-10.5)/.8,50);pulse('task',(t-.3)/.75,50);
+ const active=between(t,.6,11.3,.4)+between(t,14.9,16.7,.3)+between(t,22.1,23.2,.3);
+ fade('agent-ring',active*(.22+.28*(.5+.5*Math.sin(t*3))));fade('wallet-ring',between(t,5.5,7.4,.3)*(.45+.35*Math.sin(t*5)**2)+denied*.5+locked*.5);
+ fade('balance',between(t,3.4,5.6,.5));
+ fade('rules',between(t,5.5,8.2,.45));
+ txt('rule-text',t<6.2?'수취인 확인':t<6.8?'1회 5 USDT 이내':'남은 접근 시간 28분',t<6.2?'Allowed recipient':t<6.8?'5 USDT max per payment':'Access expires in 28 min');
+ fade('rule-check',ease((t-5.8)/.2));
+ fade('payee-check',ease((t-8.7)/.45));fade('payee-icon',1-ease((t-8.7)/.45));
+ fade('receipt',between(t,11.3,14.9,.65));$('receipt').setAttribute('transform',`translate(470 ${710+24*(1-ease((t-11.3)/.65))})`);
+ fade('result-path',1-ease((t-11.3)/.5));
+ fade('payee',1-future);fade('payment-path',1-future);fade('fund-path',1-future*.8);
+ fade('wallet-icon',(1-denied)*(1-locked));fade('wallet-deny',denied);fade('wallet-lock',locked);
+ fade('safety-note',between(t,16.5,24.7,.5));
+ txt('safety-title',t<20?'서명 거절. 돈은 그대로.':'잠금 완료. 새 서명은 종료.',t<20?'Refused. Funds stay put.':'Locked. No new signatures.');
+ txt('safety-body',t<20?'20 USDT 요청 > 1회 5 USDT 한도':'이미 보낸 거래를 되돌리지는 않습니다.',t<20?'20 USDT requested > 5 USDT per-payment cap':'Transactions already sent are not reversed.');
+ txt('safety-detail',t<20?'남은 작업비 48 USDT + 0.00998 ETH':'내 기기의 키 · 신뢰하는 기기에서 사용',t<20?'Funds left: 48 USDT + 0.00998 ETH':'Keys stay on your device · Use a trusted device');
+ txt('you-status',t<3.4?'작업비와 규칙을 설정':t<11.3?'작업은 에이전트에게':t<20?'결과와 내역을 받습니다':t<24.5?'내가 접근을 종료':'목표와 규칙은 내가',t<3.4?'Set funds and rules':t<11.3?'Delegate the work':t<20?'Results and receipts':t<24.5?'End signing access':'Your goals and rules');
+ txt('agent-status',t<4.2?'결제 기능 테스트 중':t<8.8?'허용된 결제 실행 중':t<11.3?'완료 내역 정리 중':t<14.8?'보고 완료':t<20?'20 USDT 결제 요청':t<24.5?'새 요청은 진행 불가':'내 지시를 실행',t<4.2?'Testing the payment flow':t<8.8?'Making an allowed payment':t<11.3?'Preparing the report':t<14.8?'Reported':t<20?'Requests 20 USDT':t<24.5?'New request cannot proceed':'Acts on your instructions');
+ txt('wallet-status',t<5.5?'내가 정한 규칙':t<7.4?'요청 검사 중':t<9?'규칙 안에서 승인':t<16.5?'48 USDT 남음':t<20?'한도 초과 · 서명 거절':t<21.5?'접근 종료 요청':t<24.5?'잠금':'내 기기의 키와 규칙',t<5.5?'Your rules':t<7.4?'Checking the request':t<9?'Allowed by your rules':t<16.5?'48 USDT remaining':t<20?'Over limit · Refused':t<21.5?'Ending access':t<24.5?'Locked':'Local keys and policy');
+ txt('payee-status',t<8.7?'허용한 수취인':t<14.9?'2 USDT 결제 확인':'추가 결제 없음',t<8.7?'An allowed recipient':t<14.9?'2 USDT confirmed':'No additional payment');
+ fade('future',future);fade('closing-url',ease((t-32.7)/.8));
+ $('chapter').textContent=t<24.1?'YOUR AGENT. YOUR RULES.':'FUTURE / WIP';fade('chapter',t<23.7?1:t<24.1?1-ease((t-23.7)/.4):ease((t-24.1)/.4));
+ txt('footer',t<24.5?'작동 원리 예시 · 실제 거래나 제품 화면이 아닙니다.':'미래 연동은 WIP · 투자는 손실이 발생할 수 있습니다.',t<24.5?'Illustrated workflow · Not a live transaction or product UI.':'Future integrations are WIP · Investing can result in losses.');
+ txt('footer-right',t<14.5?'로컬 키 / 거래별 한도 / 언제든 잠금':t<24.5?'거래별 한도 ≠ 누적 예산':'로컬 키 / 오픈소스',t<14.5?'Local keys / Per-payment caps / Lock anytime':t<24.5?'Per-payment caps ≠ cumulative budgets':'Local keys / Open source');
+ let i=headings.findLastIndex(h=>t>=h[0]);const row=headings[i],next=headings[i+1];
+ $('heading').textContent=row[ko?1:2];$('caption').textContent=row[ko?3:4];
+ const alpha=(i===0?1:ease((t-row[0])/.4))*(next?ease((next[0]-t)/.4):1);fade('heading',alpha);fade('caption',alpha);
+ $('seek').value=t;$('time').textContent=`0:${String(Math.floor(t)).padStart(2,'0')} / 0:36`;
+};
+let playing=true,offset=0,start=performance.now();
+function tick(now){if(playing){const t=offset+(now-start)/1000;window.draw(t);if(t>=window.duration){playing=false;offset=window.duration;$('toggle').textContent=tr('재생','Play');}}requestAnimationFrame(tick)}
+$('toggle').textContent=tr('일시 정지','Pause');$('replay').textContent=tr('다시 보기','Replay');$('seek').setAttribute('aria-label',tr('재생 위치','Playback position'));
+$('toggle').onclick=()=>{if(playing){offset=Math.min(window.duration,offset+(performance.now()-start)/1000);playing=false;}else{if(offset>=window.duration)offset=0;playing=true;start=performance.now();}$('toggle').textContent=playing?tr('일시 정지','Pause'):tr('재생','Play');};
+$('replay').onclick=()=>{offset=0;start=performance.now();playing=true;$('toggle').textContent=tr('일시 정지','Pause');};
+$('seek').oninput=e=>{offset=Number(e.target.value);start=performance.now();window.draw(offset);};
+if(new URLSearchParams(location.search).has('render')){document.body.classList.add('render');playing=false;}
+window.draw(0);requestAnimationFrame(tick);
+</script>
+</html>

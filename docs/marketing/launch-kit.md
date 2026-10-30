@@ -36,7 +36,7 @@ signed recipient/contract rules and optional per-transaction limits. An agent us
 JSON commands; the signer checks the transaction bytes. There is no zwallet service
 account or mandatory wallet API credential.
 
-The README has a 58-second visual explanation: assign task funds, let the agent work,
+The README has a 36-second visual explanation: assign task funds, let the agent work,
 watch the wallet block requests outside your rules, and get the result back. It is
 an illustration, not a shipped dashboard. An optional reproducible CLI example runs
 on a local chain and checks receipts, policy refusal and payment/gas/balance accounting.
@@ -72,7 +72,8 @@ Keep the WIP labels visible when cropping. The animated graph explains the workf
 it is not a product dashboard. Keep the first post focused on the human benefit.
 
 Visual tone follows the owner's [monochrome profile](https://github.com/icedac/icedac/tree/codex/monochrome-profile-2026-10-29):
-black and white, generous space, medium-weight type and slow fine-line geometry.
+black and white, generous space, medium-weight type and a continuous diagram.
+Movement should explain a request, a check or a result.
 Keep that treatment when making crops or follow-up material. Permission/refusal must
 stay understandable through labels and symbols, without relying on colored status.
 
@@ -87,7 +88,7 @@ stay understandable through labels and symbols, without relying on colored statu
 키는 로컬에 보관하고, 별도 지갑 서비스 가입 없이 사용할 수 있습니다. Rust / MIT.
 
 README 영상은 사람·에이전트·지갑 사이에서 일이 어떻게 흘러가는지 보여줍니다.
-허용된 요청은 통과하고, 허용하지 않은 대상은 막히며, 원하면 접근을 끊습니다.
+허용된 요청은 통과하고, 거래별 한도를 넘는 요청은 막히며, 원하면 접근을 끊습니다.
 결과와 사용 내역은 에이전트가 보고합니다. 내장 보고 기능은 아직 WIP입니다.
 직접 검증하려는 사람을 위한 로컬 CLI 재현 예제도 별도로 제공합니다.
 
