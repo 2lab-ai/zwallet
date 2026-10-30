@@ -89,7 +89,7 @@ fn seeding_after_unlock_ends_the_session_and_unlock_works_again() {
     home.create("main", &[]);
     home.allow("alice", PAYEE, &["*"]);
     home.unlock("10m");
-    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], false);
+    home.assert_unlocked();
     // The re-seal changes wallet.json's ciphertext; the daemon ends its session on its next
     // tick.
     home.allow("router", ROUTER, &["base"]);
@@ -98,7 +98,7 @@ fn seeding_after_unlock_ends_the_session_and_unlock_works_again() {
         "the session outlived the re-seal"
     );
     home.unlock("10m");
-    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], false);
+    home.assert_unlocked();
 }
 
 #[test]

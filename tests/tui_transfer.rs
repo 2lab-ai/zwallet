@@ -345,7 +345,7 @@ fn start_and_warm(home: &Home, node: &Node, from: &str) -> PtyChild {
     wait(&mut tui, "Wallet password:");
     tui.send(format!("{PW}\r").as_bytes());
     tui.wait_frame(WAIT, warmup_complete);
-    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], false);
+    home.assert_unlocked();
     assert_eq!(home.run(&["list", "--json"]).ok()["active"], "main");
     tui
 }
@@ -526,8 +526,8 @@ fn t2_t6_t7_pty_warm_send_then_whitelist_edit_stops_all_and_requires_new_warmup(
 
     // A second test-scoped home makes the edit's stop-all contract observable.
     other.unlock("10m");
-    assert_eq!(home.run(&["status", "--json"]).ok()["locked"], false);
-    assert_eq!(other.run(&["status", "--json"]).ok()["locked"], false);
+    home.assert_unlocked();
+    other.assert_unlocked();
     tui.send(b"5");
     wait(&mut tui, "verified by password: gen 1");
     tui.send(b"a");

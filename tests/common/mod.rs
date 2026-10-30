@@ -233,6 +233,22 @@ impl Home {
         v["daemonPid"].as_i64().map(|p| p as i32)
     }
 
+    /// `status --json` where the test expects this home's session to be live; panics with the
+    /// command's raw output (exit code, stdout, stderr) unless it succeeds and says
+    /// `locked: false`.
+    #[track_caller]
+    pub fn assert_unlocked(&self) -> Value {
+        let run = self.run(&["status", "--json"]);
+        let status = serde_json::from_str::<Value>(&run.stdout).ok();
+        match status {
+            Some(status) if run.code == 0 && status["locked"] == false => status,
+            _ => panic!(
+                "expected a live session; `status --json` exited {}, stdout {:?}, stderr {:?}",
+                run.code, run.stdout, run.stderr
+            ),
+        }
+    }
+
     /// Waits (bounded) until `status` reports this home locked: no daemon process for it.
     pub fn wait_locked(&self, limit: Duration) -> bool {
         let start = Instant::now();
@@ -262,8 +278,28 @@ impl Home {
         let mut v: Value =
             serde_json::from_slice(&std::fs::read(self.wallet_json()).unwrap()).unwrap();
         edit(&mut v);
-        std::fs::write(self.wallet_json(), serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+        replace_file(&self.wallet_json(), &serde_json::to_vec_pretty(&v).unwrap());
     }
+}
+
+/// Replaces `path` with `bytes` (mode 0600) at once, as zwallet itself writes wallet.json: a
+/// temp file beside it renamed over it. A write in place (`std::fs::write`) truncates the file
+/// first, and a running daemon, which reads wallet.json every second, ends its session when it
+/// reads the empty or half-written file ("wallet.json changed since unlock"): issue #52.
+pub fn replace_file(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut name = path.file_name().unwrap().to_os_string();
+    name.push(".test-replace");
+    let tmp = path.with_file_name(name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));
+    file.write_all(bytes).unwrap();
+    drop(file);
+    std::fs::rename(&tmp, path).unwrap_or_else(|e| panic!("rename onto {}: {e}", path.display()));
 }
 
 /// Seeds the signed whitelist of `home` (a wallet created with [`PW`]) through the core edit
@@ -1148,6 +1184,7 @@ impl PtyChild {
     /// returns it. Panics with the frame (and the exit and stderr, once the child has exited) when
     /// the child has exited and the reader has every byte (it ends when the pty does, after the
     /// last one: this process holds no slave of a full-screen child's pty), or past `limit`.
+    #[track_caller]
     pub fn wait_output(&mut self, limit: Duration, until: impl Fn(&[u8]) -> bool) -> Vec<u8> {
         let start = Instant::now();
         loop {
@@ -1181,6 +1218,7 @@ impl PtyChild {
     /// A frame reaches the terminal in pieces (a pty read ends anywhere), so `until` should look
     /// for the last thing the test reads in it; whether the frame holds a stray byte is decided on
     /// the whole output ([`PtyChild::final_frame`]).
+    #[track_caller]
     pub fn wait_frame(&mut self, limit: Duration, until: impl Fn(&Frame) -> bool) -> Frame {
         let size = self.full_screen().size;
         Frame::parse(
@@ -1193,6 +1231,7 @@ impl PtyChild {
     /// before it gave the terminal back. All of it was written before the exit; the wait is for
     /// the reader to catch up, and fails once the reader has ended (the pty ended with the child)
     /// if the terminal was never given back.
+    #[track_caller]
     pub fn final_frame(&mut self, limit: Duration) -> Frame {
         assert!(
             matches!(self.child.try_wait(), Ok(Some(_))),
@@ -1227,6 +1266,7 @@ impl PtyChild {
 
     /// Waits (bounded) for the exit and returns its status and stderr; past `limit` the child is
     /// killed and this panics with the last frame.
+    #[track_caller]
     pub fn wait_exit(&mut self, limit: Duration) -> (std::process::ExitStatus, String) {
         let start = Instant::now();
         let status = loop {
@@ -1272,6 +1312,7 @@ impl PtyChild {
     }
 
     /// Waits (bounded) until the terminal shows `needle`, e.g. a password prompt.
+    #[track_caller]
     pub fn wait_for(&mut self, needle: &str, limit: Duration) {
         let start = Instant::now();
         loop {
@@ -1283,17 +1324,26 @@ impl PtyChild {
             }
             assert!(
                 start.elapsed() < limit,
-                "no {needle:?} on the terminal within {limit:?}; saw {:?}",
-                self.seen
+                "no {needle:?} on the terminal within {limit:?}; saw {}",
+                self.seen_tail()
             );
             if let Ok(Some(status)) = self.child.try_wait() {
                 panic!(
-                    "exited ({status}) before showing {needle:?}; saw {:?}",
-                    self.seen
+                    "exited ({status}) before showing {needle:?}; saw {}",
+                    self.seen_tail()
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// For a failure message: the last 4 KB of what the terminal showed, escaped.
+    fn seen_tail(&self) -> String {
+        let from = self.seen.len().saturating_sub(4096);
+        let from = (from..=self.seen.len())
+            .find(|i| self.seen.is_char_boundary(*i))
+            .unwrap_or(0);
+        format!("{:?}", &self.seen[from..])
     }
 
     /// Reads what stdout's terminal holds, so the child never blocks on a full one.

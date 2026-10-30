@@ -109,6 +109,7 @@ fn bar(frame: &Frame) -> (&str, &str) {
     let len = frame.rows.len();
     (&frame.rows[len - 2], &frame.rows[len - 1])
 }
+#[track_caller]
 fn wait(tui: &mut PtyChild, text: &str) -> Frame {
     tui.wait_frame(WAIT, |f| contains(f, text))
 }
@@ -175,12 +176,27 @@ fn start(home: &Home, node: &Node, from: &str) -> PtyChild {
     tui.wait_frame(WAIT, |f| bar(f).0.contains("verified by password"));
     tui
 }
-fn lookup(tui: &mut PtyChild, hash: &str) {
-    tui.send(b"2");
+/// Looks `hash` up on the wallet tab, where `start` leaves the TUI (Enter on a key of an
+/// unlocked wallet opens it there). The tab submits a lookup only once it knows the open key's
+/// address (`history.scope`); until then Enter only says "wait for the selected key's address,
+/// then press Enter". So the hash is typed only once the history pane shows `loaded`, text it
+/// draws only from a history read, which starts only after the address is known: a row's
+/// `[journal]` tag, or "No transactions in these sources." when the journal is gone. Not `2`
+/// first: on the wallet tab it reloads the tab, which forgets the address while the screen still
+/// shows the pane loaded, and the hash went in too early under load (issue #52).
+#[track_caller]
+fn lookup(tui: &mut PtyChild, hash: &str, loaded: &str) {
+    tui.wait_frame(WAIT, |f| contains(f, loaded));
     tui.send(b"/");
     wait(tui, "Transaction hash:");
     tui.send(format!("{hash}\r").as_bytes());
 }
+/// The sources tag of a history row read from the journal alone, as the history pane draws it
+/// once it has read the journal. A row an explorer also listed would read `[journal,explorer]`:
+/// the wait would time out with the frame, never pass on the wrong state.
+const JOURNAL_ROW: &str = "[journal]";
+/// What the history pane draws once a read found no rows (t29, after the journal is removed).
+const NO_ROWS: &str = "No transactions in these sources.";
 fn replacement_confirm(tui: &mut PtyChild, label: &str) {
     tui.send(b"\r");
     wait(tui, "Type the reviewed nickname or cancel:");
@@ -214,7 +230,7 @@ fn t27_t28_pty_restart_original_proof_speedup_and_cancel_verify_signed_bytes() {
         let first = node.sent.lock().unwrap()[0].clone();
         let first_hash = node.last_hash();
         let mut tui = start(&home, &node, &from);
-        lookup(&mut tui, &first_hash);
+        lookup(&mut tui, &first_hash, JOURNAL_ROW);
         wait(&mut tui, "s speed up   x cancel");
         assert_eq!(node.sent.lock().unwrap().len(), 1);
         tui.send(&[action]);
@@ -306,7 +322,11 @@ fn t29_pty_uncertain_retry_then_restart_unknown_has_no_retry_even_without_journa
             .unwrap();
         }
         let mut tui = start(&home, &node, &from);
-        lookup(&mut tui, &original_hash);
+        lookup(
+            &mut tui,
+            &original_hash,
+            if remove { NO_ROWS } else { JOURNAL_ROW },
+        );
         let shown = wait(&mut tui, "it can pay twice");
         assert!(!contains(&shown, "R retry"));
         tui.send(b"R");
