@@ -191,8 +191,11 @@ fn lookup(tui: &mut PtyChild, hash: &str, loaded: &str) {
     wait(tui, "Transaction hash:");
     tui.send(format!("{hash}\r").as_bytes());
 }
-/// What the history pane draws once it has read the journal's rows, or found none.
+/// The sources tag of a history row read from the journal alone, as the history pane draws it
+/// once it has read the journal. A row an explorer also listed would read `[journal,explorer]`:
+/// the wait would time out with the frame, never pass on the wrong state.
 const JOURNAL_ROW: &str = "[journal]";
+/// What the history pane draws once a read found no rows (t29, after the journal is removed).
 const NO_ROWS: &str = "No transactions in these sources.";
 fn replacement_confirm(tui: &mut PtyChild, label: &str) {
     tui.send(b"\r");

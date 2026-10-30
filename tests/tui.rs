@@ -1551,7 +1551,11 @@ fn edit_wallet_never_lets_a_reader_see_wallet_json_half_written() {
         std::thread::spawn(move || {
             let (mut ready, mut torn, mut first) = (Some(ready), 0u64, None);
             while !done.load(Ordering::SeqCst) {
-                match store::read_wallet_file(&path) {
+                let read = store::read_wallet_file(&path);
+                // Counted before `ready` goes out: the writer's `before` includes the first read,
+                // so only reads made while the edits run count as progress.
+                reads.fetch_add(1, Ordering::SeqCst);
+                match read {
                     // The writer starts once a read has succeeded.
                     Ok(_) => {
                         if let Some(ready) = ready.take() {
@@ -1563,7 +1567,6 @@ fn edit_wallet_never_lets_a_reader_see_wallet_json_half_written() {
                         first.get_or_insert(e.message);
                     }
                 }
-                reads.fetch_add(1, Ordering::SeqCst);
             }
             (torn, first)
         })
