@@ -3243,7 +3243,11 @@ mod tests {
                 )),
                 "{what}: {msg}"
             );
-            assert!(!msg.contains("##") && !msg.contains("2J"), "{what}: {msg}");
+            // Neither the value nor its escape: `2J` alone can be in the file's random temp path.
+            assert!(
+                !msg.contains('\u{1b}') && !msg.contains("[2J") && !msg.contains("##"),
+                "{what}: {msg}"
+            );
         }
         // A fee cap of 79 digits is no wei amount either; a chain key zwallet does not know (yet)
         // is still a chain key's shape, so it reads.
