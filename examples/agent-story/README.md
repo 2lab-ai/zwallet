@@ -1,7 +1,9 @@
 # Give your agent a wallet
 
-[English video](../../docs/assets/agent-story.mp4) ·
-[한국어 영상](../../docs/assets/agent-story-ko.mp4) · [Back to zwallet](../../README.md)
+[Watch in English](https://ai-insightquest.github.io/zwallet/) ·
+[한국어로 보기](https://ai-insightquest.github.io/zwallet/?lang=ko) · [Back to zwallet](../../README.md)
+
+[English MP4](../../docs/assets/agent-story.mp4) · [한국어 MP4](../../docs/assets/agent-story-ko.mp4)
 
 A 58-second visual introduction for people who use AI agents or build apps with them.
 It explains the problem, the wallet's role, the user's controls and future possibilities.
@@ -11,6 +13,13 @@ uses the owner’s [icedac profile](https://github.com/icedac/icedac/tree/codex/
 as the tone reference: dark ground, medium-weight type, generous space, fine gray
 rules and slow geometric motion. Allowed/blocked states use words and symbols,
 so the distinction does not depend on color.
+
+The playback page is hosted on the project fork's GitHub Pages, using the `docs/`
+directory of `docs/agent-story-film`. GitHub's file view does not preview these MP4s;
+the page provides native playback, language links, a transcript and downloads.
+Its source is [`docs/index.html`](../../docs/index.html), with no external scripts,
+tracking or signup. Publishing another copy only requires static hosting of `docs/`;
+update the README links to that host when moving it.
 
 ## Story and transcript
 

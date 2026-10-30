@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Give your agent a wallet. Keep control. A 58-second introduction to zwallet.">
+  <title>zwallet — Give your agent a wallet</title>
+  <style>
+    :root { color-scheme: dark; background: #080808; color: #f5f5f5; font-family: "Avenir Next", "Apple SD Gothic Neo", system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0 auto; max-width: 1440px; padding: 32px clamp(20px, 4vw, 64px) 48px; }
+    header, nav, footer { display: flex; align-items: center; gap: 24px; }
+    header { justify-content: space-between; padding-bottom: 26px; border-bottom: 1px solid #303030; }
+    .wordmark { font-size: 25px; font-weight: 500; letter-spacing: -.04em; }
+    a { color: inherit; text-underline-offset: 5px; }
+    nav { gap: 18px; font-size: 14px; }
+    nav a { color: #a3a3a3; text-decoration: none; }
+    nav a[aria-current="page"] { color: #f5f5f5; text-decoration: underline; }
+    h1 { margin: 42px 0 12px; font-size: clamp(30px, 4.5vw, 56px); font-weight: 500; line-height: 1.16; letter-spacing: -.04em; }
+    .intro { margin: 0 0 28px; color: #a3a3a3; line-height: 1.6; }
+    video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #080808; border: 1px solid #303030; }
+    .caption { margin: 16px 0 32px; max-width: 78ch; font-size: 14px; line-height: 1.6; color: #a3a3a3; }
+    footer { flex-wrap: wrap; justify-content: space-between; border-top: 1px solid #303030; padding-top: 22px; font-size: 14px; }
+    :focus-visible { outline: 2px solid #f5f5f5; outline-offset: 6px; }
+    @media (max-width: 560px) { body { padding-top: 22px; } header { gap: 12px; } h1 { margin-top: 30px; } footer { gap: 18px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="wordmark" href="https://github.com/2lab-ai/zwallet" aria-label="zwallet on GitHub">zwallet.</a>
+    <nav aria-label="Video language">
+      <a href="?lang=en" lang="en" data-language="en" aria-current="page">English</a>
+      <a href="?lang=ko" lang="ko" data-language="ko">한국어</a>
+    </nav>
+  </header>
+  <main>
+    <h1 id="headline">Give your agent a wallet. Keep control.</h1>
+    <p class="intro" id="intro">Working funds. Your rules. Results and receipts. A 58-second introduction.</p>
+    <video id="film" controls playsinline preload="metadata" poster="assets/agent-story-poster.png" aria-label="zwallet illustrated introduction in English" aria-describedby="caption">
+      <source src="assets/agent-story.mp4" type="video/mp4">
+      <a href="assets/agent-story.mp4">Download the film</a>
+    </video>
+    <p class="caption" id="caption">An illustrated workflow, with all explanations on screen. Future service-payment, shopping and investment integrations are labeled WIP. Reports are assembled by your agent; per-payment caps are not cumulative budgets.</p>
+  </main>
+  <footer>
+    <a id="start" href="https://github.com/2lab-ai/zwallet#quick-start">Get started</a>
+    <a id="transcript" href="https://github.com/ai-insightquest/zwallet/blob/docs/agent-story-film/examples/agent-story/README.md#story-and-transcript">Read the transcript</a>
+    <a id="download" href="assets/agent-story.mp4" download>Download MP4</a>
+  </footer>
+  <script>
+    const korean = new URLSearchParams(location.search).get('lang') === 'ko';
+    if (korean) {
+      document.documentElement.lang = 'ko';
+      document.title = 'zwallet — 내 에이전트를 위한 지갑';
+      document.getElementById('headline').textContent = '내 에이전트에게 지갑을 주세요.';
+      document.getElementById('intro').textContent = '작업비를 맡기고, 규칙을 정하고, 결과와 내역을 받으세요. 58초로 보는 zwallet.';
+      document.getElementById('caption').textContent = '작동 원리를 보여주는 설명 영상입니다. 모든 설명은 화면에 표시됩니다. 서비스 결제·구매·투자 연동은 WIP입니다. 보고는 에이전트가 만들며, 거래별 한도는 누적 예산이 아닙니다.';
+      document.getElementById('start').textContent = '시작하기';
+      document.getElementById('transcript').textContent = '영상 설명 읽기';
+      const download = document.getElementById('download');
+      download.textContent = 'MP4 다운로드';
+      download.href = 'assets/agent-story-ko.mp4';
+      const film = document.getElementById('film');
+      film.poster = 'assets/agent-story-ko-poster.png';
+      film.setAttribute('aria-label', 'zwallet 한국어 설명 영상');
+      film.querySelector('source').src = 'assets/agent-story-ko.mp4';
+      film.querySelector('a').href = 'assets/agent-story-ko.mp4';
+      film.load();
+      document.querySelector('[data-language="en"]').removeAttribute('aria-current');
+      document.querySelector('[data-language="ko"]').setAttribute('aria-current', 'page');
+    }
+  </script>
+</body>
+</html>

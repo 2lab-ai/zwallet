@@ -10,15 +10,15 @@ the result and bring back the receipts.
 
 **Your keys · Your rules · Your agent · Open source**
 
-[Get started](#quick-start) · [Watch how it works](docs/assets/agent-story.mp4) ·
-[한국어 영상](docs/assets/agent-story-ko.mp4) · [What works today](docs/features.md)
+[Get started](#quick-start) · [Watch how it works](https://ai-insightquest.github.io/zwallet/) ·
+[한국어 영상](https://ai-insightquest.github.io/zwallet/?lang=ko) · [What works today](docs/features.md)
 
-[![Watch the film: give your agent a wallet, with rules you control](docs/assets/agent-story-poster.png)](docs/assets/agent-story.mp4)
+[![Watch the film: give your agent a wallet, with rules you control](docs/assets/agent-story-poster.png)](https://ai-insightquest.github.io/zwallet/)
 
 **58 seconds: the problem, the workflow, your controls, and what comes next.**
 This is an illustrated explanation of the wallet component, not a product dashboard.
 Investment, service-payment and shopping integrations are marked **WIP**.
-[English video](docs/assets/agent-story.mp4) · [한국어 영상](docs/assets/agent-story-ko.mp4) ·
+[English video](https://ai-insightquest.github.io/zwallet/) · [한국어 영상](https://ai-insightquest.github.io/zwallet/?lang=ko) ·
 [Transcript](examples/agent-story/README.md#story-and-transcript)
 
 ## How it works
