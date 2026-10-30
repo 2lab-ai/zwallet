@@ -2,7 +2,7 @@
 
 [README](../../README.md) · [Launch kit](launch-kit.md) · [Future PRD](../../.prd/07-agent-economy.md)
 
-Audience: maintainers preparing an honest developer launch. Findings below come from
+Audience: maintainers preparing an open-source launch. Findings below come from
 primary documentation/repositories accessed on 2026-10-29, not installation tests or
 independent security audits. Product behavior and requirements can change; recheck
 before publishing a competitive claim. This is a focused comparison, not an exhaustive
@@ -10,10 +10,16 @@ market census.
 
 ## Decision
 
-Lead with **“Fund the task. Let your agent execute. Keep the receipts.”** The first
-reader should recognize a practical interruption: an agent can write the code but
-keeps delegating funding, payments and verification back to the human. Show a complete
-permitted execution with a receipt, a rejected request and accounted spend.
+Lead with **“Give your agent a wallet. Keep control.”** The first reader should
+recognize a practical interruption: AI can build an app, but still hands moving money
+and checking results back to the human. General AI users and people building with
+coding agents should understand the benefit without reading commands.
+
+Use a short illustrated network story: task funds → agent action → wallet rules →
+result and receipts. Show an allowed request passing, an unapproved destination
+being refused and access being closed. Show investment/payment/shopping possibilities
+with WIP labels. Keep the runnable CLI recording as optional evidence for readers
+who want to inspect the implementation.
 
 The defensible distinction is the combination of a local Rust CLI, human-controlled
 unlock, a small key daemon enforcing signed policy and user-selected RPC. These are
@@ -41,8 +47,8 @@ and receipt/settlement concepts merit investigation when designing idempotent pa
 requests. Validate the chosen scheme's signing and policy requirements before building.
 
 Investment and purchase automation broaden the vision, but the immediately verifiable
-story remains development allocation → permitted execution → evidence. Lead with the
-working demo and let the WIP segment explain the ambition.
+story remains development allocation → permitted execution → results. Lead with a
+plain-language explanation and let the WIP segment explain the ambition.
 
 ## Claims to use / avoid
 
@@ -56,13 +62,19 @@ working demo and let the WIP segment explain the ambition.
 
 ## Launch fit
 
-Start with shell-capable coding-agent users and EVM developers. They can reproduce
-the demo without funding a public wallet and can judge the core friction directly.
-Use the wider investment/shopping vision to invite adapter contributors, while every
-current-capability statement links to code or a runnable example.
+The public story targets general AI users and people building apps with coding
+agents. They should recognize the problem, understand what the wallet provides and
+want to try or share it. Developers and security reviewers get commands, execution
+evidence and source links one level deeper.
+
+The owner's reach goal is **10,000 GitHub stars**, supported by widespread use and
+sharing. It is a goal, not a forecast. A clear story, a working first-run path and
+useful examples should earn that attention; star counts alone do not validate the
+product.
 
 [Show HN guidance](https://news.ycombinator.com/showhn.html) asks for something readers
-can try, not just a landing page or announcement. The local demo is the primary call
-to action. Post a technical founder explanation and answer questions about custody,
-policy, retries and competitors; do not solicit votes or manufacture endorsements.
+can try, not just a landing page or announcement. Pair the visual story with the
+quick start and optional local reproduction. Post a founder explanation and answer
+questions about custody, policy, retries and competitors; do not solicit votes or
+manufacture endorsements.
 For other communities, check their current self-promotion rules before posting.

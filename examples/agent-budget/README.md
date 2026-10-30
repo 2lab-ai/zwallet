@@ -1,5 +1,8 @@
 # Watch an agent-sized task complete
 
+This is the optional technical appendix. For the public introduction, watch the
+[animated explainer](../agent-story/README.md).
+
 [Back to zwallet](../../README.md) · [MP4](../../docs/assets/agent-budget.mp4) ·
 [Terminal recording](../../docs/assets/agent-budget.cast) ·
 [Execution evidence](../../docs/assets/agent-budget-evidence.json)
@@ -61,7 +64,7 @@ requirements; the example does not override them. See [development](../../docs/d
 The fixture stops its daemon and Anvil and removes its wallet on normal exit or an
 exception. Do not replace its scoped binary with an installed/release binary.
 
-## Render the video and README preview
+## Render the technical recording
 
 Rendering requires Pillow, pyte and imageio-ffmpeg. Use an isolated Python environment:
 

@@ -107,7 +107,7 @@ def main():
     frames(outro,7); thumbs.append(outro)
     proc.stdin.close()
     if proc.wait()!=0: raise RuntimeError('MP4 encoding failed')
-    # Small inline README preview with an explicit label even when the video is not opened.
+    # Compact technical preview; the public README uses the separate agent-story explainer.
     subprocess.run([ff,'-y','-loglevel','error','-i',str(assets/'agent-budget.mp4'),
                     '-filter_complex','fps=4,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=96[p];[b][p]paletteuse=dither=bayer',
                     '-loop','0',str(assets/'agent-budget.gif')],check=True)
