@@ -17,6 +17,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | Command | Output (`--json`) | While locked |
 |---|---|---|
 | `chains` | `[{ key, name, family, symbol, chainId, rpc }]` | works |
+| `task create <id> --chain <key> [--key <name>] [--allocation ASSET=BASE_UNITS] [--rpc <url>]` | local task summary; observes baseline balances, no signature | works |
+| `task list` | local task summaries; account addresses omitted | works |
+| `task report <id> [--offline \| --rpc <url>] [--reveal-addresses]` | six outcome states, exact amounts/fees, separate balance observations, provenance and incomplete-accounting warnings; [details](task-reports.md) | works |
 | `create <name> [--password-stdin] [--unlock <dur> [--allow-ptrace-scope-0]] [--words 12\|15\|18\|21\|24] [--no-qr]` | `{ name, index, address, active, master, home, chains, verified }` (+ `locked, expiresAt, daemonPid, whitelist` with `--unlock`) | see below |
 | `list [--verify [--password-stdin]]` | `{ active, keys: [{ name, index, address, active }], verified, verifiedBy?, warning? }` | works |
 | `change <name> [--no-qr]` | `{ active, address, verified, verifiedBy?, warning? }` | works |
@@ -26,25 +29,32 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `balance [--no-qr]` | `{ key, address, verified, verifiedBy?, warning?, chains: [{ chain, chainId, native: { symbol, decimals, balance, raw }, tokens: [{ symbol, address, decimals, balance, raw }] }] }`; a network that failed has `{ chain, chainId, error, errorCode }` instead, a token whose read failed `{ symbol, address, decimals, error, errorCode }` (see below) | works |
 | `balance --chain <key> [--token <erc20>] [--rpc <url>] [--no-qr]` | `{ chain, key, address, symbol, decimals, balance, raw, verified, verifiedBy?, warning?, token? }` (on `tron` also `activated`, and `--token usdt\|<T…>` adds `symbolSource`) | works |
 | `call --chain <key> --to <contract> --sig "<fn>" [ARGS...] [--rpc <url>]` | `{ chain, from, to, sig, args, result, raw }` | works |
-| `invoke --chain <key> --to <contract\|@nick> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | transfer's send fields + `{ sig, args, data, value, valueRaw, toNickname? }` | `WALLET_LOCKED` |
-| `transfer --chain <key> --to <0x\|@nick> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>]` | see below | `WALLET_LOCKED` |
+| `invoke --chain <key> --to <contract\|@nick> (--sig "<fn>" [ARGS...] \| --data 0x...) [--value <dec>] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>] [--task <id>]` | transfer's send fields + `{ sig, args, data, value, valueRaw, toNickname? }` | `WALLET_LOCKED` |
+| `transfer --chain <key> --to <0x\|@nick> --amount <dec> [--token <erc20>] [--force] [--dry-run] [--wait [--wait-timeout <dur>]] [--nonce <n> [--bump <factor>] [--replace <txHash>] \| [--allow-pending] [--allow-duplicate]] [--max-fee-gwei <gwei>] [--rpc <url>] [--task <id>]` | see below | `WALLET_LOCKED` |
 | `sign-message [--chain <key>] --message <s>` | `{ chain, key, address, message, signature, digest }` (EIP-191; refused unless the whitelist allows it; `CAPABILITY_UNSUPPORTED` on `tron`) | `WALLET_LOCKED` |
 | `tx --chain <key> <txHash> [--rpc <url>]` | `{ chain, txHash, found, status, from, to, nonce, value, valueRaw, symbol, explorerUrl, blockNumber?, gasUsed?, success?, hint? }` | works (no wallet needed) |
 | `unlock <dur> [--password-stdin] [--allow-ptrace-scope-0] [--no-qr]` | `{ locked: false, duration, expiresAt, active, index, address, daemonPid, verified: true, verifiedBy: "password", whitelist, warning? }` | - |
 | `lock` | `{ locked: true, wasUnlocked, stopped: [<pid>] }` | - |
 | `backup` | prints the recovery phrase; interactive terminal only | asks for the password |
-| `whitelist list [--verify [--password-stdin]]` | `{ gen, entries: [{ nickname, kind, address, chains, selectors? }], policy: { maxFeeWei, allowMessageSigning, transactionLimits? }, verified, source?, sealedGen?, reason? }` | works |
+| `whitelist list [--verify [--password-stdin]]` | `{ gen, entries: [{ nickname, kind, address, chains, selectors? }], policy: { maxFeeWei, allowMessageSigning, transactionLimits?, duplicateWindowSecs? }, verified, source?, sealedGen?, reason? }` | works |
 | `whitelist add <nick> <0x> [--chains <c1,c2>\|'*'] [--contract --selectors <0x…,0x…>] [--unlock <dur>]` | a change (see **The whitelist**) + `{ entry, warning? }` | asks for the password |
 | `whitelist remove <nick> [--unlock <dur>]` | a change + `{ entry }` | asks for the password |
 | `whitelist fee-cap <chain> <amount> [--unlock <dur>]` | a change + `{ feeCap: { chain, maxFeeWei, maxFee } }` | asks for the password |
 | `whitelist native-cap <chain> <coin amount\|none> [--unlock <dur>]` | a change + `{ transactionLimit: { chain, target, value, perTransaction: true }, policy }` | asks for the password |
 | `whitelist token-cap <chain> <token address> <integer base units\|none> [--unlock <dur>]` | a change + `{ transactionLimit: { chain, target, value, perTransaction: true }, policy }` | asks for the password |
 | `whitelist calldata-cap <chain> <byte count\|none> [--unlock <dur>]` | a change + `{ transactionLimit: { chain, target, value, perTransaction: true }, policy }` | asks for the password |
+| `whitelist duplicate-window <duration\|default> [--unlock <dur>]` | a change + `{ duplicateWindowSecs, advisory: true, policy }`; 1s–1d, default 10m | asks for the password |
 | `whitelist allow-message-signing on\|off [--unlock <dur>]` | a change + `{ allowMessageSigning }` | asks for the password |
 | `whitelist reset [--unlock <dur>]` | a change + `{ dropped }` | asks for the password |
 | `tui [--chain <key>] [--warm <dur>] [--allow-ptrace-scope-0]` | none: a terminal UI for a human (`--json` is refused) | works |
 
 ## Key management and terminal UI
+
+`transfer` and `invoke` also accept `--task <id>` to record shaped intent and submission
+for a task bound to the same chain/account. This is advisory accounting, not a policy
+edit or cumulative limit. Reports make no signature or broadcast request; use
+[`task report`](task-reports.md) to retain unknowns and investigate existing hashes
+before retrying an uncertain payment.
 
 - **Whitelist changes** also take `--password-stdin`, and with `--unlock <dur>` also
   `--allow-ptrace-scope-0` (see **The whitelist**).
@@ -70,7 +80,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
   wallet.json, the daemon socket and the environment is escaped and bounded as in the CLI, every
   cell goes through one filter that lets only printable ASCII and `₮` through, and no QR code is
   drawn. Tabs `1`–`7` and `[`/`]` navigate from any list, review or popup that is not a text
-  field; `?` or `:` opens the 55-action menu. Typing in a field or menu keeps `q`, `?` and
+  field; `?` or `:` opens the 60-action menu. Typing in a field or menu keeps `q`, `?` and
   digits as input; Esc closes it. Actions belonging to later work are listed with their
   disabled reason.
 
@@ -639,7 +649,7 @@ issues [#26](https://github.com/2lab-ai/zwallet/issues/26) and
   Mainnet, the L1 data fee. Without `--dry-run` a shortfall is `INSUFFICIENT_FUNDS` before anything
   is signed. `--dry-run` signs but does not broadcast and returns `{ dryRun: true, chain, key, from,
   to, amount, amountRaw, symbol, decimals, token?, chainId, nonce, pendingNonces, pendingRange,
-  pendingCount, duplicateSends?, gasLimit, gasEstimate, gasLimitSource, type, maxFeePerGas,
+  pendingCount, duplicateSends?, duplicateGuard, taskId?, taskIntentId?, gasLimit, gasEstimate, gasLimitSource, type, maxFeePerGas,
   maxPriorityFeePerGas, gasPrice, maxGasCost, l1Fee, nativeBalance, sufficientFunds, shortfall,
   whitelist, signerDecoded, txHash, recoveredFrom }` (without the last three when the whitelist
   refuses, see **The whitelist**). It has no `rawTx`: a dry-run never hands out bytes that
@@ -650,7 +660,7 @@ issues [#26](https://github.com/2lab-ai/zwallet/issues/26) and
   (or `null`) and `pendingCount` how many there are. Both counts come from the node, so the range is
   never listed in full. `duplicateSends` (a send without `--nonce`) lists the journal's recent sends
   that this one repeats (see below). Live: `{ ..., txHash, explorerUrl, journal, broadcastWarning?,
-  rpcTxHash? }` plus `{ status, success, blockNumber, gasUsed, hint? }` with `--wait`.
+  rpcTxHash?, taskWarning? }` plus `{ status, success, blockNumber, gasUsed, hint? }` with `--wait`.
 - **`--wait`** polls for the receipt for `--wait-timeout <dur>` (default `90s`; same units as
   unlock durations). One deadline bounds both in-flight receipt RPC requests and polling sleeps;
   a late response is not accepted after expiry. This budget starts after broadcast and does not
@@ -733,9 +743,10 @@ issues [#26](https://github.com/2lab-ai/zwallet/issues/26) and
   anyway; use it only for a different payment. A dry-run reports `pendingNonces` instead of
   refusing.
 - **A send without `--nonce` that repeats a recent one is refused.** If the send journal has an
-  entry from the last 10 minutes with the same chain, kind, `to` and amount in base units
+  entry within the configured window (default 10 minutes) with the same chain, kind, `to` and amount in base units
   (`amountRaw`: wei for a native transfer or an invoke's value; for a token transfer the token's
-  base units and the same token contract), a send without `--nonce` is `VALIDATION_ERROR` "this
+  base units and the same token contract), and for invokes the same encoded calldata hash,
+  a send without `--nonce` is `VALIDATION_ERROR` "this
   looks like a repeat of a recent send; look those hashes up first. If this really is a second
   payment, pass --allow-duplicate", naming each match's txHash, nonce and time, then one `zwallet
   tx` template to look each hash up (`duplicateSends`, `journal`); nothing is signed. The display text (`value`) is
@@ -748,6 +759,12 @@ issues [#26](https://github.com/2lab-ai/zwallet/issues/26) and
   reports it too. `--nonce` sends skip the check: at a fixed nonce they can only replace or retry,
   never add a payment. Only the journal's last 1 MiB is read, and lines that are not entries are
   skipped.
+  `whitelist duplicate-window 30m` sets the authenticated advisory window for all chains;
+  `default` restores 10m. Values are 1s–1d. In the whitelist TUI use `D` or the action menu.
+  Invoke matches include the hash of encoded calldata; missing/malformed legacy hashes match
+  conservatively. `duplicateGuard` reports the effective seconds, 1 MiB tail and policy source:
+  CLI local-file reads are unverified, while a TUI review uses its password-checked list.
+  This is an accident-prevention aid, not daemon replay protection or cumulative accounting.
 - **`signerDecoded.action`** names the ABI method the calldata calls, never an asset, because
   ERC-20 and ERC-721 share these selectors: `{ kind: "native-transfer", to, value }`,
   `{ kind: "transfer-call", token, to, amount, assetType: "unverified" }`,
@@ -912,7 +929,7 @@ this session retains its immutable review. It retries the same intent at the
 same nonce, even if the journal has changed. After restarting, look the hash up
 with `/` or `zwallet tx`. An unknown hash does not prove failure: a fresh send at
 a new nonce may pay twice even without `d`, since the repeat check uses only a
-10-minute window in a journal editable by any process of this user.
+configured window (10 minutes by default) in a journal editable by any process of this user.
 
 
 ## TUI contract and message tools
@@ -923,8 +940,9 @@ and a password-checked key/list, show the decoded intent and fee review, and req
 the contract nickname before signing. The review shows the pending and repeat guards'
 verdicts before that (`clear` with nothing to block, `blocked` with something and no
 override, `OVERRIDE` once overridden), as the transfer review does; `p` and `d` override them.
-As in the CLI, a repeat is the same contract, value and token within 10 minutes, whatever
-the calldata. Use `j`/`k` to scroll the complete calldata
+As in the CLI, a repeat has the same contract, value, token and encoded calldata within
+the configured window. Missing or malformed legacy calldata hashes match conservatively.
+Use `j`/`k` to scroll the complete calldata
 and exact quantities; Home returns to the review's beginning. Their status uses the same `w`, `s`, `x` and
 `R` controls and original-intent checks as transfers.
 

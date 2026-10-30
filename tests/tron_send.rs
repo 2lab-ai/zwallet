@@ -450,6 +450,7 @@ async fn tr21_broadcast_outcomes_preserve_computed_hash_and_journal() {
             value: "1 TRX".into(),
             amount_raw: Some("1000000".into()),
             token: None,
+            calldata_hash: None,
         };
         let mut record = SendRecord::new(j.clone(), &signed, &summary);
         record.entry["expiresAt"] = p.fields["expiresAt"].clone();
@@ -534,6 +535,63 @@ fn pay<'a>(node: &'a MockTron, to: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
     a.extend_from_slice(extra);
     a
 }
+
+#[test]
+fn tron_native_task_reports_reconcile_checked_raw_data_and_receipt_without_nonce() {
+    let home = fake_home();
+    let published = Arc::new(Mutex::new(None::<Value>));
+    let captured = published.clone();
+    let node = MockTron::start(move |path, body| {
+        Reply::Json(match path {
+            "/wallet/broadcasthex" => {
+                let raw = raw_from_envelope(body["transaction"].as_str().unwrap());
+                let id = hex::encode(tx::txid(&raw));
+                *captured.lock().unwrap() = Some(
+                    json!({"txID":id,"raw_data_hex":hex::encode(raw),"ret":[{"contractRet":"SUCCESS"}]}),
+                );
+                json!({"result":true})
+            }
+            "/wallet/gettransactionbyid" => captured.lock().unwrap().clone().unwrap_or(json!({})),
+            "/wallet/gettransactioninfobyid" => captured
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|v| json!({"id":v["txID"],"blockNumber":9000001,"fee":1234}))
+                .unwrap_or(json!({})),
+            _ => fixture(path, body),
+        })
+    });
+    home.run(&[
+        "task",
+        "create",
+        "tron-dev",
+        "--chain",
+        "tron",
+        "--allocation",
+        "native=2000000",
+        "--rpc",
+        &node.url,
+        "--json",
+    ])
+    .ok();
+    let daemon = fake(&home, 0);
+    home.run(&pay(&node, "@bob", &["--task", "tron-dev"])).ok();
+    let count = sign_count(&daemon);
+    let r = home
+        .run(&["task", "report", "tron-dev", "--rpc", &node.url, "--json"])
+        .ok();
+    assert_eq!(r["records"][0]["outcome"], "confirmed", "{r}");
+    assert_eq!(r["records"][0]["actualFeeRaw"], "1234");
+    assert!(r["records"][0]["nonce"].is_null());
+    assert_eq!(sign_count(&daemon), count, "read-only report did not sign");
+    let native = r["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["asset"] == "native")
+        .unwrap();
+    assert_eq!(native["remainingAllocationRaw"], "998766");
+}
 #[test]
 fn tr19_cli_flags_and_nonregistry_tokens_fail_before_any_rpc() {
     let home = Home::new();
@@ -600,6 +658,7 @@ fn tr18_cli_preflight_refusals_send_zero_signature_requests() {
 fn tr20_cli_send_wait_and_duplicate_are_one_journaled_payment() {
     for token in [false, true] {
         let home = fake_home();
+        home.edit_whitelist(|list| list.policy.duplicate_window_secs = Some(1800));
         let daemon = fake(&home, 0);
         let state = Arc::new(Mutex::new(None::<Value>));
         let saved = state.clone();
@@ -631,12 +690,26 @@ fn tr20_cli_send_wait_and_duplicate_are_one_journaled_payment() {
         let v = home.run(&pay(&node, "@bob", &extra)).ok();
         assert_eq!(v["status"], "mined");
         assert_eq!(v["success"], true);
+        assert_eq!(v["duplicateGuard"]["windowSecs"], 1800);
+        let path = v["journal"].as_str().unwrap();
+        let mut entry: Value =
+            serde_json::from_str(std::fs::read_to_string(path).unwrap().trim()).unwrap();
+        entry["ts"] = json!(zwallet::core::time::rfc3339_utc(
+            zwallet::core::time::unix_secs(std::time::SystemTime::now()) - 1200
+        ));
+        std::fs::write(path, format!("{entry}\n")).unwrap();
         assert!(v.get("nonce").is_none());
         assert_eq!(sign_count(&daemon), 1);
-        let e = home
-            .run(&pay(&node, "@bob", &extra))
-            .err("VALIDATION_ERROR");
+        let refused = home.run(&pay(&node, "@bob", &extra));
+        let e = refused.err("VALIDATION_ERROR");
         assert!(e.contains("expiresAt") && e.contains("second payment"));
+        assert!(e.starts_with("advisory duplicate guard (policy: local-file-unverified; window 1800s; last 1 MiB of local journal): "));
+        assert_eq!(refused.json()["duplicateGuard"], v["duplicateGuard"]);
+        let mut human_args = pay(&node, "@bob", &extra);
+        human_args.retain(|arg| *arg != "--json");
+        let human = home.run(&human_args);
+        assert_ne!(human.code, 0);
+        assert!(human.stderr.starts_with("error: advisory duplicate guard (policy: local-file-unverified; window 1800s; last 1 MiB of local journal): "), "{}", human.stderr);
         assert_eq!(sign_count(&daemon), 1);
         assert_eq!(node.calls("/wallet/broadcasthex").len(), 1);
     }

@@ -27,6 +27,7 @@ pub use tools::{
 };
 pub mod replacement;
 pub mod send;
+pub mod tasks;
 pub mod tron_send;
 pub use send::{
     CheckedPayee, SendOutput, SendTransferOutcome, TransferInput, TransferOptions, TransferReview,

@@ -31,6 +31,9 @@ Local acceptance for H24 is complete. Exact final head, fork draft PR and CI
 receipts are indexed by [issue #57](https://github.com/2lab-ai/zwallet/issues/57);
 a predecessor CI pass does not establish that final run. Upstream merge remains
 outside this continuation's authority, so H24/#55 are not closed. After an authorized
-merge, verify main CI before calling that revision shipped. Existing PR #51
-real-terminal acceptance covers the unchanged product behavior. Stable release/tags,
+merge, verify main CI before calling that revision shipped. PR #59 now also carries the authorized remaining-plan continuation and comprehensive
+security document; its new behavior and final-source gates are tracked in
+[`../security-assurance/completion-checklist.md`](../security-assurance/completion-checklist.md).
+Existing PR #51 real-terminal acceptance remains historical evidence for the original
+TUI/Tron behavior. Stable release/tags,
 funds, real-wallet acceptance and trade-offs remain the owner's.

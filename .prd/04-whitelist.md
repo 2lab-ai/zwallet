@@ -586,8 +586,6 @@ request):
 [feature status](../docs/features.md#planned-features).
 
 - Cumulative amount budgets (rolling 24 h native and per-token caps).
-- The `invoke` duplicate key on calldata, and the duplicate window as a policy setting (R4 N-3 and
-  N-4).
 - User-added tokens.
 - Moving the whitelist key to the Secure Enclave or hardware.
 
@@ -605,6 +603,24 @@ Human edits use `native-cap <chain> <coin amount|none>`,
 `calldata-cap <chain> <byte count|none>`. Reset removes all such limits with a warning.
 These are not cumulative budgets, general contract-argument constraints or L1 total-fee caps.
 Full acceptance and delivery status: [`06-review-hardening.md`](06-review-hardening.md).
+
+## Advisory duplicate guard (2026-10-30)
+
+The implemented optional signed `policy.duplicateWindowSecs` is an integer from 1 to
+86400. Absence and reset use 600 seconds and preserve the old canonical signing bytes.
+Human `whitelist duplicate-window <duration|default>` and the TUI whitelist action
+use the existing authenticated edit boundary. This closes planned R4 N-3/N-4 in the
+current source; final validation/delivery is tracked by
+[`10-security-assurance.md`](10-security-assurance.md).
+
+`invoke` repeat identity includes keccak256 of normalized encoded calldata. Signature
+and raw-hex forms producing the same bytes match; different valid hashes do not.
+Missing/malformed legacy hashes match conservatively. Only the last 1 MiB of journal
+is searched, so even a configured window is not exhaustive. CLI reports the local-file
+setting as unverified; the TUI pins its password-checked list's setting. The daemon
+still verifies the whole policy before signing, but performs no duplicate accounting.
+`--allow-duplicate`, fixed-nonce paths, direct callers and mutable/deleted records remain
+outside this advisory guard. It is neither replay protection nor a cumulative budget.
 
 
 ## Tron family policy

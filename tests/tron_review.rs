@@ -156,6 +156,7 @@ impl Fixture {
     }
     fn input(&self, asset: TronAsset) -> TronTransferInput {
         TronTransferInput {
+            task_id: None,
             key_name: "main".into(),
             index: 0,
             from: FROM.into(),

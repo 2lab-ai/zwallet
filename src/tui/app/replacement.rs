@@ -23,6 +23,7 @@ pub enum Stage {
     Review,
     Confirm,
     Bump,
+    Task,
     Sending,
     Failed,
 }
@@ -695,6 +696,19 @@ impl App {
                     }
                     Vec::new()
                 }
+                Key::Char('t') if self.replacement.stage == Stage::Review => {
+                    let task = self
+                        .replacement
+                        .review
+                        .as_ref()
+                        .and_then(|r| r.original().task_id())
+                        .unwrap_or("");
+                    self.replacement.field = Some(
+                        Field::with_value(Kind::OptionalTaskId, task).expect("validated task ID"),
+                    );
+                    self.replacement.stage = Stage::Task;
+                    Vec::new()
+                }
                 Key::Char('b') if self.replacement.stage == Stage::Review => {
                     self.replacement.field = Some(Field::new(Kind::Bump));
                     self.replacement.stage = Stage::Bump;
@@ -768,6 +782,20 @@ impl App {
                 self.replacement.stage = Stage::Review;
                 return Vec::new();
             }
+            Edit::Submit if self.replacement.stage == Stage::Task => {
+                if let Some(context) = &mut self.replacement.context
+                    && let Some(original) = context.original.take()
+                {
+                    context.original = Some(
+                        original
+                            .with_task_id(
+                                (!field.value().is_empty()).then(|| field.value().to_string()),
+                            )
+                            .expect("validated task ID"),
+                    );
+                }
+                return self.prepare_replacement_again();
+            }
             Edit::Submit if self.replacement.stage == Stage::Bump => {
                 match chains::parse_bump(field.value()) {
                     Ok(bump) => {
@@ -820,8 +848,8 @@ impl App {
     pub fn replacement_hint(&self) -> &'static str {
         match self.replacement.stage {
             Stage::Preparing => "checking original...   Esc back   q quit",
-            Stage::Review => "Enter confirm   b bump   r review again   j/k scroll   Esc back",
-            Stage::Confirm | Stage::Bump => "Enter submit   Esc back   Ctrl-C quit",
+            Stage::Review => "Enter confirm  b bump  t task  r review  j/k scroll  Esc back",
+            Stage::Confirm | Stage::Bump | Stage::Task => "Enter submit   Esc back   Ctrl-C quit",
             Stage::Failed => "r review again   Esc back   q quit",
             _ => match self.replacement_available() {
                 (true, true) => "s speed up   x cancel   R retry this uncertain send",

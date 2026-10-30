@@ -5,7 +5,25 @@ use crate::tui::app::transfer::{ReceiptState, Stage};
 use alloy::primitives::U256;
 
 pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
-    let block = Block::bordered().border_set(ASCII).title(" send ");
+    let task = if app.on_tron() {
+        app.transfer()
+            .tron
+            .review
+            .as_ref()
+            .and_then(|r| r.fields().get("taskId"))
+            .and_then(serde_json::Value::as_str)
+    } else {
+        app.transfer()
+            .review
+            .as_ref()
+            .and_then(|r| r.fields().get("taskId"))
+            .and_then(serde_json::Value::as_str)
+    };
+    let title = format!(
+        " send / task: {} ",
+        Outside::input(task.unwrap_or("none")).text()
+    );
+    let block = Block::bordered().border_set(ASCII).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let state = app.transfer();
@@ -33,6 +51,17 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
         r.draw(frame, line(inner, y), placed);
     };
     match state.stage {
+        Stage::Task => {
+            row(
+                frame,
+                0,
+                "Optional task ID; blank removes attribution. No budget is enforced.",
+                None,
+                HINT,
+                placed,
+            );
+            field(frame, inner, 2, "Task: ", app, placed);
+        }
         Stage::Inactive | Stage::Loading => {
             row(frame, 0, "reading checked send data...", None, HINT, placed)
         }
@@ -354,7 +383,7 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 16,
                 "",
                 Some(Outside::detail(&format!(
-                    "Funds {} | pending {} {} | repeats {} {}",
+                    "Funds {} | pending {} {} | repeats {} {} [{}s/1MiB local]",
                     if review.sufficient_funds() {
                         "yes"
                     } else {
@@ -363,7 +392,10 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                     pending,
                     guard_verdict(pending, review.options().allow_pending),
                     repeats,
-                    guard_verdict(repeats as u64, review.options().allow_duplicate)
+                    guard_verdict(repeats as u64, review.options().allow_duplicate),
+                    review.fields()["duplicateGuard"]["windowSecs"]
+                        .as_u64()
+                        .unwrap_or(600)
                 ))),
                 if pending > 0 || repeats > 0 || !review.sufficient_funds() {
                     WARNING
@@ -397,19 +429,37 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
             }
         }
         Stage::Sending | Stage::Status | Stage::Wait => {
+            let task_warning = state
+                .status
+                .as_ref()
+                .is_some_and(|s| s.task_warning.is_some());
             row(
                 frame,
                 0,
-                if app.sending() {
+                if task_warning {
+                    "Task submission update not confirmed."
+                } else if app.sending() {
                     "Signing / broadcasting; q waits for the result."
                 } else {
                     "Send recorded; leaving this screen does not cancel it."
                 },
                 None,
-                TITLE,
+                if task_warning { WARNING } else { TITLE },
                 placed,
             );
             if let Some(status) = &state.status {
+                if task_warning {
+                    // Keep the accounting warning separate from mutable receipt notes. These
+                    // two complete lines also fit the minimum terminal, including wait mode.
+                    row(
+                        frame,
+                        1,
+                        "Inspect task report; do not resend blindly.",
+                        None,
+                        WARNING,
+                        placed,
+                    );
+                }
                 row(
                     frame,
                     2,

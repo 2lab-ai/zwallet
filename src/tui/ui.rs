@@ -6,6 +6,7 @@
 mod create;
 pub(crate) mod history;
 mod replacement;
+mod tasks;
 mod tools;
 mod transfer;
 mod tron_transfer;
@@ -122,6 +123,8 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         keys_pane(frame, pane, app, &mut placed);
     } else if let Some(popup) = &app.navigation().popup {
         popup_pane(frame, pane, app, popup, &mut placed);
+    } else if app.tasks_visible() {
+        tasks::pane(frame, pane, app, &mut placed);
     } else if app.tab() == Tab::Tools {
         tools::pane(frame, pane, app, &mut placed);
     } else if app.replacement_visible() {
@@ -158,6 +161,12 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
             "arrows move/edit   Enter choose   Esc back   Ctrl-C quit",
             HINT,
         )
+    } else if app.tasks_visible() {
+        if let Some(notice) = &app.tasks().notice {
+            Row::default().outside(&notice.cut(usize::from(hint.width)), ERROR)
+        } else {
+            Row::default().text(app.tasks_hint(), HINT)
+        }
     } else if app.tab() == Tab::Tools {
         if let Some(notice) = &app.tools().notice {
             Row::default().outside(&notice.cut(usize::from(hint.width)), ERROR)

@@ -65,12 +65,15 @@ no account, no API key, no telemetry and no OS keychain.
 - **G6 Chain families.** EVM is implemented. Solana and TON
   ![WIP](https://img.shields.io/badge/status-WIP-yellow) slot in later behind the same family
   boundary without changing the wallet file or the daemon protocol. Tron (TRX, TRC20 USDT) is the
-  first such family, planned for v0.3: [`05-tron.md`](05-tron.md).
+  first such family, implemented in v0.3: [`05-tron.md`](05-tron.md); funded mainnet acceptance
+  remains owner-run.
 - **G8 Signed whitelist (v0.1, WU1b).** Funds leave only to entries of a list signed with a key
   separate from the seed, enforced by the daemon. Approvals are revoke-only, there is a per-chain
   fee cap, and `sign-message` is gated ([`04-whitelist.md`](04-whitelist.md)).
-- **G9 TUI (v0.2).** ![WIP](https://img.shields.io/badge/status-WIP-yellow) Full workflows planned; the basic key/status screen is implemented. `zwallet tui`: keys, warm-up, balance + last 10 tx, tx detail, assets →
-  transfer to whitelisted recipients ([`03-tui.md`](03-tui.md)).
+- **G9 TUI (v0.2).** Full CLI/TUI workflows are implemented: keys, warm-up, balances, history,
+  transaction detail, checked transfers, replacement, whitelist editing and contract/message
+  tools. QR and recovery phrase remain the accepted CLI pointers; their alternative TUI
+  designs await the owner's choice ([`03-tui.md`](03-tui.md)).
 - **G7 Distribution.** The llmux/harn pattern: CI, preview prereleases on every `main` push, stable
   releases on `v*` tags, Homebrew formulae `2lab-ai/tap/zwallet` and `2lab-ai/tap/zwallet-preview`,
   and an `xbrew install zwallet` recipe.

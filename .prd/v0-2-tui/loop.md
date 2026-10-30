@@ -23,21 +23,9 @@ merged in PR #51 (599bde9); closed rows, units, build facts and receipts are in
   then accept the TUI on it. The dispatcher's real-terminal acceptance on that preview passed
   (loop.done.md R1); it does not stand in for the owner's.
 
-## Open test notes (TUI-1c review rounds 1 and 2, 2026-10-28)
-
-For the next unit whose pty runs resize or print after the TUI. Both still hold at 599bde9:
-- T9 shrinks a running terminal (120x40 to 79x24) and sees the warning alone, but does not tell
-  whether SIGWINCH's `Msg::Resize` or the next refresh tick redrew it (a probe on 2026-10-28 saw
-  the redraw 5 ms after the resize), and no test grows the window back
-  (`t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo`, tests/tui.rs:950-973,
-  only shrinks).
-- `quit()`'s stray and pending check (tests/tui.rs:858) covers only the bytes before the first
-  `CSI ?1049l` (`Frame::last`, tests/common/mod.rs:1645-1650). What is written after it goes
-  unchecked: the line for a failed `L` stop, and the panic hook's fixed line.
-
 ## Next
 
-The owner: the three items above. Pick up the test notes with the next TUI change
-that touches resize or post-exit output. Issue #52 is closed by PR #54; its receipt
+The owner: the three items above. The resize/post-exit test notes are resolved in
+`loop.done.md` R3. Issue #52 is closed by PR #54; its receipt
 is appended in [`loop.done.md`](loop.done.md) R2. The #55/#57 follow-up is tracked in
 [`../handoff-completion/loop.md`](../handoff-completion/loop.md), without reopening shipped TUI units.

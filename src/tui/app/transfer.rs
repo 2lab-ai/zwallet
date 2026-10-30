@@ -35,6 +35,7 @@ pub enum Stage {
     Review,
     Confirm,
     Fee,
+    Task,
     Sending,
     Status,
     Wait,
@@ -58,6 +59,8 @@ pub struct SendStatus {
     pub state: ReceiptState,
     pub wait: Duration,
     pub note: Option<Outside>,
+    /// Submission accounting warnings survive subsequent chain receipt updates.
+    pub task_warning: Option<Outside>,
     pub uncertain: bool,
     pub net: Net,
 }
@@ -595,6 +598,7 @@ impl App {
                         state: ReceiptState::Pending,
                         wait: SEND_WAIT,
                         note: None,
+                        task_warning: None,
                         uncertain: false,
                         net: self.net().clone(),
                     });
@@ -619,7 +623,14 @@ impl App {
                             ));
                             Vec::new()
                         }
-                        Ok(SendTransferOutcome::Sent(_)) => {
+                        Ok(SendTransferOutcome::Sent(output)) => {
+                            if let Some(status) = &mut self.transfer.status {
+                                status.task_warning = output
+                                    .fields
+                                    .get("taskWarning")
+                                    .and_then(Value::as_str)
+                                    .map(Outside::warning);
+                            }
                             self.transfer.stage = Stage::Status;
                             self.start_receipt_wait(SEND_WAIT)
                         }
@@ -756,6 +767,25 @@ impl App {
             return Some(self.transfer_input(super::navigation::input(key)));
         }
         self.transfer.notice = None;
+        if matches!(self.transfer.stage, Stage::Review | Stage::Failed) && key == Key::Char('t') {
+            let value = if self.on_tron() {
+                self.transfer
+                    .tron
+                    .draft
+                    .as_ref()
+                    .and_then(|d| d.task_id.as_deref())
+            } else {
+                self.transfer
+                    .draft
+                    .as_ref()
+                    .and_then(|d| d.options.task_id.as_deref())
+            }
+            .unwrap_or("");
+            self.transfer.field =
+                Some(Field::with_value(Kind::OptionalTaskId, value).expect("validated task ID"));
+            self.transfer.stage = Stage::Task;
+            return Some(vec![]);
+        }
         if self.on_tron()
             && let Some(work) = self.tron_transfer_key(key)
         {
@@ -877,7 +907,7 @@ impl App {
         Some(work)
     }
     fn transfer_input(&mut self, input: Input<'_>) -> Vec<Effect> {
-        if self.on_tron() && self.transfer.stage != Stage::Wait {
+        if self.on_tron() && !matches!(self.transfer.stage, Stage::Wait | Stage::Task) {
             return self.tron_transfer_input(input);
         }
         let Some(mut field) = self.transfer.field.take() else {
@@ -886,6 +916,19 @@ impl App {
         self.transfer.notice = None;
         match field.edit(input) {
             Edit::Submit => match self.transfer.stage {
+                Stage::Task => {
+                    let task_id = (!field.value().is_empty()).then(|| field.value().to_string());
+                    if self.on_tron() {
+                        if let Some(draft) = &mut self.transfer.tron.draft {
+                            draft.task_id = task_id;
+                        }
+                        return self.review_tron_draft();
+                    }
+                    if let Some(draft) = &mut self.transfer.draft {
+                        draft.options.task_id = task_id;
+                    }
+                    return self.review_draft();
+                }
                 Stage::Amount => {
                     if let Some(draft) = &mut self.transfer.draft {
                         draft.amount = field.value().into();
@@ -957,13 +1000,15 @@ impl App {
     }
     pub fn transfer_hint(&self) -> &'static str {
         match self.transfer.stage {
-            Stage::Amount | Stage::Fee | Stage::Confirm | Stage::Wait => {
+            Stage::Amount | Stage::Fee | Stage::Task | Stage::Confirm | Stage::Wait => {
                 "type value  Enter accept  Esc back  Ctrl-C quit"
             }
             Stage::Loading => "reading...  q quit  ? actions",
             Stage::Sending => "sending... q quits when done; do not resend  ? actions",
-            Stage::Review if self.on_tron() => "Enter confirm  d allow repeat  Esc edit  ? actions",
-            Stage::Review => "Enter confirm  p allow pending  d allow repeat  g fee  ? actions",
+            Stage::Review if self.on_tron() => {
+                "Enter confirm  d allow repeat  t task  Esc edit  ? actions"
+            }
+            Stage::Review => "Enter confirm  p pending  d repeat  g fee  t task  ? actions",
             Stage::Payees | Stage::Assets => {
                 "arrows choose  Enter select  Esc back  q quit  ? actions"
             }

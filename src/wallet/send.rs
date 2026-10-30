@@ -27,6 +27,8 @@ pub(crate) struct SendOptions {
     pub allow_duplicate: bool,
     pub wait: bool,
     pub wait_timeout: Option<Duration>,
+    /// A TUI review pins the password-checked policy window; CLI uses the local signed file.
+    pub duplicate_window_secs: Option<u32>,
 }
 
 fn payload(unsigned: &Value) -> Result<Vec<u8>> {
@@ -60,6 +62,14 @@ pub(crate) fn send_summary(
             .or_else(|| text("valueRaw"))
             .map(str::to_string),
         token: text("token").map(str::to_string),
+        calldata_hash: (kind == "invoke")
+            .then(|| {
+                text("data")
+                    .and_then(|v| v.strip_prefix("0x"))
+                    .and_then(|v| alloy::hex::decode(v).ok())
+                    .map(|bytes| format!("{:#x}", alloy::primitives::keccak256(bytes)))
+            })
+            .flatten(),
     }
 }
 
@@ -83,14 +93,38 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
     for (k, v) in fields {
         out.entry(k).or_insert(v);
     }
-    let journal = chains::SendJournal::new(home, net.chain, from);
+    let task = super::tasks::begin_async(home, net.chain, from, &out, kind, send.dry_run).await?;
+    if let Some((_, intent)) = &task {
+        out.insert("taskIntentId".into(), json!(intent));
+    }
+    // The CLI reads this signed field as local information; the daemon independently checks
+    // the entire policy against its sealed anchor. The guard/journal are not signer authority.
+    let window = match send.duplicate_window_secs {
+        Some(seconds) => seconds,
+        None => super::whitelist::local_duplicate_window(home),
+    };
+    let journal = chains::SendJournal::new(home, net.chain, from).with_duplicate_window(window)?;
+    let policy_source = if send.duplicate_window_secs.is_some() {
+        "password-checked-list"
+    } else {
+        "local-file-unverified"
+    };
+    let guard = json!({"windowSecs":window,"journalTailBytes":1 << 20,"advisory":true,"policySource":policy_source});
+    out.insert("duplicateGuard".into(), guard.clone());
     let summary = send_summary(&out, net.chain, kind);
     let mut duplicates_text = None;
     if send.nonce.is_none() {
         let now = crate::core::time::unix_secs(std::time::SystemTime::now());
         let duplicates = journal.recent_duplicates(&summary, now)?;
         if !duplicates.is_empty() && !send.dry_run && !send.allow_duplicate {
-            return Err(journal.duplicate_error(duplicates));
+            let mut error = journal.duplicate_error(duplicates);
+            // The refusal is the most important place to distinguish an advisory local guard
+            // from signer authority. Put this first so a bounded TUI error also preserves it.
+            error.message = format!(
+                "advisory duplicate guard (policy: {policy_source}; window {window}s; last 1 MiB of local journal): {}",
+                error.message
+            );
+            return Err(error.with_detail("duplicateGuard", guard));
         }
         // The journal's own lines, which anyone of this user can write: escaped in `--json`,
         // and for a human each field only in the shape zwallet writes it, within one budget.
@@ -183,9 +217,28 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
     if matches!(net.chain.family, Family::Tron(_)) {
         record.entry["expiresAt"] = out.get("expiresAt").cloned().unwrap_or(Value::Null);
     }
+    if let Some((id, intent)) = &task {
+        super::tasks::submission_async(home, id, *intent, &signed.tx_hash, signed.nonce, false)
+            .await?;
+        record.entry["taskId"] = json!(id);
+        record.entry["taskIntentId"] = json!(intent);
+    }
     let outcome = fam
         .broadcast(net, &signed, send.nonce.is_some(), &record)
-        .await?;
+        .await
+        .map_err(|error| match &task {
+            Some((id, intent)) => error
+                .with_detail("taskId", id.as_str())
+                .with_detail("taskIntentId", *intent),
+            None => error,
+        })?;
+    if let Some((id, intent)) = &task
+        && super::tasks::submission_async(home, id, *intent, &signed.tx_hash, signed.nonce, true)
+            .await
+            .is_err()
+    {
+        out.insert("taskWarning".into(), json!("broadcast returned successfully but the local task submission update was not confirmed and may finish later; inspect task list/report before retrying; do not resend blindly"));
+    }
     out.insert(
         "explorerUrl".into(),
         json!(net.chain.explorer_tx_url(&signed.tx_hash)),
@@ -294,6 +347,8 @@ pub fn transfer_payees(checked: &CheckedList, chain: &'static Chain) -> Vec<Chec
 /// Choices held by a review. A changed choice requires another review.
 #[derive(Debug, Clone, Default)]
 pub struct TransferOptions {
+    /// Advisory local task attribution, captured immutably by the review.
+    pub task_id: Option<String>,
     pub allow_pending: bool,
     pub allow_duplicate: bool,
     /// Price per gas unit in wei, equivalent to the CLI's --max-fee-gwei.
@@ -421,7 +476,8 @@ impl TransferReview {
     }
 
     fn same_intent(&self, next: &Self) -> bool {
-        self.decoded.chain_id() == next.decoded.chain_id()
+        self.input.options.task_id == next.input.options.task_id
+            && self.decoded.chain_id() == next.decoded.chain_id()
             && self.input.from == next.input.from
             && self.decoded.to() == next.decoded.to()
             && self.decoded.value() == next.decoded.value()
@@ -451,11 +507,15 @@ fn transfer_kind(request: &TransferRequest) -> &'static str {
 }
 
 fn base_fields(chain: &Chain, input: &TransferInput) -> Map<String, Value> {
-    json!({"chain":chain.key, "key":input.key_name, "from":input.from,
+    let mut fields = json!({"chain":chain.key, "key":input.key_name, "from":input.from,
         "to":input.payee.address, "toNickname":input.payee.nickname})
     .as_object()
     .unwrap()
-    .clone()
+    .clone();
+    if let Some(task) = &input.options.task_id {
+        fields.insert("taskId".into(), task.clone().into());
+    }
+    fields
 }
 
 fn assemble_review(
@@ -520,7 +580,10 @@ fn assemble_review(
         .ok_or_else(|| WalletError::validation("prepared transaction has no funds verdict"))?;
     let mut fields = base_fields(net.chain, &input);
     fields.extend(prepared.fields.clone());
-    let journal = chains::SendJournal::new(&home, net.chain, &input.from);
+    let window = checked.list.policy.duplicate_window_secs();
+    let journal =
+        chains::SendJournal::new(&home, net.chain, &input.from).with_duplicate_window(window)?;
+    fields.insert("duplicateGuard".into(), json!({"windowSecs":window,"journalTailBytes":1 << 20,"advisory":true,"policySource":"password-checked-list"}));
     if request.nonce.is_none() {
         let duplicates = journal.recent_duplicates(
             &send_summary(&fields, net.chain, transfer_kind(&request)),
@@ -575,6 +638,9 @@ pub async fn review_transfer(
         ));
     }
     input.from = evm::parse_address(&input.from)?.to_checksum(None);
+    if let Some(task) = &input.options.task_id {
+        super::tasks::validate_binding_async(home, task, net.chain, &input.from).await?;
+    }
     if input.options.max_fee_wei == Some(0) {
         return Err(WalletError::validation(
             "--max-fee-gwei must be greater than zero",
@@ -646,6 +712,7 @@ pub async fn send_transfer(
         allow_duplicate: next.input.options.allow_duplicate,
         wait: false,
         wait_timeout: None,
+        duplicate_window_secs: Some(next.checked.list.policy.duplicate_window_secs()),
     };
     let result = send_prepared(
         &Evm,
@@ -662,4 +729,41 @@ pub async fn send_transfer(
     )
     .await?;
     Ok(SendTransferOutcome::Sent(result))
+}
+
+#[cfg(test)]
+mod duplicate_tests {
+    use super::*;
+    #[test]
+    fn invoke_summary_hashes_encoded_bytes_not_spelling_or_signature_form() {
+        let chain = chains::find("ethereum").unwrap();
+        let signature = crate::wallet::InvokeData::Signature {
+            sig: "transfer(address,uint256)".into(),
+            args: vec![
+                "0x2222222222222222222222222222222222222222".into(),
+                "7".into(),
+            ],
+        };
+        let (bytes, _) = signature.encode().unwrap();
+        let lower = format!("0x{}", alloy::hex::encode(&bytes));
+        let upper = format!("0x{}", alloy::hex::encode(&bytes).to_ascii_uppercase());
+        let summary = |data: &str| {
+            send_summary(json!({"to":"0x2222222222222222222222222222222222222222","data":data,"valueRaw":"0"}).as_object().unwrap(),chain,"invoke")
+        };
+        let a = summary(&lower);
+        assert_eq!(a.calldata_hash, summary(&upper).calldata_hash);
+        let (raw, _) = crate::wallet::InvokeData::Raw(upper).encode().unwrap();
+        assert_eq!(raw, bytes);
+        assert_eq!(
+            a.calldata_hash,
+            Some(format!("{:#x}", alloy::primitives::keccak256(&raw)))
+        );
+        assert_ne!(a.calldata_hash, summary(&(lower + "00")).calldata_hash);
+        assert!(summary("not hex").calldata_hash.is_none());
+        assert!(
+            send_summary(&Map::new(), chain, "transfer")
+                .calldata_hash
+                .is_none()
+        );
+    }
 }

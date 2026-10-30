@@ -774,6 +774,7 @@ pub struct SendJournal {
     path: PathBuf,
     chain: &'static Chain,
     address: String,
+    duplicate_window_secs: u32,
 }
 
 /// How many journal entries an error message names at most (the newest).
@@ -953,11 +954,11 @@ fn journal_lookup(chain: &Chain) -> String {
 fn inert_entries(entries: &[Value]) -> Value {
     Value::Array(entries.iter().map(crate::core::text::inert_json).collect())
 }
-/// How much of the journal's end is read; older entries are past every window that matters.
+/// Maximum journal tail read. High-volume histories may omit entries within the window.
 const JOURNAL_TAIL: u64 = 1 << 20;
 /// A send without `--nonce` that matches a journal entry this recent is refused as a likely
 /// repeat ([`SendJournal::recent_duplicates`]).
-pub const DUPLICATE_WINDOW_SECS: u64 = 600;
+pub const DUPLICATE_WINDOW_SECS: u64 = crate::core::whitelist::DEFAULT_DUPLICATE_WINDOW_SECS as u64;
 
 /// What a send does, as its journal line records it and the duplicate check compares it:
 /// `kind` (`transfer`, `token-transfer`, `invoke`), `to` (the recipient, or the contract for
@@ -974,6 +975,8 @@ pub struct SendSummary {
     pub value: String,
     pub amount_raw: Option<String>,
     pub token: Option<String>,
+    /// Keccak-256 of exact encoded invoke calldata; no arbitrary call arguments are journaled.
+    pub calldata_hash: Option<String>,
 }
 
 /// Where [`SendJournal`] keeps `address`'s sends on `chain` in `home`.
@@ -1016,7 +1019,19 @@ impl SendJournal {
             path: journal_path(home, chain, address),
             chain,
             address: address.to_string(),
+            duplicate_window_secs: crate::core::whitelist::DEFAULT_DUPLICATE_WINDOW_SECS,
         }
+    }
+
+    /// Choose the window from a validated policy. This remains a local, bypassable aid.
+    pub fn with_duplicate_window(mut self, seconds: u32) -> Result<Self> {
+        if !(1..=crate::core::whitelist::MAX_DUPLICATE_WINDOW_SECS).contains(&seconds) {
+            return Err(WalletError::validation(
+                "duplicate window must be from 1 to 86400 seconds",
+            ));
+        }
+        self.duplicate_window_secs = seconds;
+        Ok(self)
     }
 
     /// Known expiration from this account's journal. The file is an observation aid, not policy.
@@ -1312,10 +1327,12 @@ impl SendJournal {
         (text, entries)
     }
 
-    /// The entries from the last [`DUPLICATE_WINDOW_SECS`] before `now` (UNIX seconds) that do
+    /// The entries from the configured window (default [`DUPLICATE_WINDOW_SECS`]) before `now` that do
     /// what `send` does: same chain, kind and `to`, the same amount in base units (`amountRaw`;
     /// a line written before zwallet journaled it compares its `value` text instead), and the
-    /// same token contract (or none on both). Addresses compare without case. An entry stamped after `now` (a clock set back)
+    /// same token contract (or none on both). Invokes also compare calldata hashes; absent or
+    /// malformed legacy hashes conservatively match. Only the last 1 MiB is read, so this is
+    /// not exhaustive accounting. Addresses compare without case. An entry stamped after `now` (a clock set back)
     /// counts as recent; one whose time does not parse does not. A journal that cannot be read
     /// is an error that says nothing was signed: without it a repeat would go unnoticed.
     pub fn recent_duplicates(&self, send: &SendSummary, now: u64) -> Result<Vec<Value>> {
@@ -1344,7 +1361,9 @@ impl SendJournal {
                 e["ts"]
                     .as_str()
                     .and_then(crate::core::time::parse_rfc3339_utc)
-                    .is_some_and(|ts| now.saturating_sub(ts) <= DUPLICATE_WINDOW_SECS)
+                    .is_some_and(|ts| {
+                        now.saturating_sub(ts) <= u64::from(self.duplicate_window_secs)
+                    })
             })
             .filter(|e| {
                 let same_amount = match (e["amountRaw"].as_str(), send.amount_raw.as_deref()) {
@@ -1356,6 +1375,8 @@ impl SendJournal {
                     && same_amount
                     && same_addr(&e["to"], Some(&send.to))
                     && same_addr(&e["token"], send.token.as_deref())
+                    && (send.kind != "invoke"
+                        || same_calldata(e["calldataHash"].as_str(), send.calldata_hash.as_deref()))
             })
             .collect())
     }
@@ -1390,14 +1411,25 @@ impl SendJournal {
         WalletError::validation(format!(
             "this looks like a repeat of a recent send; look those hashes up first. If this \
              really is a second payment, pass --allow-duplicate. The send journal {} has the same \
-             send (chain, kind, recipient, amount and token) from the last {} minutes: {shown}; \
+             send (chain, kind, recipient, amount, token and invoke calldata) in the last {} seconds within the journal tail (at most 1 MiB): {shown}; \
              {}; nothing was signed",
             self.display(),
-            DUPLICATE_WINDOW_SECS / 60,
+            self.duplicate_window_secs,
             journal_lookup(self.chain)
         ))
         .with_detail("duplicateSends", inert_entries(&duplicates))
         .with_detail("journal", self.display())
+    }
+}
+
+/// Unknown legacy identities match conservatively: loss/corruption must not make a repeat new.
+fn same_calldata(a: Option<&str>, b: Option<&str>) -> bool {
+    let valid = |s: &str| {
+        s.len() == 66 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
+    };
+    match (a.filter(|s| valid(s)), b.filter(|s| valid(s))) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => true,
     }
 }
 
@@ -1459,6 +1491,9 @@ impl SendRecord {
         }
         if let Some(token) = &send.token {
             entry["token"] = json!(token);
+        }
+        if let Some(hash) = &send.calldata_hash {
+            entry["calldataHash"] = json!(hash);
         }
         Self {
             journal,
@@ -2172,6 +2207,7 @@ mod tests {
             value: "0.5 ETH".into(),
             amount_raw: Some("500000000000000000".into()),
             token: None,
+            calldata_hash: None,
         };
         let record = SendRecord::new(journal.clone(), &signed, &summary);
         record.write().unwrap();
@@ -2275,6 +2311,7 @@ mod tests {
             value: "1 ETH".into(),
             amount_raw: None,
             token: None,
+            calldata_hash: None,
         };
         assert_eq!(hashes(&native), [h(1), h(3)]);
         let token = SendSummary {
@@ -2302,6 +2339,106 @@ mod tests {
         let v = e.to_json();
         assert_eq!(v["duplicateSends"].as_array().unwrap().len(), 2);
         assert_eq!(v["journal"], journal.display());
+    }
+
+    #[test]
+    fn invoke_duplicates_compare_calldata_and_keep_legacy_rows_conservative() {
+        let home = temp_home();
+        let journal = SendJournal::new(home.path(), find("ethereum").unwrap(), "0xF00");
+        let now = 10_000;
+        let hash = |byte| format!("0x{}", format!("{byte:02x}").repeat(32));
+        let wanted = hash(1);
+        for (id, data) in [
+            ("same", Some(wanted.clone())),
+            (
+                "case",
+                Some(format!("0x{}", wanted[2..].to_ascii_uppercase())),
+            ),
+            ("different", Some(hash(2))),
+            ("legacy", None),
+            ("malformed", Some("0x01".into())),
+        ] {
+            journal.append(&json!({"ts":crate::core::time::rfc3339_utc(now),"chain":"ethereum","kind":"invoke","to":"0xb0b","amountRaw":"5","value":"0.000000000000000005 ETH","txHash":id,"calldataHash":data})).unwrap();
+        }
+        let summary = SendSummary {
+            kind: "invoke".into(),
+            to: "0xB0B".into(),
+            amount_raw: Some("5".into()),
+            value: "ignored label".into(),
+            token: None,
+            calldata_hash: Some(wanted),
+        };
+        let duplicates = journal.recent_duplicates(&summary, now).unwrap();
+        assert_eq!(
+            duplicates
+                .iter()
+                .map(|v| v["txHash"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["same", "case", "legacy", "malformed"]
+        );
+        let signed = SignedTx {
+            raw: "0x02".into(),
+            tx_hash: hash(3),
+            signer: "0xF00".into(),
+            nonce: Some(7),
+        };
+        let record = SendRecord::new(journal, &signed, &summary);
+        assert_eq!(record.entry["calldataHash"], summary.calldata_hash.unwrap());
+        assert!(record.entry.get("data").is_none());
+    }
+
+    #[test]
+    fn duplicate_windows_apply_to_evm_and_tron_with_inclusive_boundaries() {
+        for chain in ["ethereum", "tron"] {
+            let home = temp_home();
+            let journal = SendJournal::new(home.path(), find(chain).unwrap(), "owner");
+            let now = 10_000;
+            for (id, age) in [
+                ("inside", 299_i64),
+                ("edge", 300),
+                ("outside", 301),
+                ("default", 600),
+                ("long", 1800),
+                ("future", -10),
+            ] {
+                journal.append(&json!({"ts":crate::core::time::rfc3339_utc((now as i64-age) as u64),"chain":chain,"kind":"transfer","to":"recipient","amountRaw":"5","txHash":id})).unwrap();
+            }
+            let summary = SendSummary {
+                kind: "transfer".into(),
+                to: "recipient".into(),
+                value: "5 units".into(),
+                amount_raw: Some("5".into()),
+                token: None,
+                calldata_hash: None,
+            };
+            for (window, expected) in [
+                (300, vec!["inside", "edge", "future"]),
+                (600, vec!["inside", "edge", "outside", "default", "future"]),
+                (
+                    1800,
+                    vec!["inside", "edge", "outside", "default", "long", "future"],
+                ),
+            ] {
+                let configured = journal.clone().with_duplicate_window(window).unwrap();
+                let dup = configured.recent_duplicates(&summary, now).unwrap();
+                assert_eq!(
+                    dup.iter()
+                        .map(|v| v["txHash"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                if chain == "ethereum" {
+                    assert!(
+                        configured
+                            .duplicate_error(dup)
+                            .message
+                            .contains(&format!("last {window} seconds"))
+                    );
+                }
+            }
+            assert!(journal.clone().with_duplicate_window(0).is_err());
+            assert!(journal.with_duplicate_window(86_401).is_err());
+        }
     }
 
     #[test]
@@ -2580,6 +2717,7 @@ mod tests {
             value: value.into(),
             amount_raw: Some(raw.into()),
             token: token.map(str::to_string),
+            calldata_hash: None,
         };
         // symbol() failed this time: "0.5 ?" still matches on the token and base units.
         assert_eq!(
@@ -2618,6 +2756,7 @@ mod tests {
             value: "1 ETH".into(),
             amount_raw: None,
             token: None,
+            calldata_hash: None,
         };
         SendRecord::new(journal.clone(), &signed, &summary)
             .write()
@@ -2673,6 +2812,7 @@ mod tests {
             value: "1 ETH".into(),
             amount_raw: None,
             token: None,
+            calldata_hash: None,
         };
         let e = journal.recent_duplicates(&summary, 0).unwrap_err();
         assert!(

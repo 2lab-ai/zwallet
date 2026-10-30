@@ -3,6 +3,11 @@
 This is the optional technical appendix. For the public introduction, watch the
 [animated explainer](../agent-story/README.md).
 
+The recording below is historical evidence from its stated source revision. Current
+source also provides [native task reports](../../docs/task-reports.md); the existing
+film, cast and example-computed report are preserved, not represented as a rerun of
+that newer command.
+
 [Back to zwallet](../../README.md) · [MP4](../../docs/assets/agent-budget.mp4) ·
 [Terminal recording](../../docs/assets/agent-budget.cast) ·
 [Execution evidence](../../docs/assets/agent-budget-evidence.json)

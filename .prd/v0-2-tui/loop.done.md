@@ -161,3 +161,29 @@ as `6f1a2c91ab3a0bdaf9bf039afc27110eff0c1c6a`, closing #52. Main
 on Linux and macOS. See the [handoff R2](../handoff-completion/loop.done.md#r2--closed-2026-10-30-pr-54)
 for the bounded conclusion about the unreproduced single-edit a_cache observation.
 Existing shipped acceptance rows and R1 receipts above are unchanged.
+
+
+## R3 — closed 2026-10-30 (remaining evidence notes, draft PR #59)
+
+Resolved in the current continuation (draft PR #59): actual full runtime with refresh
+ticks disabled observes 120x40 → 79x24 → 80x24; shared PTY output through EOF proves
+cursor restoration precedes the exact failed-lock error; panic streams allow only
+the fixed output. Tests: `actual_sigwinch_redraws_shrink_and_grow_without_refresh_ticks`,
+`failed_lock_then_quit_restores_before_exact_cli_error_output`, complete-stream
+counterexamples and production T9. The focused unit observed 26 passed, 0 failed.
+The final integrated gate/CI is tracked in security-assurance; this is not a new
+preview-release claim.
+
+### Original note snapshot
+
+## Open test notes (TUI-1c review rounds 1 and 2, 2026-10-28)
+
+For the next unit whose pty runs resize or print after the TUI. Both still hold at 599bde9:
+- T9 shrinks a running terminal (120x40 to 79x24) and sees the warning alone, but does not tell
+  whether SIGWINCH's `Msg::Resize` or the next refresh tick redrew it (a probe on 2026-10-28 saw
+  the redraw 5 ms after the resize), and no test grows the window back
+  (`t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo`, tests/tui.rs:950-973,
+  only shrinks).
+- `quit()`'s stray and pending check (tests/tui.rs:858) covers only the bytes before the first
+  `CSI ?1049l` (`Frame::last`, tests/common/mod.rs:1645-1650). What is written after it goes
+  unchecked: the line for a failed `L` stop, and the panic hook's fixed line.

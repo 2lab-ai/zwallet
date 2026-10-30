@@ -8,6 +8,11 @@ is the as-built contract of the TUI (v0.2), not a future target. Receipts:
 acceptance on the installed preview, where the coverage matrix's 59 TUI rows PASS at 120x40 and
 80x24. Code-backed boundary: [feature status](../docs/features.md).
 
+Current-source extensions on 2026-10-30 add coverage rows 63–67 and acceptance
+T48–T52 for the advisory duplicate window and native task accounting. Their final
+source/CI receipt is tracked in [`security-assurance`](security-assurance/loop.md);
+the historical preview receipt above does not certify these later additions.
+
 History: revised 2026-10-20 after two spec reviews, 2026-10-27 against PRs #6–#12 (`origin/main`
 c7d3f13) and after review rounds 1 and 2 the same day, on 2026-10-28 for TUI-1b (§Changes on
 2026-10-28), and the same day, against `origin/main` 24f4b5b, to cover every CLI function
@@ -111,9 +116,9 @@ Every CLI command and every user-meaningful flag (README.md §Commands, src/cli.
 24f4b5b), and the Tron functions the owner asked for on 2026-10-28. "Screen" is the tab (§Screens
 and keys). Mockups: [`03-tui-screens.md`](03-tui-screens.md).
 
-**Alias.** Each of rows 1–52 and 60–62 is one row of the action menu, and the Alias column is that row's
+**Alias.** Each of rows 1–52 and 60–67 is one row of the action menu, and the Alias column is that row's
 alias token, spelled exactly as here (two menu rows may share a token: rows 3 and 4, rows 33 and
-35). So the menu has exactly 55 rows, and T12 compares the menu's alias tokens with this column,
+35). So the menu has exactly 60 rows, and T12 compares the menu's alias tokens with this column,
 row for row. Rows 53–59 have no menu row. A **start flag** or **env var** in the Key(s) column is
 read when `zwallet tui` starts; each such row also names its path inside the TUI, except row 8,
 which stays a start flag for the security reason written in it (review round 2).
@@ -182,6 +187,11 @@ which stays a start flag for the security reason written in it (review round 2).
 | 60 | `whitelist native-cap` | `whitelist native-cap` | 5 whitelist | action menu | chain, per-transaction native amount ceiling or `none`, summary, password, outcome; the chain's units are explicit | T45 | TUI-6 |
 | 61 | `whitelist token-cap` | `whitelist token-cap` | 5 whitelist | action menu | chain, registry token, per-transaction amount ceiling in integer base units or `none`, summary, password, outcome; token decimals and units are explicit | T46 | TUI-6 |
 | 62 | `whitelist calldata-cap` | `whitelist calldata-cap` | 5 whitelist | action menu | chain, per-transaction calldata byte ceiling or `none`, summary, password, outcome | T47 | TUI-6 |
+| 63 | `whitelist duplicate-window` | `whitelist duplicate-window` | 5 whitelist | `D`, action menu | 1s–1d or default, advisory scope/1 MiB tail summary, password, effective setting | T48 | S7 |
+| 64 | `task create` | `task create` | 6 tools | action menu; `n` in task list | selected key/chain, bounded ID, exact-unit allocations, confirm local baseline capture; no signing | T49 | S6 |
+| 65 | `task list` | `task list` | 6 tools | action menu | redacted account list, selection; Enter opens report | T50 | S6 |
+| 66 | `task report` | `task report` | 6 tools | action menu | ID, provenance/time, six states, exact amounts/unknowns, scroll; `r` online, `o` offline, `a` reveal | T51 | S6 |
+| 67 | `transfer/invoke --task` | `--task` | send/tools review | `t`, action menu | optional bound task ID retained by immutable transfer/invoke/replacement review; empty removes attribution | T52 | S6 |
 
 **TUI functions with no CLI command** (from [`v0-2-tui/ssot.md`](v0-2-tui/ssot.md), 2026-10-20):
 the history of the last 10 transactions (T3, T3b), the transaction detail with its fee,
@@ -195,15 +205,16 @@ and the TUI's address fields (rule 3) gain that alphabet. Inputs, outputs and er
 49–52 come from 05-tron.md; the screens are the EVM ones with Tron's values. T38–T41 stay
 conditional on it.
 
-**Count.** 62 rows; rows 60–62 preserve the earlier row IDs and add the signed limits merged in PR #29:
+**Count.** 67 rows; 60–62 retain the signed limits from PR #29, and 63–67 add the current-source duplicate/task paths:
 
 | Kind | Rows | How many |
 |---|---|---|
 | Reachable in the TUI, EVM | 1–48 except 8, 11 and 14 | 45 |
 | Signed transaction limits, reachable with TUI-6 | 60–62 | 3 |
+| Advisory duplicate policy and task accounting | 63–67 | 5 |
 | A start flag only, with a security reason (no key in the TUI) | 8 | 1 |
 | CLI pointer until the owner picks (B1, Q1 are built; B2, Q3 are not) | 11, 14 | 2 |
-| Tron, reachable once 05-tron.md and its library land | 49–52 | 4 |
+| Tron, reachable through the implemented family | 49–52 | 4 |
 | CLI-only, with a security reason | 53, 54, 59 | 3 |
 | Not a function: the daemon never signs it | 55, 56 | 2 |
 | Not applicable | 57, 58 | 2 |
@@ -305,7 +316,7 @@ zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
    text equals an alias exactly, the menu shows only the rows with that alias (so `whitelist add`
    leaves one row, not `whitelist add --contract` too); otherwise every row whose words or alias
    contain it, exact matches first. The menu has
-   exactly one row per §Coverage matrix row 1–52 and 60–62 (its title says `actions (55)`); the navigation
+   exactly one row per §Coverage matrix row 1–52 and 60–67 (its title says `actions (60)`); the navigation
    keys (tabs, `[` `]`, `j`/`k`, `r`, Esc, `q`) are listed on its last lines, with
    `zwallet --version`'s line, and are not counted as actions. It is the help screen: there is no
    other.
@@ -926,10 +937,10 @@ and one rule covers every one of them.
   without the review, `R` is not offered, and the screen says what to do instead: look the hash
   up first (`/`, or `zwallet tx`); once the node knows it, `s` and `x` are offered under (b). A new
   send through the normal send flow is not a retry: it is a new payment at a new nonce, and it
-  may pay twice even without `d`, because the repeat check looks back only 10 minutes
-  (`DUPLICATE_WINDOW_SECS = 600`, chains/mod.rs:836; [README.md:572-574](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L572-L574)) and reads a journal any
-  process of this user can edit (review round 3 deleted the claim that only `d` could pay twice).
-  The screen says, in these words: `the node does not know this hash; that is no proof the send failed. A new send is a new payment at a new nonce: it can pay twice, also without d (the repeat check looks back 10 minutes, in a journal any process of this user can edit). Look the hash up first.` T29.
+  may pay twice even without `d`: the advisory repeat check uses the configured window
+  (default 600 seconds) and only the last 1 MiB of a journal any process of this user can
+  edit. The screen says, in these words: `the node does not know this hash; that is no proof the send failed. A new send uses a new nonce: it can pay twice, also without d. The advisory check uses a configured window (default 10 minutes) and the last 1 MiB of editable local journal. Look the hash up first.` T29.
+
 - **Judged by kind.** A transfer's speed-up or retry needs its payee to be an address entry of
   the checked list on this chain; the review shows its nickname, typed at confirm. An invoke's
   speed-up or retry needs the contract to be a contract entry of the checked list on this chain
@@ -1091,7 +1102,7 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T9 | 80×24 resize; 79×24; `q`; forced panic | layout fits at 80×24; one `terminal too small` line at 79×24; the terminal is restored after both |
 | T10 | `zwallet lock` from another shell | the TUI shows `locked` within two refreshes (10 s) |
 | T11 | pty test across T2 and T7 | no echo; the password appears in no captured frame; cancel mid-entry, then a retry, works |
-| T12 | `?`; type `whitelist add`; Enter | the menu's title says `actions (55)` and it has exactly 55 rows, whose alias tokens equal §Coverage matrix's Alias column for rows 1–52 then 60–62, row for row (the test holds that column as a list: a matrix row without a menu row fails, and the other way); the filter leaves one row (key `a`, tab 5), and Enter opens the add form; a row that cannot run now shows its reason (`needs: …`, `in a later version`, `start flag`), and Enter on it starts no `Effect` |
+| T12 | `?`; type `whitelist add`; Enter | the menu's title says `actions (60)` and it has exactly 60 rows, whose alias tokens equal §Coverage matrix's Alias column for rows 1–52 then 60–67, row for row (the test holds that column as a list: a matrix row without a menu row fails, and the other way); the filter leaves one row (key `a`, tab 5), and Enter opens the add form; a row that cannot run now shows its reason (`needs: …`, `in a later version`, `start flag`), and Enter on it starts no `Effect` |
 | T13 | from the start: `1` … `7`, `[`, `]`, Esc in a popup and in a sub-screen; each frame the TUI-3+4 PR draws, at 80x24 | each tab reached; the hint rule of §Screens and keys holds (a frame whose focus is not a text field, a menu or a popup ends its hint line with `? actions`; one whose focus is shows no `? actions`); Esc closes the popup, then returns to the tab; each of those frames fits 80x24 (`TestBackend`); a tab whose screens a later unit brings says `in a later version`. Each later unit runs the same size and hint checks on the frames it adds (units.md §Every unit) |
 | T14 | 7 session, `u`, `10m`, the password | the bar says `signing (agent too) until` ≈ now+10m; `zwallet status --json` has the same `expiresAt` |
 | T15 | 2 wallet, `a`, with all 8 `ZWALLET_RPC_<CHAIN>` set: two to mock nodes that answer, one to a mock that refuses, the other five to a closed port (`http://127.0.0.1:1`) | one line per network, testnet last; each failed one `error: … [CODE]` cut to 72 (`brief`); `2 of 8 networks have a balance; 6 did not answer`; zero tokens hidden; no test reaches a public RPC |
@@ -1128,6 +1139,11 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T45 | 5 whitelist, `whitelist native-cap`, a chain and amount, summary, password | the same signed per-transaction ceiling as the CLI is saved; its units and impact are shown before the password; `none` explicitly removes the amount limit, and invalid input writes nothing |
 | T46 | 5 whitelist, `whitelist token-cap`, a chain, registry token and amount, summary, password | the signed token ceiling matches CLI verification in integer base units (`none` removes it); a token outside the registry is refused before the password |
 | T47 | 5 whitelist, `whitelist calldata-cap`, a chain and byte count, summary, password | the signed calldata ceiling matches CLI verification; zero bytes is a deliberate empty-data limit, `none` removes it, and an overflow is refused before the password |
+| T48 | whitelist duplicate-window form, valid/invalid/default values, review and password | same signed setting as CLI; legacy bytes unchanged when absent; effective advisory source/window/tail visible including refusals |
+| T49 | task create on EVM and Tron at 80x24 and 120x40 | open key/selected chain captured, exact allocations confirmed, baseline saved without signature; invalid input cannot create; submitted write is not falsely cancelled |
+| T50 | task list and selection | account addresses hidden; no unbounded rows; selected task opens its report; late cancelled results do not repopulate the view |
+| T51 | task report online/offline/reveal/refresh and scroll | provenance/time and unknowns visible, exact large integers preserved, regular Tick retains report, context changes cancel reads; report never signs |
+| T52 | task attribution on transfer, invoke and retained replacement/cancel | immutable bound task identity shown and carried to execution; wrong account/chain fails before signing; unconfirmed persistence warning survives successful receipt updates |
 
 **Tests:**
 - `TestBackend` buffer assertions for each screen, through `FilteredBackend`, with the style and

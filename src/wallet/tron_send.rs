@@ -74,6 +74,8 @@ impl TronAsset {
 /// metadata row or daemon status. Confirm consumes these held values and accepts no new key.
 #[derive(Clone, Debug)]
 pub struct TronTransferInput {
+    /// Advisory local task attribution, never signer authority.
+    pub task_id: Option<String>,
     pub key_name: String,
     pub index: u32,
     pub from: String,
@@ -146,7 +148,8 @@ impl TronTransferReview {
         self.checked.list.policy.max_fee_wei("tron")
     }
     fn matches(&self, next: &Self) -> bool {
-        self.decoded.owner == next.decoded.owner
+        self.input.task_id == next.input.task_id
+            && self.decoded.owner == next.decoded.owner
             && self.decoded.contract == next.decoded.contract
             && self.input.asset == next.input.asset
             && self.input.from == next.input.from
@@ -171,7 +174,11 @@ fn kind(asset: TronAsset) -> &'static str {
     }
 }
 fn fields(input: &TronTransferInput) -> Map<String, Value> {
-    json!({"chain":"tron","key":input.key_name,"from":input.from,"to":input.payee.address,"toNickname":input.payee.nickname}).as_object().unwrap().clone()
+    let mut fields = json!({"chain":"tron","key":input.key_name,"from":input.from,"to":input.payee.address,"toNickname":input.payee.nickname}).as_object().unwrap().clone();
+    if let Some(task) = &input.task_id {
+        fields.insert("taskId".into(), task.clone().into());
+    }
+    fields
 }
 fn decode(unsigned: &Value) -> Result<DecodedTron> {
     let raw = unsigned
@@ -231,7 +238,10 @@ fn assemble(
                 .to_string()
         ),
     );
-    let journal = chains::SendJournal::new(&home, net.chain, &input.from);
+    let window = checked.list.policy.duplicate_window_secs();
+    let journal =
+        chains::SendJournal::new(&home, net.chain, &input.from).with_duplicate_window(window)?;
+    fields.insert("duplicateGuard".into(), json!({"windowSecs":window,"journalTailBytes":1 << 20,"advisory":true,"policySource":"password-checked-list"}));
     let duplicates = journal.recent_duplicates(
         &send_summary(&fields, net.chain, kind(input.asset)),
         crate::core::time::unix_secs(std::time::SystemTime::now()),
@@ -275,6 +285,9 @@ pub async fn review_tron_transfer(
         ));
     }
     whitelist::check_unchanged(home, &checked.fingerprint)?;
+    if let Some(task) = &input.task_id {
+        super::tasks::validate_binding_async(home, task, net.chain, &input.from).await?;
+    }
     if input.payee.fingerprint != checked.fingerprint
         || !tron_transfer_payees(checked)
             .iter()
@@ -344,6 +357,7 @@ pub async fn send_tron_transfer(
         allow_duplicate: next.input.allow_duplicate,
         wait: false,
         wait_timeout: None,
+        duplicate_window_secs: Some(next.checked.list.policy.duplicate_window_secs()),
     };
     let out = send_prepared(
         &tron::Tron,

@@ -80,6 +80,15 @@ pub async fn run(
     let mut terminal_failure = None;
     let result = loop {
         for effect in work.drain(..) {
+            if let Effect::Tasks(id) = effect {
+                if let Some(job) = app.take_task_job(id) {
+                    let (home, tx) = (home.clone(), tx.clone());
+                    tokio::spawn(async move {
+                        job.run(id, &home, &tx).await;
+                    });
+                }
+                continue;
+            }
             if let Effect::Tools(id) = effect {
                 if let Some(job) = app.take_tool_job(id) {
                     let (home, tx) = (home.clone(), tx.clone());
@@ -168,9 +177,13 @@ pub async fn run(
             let _ = ack_tx.send(mode);
             input_waiting = false;
         }
+        #[cfg(not(test))]
+        let refresh_enabled = true;
+        #[cfg(test)]
+        let refresh_enabled = !terminal_observation_tests::refresh_disabled();
         let msg = tokio::select! {
             Some(msg) = rx.recv() => msg,
-            _ = tick.tick() => Msg::Tick,
+            _ = tick.tick(), if refresh_enabled => Msg::Tick,
         };
         input_waiting |= terminal_failure.is_none() && input_message(&msg);
         work = terminal_update(&mut app, &terminal_failure, msg);
@@ -250,7 +263,7 @@ fn start(
         other => other,
     };
     match effect {
-        Effect::Tools(_) | Effect::Transfer(_) | Effect::Replacement(_) => {
+        Effect::Tasks(_) | Effect::Tools(_) | Effect::Transfer(_) | Effect::Replacement(_) => {
             unreachable!("send jobs are moved out of App by the loop")
         }
         Effect::HistoryOwner(target) => {
@@ -411,6 +424,11 @@ fn start(
         }
         Effect::LockAll => {
             tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                if let Some(error) = terminal_observation_tests::injected_lock_failure() {
+                    let _ = tx.send(Msg::Locked(Err(error)));
+                    return;
+                }
                 let _ = tx.send(Msg::Locked(protocol::stop_all_daemons()));
             });
         }
@@ -1019,3 +1037,6 @@ mod terminal_failure_tests {
         assert!(terminal_frame(&app, &mut failure, || panic!("no redraw")).is_err());
     }
 }
+
+#[cfg(test)]
+pub(crate) mod terminal_observation_tests;

@@ -1341,6 +1341,7 @@ mod tests {
             max_fee_wei: BTreeMap::new(),
             allow_message_signing: false,
             transaction_limits: Default::default(),
+            duplicate_window_secs: None,
         };
         let e = check(
             &ListView::Usable(&l),

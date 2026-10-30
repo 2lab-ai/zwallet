@@ -211,6 +211,7 @@ enum Mutation {
         limit: Limit,
     },
     MessageSigning(bool),
+    DuplicateWindow(Option<u32>),
     /// A new key and an empty list ([`whitelist::reset`]).
     Reset,
 }
@@ -223,6 +224,7 @@ impl Mutation {
             Self::FeeCap { .. } => "fee-cap",
             Self::Limit { limit, .. } => limit.name(),
             Self::MessageSigning(_) => "allow-message-signing",
+            Self::DuplicateWindow(_) => "duplicate-window",
             Self::Reset => "reset",
         }
     }
@@ -246,6 +248,10 @@ impl Mutation {
             }
             Self::MessageSigning(on) => {
                 list.policy.allow_message_signing = *on;
+                Ok(())
+            }
+            Self::DuplicateWindow(seconds) => {
+                list.policy.duplicate_window_secs = *seconds;
                 Ok(())
             }
             Self::Reset => Ok(()),
@@ -340,6 +346,22 @@ impl Change {
             return Err(bad("must be greater than zero".into()));
         }
         Ok(Self(Mutation::FeeCap { chain, wei }))
+    }
+
+    /// Advisory journal duplicate window for all chains, 1s..1d; `default` restores 10m.
+    pub fn duplicate_window(duration: &str) -> Result<Self> {
+        let seconds = if duration == "default" {
+            None
+        } else {
+            let seconds = parse_duration(duration)?.as_secs();
+            if !(1..=u64::from(whitelist::MAX_DUPLICATE_WINDOW_SECS)).contains(&seconds) {
+                return Err(WalletError::validation(
+                    "duplicate window must be from 1s to 1d, or default (10m)",
+                ));
+            }
+            Some(seconds as u32)
+        };
+        Ok(Self(Mutation::DuplicateWindow(seconds)))
     }
 
     /// Per-transaction native amount in coin units, or `none` to remove the limit.
@@ -834,6 +856,17 @@ fn summary(files: &ListFiles, change: &Mutation, unlock: Option<(&str, Duration)
             limit.target(chain),
             limit.value()
         )),
+        Mutation::DuplicateWindow(seconds) => {
+            let old = old_values(&current, &next, "600 seconds (default)", |l| {
+                format!("{} seconds", l.policy.duplicate_window_secs())
+            });
+            lines.push(format!(
+                "  duplicate-window: {old} -> {} seconds{}; all chains; local advisory guard only",
+                seconds.unwrap_or(whitelist::DEFAULT_DUPLICATE_WINDOW_SECS),
+                if seconds.is_none() { " (default)" } else { "" }
+            ));
+            lines.push("  only the last 1 MiB of journal is checked; old/missing/edited records and explicit overrides can bypass it; not signer replay protection or a cumulative budget".into());
+        }
         Mutation::MessageSigning(on) => {
             let old = old_values(&current, &next, on_off(false), |l| {
                 on_off(l.policy.allow_message_signing).to_string()
@@ -954,6 +987,8 @@ fn reset_lines(
     // A corrupt list cannot reveal which limits the sealed policy used to have.
     // Reset discards them regardless, so disclose this even when neither file parses.
     lines.push("  all per-transaction native/token/calldata limits are removed; set them again before unlocking".into());
+    lines
+        .push("  the advisory duplicate window returns to 600 seconds (10m) for all chains".into());
     lines.push("  fee caps after the reset, the built-in defaults:".to_string());
     lines.extend(caps);
     let signing_on: Vec<&str> = list_files(current, next)
@@ -1135,8 +1170,9 @@ fn headline(change: &Mutation) -> String {
             limit.value()
         ),
         Mutation::MessageSigning(on) => format!("allow-message-signing {}", on_off(*on)),
+        Mutation::DuplicateWindow(seconds) => format!("duplicate-window {} seconds{}; advisory journal guard", seconds.unwrap_or(whitelist::DEFAULT_DUPLICATE_WINDOW_SECS), if seconds.is_none() { " (default)" } else { "" }),
         Mutation::Reset => {
-            "reset: a new key, an empty list, every fee cap back to the default; all per-transaction native/token/calldata limits removed".to_string()
+            "reset: a new key, an empty list, every fee cap back to the default; all per-transaction native/token/calldata limits removed; advisory duplicate window reset to 600 seconds".to_string()
         }
     }
 }
@@ -1353,6 +1389,21 @@ impl FileNames {
     }
 }
 
+/// CLI duplicate preflight, intentionally local/unverified like the dry-run preview. The
+/// daemon still authenticates the whole policy before signing. Missing current file falls
+/// back to the default; a staged-only edit is not independently authenticated here.
+pub(crate) fn local_duplicate_window(home: &Path) -> u32 {
+    // Missing/malformed local policy does not replace the existing dry-run refusal or the
+    // daemon's authenticated WHITELIST_INVALID verdict with a local preflight error.
+    whitelist::read_list(&home.join(WHITELIST_FILE))
+        .ok()
+        .flatten()
+        .filter(|signed| signed.list.check_format().is_ok())
+        .map_or(whitelist::DEFAULT_DUPLICATE_WINDOW_SECS, |signed| {
+            signed.list.policy.duplicate_window_secs()
+        })
+}
+
 /// What the dry-run's whitelist check found ([`dry_run_check`]).
 pub(crate) enum DryRunCheck {
     /// There is no whitelist.json, so nothing was checked here: the daemon decides, against the
@@ -1476,6 +1527,11 @@ fn edit_output(
             out["policy"] = json!(list.policy);
         }
         Mutation::MessageSigning(on) => out["allowMessageSigning"] = json!(on),
+        Mutation::DuplicateWindow(_) => {
+            out["duplicateWindowSecs"] = json!(list.policy.duplicate_window_secs());
+            out["advisory"] = json!(true);
+            out["policy"] = json!(list.policy);
+        }
         Mutation::Reset => out["dropped"] = json!(nicknames(&base.list)),
     }
     // What a reset dropped without it having verified, or a whitelist.json found before there
@@ -1537,6 +1593,10 @@ fn edit_text(out: &Value) -> String {
             out["transactionLimit"]["chain"].as_str().unwrap_or("?"),
             out["transactionLimit"]["target"].as_str().unwrap_or("?"),
             out["transactionLimit"]["value"].as_str().unwrap_or("?")
+        ),
+        "duplicate-window" => format!(
+            "advisory duplicate window set to {} seconds (all chains; last 1 MiB of local journal; not signer replay protection)",
+            out["duplicateWindowSecs"]
         ),
         "allow-message-signing" => format!(
             "message signing {}",
@@ -2009,6 +2069,12 @@ fn list_text(out: &Value, verify: bool) -> String {
             }
         ));
     }
+    let seconds = out["policy"]["duplicateWindowSecs"]
+        .as_u64()
+        .unwrap_or(u64::from(whitelist::DEFAULT_DUPLICATE_WINDOW_SECS));
+    lines.push(format!(
+        "duplicate window: {seconds} seconds; advisory, last 1 MiB of local journal only"
+    ));
     if let Some(limits) = out["policy"]["transactionLimits"].as_object() {
         let mut shown = 0;
         for (chain, limit) in limits.iter().take(ITEMS_SHOWN) {

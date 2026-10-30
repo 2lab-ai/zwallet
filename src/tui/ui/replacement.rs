@@ -23,6 +23,10 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
             original.chain().key,
             tx.nonce()
         ));
+        lines.push(format!(
+            "Task: {} (advisory)",
+            original.task_id().unwrap_or("none")
+        ));
         lines.push("Original hash:".into());
         lines.push(review.replaced_hash());
         lines.push(format!("From: {}", original.from()));
@@ -128,7 +132,9 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
     }
     if let Some(field) = field {
         let y = inner.height.saturating_sub(2);
-        let label = if state.stage == Stage::Bump {
+        let label = if state.stage == Stage::Task {
+            "Optional task ID; blank clears attribution:"
+        } else if state.stage == Stage::Bump {
             "Bump (1.1 to 3):"
         } else {
             "Type the reviewed nickname or cancel:"
