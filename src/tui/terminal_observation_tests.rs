@@ -80,7 +80,8 @@ impl Pty {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        // SAFETY: openpty initializes two exclusively owned fds; winsize is a valid pointer.
+        // SAFETY: openpty initializes two exclusively owned fds; winsize is valid.
+        // Its libc type is *mut on macOS and *const on Linux; a raw pointer fits both.
         assert_eq!(
             unsafe {
                 libc::openpty(
@@ -88,7 +89,7 @@ impl Pty {
                     &mut slave,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut window,
+                    &raw mut window,
                 )
             },
             0

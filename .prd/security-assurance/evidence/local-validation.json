@@ -1,9 +1,9 @@
 {
-  "measuredAt": "2026-10-30T12:52:20.508694+00:00",
+  "measuredAt": "2026-10-30T13:05:15.454641+00:00",
   "platform": "macOS-15.6.1-arm64-arm-64bit-Mach-O",
   "rust": "1.95.0",
   "baseMain": "0994f9a64648cef7890286dd73080af21c57c603",
-  "inputManifestSha256": "caeb70e43bcd5a88045f17dd1138891be1152891008894d780bbba2713e30129",
+  "inputManifestSha256": "c10573c2ec7304baea3c152b2a2a0eb52370fb1a50c1200e7f6ef7a39646d167",
   "inputs": {
     ".github/workflows/ci.yml": "97f7f057882c3f9d155a915019bec8d46630a982ea196596ee139e27c8000826",
     ".github/workflows/preview.yml": "ef9ec389c1b09ed67b395e7a6b6614292496158048a75b0424f626a0c45f2154",
@@ -76,7 +76,7 @@
     "src/tui/password.rs": "e43747590b84ac2b3b3b7f8b84de05c81bf7512788c949ebaaa0ce14c3936fb0",
     "src/tui/style.rs": "d2d50735bcd9abe419fa4505f723a486f8f4a6b4d123476df062c4bbf6aed417",
     "src/tui/term.rs": "dd51ca7418171a1e69ac7d97864c23e76cc6928d9a71f39ece09ca78968c4038",
-    "src/tui/terminal_observation_tests.rs": "bcecb1bc94e0a2c04a19a1f94507e4a33f56e9f3265f6f2082ff3fa987166184",
+    "src/tui/terminal_observation_tests.rs": "c0898026043633a97ade956010644c7c0358b46b89f19d6281f23d115ffd5457",
     "src/tui/text.rs": "74c7102d9177a64f539c7b05da21ef26c453577a64742ab4ba521c64020420c1",
     "src/tui/ui/create.rs": "41d42265eae95eb58bf72395f8774711371aeef0fa64b0a4fdcf09f62a191caf",
     "src/tui/ui/history.rs": "e03f79e15b8173aa34458d1a8cb65fe701ca66ae5df7151050f772d9d99d4c1c",

@@ -1,7 +1,7 @@
 # Security assurance — delivery gate
 
 Status: implementation and local acceptance complete, 2026-10-30. Closed S1–S4,
-S6–S7 and observed evidence are in [`loop.done.md`](loop.done.md). Contract:
+S6–S8 and observed evidence are in [`loop.done.md`](loop.done.md). Contract:
 [`../10-security-assurance.md`](../10-security-assurance.md).
 
 | ID | Scope | Owner | Status | Authoritative evidence / boundary |

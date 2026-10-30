@@ -13,7 +13,7 @@ Rust 1.95.0: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 Ignored cases require external/live prerequisites and are not counted as passes.
 All executed signing/broadcast fixtures used isolated test homes and mock/test data;
 no owner wallet or real funds were used. The JSON lists every test binary's count.
-Input-manifest SHA256: `caeb70e43bcd5a88045f17dd1138891be1152891008894d780bbba2713e30129`. Documentation-only edits are outside that manifest.
+Input-manifest SHA256: `c10573c2ec7304baea3c152b2a2a0eb52370fb1a50c1200e7f6ef7a39646d167`. Documentation-only edits are outside that manifest.
 
 The first integration attempt exposed an overbroad `verified"` substring assertion
 that matched the new `local-file-unverified` provenance value. It now checks the
@@ -68,3 +68,13 @@ Executed acceptance comes from the gate and frames above, followed by the PR che
 The referenced optional `local:ztrace` skill was not available in the installed skills
 or the source skill repository. No ztrace execution is claimed; the consolidated
 mapping above uses directly executed tests, observed terminal frames and source review.
+
+## Linux portability follow-up
+
+Initial CI [41058794545](https://github.com/2lab-ai/zwallet/actions/runs/41058794545)
+rejected the new test harness's mutable-reference argument to Linux `openpty`, whose
+libc declaration uses a const pointer. macOS declares the same argument mutable.
+The harness now uses the repository's existing `&raw mut window` convention, which
+fits both declarations without suppressing lint. The local complete gate and source
+manifest above were refreshed after this test-only correction. Final Linux/macOS
+results still come from the exact-head PR checks and delivery receipt.

@@ -43,3 +43,16 @@ is recorded in the linked PR/issue receipt, avoiding a self-referential source c
 The input manifest makes code identity checkable independently of documentation edits.
 #26/#27 stay design-only; dependent adapters, funded TR23, owner preview acceptance,
 QR/phrase trade-offs and release/merge authority remain as listed in the scope matrix.
+
+## R2 — closed 2026-10-30 (test harness portability correction)
+
+### Closed rows
+
+| ID | Scope | Source | Status | Evidence |
+|---|---|---|---|---|
+| S8 | Correct the new PTY harness's cross-platform openpty argument | regression:S3 | ✅ | CI 41058794545 identified the Linux const-pointer lint. Reused the existing raw-pointer convention from tests/common/mod.rs. Local fmt/strict Clippy and full 964/0/15 passed on the corrected source. Final cross-platform execution remains the S5 external gate. |
+
+re-verified ✅: S3 · complete local suite and regenerated terminal receipts ·
+[updated source manifest](evidence/local-validation.json). R1 above is unchanged.
+This follow-up changes only test harness pointer spelling and its receipts; no wallet
+behavior, live settings, dependencies or workflow permissions changed.

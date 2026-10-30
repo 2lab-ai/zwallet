@@ -37,18 +37,18 @@ CREATE
 |                                                                                                                      |
 +----------------------------------------------------------------------------------------------------------------------+
 j/k scroll  Enter create local task  Esc cancel; no signature or budget
-ethereum | a 0xafaC...cBE3 | verified by session
-signing (agent too) until 13:00Z | 127.0.0.1:51431
+ethereum | a 0x04bc...15b2 | verified by session
+signing (agent too) until 13:12Z | 127.0.0.1:56402
 stray: [], pending: ""
 OFFLINE
 1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
 + tasks / advisory accounting -----------------------------------------------------------------------------------------+
 |Local records and RPC observations; not a spending limit.                                                             |
-|Task tui-ethereum-120 / ethereum / observed 1793364607 UTC epoch                                                      |
+|Task tui-ethereum-120 / ethereum / observed 1793365339 UTC epoch                                                      |
 |Source: local records only; outcomes unverified / addresses redacted                                                  |
-|Owner: redacted:cab6efef45b05a28                                                                                      |
-|Observation began 1793364607 UTC epoch                                                                                |
-|Baseline source http://127.0.0.1:51431 / observed 1793364607 UTC epoch                                                |
+|Owner: redacted:6a61c4ca14e0f7f7                                                                                      |
+|Observation began 1793365339 UTC epoch                                                                                |
+|Baseline source http://127.0.0.1:56402 / observed 1793365339 UTC epoch                                                |
 |Current source: unknown                                                                                               |
 |Warning: Local task/intent/submission records are mutable claims, not au                                              |
 |thorization or a complete account history. Untagged sends and missing/de                                              |
@@ -79,19 +79,19 @@ OFFLINE
 |Allocation: unknown / remaining: unknown                                                                              |
 +----------------------------------------------------------------------------------------------------------------------+
 j/k scroll  Home top  r online refresh  o offline/online  a reveal/hide  Esc tools
-ethereum | a 0xafaC...cBE3 | verified by session
-signing (agent too) until 13:00Z | 127.0.0.1:51431
+ethereum | a 0x04bc...15b2 | verified by session
+signing (agent too) until 13:12Z | 127.0.0.1:56402
 stray: [], pending: ""
 ONLINE
 1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
 + tasks / advisory accounting -----------------------------------------------------------------------------------------+
 |Local records and RPC observations; not a spending limit.                                                             |
-|Task tui-ethereum-120 / ethereum / observed 1793364607 UTC epoch                                                      |
+|Task tui-ethereum-120 / ethereum / observed 1793365339 UTC epoch                                                      |
 |Source: local records + session RPC observations / addresses redacted                                                 |
-|Owner: redacted:cab6efef45b05a28                                                                                      |
-|Observation began 1793364607 UTC epoch                                                                                |
-|Baseline source http://127.0.0.1:51431 / observed 1793364607 UTC epoch                                                |
-|Current source: http://127.0.0.1:51431                                                                                |
+|Owner: redacted:6a61c4ca14e0f7f7                                                                                      |
+|Observation began 1793365339 UTC epoch                                                                                |
+|Baseline source http://127.0.0.1:56402 / observed 1793365339 UTC epoch                                                |
+|Current source: http://127.0.0.1:56402                                                                                |
 |Warning: Local task/intent/submission records are mutable claims, not au                                              |
 |thorization or a complete account history. Untagged sends and missing/de                                              |
 |leted task files are not discovered.                                                                                  |
@@ -121,8 +121,8 @@ ONLINE
 |Allocation: unknown / remaining: unknown                                                                              |
 +----------------------------------------------------------------------------------------------------------------------+
 j/k scroll  Home top  r online refresh  o offline/online  a reveal/hide  Esc tools
-ethereum | a 0xafaC...cBE3 | verified by session
-signing (agent too) until 13:00Z | 127.0.0.1:51431
+ethereum | a 0x04bc...15b2 | verified by session
+signing (agent too) until 13:12Z | 127.0.0.1:56402
 stray: [], pending: ""
 FINAL
 1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
@@ -163,6 +163,6 @@ FINAL
 |                                                                                                                      |
 +----------------------------------------------------------------------------------------------------------------------+
 Enter open  C call  i invoke  d raw  m message  t token  a tasks  ? actions
-ethereum | a 0xafaC...cBE3 | verified by session
-signing (agent too) until 13:00Z | 127.0.0.1:51431
+ethereum | a 0x04bc...15b2 | verified by session
+signing (agent too) until 13:12Z | 127.0.0.1:56402
 stray: [], pending: ""
