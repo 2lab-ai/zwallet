@@ -1,20 +1,20 @@
 # Launch kit
 
 Drafts for human review. Nothing in this file has been posted to a community or social
-account. [Research](research.md) · [Video/reproduction](../../examples/agent-budget/README.md)
+account. [Research](research.md) · [Explainer and transcript](../../examples/agent-story/README.md)
 
 ## Message
 
-**Fund the task. Let your agent execute. Keep the receipts.**
+**Give your agent a wallet. Keep control.**
 
-One sentence: zwallet is an MIT-licensed local wallet CLI that lets a human fund and
-authorize an agent's on-chain work, then inspect transaction evidence.
+One sentence: give your AI agent working funds, let it act within your rules, and
+get back the results and receipts. zwallet is the open-source wallet behind that workflow.
 
 Suggested GitHub description (manual setting, not applied by this PR):
 
-> Local wallet CLI for AI agents. Fund a task, set signing rules, get receipts. Rust / MIT.
+> A wallet for your AI agent. Give it working funds, set the rules, get receipts. Local keys. Rust / MIT.
 
-Suggested topics (manual settings): `ai-agents`, `wallet`, `cli`, `ethereum`, `evm`,
+Suggested topics (manual settings): `ai-agents`, `wallet`, `cli`, `ethereum`, `evm`, `tron`,
 `rust`, `self-custody`, `developer-tools`. Avoid tagging unsupported chains or claiming
 implemented investment/checkout integrations.
 
@@ -36,10 +36,10 @@ signed recipient/contract rules and optional per-transaction limits. An agent us
 JSON commands; the signer checks the transaction bytes. There is no zwallet service
 account or mandatory wallet API credential.
 
-The README has a reproducible local-chain demo: fund 0.020 test ETH, send 0.001,
-verify the receipt, reject an over-limit request, and reconcile payment + gas +
-remaining funds. The reporting example is a script built on CLI/RPC results, not a
-built-in report command. It is scripted, not a live LLM session.
+The README has a 36-second visual explanation: assign task funds, let the agent work,
+watch the wallet block requests outside your rules, and get the result back. It is
+an illustration, not a shipped dashboard. An optional reproducible CLI example runs
+on a local chain and checks receipts, policy refusal and payment/gas/balance accounting.
 
 This is an early wallet component, not a complete autonomous finance product.
 Cumulative budgets, investment adapters and shopping/paid-service workflows are
@@ -57,18 +57,25 @@ move the tokens, and verify the transaction. I built zwallet to finish that work
 
 2. Fund a dedicated wallet. Set allowed recipients/contracts and per-transaction
 limits. Unlock a session. Let your agent execute and return the transaction evidence.
-Local Rust CLI, JSON output, MIT. No zwallet service signup.
+Keys stay on your device. No zwallet service signup. Open source.
 
-3. The demo runs real CLI commands on a local EVM chain: payment confirmed, over-limit
-request refused, spend + gas + balance reconciled. No public funds. Future investment
-and shopping scenes are explicitly WIP.
+3. Watch how it works: your agent requests a payment, the wallet checks your rules,
+and you get the result. Future service payments, shopping and investment integrations
+are shown as WIP. The reproducible CLI proof is there when you want to go deeper.
 
 4. Try it: https://github.com/2lab-ai/zwallet
 What does your agent need to pay for? Current focus: development workflows.
 Future direction: accountable task budgets, service payments, investment and purchases.
 
-Attach `docs/assets/agent-budget.mp4`. Keep the WIP/local-chain labels visible when
-cropping. Do not use the future segment alone without its context label.
+Attach `docs/assets/agent-story.mp4` (English) or `agent-story-ko.mp4` (Korean).
+Keep the WIP labels visible when cropping. The animated graph explains the workflow;
+it is not a product dashboard. Keep the first post focused on the human benefit.
+
+Visual tone follows the owner's [monochrome profile](https://github.com/icedac/icedac/tree/codex/monochrome-profile-2026-10-29):
+black and white, generous space, medium-weight type and a continuous diagram.
+Movement should explain a request, a check or a result.
+Keep that treatment when making crops or follow-up material. Permission/refusal must
+stay understandable through labels and symbols, without relying on colored status.
 
 ## Korean launch draft
 
@@ -77,12 +84,13 @@ cropping. Do not use the future segment alone without its context label.
 
 그래서 zwallet을 만들었습니다. 작업용 지갑에 필요한 자금을 넣고, 허용할
 수취인·컨트랙트와 거래별 한도를 설정하고, 일정 시간 잠금을 풀어줍니다.
-에이전트는 CLI로 작업하고 트랜잭션 근거와 사용 내역을 보고하게 할 수 있습니다.
+에이전트가 허용된 작업을 처리하고 결과와 사용 내역을 보고하게 할 수 있습니다.
 키는 로컬에 보관하고, 별도 지갑 서비스 가입 없이 사용할 수 있습니다. Rust / MIT.
 
-README 영상에는 실제 CLI 송금, 한도 초과 거절, 영수증 기반 사용액 계산이
-들어 있습니다. 로컬 테스트 체인으로 재현할 수 있고 실제 자금은 필요 없습니다.
-자동 보고는 현재 예제 스크립트이며, 내장 기능은 아닙니다.
+README 영상은 사람·에이전트·지갑 사이에서 일이 어떻게 흘러가는지 보여줍니다.
+허용된 요청은 통과하고, 거래별 한도를 넘는 요청은 막히며, 원하면 접근을 끊습니다.
+결과와 사용 내역은 에이전트가 보고합니다. 내장 보고 기능은 아직 WIP입니다.
+직접 검증하려는 사람을 위한 로컬 CLI 재현 예제도 별도로 제공합니다.
 
 장기적으로는 이 지갑을 투자·결제·구매 에이전트의 실행 기반으로 확장하려고
 합니다. 누적 예산과 해당 연동은 아직 WIP이며, 수익을 보장하는 제품은 아닙니다.
@@ -96,12 +104,13 @@ https://github.com/2lab-ai/zwallet
    signed-out GitHub session; verify the target release includes the demo's commands.
 2. Run the example from a clean checkout on supported macOS/Linux; publish exact
    prerequisites and source revision. Preview builds can precede stable releases.
-3. Publish the working demo with the founder story; link to the repo rather than a
-   signup form. Reply to substantive questions, correct factual comparisons promptly.
+3. Publish the visual explainer with the founder story; link to the repo and a clear
+   first-run path. Reply to substantive questions, correct factual comparisons promptly.
 4. Gather workflow issues and reproduction results before expanding the roadmap.
 
 Measure reproducible first runs, time to the first verified local transaction,
-quality of integration issues and contributor examples. Stars are a secondary signal.
+quality of integration issues and contributor examples. The reach goal is 10,000
+GitHub stars, earned through use and sharing; track stars alongside actual adoption.
 Do not invent install metrics or imply video views demonstrate safe real-world use.
 
 ## Answers worth preparing
@@ -110,8 +119,9 @@ Do not invent install metrics or imply video views demonstrate safe real-world u
   support. zwallet focuses on a local Rust CLI and daemon-enforced signed policy.
 - **Can an agent spend everything?** Repeated permitted transactions can consume the
   balance. Cumulative budgets remain WIP; allocation size and policy scope matter.
-- **Can it trade or buy things now?** It provides EVM transaction primitives under
-  policy. Turnkey strategies, DeFi allowances, x402 and checkout adapters are WIP.
+- **Can it trade or buy things now?** It provides EVM transaction primitives and
+  TRX/registry-USDT transfers on Tron under policy. Turnkey strategies, DeFi allowances,
+  x402 and checkout adapters are WIP.
 - **Does it make profit?** No profit guarantee. Future strategies may lose money.
 - **Where are the reports?** CLI JSON, receipts and the send journal are available;
   the demo computes a report externally. Native task reporting is planned.

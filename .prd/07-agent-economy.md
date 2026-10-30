@@ -2,7 +2,7 @@
 
 ![WIP](https://img.shields.io/badge/status-WIP-yellow) **Future product direction.** No investment engine, merchant checkout, cumulative
 budget or native task-report command is implemented by this document. Reviewed
-against `99fff4e` on 2026-10-29. [Current capabilities](../docs/features.md).
+against `6f1a2c9` on 2026-10-30. [Current capabilities](../docs/features.md).
 
 ## Intent
 
@@ -45,7 +45,7 @@ All rows are ![WIP](https://img.shields.io/badge/status-WIP-yellow). Proposed ID
 | ID | Workstream | Depends on | Acceptance before removing WIP |
 |---|---|---|---|
 | AE-1 | Task identity and reconciled spend reports | Existing CLI JSON/journal/receipts | A task report distinguishes intent, submitted, pending, confirmed, reverted and uncertain; reconciles actual fees and balances; includes evidence and redacts personal/secret data |
-| AE-2 | Cumulative task/session budgets | AE-1; reviewed authority/freshness design | Concurrent requests cannot oversubscribe; pending spends reserve capacity; replacement does not double-count; revert refunds only unspent value, never paid gas; crash/restart and rollback behavior are specified and tested |
+| AE-2 | Cumulative task/session budgets | AE-1; reviewed authority/freshness design | Concurrent requests cannot oversubscribe; exposed signatures retain their authorization charge even if submission is uncertain; distinct replacements are charged conservatively; actual-spend reports stay separate from authorization accounting; crash/restart and rollback behavior follow the [budget contract](08-cumulative-budget-design.md) |
 | AE-3 | Investment execution adapters | AE-1, AE-2; bounded allowance/typed-signature design | Enforce approved assets, venues, position/exposure limits, slippage, deadlines and mandate expiry against the executable operation; stale quotes fail; losses are represented correctly |
 | AE-4 | Digital-service payments | AE-1, AE-2; protocol-specific policy | Validate invoice origin, chain, asset, payee, amount, expiry and idempotency; request retries cause at most one intended payment; retain proof of access/delivery or unresolved status |
 | AE-5 | Merchant checkout | AE-1, AE-2, adapter protocol | Bind product/options/merchant to a quote with tax, delivery and conversion costs; do not equate on-chain payment with a completed order; handle pending orders, cancellations and refunds |
@@ -68,6 +68,9 @@ accounting. Define reservation, settlement, failed execution, reorg/finality pol
 multiple keys/processes and persistence. Do not advertise rollback-proof limits
 using only state an agent's OS user can restore or modify. Per-transaction limits
 already exist and remain useful; they are not cumulative budgets.
+The [cumulative-budget design](08-cumulative-budget-design.md) and
+[policy-freshness design](09-policy-freshness-design.md) record the current design
+questions and acceptance criteria; neither is shipped enforcement.
 
 ### AE-3: investment is a mandate, not a promise
 
@@ -106,9 +109,12 @@ trading/commerce surface before reliable accounting and policy boundaries exist.
 
 ## Demonstration and launch rules
 
-- Current demo: real binary, local Anvil, valueless ETH, scripted orchestration,
+- Public explainer: original illustrated flow for general AI users and people building
+  with coding agents. Show outcomes, rules, refusal and human control without terminal
+  output. Label it as an explanation, not an implemented dashboard.
+- Technical appendix: real binary, local Anvil, valueless ETH, scripted orchestration,
   selected JSON fields. Preserve raw cast and execution evidence.
-- Future scenes: persistent **CONCEPT / WIP — NOT AVAILABLE** label. No invented CLI
+- Future scenes: persistent **FUTURE / WIP** label and WIP labels on future branches. No invented CLI
   commands presented as shipping, merchant confirmations or executed trades.
 - Do not imply automatic top-ups, fiat/card checkout, guaranteed income, gasless
   stablecoin use, per-agent sandboxing, a security audit or universal token support.

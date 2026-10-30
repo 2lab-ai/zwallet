@@ -1,26 +1,39 @@
 # zwallet
 
-**Fund the task. Let your agent execute. Keep the receipts.**
+**Give your agent a wallet. Keep control.**
 
-An open-source wallet CLI for agents doing real on-chain work. Give a dedicated
-wallet the funds you are willing to allocate, set its signing rules, and unlock a
-session. Your agent can check balances, send permitted payments, call allowed
-contracts and verify the results without asking you to approve every transaction.
+Your AI can build the app. Why are you still moving the money?
 
-**Local keys · No service signup · Signed spending rules · JSON CLI · MIT · Rust**
+Put task funds in a dedicated wallet, choose the allowed destinations and limits per
+payment, and set an access window. Your agent can do permitted on-chain work, check
+the result and bring back the receipts.
 
-[Get started](#quick-start) · [Watch the demo](docs/assets/agent-budget.mp4) ·
-[Run it yourself](examples/agent-budget/README.md) · [Current features](docs/features.md)
+**Your keys · Your rules · Your agent · Open source**
 
-[![Real zwallet CLI demo followed by clearly labeled WIP investment and shopping concepts](docs/assets/agent-budget.gif)](docs/assets/agent-budget.mp4)
+[Get started](#quick-start) · [Watch how it works](https://ai-insightquest.github.io/zwallet/?v=flow-36) ·
+[한국어 영상](https://ai-insightquest.github.io/zwallet/?lang=ko&v=flow-36) · [What works today](docs/features.md)
 
-**In the video:** real CLI execution on an isolated Anvil chain using valueless ETH,
-followed by **CONCEPT / WIP** investment and shopping scenes. The CLI segment is a
-scripted agent workflow, not an LLM conversation. Selected JSON output is shown;
-the example script computes the report. [MP4](docs/assets/agent-budget.mp4) ·
-[Terminal recording](docs/assets/agent-budget.cast) ·
-[Execution evidence](docs/assets/agent-budget-evidence.json) ·
-[Transcript and reproduction](examples/agent-budget/README.md)
+[![Watch the film: give your agent a wallet, with rules you control](docs/assets/agent-story-poster.png?v=flow-36)](https://ai-insightquest.github.io/zwallet/?v=flow-36)
+
+**36 seconds: fund a task, follow the payment, see the controls and what comes next.**
+This is an illustrated explanation of the wallet component, not a product dashboard.
+Investment, service-payment and shopping integrations are marked **WIP**.
+[English video](https://ai-insightquest.github.io/zwallet/?v=flow-36) · [한국어 영상](https://ai-insightquest.github.io/zwallet/?lang=ko&v=flow-36) ·
+[Transcript](examples/agent-story/README.md#story-and-transcript)
+
+## How it works
+
+1. **You give it working funds.** Use a dedicated wallet for the task.
+2. **You set the rules.** Choose allowed payees, limits for each payment and how long
+   access lasts. The wallet checks the requested transaction before signing.
+3. **Your agent does the work.** It can send permitted payments, interact with allowed
+   contracts, verify outcomes and use the results to report back.
+4. **You keep control.** Keys stay on your device. Lock the wallet to end signing access.
+
+zwallet is the local wallet component behind this workflow. It works with agents
+that can use its CLI; it does not require a zwallet service account. Reports are
+assembled by your agent from transaction evidence. Built-in task reports and
+cumulative budgets are ![WIP](https://img.shields.io/badge/status-WIP-yellow).
 
 ## Why I built this
 
@@ -274,14 +287,16 @@ is a small, inspectable local signing boundary. See the dated, source-linked
 
 ## Get involved
 
-Try the [local demo](examples/agent-budget/README.md), connect the CLI to your agent,
+Follow the [quick start](#quick-start), give your agent the [task workflow](docs/agent-workflow.md),
 and [tell us what it needed to pay for](https://github.com/2lab-ai/zwallet/issues).
 A useful report includes the workflow, chain, expected outcome and redacted command
 output. Never include passwords, recovery phrases or private keys.
 
-If this solves a problem you recognize, star the repo or contribute a reproducible
-agent workflow. Current capabilities and WIP boundaries live in
-[feature status](docs/features.md).
+Share a workflow or contribute a reproducible agent example. Current capabilities
+and WIP boundaries live in [feature status](docs/features.md).
+
+Want to verify the implementation? The optional [local CLI example](examples/agent-budget/README.md)
+includes an actual terminal recording, transaction evidence and reproduction script.
 
 ## Documentation
 
