@@ -276,8 +276,28 @@ impl Home {
         let mut v: Value =
             serde_json::from_slice(&std::fs::read(self.wallet_json()).unwrap()).unwrap();
         edit(&mut v);
-        std::fs::write(self.wallet_json(), serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+        replace_file(&self.wallet_json(), &serde_json::to_vec_pretty(&v).unwrap());
     }
+}
+
+/// Replaces `path` with `bytes` (mode 0600) at once, as zwallet itself writes wallet.json: a
+/// temp file beside it renamed over it. A write in place (`std::fs::write`) truncates the file
+/// first, and a running daemon, which reads wallet.json every second, ends its session when it
+/// reads the empty or half-written file ("wallet.json changed since unlock"): issue #52.
+pub fn replace_file(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut name = path.file_name().unwrap().to_os_string();
+    name.push(".test-replace");
+    let tmp = path.with_file_name(name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));
+    file.write_all(bytes).unwrap();
+    drop(file);
+    std::fs::rename(&tmp, path).unwrap_or_else(|e| panic!("rename onto {}: {e}", path.display()));
 }
 
 /// Seeds the signed whitelist of `home` (a wallet created with [`PW`]) through the core edit

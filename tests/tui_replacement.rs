@@ -176,8 +176,18 @@ fn start(home: &Home, node: &Node, from: &str) -> PtyChild {
     tui.wait_frame(WAIT, |f| bar(f).0.contains("verified by password"));
     tui
 }
+/// Looks `hash` up on the wallet tab, where `start` leaves the TUI (Enter on a key of an
+/// unlocked wallet opens it there). The tab submits a lookup only once it knows the open key's
+/// address (`history.scope`); until then Enter only says "wait for the selected key's address,
+/// then press Enter". The history pane leaves "reading history..." only once that address is
+/// known, and nothing here reloads the tab, so the hash is typed after that. Not `2` first: on
+/// the wallet tab it reloads the tab, which forgets the address while the screen still shows the
+/// pane loaded, and the hash went in too early under load (issue #52).
+#[track_caller]
 fn lookup(tui: &mut PtyChild, hash: &str) {
-    tui.send(b"2");
+    tui.wait_frame(WAIT, |f| {
+        contains(f, "Recent transactions") && !contains(f, "reading history...")
+    });
     tui.send(b"/");
     wait(tui, "Transaction hash:");
     tui.send(format!("{hash}\r").as_bytes());

@@ -1521,6 +1521,44 @@ fn a_cache_changed_after_unlock_fails_the_password_check_but_keeps_the_session()
     );
 }
 
+/// The test above (and every other `edit_wallet` under a live session) relies on this: a
+/// running daemon reads wallet.json every second (`store::read_wallet_file`) and ends its
+/// session on a file it cannot parse. Written in place (truncate, then write), an edit showed it
+/// an empty file now and then, and `status` said `locked: true` (issue #52).
+#[test]
+fn edit_wallet_never_lets_a_reader_see_wallet_json_half_written() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let home = Home::new();
+    home.create("a", &[]);
+    let done = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let (path, done) = (home.path().to_path_buf(), done.clone());
+        std::thread::spawn(move || {
+            let (mut reads, mut torn) = (0u64, Vec::new());
+            while !done.load(Ordering::SeqCst) {
+                reads += 1;
+                if let Err(e) = store::read_wallet_file(&path) {
+                    torn.push(e.message);
+                }
+            }
+            (reads, torn)
+        })
+    };
+    for _ in 0..2000 {
+        home.edit_wallet(|_| {});
+    }
+    done.store(true, Ordering::SeqCst);
+    let (reads, torn) = reader.join().unwrap();
+    assert!(reads > 0);
+    assert!(
+        torn.is_empty(),
+        "{} of {reads} reads saw a half-written wallet.json, e.g. {:?}",
+        torn.len(),
+        torn.first()
+    );
+}
+
 #[test]
 fn an_invalid_socket_address_never_replaces_a_password_pinned_address() {
     let home = Home::new();
