@@ -1521,41 +1521,68 @@ fn a_cache_changed_after_unlock_fails_the_password_check_but_keeps_the_session()
     );
 }
 
-/// The test above (and every other `edit_wallet` under a live session) relies on this: a
-/// running daemon reads wallet.json every second (`store::read_wallet_file`) and ends its
-/// session on a file it cannot parse. Written in place (truncate, then write), an edit showed it
-/// an empty file now and then, and `status` said `locked: true` (issue #52).
+/// Probabilistic regression coverage for `edit_wallet`, not a deterministic reproduction. The
+/// test above (and every other `edit_wallet` under a live session) relies on it replacing
+/// wallet.json at once: a running daemon reads the file every second (`store::read_wallet_file`)
+/// and ends its session on a file it cannot parse. Written in place (truncate, then write), an
+/// edit could show it an empty file, and `status` said `locked: true` (issue #52). Here a reader
+/// polls the file throughout 2,000 edits; against the in-place write it saw torn files in every
+/// run measured, but a run that sees none proves nothing by itself.
 #[test]
 fn edit_wallet_never_lets_a_reader_see_wallet_json_half_written() {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    /// Stops the reader however the edits end, a panic included.
+    struct StopReader(Arc<AtomicBool>);
+    impl Drop for StopReader {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
     let home = Home::new();
     home.create("a", &[]);
-    let done = Arc::new(AtomicBool::new(false));
+    let (done, reads) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicU64::new(0)),
+    );
+    let (ready, reading) = std::sync::mpsc::channel();
     let reader = {
-        let (path, done) = (home.path().to_path_buf(), done.clone());
+        let (path, done, reads) = (home.path().to_path_buf(), done.clone(), reads.clone());
         std::thread::spawn(move || {
-            let (mut reads, mut torn) = (0u64, Vec::new());
+            let (mut ready, mut torn, mut first) = (Some(ready), 0u64, None);
             while !done.load(Ordering::SeqCst) {
-                reads += 1;
-                if let Err(e) = store::read_wallet_file(&path) {
-                    torn.push(e.message);
+                match store::read_wallet_file(&path) {
+                    // The writer starts once a read has succeeded.
+                    Ok(_) => {
+                        if let Some(ready) = ready.take() {
+                            let _ = ready.send(());
+                        }
+                    }
+                    Err(e) => {
+                        torn += 1;
+                        first.get_or_insert(e.message);
+                    }
                 }
+                reads.fetch_add(1, Ordering::SeqCst);
             }
-            (reads, torn)
+            (torn, first)
         })
     };
+    let stop = StopReader(done);
+    reading
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the reader never read wallet.json whole before the edits");
+    let before = reads.load(Ordering::SeqCst);
     for _ in 0..2000 {
         home.edit_wallet(|_| {});
     }
-    done.store(true, Ordering::SeqCst);
-    let (reads, torn) = reader.join().unwrap();
-    assert!(reads > 0);
-    assert!(
-        torn.is_empty(),
-        "{} of {reads} reads saw a half-written wallet.json, e.g. {:?}",
-        torn.len(),
-        torn.first()
+    let during = reads.load(Ordering::SeqCst) - before;
+    drop(stop);
+    let (torn, first) = reader.join().unwrap();
+    assert!(during > 0, "the reader made no read while the edits ran");
+    assert_eq!(
+        torn, 0,
+        "{torn} reads saw a half-written wallet.json ({during} while the edits ran), e.g. {first:?}"
     );
 }
 

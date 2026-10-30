@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use zwallet::chains::evm::registry::WHITELIST_RULES;
-use zwallet::core::protocol::{TEST_END_NOTES, TEST_SCOPE_ENV};
+use zwallet::core::protocol::TEST_SCOPE_ENV;
 use zwallet::core::whitelist::{self, Entry, Whitelist};
 
 pub const PW: &str = "correct horse battery staple";
@@ -233,18 +233,20 @@ impl Home {
         v["daemonPid"].as_i64().map(|p| p as i32)
     }
 
-    /// `status --json` where the test expects this home's session to be live: panics with the
-    /// status and why the daemon ended it ([`daemon_end_notes`]) when it says `locked`.
+    /// `status --json` where the test expects this home's session to be live; panics with the
+    /// command's raw output (exit code, stdout, stderr) unless it succeeds and says
+    /// `locked: false`.
     #[track_caller]
     pub fn assert_unlocked(&self) -> Value {
-        let status = self.run(&["status", "--json"]).ok();
-        assert_eq!(
-            status["locked"],
-            false,
-            "{status}; {}",
-            daemon_end_notes(self.path())
-        );
-        status
+        let run = self.run(&["status", "--json"]);
+        let status = serde_json::from_str::<Value>(&run.stdout).ok();
+        match status {
+            Some(status) if run.code == 0 && status["locked"] == false => status,
+            _ => panic!(
+                "expected a live session; `status --json` exited {}, stdout {:?}, stderr {:?}",
+                run.code, run.stdout, run.stderr
+            ),
+        }
     }
 
     /// Waits (bounded) until `status` reports this home locked: no daemon process for it.
@@ -370,31 +372,6 @@ impl Drop for Home {
                 }
             }
         }
-    }
-}
-
-/// Why the daemons of `home` ended their sessions or exited, as a debug daemon of a test home
-/// notes it ([`TEST_END_NOTES`]): for a failure message, one escaped line per note, at most the
-/// last 4 KB.
-pub fn daemon_end_notes(home: &Path) -> String {
-    match std::fs::read(home.join(TEST_END_NOTES)) {
-        Ok(bytes) => {
-            let tail = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(4096)..])
-                .lines()
-                .map(|line| {
-                    let inert = line.chars().map(|c| {
-                        if c.is_control() {
-                            c.escape_default().to_string()
-                        } else {
-                            c.to_string()
-                        }
-                    });
-                    format!("\n  {}", inert.collect::<String>())
-                })
-                .collect::<String>();
-            format!("daemon end notes ({TEST_END_NOTES}, `<pid> <unix ms> <why>`):{tail}")
-        }
-        Err(e) => format!("no daemon end notes ({TEST_END_NOTES}: {e})"),
     }
 }
 
@@ -1093,8 +1070,6 @@ pub struct PtyChild {
     shown: Vec<u8>,
     /// With [`PtyChild::spawn_full_screen`]: the thread reading the master all along.
     screen: Option<FullScreen>,
-    /// The child's `ZWALLET_HOME`, if it has one: a failed wait says why its daemons ended.
-    home: Option<PathBuf>,
 }
 
 /// What [`PtyChild::spawn_full_screen`] keeps: the grid frames are parsed on, every byte read from
@@ -1168,11 +1143,6 @@ impl PtyChild {
     /// Starts `cmd`, its stdio set, in a session of its own with `slave` as its controlling
     /// terminal.
     fn start(mut cmd: Command, master: File, slave: OwnedFd, out: Option<(File, OwnedFd)>) -> Self {
-        let home = cmd
-            .get_envs()
-            .find(|(k, _)| *k == "ZWALLET_HOME")
-            .and_then(|(_, v)| v)
-            .map(PathBuf::from);
         // SAFETY: setsid and ioctl are async-signal-safe; fd 0 is the pty slave by now.
         unsafe {
             cmd.pre_exec(|| {
@@ -1191,15 +1161,7 @@ impl PtyChild {
             out,
             shown: Vec::new(),
             screen: None,
-            home,
         }
-    }
-
-    /// For a failure message: why the daemons of the child's home ended ([`daemon_end_notes`]).
-    fn end_notes(&self) -> String {
-        self.home
-            .as_deref()
-            .map_or_else(|| "no ZWALLET_HOME".into(), daemon_end_notes)
     }
 
     fn full_screen(&self) -> &FullScreen {
@@ -1244,9 +1206,8 @@ impl PtyChild {
                     None => format!("still running after {limit:?}"),
                 };
                 panic!(
-                    "not shown; {exit}; the terminal showed:\n{}\n{}",
-                    Frame::parse(&output, size),
-                    self.end_notes()
+                    "not shown; {exit}; the terminal showed:\n{}",
+                    Frame::parse(&output, size)
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -1315,9 +1276,8 @@ impl PtyChild {
             if start.elapsed() > limit {
                 let _ = self.child.kill();
                 panic!(
-                    "still running after {limit:?}; the terminal showed:\n{}\n{}",
-                    self.frame(),
-                    self.end_notes()
+                    "still running after {limit:?}; the terminal showed:\n{}",
+                    self.frame()
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -1377,14 +1337,13 @@ impl PtyChild {
         }
     }
 
-    /// For a failure message: the last 4 KB of what the terminal showed, escaped, and why the
-    /// daemons of the child's home ended.
+    /// For a failure message: the last 4 KB of what the terminal showed, escaped.
     fn seen_tail(&self) -> String {
         let from = self.seen.len().saturating_sub(4096);
         let from = (from..=self.seen.len())
             .find(|i| self.seen.is_char_boundary(*i))
             .unwrap_or(0);
-        format!("{:?}; {}", &self.seen[from..], self.end_notes())
+        format!("{:?}", &self.seen[from..])
     }
 
     /// Reads what stdout's terminal holds, so the child never blocks on a full one.

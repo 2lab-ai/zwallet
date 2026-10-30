@@ -1209,8 +1209,7 @@ fn macos_exe_path(pid: i32, max: usize) -> String {
 /// daemon from the seed it decrypted with `password`, never read from the cache in wallet.json).
 ///
 /// The new daemon is this process's own child (`setsid`, argv `zwallet daemon --home <canonical
-/// home>`, no environment (a debug build passes its [`TEST_SCOPE_ENV`] on), no descriptor but
-/// its channel), started from `exe`. Its fds 0 and 1
+/// home>`, no environment, no descriptor but its channel), started from `exe`. Its fds 0 and 1
 /// are one end of a socketpair whose other end only this process holds. Over that channel:
 /// 1. it asks for input only once core dumps are off; on macOS it must then run this build's
 ///    code ([`check_started_code`]); it then gets the TTL and the password,
@@ -1265,12 +1264,6 @@ fn spawn_daemon(exe: &DaemonExe, canonical_home: &Path) -> Result<(Child, ChildC
         .stdin(Stdio::from(OwnedFd::from(theirs)))
         .stdout(Stdio::from(OwnedFd::from(theirs_out)))
         .stderr(Stdio::null());
-    // A debug build passes its test scope on, and nothing else: the daemon of a test home then
-    // notes why it ends (`TEST_END_NOTES`). A release build has no test scope to pass.
-    #[cfg(debug_assertions)]
-    if let Some(scope) = std::env::var_os(TEST_SCOPE_ENV) {
-        cmd.env(TEST_SCOPE_ENV, scope);
-    }
     // SAFETY: runs between fork and exec and only calls async-signal-safe functions (setsid,
     // syscall, open, fcntl, close, proc_pidinfo) on memory allocated before the fork; the
     // channel is already on 0 and 1.
@@ -1725,18 +1718,6 @@ fn test_scope() -> Option<HomePrefix> {
 #[cfg(not(debug_assertions))]
 fn test_scope() -> Option<HomePrefix> {
     None
-}
-
-/// Test-only, not a user feature: the file in a test home where a debug build's daemon notes
-/// why it ended its session or exited, one line each (`daemon::note_end`), so that a test that
-/// finds a session gone can say why. Written only by a build with `debug_assertions`, and only
-/// for a home under [`TEST_SCOPE_ENV`]; a release daemon writes no file.
-pub const TEST_END_NOTES: &str = "daemon-ends.test.log";
-
-/// Whether `home` lies under the [`TEST_SCOPE_ENV`] prefix (a debug build only).
-#[cfg(debug_assertions)]
-pub(crate) fn in_test_scope(home: &Path) -> bool {
-    test_scope().is_some_and(|scope| scope.holds(home.as_os_str()))
 }
 
 /// `(pid, --home)` of every zwallet daemon of this user, other than this process and `keep`:
