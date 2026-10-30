@@ -47,7 +47,50 @@ not claim that the whole product specification has shipped (01-spec.md keeps its
 - **The owner's own acceptance** on preview 2026.10.29.2134.
 - **A stable release or `v*` tag**, and BSC USDT.
 - **#26 and #27**: design only; runtime enforcement deferred by the owner.
-- **#52**: the once-seen Linux pty flake, tracked.
+
+## Post-delivery follow-up — issue #57
+
+The original PR #51/#53 delivery above remains complete. Issue #52 was repaired by
+PR #54, and its stale open notes moved to append-only R2 receipts. The merged main
+revision `6f1a2c91ab3a0bdaf9bf039afc27110eff0c1c6a` has successful Linux/macOS
+[CI 40992407534](https://github.com/2lab-ai/zwallet/actions/runs/40992407534).
+
+Draft PR #56 at `1cba2938129a33fdcbdfa12d0896b08ea65be8dd` fixes the three assertion
+sites in #55; its [CI 40995708937](https://github.com/2lab-ai/zwallet/actions/runs/40995708937)
+succeeded on Linux/macOS. The continuation's local acceptance is complete:
+
+- **Native macOS gate, Rust 1.95.0:** `cargo fmt --check`,
+  `cargo clippy --all-targets --locked -- -D warnings` and the full `cargo test --locked --no-fail-fast`
+  suite passed: **924 passed / 0 failed / 15 ignored across 34 targets**, exit 0.
+  This includes the ordinary, unleaked `dry_run_prints_no_broadcastable_raw_tx` test.
+- **Forced-path regression:** with `TMPDIR` containing `2J`, the exact whitelist-shape
+  and journal-field library tests passed **2/2**, exit 0. Their assertions still
+  detect the planted unsafe fields, rather than incidental path characters.
+- **Linux tr4 under load:**
+  `cargo test --offline --locked --test cli tr4_a_tampered_tron_cache_is_refused_and_shown_escaped -- --exact --test-threads=1`
+  passed **30/30**, exit 0, in 179 seconds including the first rebuild. Environment:
+  Linux aarch64, Rust 1.95.0, non-root uid 1000, a two-vCPU quota and two CPU workers,
+  external networking disconnected, ptrace_scope=1. Debug assertions stayed enabled
+  with debug metadata disabled. No daemon diagnostics or product deadline override
+  was added. The historical tr4 single-event cause remains an inference; passing
+  reruns do not turn it into a reproduced cause.
+- **Independent review: CLEAR.** The exact three-file code delta retains raw/escaped
+  planted-value detection, strips only the complete journal path for field checks,
+  and distinguishes a complete signed type-2 transaction from a 32-byte hash or
+  20-byte address. Existing no-rawTx, signer, no-journal and no-broadcast assertions
+  remain. Product behavior is unchanged; no must-fix finding remains.
+- **Tested source:** [1cba2938129a33fdcbdfa12d0896b08ea65be8dd](https://github.com/2lab-ai/zwallet/commit/1cba2938129a33fdcbdfa12d0896b08ea65be8dd).
+  All 122 source/test/Cargo/toolchain files remained unchanged through validation;
+  the delivery commit adds only `.prd` receipts. Commands, results and the independent
+  review conclusion are recorded above; final CI is linked below.
+
+The exact final commit, fork draft PR and CI receipt are indexed by
+[issue #57](https://github.com/2lab-ai/zwallet/issues/57), separately from the observed
+#56 CI above. Upstream merge is outside this continuation's authority; #55 stays
+open pending an authorized merge. Existing PR #51 real-terminal acceptance covers
+the unchanged product, so completed integration previews are not rebuilt.
+Owner wallet access, funded TR23, Q/B, stable tags and #26/#27 retain their boundaries.
+After any authorized merge, check that revision's main CI before calling it shipped.
 
 ## Original requests and preserved decisions
 
@@ -81,7 +124,9 @@ GitHub issue states below were fetched individually on 2026-10-30.
 | [#27](https://github.com/2lab-ai/zwallet/issues/27) | Approved trusted-freshness design boundary | PR #35 (in PR #51), 09-policy-freshness-design.md; comment 6490909782 | Open deliberately; runtime protection deferred by owner |
 | [#28](https://github.com/2lab-ai/zwallet/issues/28) | Unlock wire protocol separated without API change | PR #29; existing full protocol/integration suite | Closed completed |
 | [#34](https://github.com/2lab-ai/zwallet/issues/34) | TUI v2 and Tron handoff | PR #51 (599bde9); preview 2026.10.29.2134; §What shipped | Closed completed by PR #51, 2026-10-29T21:34Z |
-| [#52](https://github.com/2lab-ai/zwallet/issues/52) | Once-seen Linux pty flake in `t27_t28_pty_restart_…` | Gate at 2a1ee64, Linux first full run | Open; tracked |
+| [#52](https://github.com/2lab-ai/zwallet/issues/52) | Test-harness readiness/torn-write fixes | PR #54, merged 6f1a2c9; [main CI 40992407534](https://github.com/2lab-ai/zwallet/actions/runs/40992407534) Linux/macOS success; loop.done R2 | Closed completed, 2026-10-30 |
+| [#55](https://github.com/2lab-ai/zwallet/issues/55) | Random path/hash collisions in never-echoed assertions | Draft PR #56 at 1cba293; [CI 40995708937](https://github.com/2lab-ai/zwallet/actions/runs/40995708937) Linux/macOS success; continuation receipt in #57 | Open; successor local gates/review passed; final head/PR/CI indexed in #57; authorized merge remains |
+| [#57](https://github.com/2lab-ai/zwallet/issues/57) | Post-delivery handoff: #55 gates and #52 documentation closeout | Current branch continues 1cba293 over merged 6f1a2c9; exact final head, fork draft PR and CI are indexed by issue #57 | Local acceptance complete; final head/PR/CI indexed here; merge outside authority; original #34 delivery remains complete |
 
 PR #29 merged 2026-10-29T06:17Z as 99fff4e. Its head validation receipt is
 [CI 40814597506](https://github.com/2lab-ai/zwallet/actions/runs/40814597506):

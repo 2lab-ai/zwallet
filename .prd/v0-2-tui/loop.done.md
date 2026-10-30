@@ -148,3 +148,16 @@ v0.2; avalanche through Routescan stays out of v0.2; the coverage per chain is u
 **From "Open for TUI-2b".** Round 4 of TUI-1c's review closed a third line, the stderr join in `PtyChild::stderr()`: a daemon the warm-up starts inherits neither that pipe nor the pty slave, since `spawn_daemon` gives it `Stdio::null()` for stderr and marks every fd from 3 up close-on-exec (src/core/protocol.rs:1354, :1363). The other two lines stay open in [`loop.md`](loop.md).
 
 **Next (as it was).** Merge `integ/tui-tron-final` as one PR (it marks #35 and #37–#49 merged), then move the 🟡 rows to `loop.done.md`. The previews M1–M5 can collapse into one preview of that merge: the owner unlocks again (new cdhash) and accepts the TUI on it. T18's trade-off Q stays with the owner; the existing Q1 and B1 pointers remain the defaults, and the handoff does not authorize phrase display or a new QR implementation. Done 2026-10-30 except the owner's steps.
+
+## R2 — closed 2026-10-30 (issue #52)
+
+The once-seen Linux pty flake in
+`t27_t28_pty_restart_original_proof_speedup_and_cancel_verify_signed_bytes` was tracked as #52.
+
+**Result.** [PR #54](https://github.com/2lab-ai/zwallet/pull/54) fixed the reproduced
+history-readiness race and changed fixture wallet edits to atomic rename. It merged
+as `6f1a2c91ab3a0bdaf9bf039afc27110eff0c1c6a`, closing #52. Main
+[CI 40992407534](https://github.com/2lab-ai/zwallet/actions/runs/40992407534) succeeded
+on Linux and macOS. See the [handoff R2](../handoff-completion/loop.done.md#r2--closed-2026-10-30-pr-54)
+for the bounded conclusion about the unreproduced single-edit a_cache observation.
+Existing shipped acceptance rows and R1 receipts above are unchanged.

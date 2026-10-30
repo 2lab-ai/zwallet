@@ -37,6 +37,7 @@ For the next unit whose pty runs resize or print after the TUI. Both still hold 
 
 ## Next
 
-The owner: the three items above. The agent: nothing queued; pick up the test notes with the next
-TUI change that touches resize or post-exit output. The once-seen Linux pty flake in
-`t27_t28_pty_restart_original_proof_speedup_and_cancel_verify_signed_bytes` is tracked as #52.
+The owner: the three items above. Pick up the test notes with the next TUI change
+that touches resize or post-exit output. Issue #52 is closed by PR #54; its receipt
+is appended in [`loop.done.md`](loop.done.md) R2. The #55/#57 follow-up is tracked in
+[`../handoff-completion/loop.md`](../handoff-completion/loop.md), without reopening shipped TUI units.
