@@ -298,7 +298,9 @@ the same payment.
     the first 64, plus `pendingRange` and `pendingCount`, so a bogus count is never enumerated)
     and their journal entries. `--allow-pending` overrides.
   - **Duplicate guard:** refused if the journal has the same chain, kind, `to` and **base-unit
-    amount** (and token contract) from the last 10 minutes. It never compares the display string,
+    amount** (and token contract), plus exact encoded calldata hash for invokes, within the
+    signed advisory window (default 10 minutes). Only the last 1 MiB of local journal is read;
+    legacy or malformed calldata hashes match conservatively. It never compares the display string,
     so a failed `symbol()` call cannot defeat it. This catches "my first attempt was killed,
     re-run" even when that attempt has already been mined. `--allow-duplicate` overrides.
 - **Lookup:** `zwallet tx --chain <c> <txHash>` reports mined / pending / not found from the chain,

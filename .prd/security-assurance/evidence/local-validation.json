@@ -1,0 +1,378 @@
+{
+  "measuredAt": "2026-10-30T13:05:15.454641+00:00",
+  "platform": "macOS-15.6.1-arm64-arm-64bit-Mach-O",
+  "rust": "1.95.0",
+  "baseMain": "0994f9a64648cef7890286dd73080af21c57c603",
+  "inputManifestSha256": "c10573c2ec7304baea3c152b2a2a0eb52370fb1a50c1200e7f6ef7a39646d167",
+  "inputs": {
+    ".github/workflows/ci.yml": "97f7f057882c3f9d155a915019bec8d46630a982ea196596ee139e27c8000826",
+    ".github/workflows/preview.yml": "ef9ec389c1b09ed67b395e7a6b6614292496158048a75b0424f626a0c45f2154",
+    ".github/workflows/release.yml": "89db133bb3156119f0fa7f6db24eb3de8edbaaaa160a0319e685e8d64f0128d8",
+    ".github/workflows/validate.yml": "b00e982a79bf8518991ef49f6ec2098dfc264c41b0ce62759a8be4d4eb34f5d1",
+    "Cargo.lock": "f954013b1b83a33061e4127bcce1595041fff87e0016f94d5372044833ee9fa8",
+    "Cargo.toml": "139f2dc4ccbfedf2e2aec743352ceb6d0e5ec26620840fa6a6ee63257298b4b0",
+    "rust-toolchain.toml": "7d21c66a15f41bad66b82ed06a289f5dc8a6e3751951d2696bbf20ce296f2b0f",
+    "src/chains/evm/abi.rs": "eb3f8c378dfe5cbc3b0e873c66c062109937c15cfead8f9578d689f4078dc312",
+    "src/chains/evm/explorer.rs": "9cc6a4e0b51dab731ed5819a63b4ee30c1d87fc160a49e9ccd68618151871f27",
+    "src/chains/evm/mod.rs": "056b5e3fffc14f97ae88b3f37b468360fc3dc1aac2b908e20ddc768717747ea7",
+    "src/chains/evm/policy.rs": "76a4dd1c7de500e763bcaf3265c274d42eb050377a26e8c89f1dc4bf2d4466af",
+    "src/chains/evm/registry.rs": "6760f9641f273d1fe461f6c63902167c91c9dd3b87e3b0a55f5e7c8ca01fcf9b",
+    "src/chains/evm/rpc/detail.rs": "1bf297fca892f82de67c473f4dcaf79c26ad34682bd596155a9f7cfa583130cd",
+    "src/chains/evm/rpc/replacement.rs": "8bc44a222f4727071db4abe91a67be9a0edb6abf358c40d47db29f8ad94f969f",
+    "src/chains/evm/rpc.rs": "2c6cb647b51dce48dda73c73fcff9236151a6e89437e9eaa8ed78d64bb3c4712",
+    "src/chains/evm/tx.rs": "34e19401e845881513dcc952aa1ba08dc4030d5c82cfe44e47662ef2a90ba5c5",
+    "src/chains/evm/tx_original.rs": "e67114b170b1896d1056c0183f91292fba0bb73a026ef997b75c4452011236d4",
+    "src/chains/mod.rs": "d2b0a9fe9209fac0cadc33a051f92c93be28a3c57a4efc3f57f7856c34f830f5",
+    "src/chains/policy.rs": "3e725b9f3aefd0d7b1e76fdc6751dedd966411914ca5a31c9e38621f27a3d104",
+    "src/chains/tron/address.rs": "effaa8d8482834faffa0ecddee513a4d19a4893c60b2169604d244bd15d353d0",
+    "src/chains/tron/journal.rs": "4df1085acc17addd30202b31025fce57e0ca427822077cb50e37651499cadc15",
+    "src/chains/tron/lookup.rs": "2903e1ad6c20900423c9cf697a7ca181f82284006f5cdc0529f5a51df84f6cc3",
+    "src/chains/tron/mod.rs": "5d2859ea84795ffad8cfa953a60e96459fed95519ae9938bc4469c9e0bd20c98",
+    "src/chains/tron/policy/tests.rs": "e0f4258c9346618dd6da06acbbfade4b63ea1ba3f751128168f6dfd3da89897d",
+    "src/chains/tron/policy.rs": "9cfd979ce5c6239ad6da48755e717b952562fcf8ce99182db6bf7c7a862abdd0",
+    "src/chains/tron/registry.rs": "d7ee0200366f1fb26be7498dea8c54085b6930af06bb5ea4764377165a8111d8",
+    "src/chains/tron/rpc.rs": "80bfa32892f191210aeb1c6d9ac8e7eff68743bffd7f1068a47eac1fc2c24001",
+    "src/chains/tron/send.rs": "06798898831a7db1eb4f58edae9368ee1f29fc5dc15867064753f2bf03d2639f",
+    "src/chains/tron/tx.rs": "bf556e78ba9afcf2d19c23cfe0567d690a7e8398b182244a8099a98522950ee8",
+    "src/chains/tron/tx_tests.rs": "7f18f496c69f0c124193d922ff51139eb113f5c756daf962ccf9477ed888e708",
+    "src/cli/terminal_observation_tests.rs": "99abf9a30718f976578ca352b4cb0283689cc8ac16334ac0f699c1bfee1665e4",
+    "src/cli.rs": "924eda3311838c1b872348108a51a886e7ae04a1b2e720e51580b65cc23b6559",
+    "src/commands/whitelist.rs": "05e69b7cceaeef403347b1d618cc913b63521bb6632953b2bc06a1d36560dbc7",
+    "src/commands.rs": "7346e461fa73ff9804b999e6a98dc59c5399be0becd1e43ee4b3010034e52b2d",
+    "src/core/amount.rs": "174dca0a3b11b7a62a934d5e3baf98cde69332fb4bde71cb9c9583f382955633",
+    "src/core/error.rs": "96d2da7179298e96cf792719f57080cfe764dad34dd9de227a00841b6d42a0de",
+    "src/core/mod.rs": "21bd7cdd7d843bd1c9c7461f35eba188548efde594679a4856d84f26c508455a",
+    "src/core/password.rs": "945bc9669daf8b835e4ceb9afdda23974a01378f0eae123edef4345428485d96",
+    "src/core/protocol/unlock_channel.rs": "def587c91827d633706ffdc2f7459b0f4b21f62cbfc1214f3181925699553f41",
+    "src/core/protocol.rs": "caa5b3e0dcf3140640d5e9a7cab7e25da4b23728649e393155b91c3e3470b1b5",
+    "src/core/seed.rs": "7e9b01fb8f59ffe5b6348b9f93832b730a29f3601785c3c3912f1e25fc27b826",
+    "src/core/store.rs": "224299139d3e6a7e193d5fd0c0cf4d896df05a23ca8f65dfd72a91d1731f6d28",
+    "src/core/terminal.rs": "964381e3eab6be3cb3243e2eac67bd38fd9f9fbde288dfa7fa98d152b0a23ecb",
+    "src/core/text.rs": "eb21747041351e73d041f37312bdf7cf94294275fa0908be231a4248c1824538",
+    "src/core/time.rs": "d6cea3b8c57d19be6c7c28418c611e0bb357fb3cf6ee1527480514fb9abc1de8",
+    "src/core/whitelist.rs": "d06ad5eae91378a8ef39e9f84da03a20ae62f3ec47170239f7b4f75cd30005a9",
+    "src/daemon/mod.rs": "979072bdb69bf758a3b83cf85d6e72ce92878941fa52eedb174bbf89719b62c9",
+    "src/history/tron.rs": "5b2b0f53b6d738a71927cc360a5af886e954fe185f9f985467dec8c6d9850de5",
+    "src/history.rs": "97b13c44208585c86031c3a6884d6f253180f0416f21053ab4ce7264ce746cf1",
+    "src/lib.rs": "b3dc8848af272884e3d9ce4897840066e8db85b687661f56d278bb09b65726f3",
+    "src/main.rs": "e98b5a514e25bf427a0401dbbd9c94e679ec89e86ba9c70cf790cee3df50d4a1",
+    "src/qr.rs": "7cdf89962f2a19b8b07c58ce759772ed7e05adee36d516a8b7abf2123a2c0bb4",
+    "src/tui/actions.rs": "2b1c4cf00357ad9765213b1ad3d247b9f5828ded12fca0f0528deba6969eba4b",
+    "src/tui/app/addresses.rs": "e34e6d1d574ae82c5a5e5486ca671b0de6ff6c21b00d949ec5427d09896b2a69",
+    "src/tui/app/create.rs": "ed1725293704f80f077a14eaeb44151cb7beec15f8bef07840d90454168a71ce",
+    "src/tui/app/history.rs": "5abc85c0c54dd9feca6b39fd637096a80d3375d8e7e37293392bfc5920b971e0",
+    "src/tui/app/navigation.rs": "7b183a9617df354907dfcc0fdd20cdf1c375f8edcff4385a02a8635cd9d893a7",
+    "src/tui/app/replacement.rs": "e889f42fe569a4b983eb715cf9350927177306a54eb8f1ce6cc6b02c0bdb4ec1",
+    "src/tui/app/tasks.rs": "b580f8d2ed770cf65d1282209a88b6ecae571a19b9694fec1edfcc3bcab533f4",
+    "src/tui/app/tools.rs": "a60ef0809db3b143098883fb63c17437c330bb0a000a994a060c9c5c5f73ce37",
+    "src/tui/app/transfer/tron.rs": "f8c9da1b52a4f08582fafbced324bfb8b45bd5074b5d1d2b21d8fa0d66b9144f",
+    "src/tui/app/transfer.rs": "3da489765bd19946672e107f649f1f49b0f16e5a2bc71877bf1f8bf2b01868ef",
+    "src/tui/app/whitelist.rs": "334a80cb5374c8be154cc0d91b45a3965956bb7fa0111e9438d526de48c52be9",
+    "src/tui/app/whitelist_tests.rs": "300dadfcd5f86489f0e46bec21150c1660efc567cadf7cf8d1ef6a07edf0e3ec",
+    "src/tui/app.rs": "2073efc21d799405ee6ac061c6f9531485879599ae870bbee76dca7d1324d083",
+    "src/tui/create_runtime.rs": "ee1f03f02e4d9fbb73afad1d5ac2393103a2c358b0bb77ef9b3527090f24fad1",
+    "src/tui/form.rs": "c9b5e8c8891c3af65c1cd2e30aacde643b5b74aeab738dad737c35e60676a095",
+    "src/tui/mod.rs": "05aa8c4c6952cdcd71e5421c7fc1b8ec58ee139a8203c7ae5d5871082c11ab7c",
+    "src/tui/password.rs": "e43747590b84ac2b3b3b7f8b84de05c81bf7512788c949ebaaa0ce14c3936fb0",
+    "src/tui/style.rs": "d2d50735bcd9abe419fa4505f723a486f8f4a6b4d123476df062c4bbf6aed417",
+    "src/tui/term.rs": "dd51ca7418171a1e69ac7d97864c23e76cc6928d9a71f39ece09ca78968c4038",
+    "src/tui/terminal_observation_tests.rs": "c0898026043633a97ade956010644c7c0358b46b89f19d6281f23d115ffd5457",
+    "src/tui/text.rs": "74c7102d9177a64f539c7b05da21ef26c453577a64742ab4ba521c64020420c1",
+    "src/tui/ui/create.rs": "41d42265eae95eb58bf72395f8774711371aeef0fa64b0a4fdcf09f62a191caf",
+    "src/tui/ui/history.rs": "e03f79e15b8173aa34458d1a8cb65fe701ca66ae5df7151050f772d9d99d4c1c",
+    "src/tui/ui/replacement.rs": "63289740e67494c453e26b7977e1e7a02d5982ef3e0275277c7c15001a64d09b",
+    "src/tui/ui/tasks.rs": "9519a3c733f46723f582dfb444099562d012e207a9a48d0453473f13fb231e4b",
+    "src/tui/ui/tools.rs": "0e9c38a5219fddc761b79ae515b12efe2108cae2305001ac8cfbb7484da819d0",
+    "src/tui/ui/transfer.rs": "aa84cdc7543fa7a5c2eb7a53008c24f58708ea4fc11156997a73c48934b7b247",
+    "src/tui/ui/tron_transfer.rs": "a95b57e12410dd9d92bc4543990b4d61088df4a8b11557905dd957ead99b1adb",
+    "src/tui/ui/whitelist.rs": "bcb5931f53aaa877b0d531a95d7e3fa20e2d64c1b9e4685787a06034edef75e2",
+    "src/tui/ui.rs": "1f845f5977f714f03a5273f6fac951f7da9e7b088165932d411c20a0567c32f1",
+    "src/wallet/create.rs": "731fffed2a5b7f313e7fbdc6ad552d07e4226c5b56cc0d47085706342e3b7c8b",
+    "src/wallet/read.rs": "31a7dd56b99c4869fa0d726af0981edd6e5dd80b988f40526bdf6b524d2c5a60",
+    "src/wallet/replacement.rs": "b591edf9e0a63e859df1fdbc5291a9db69ad2cde774455b581037db4caa4be0f",
+    "src/wallet/send.rs": "3540637418c41c5cb73254554f8e935ab2b3db62d38ae030f9e3a511197b625c",
+    "src/wallet/tasks.rs": "43f732d83586c52f4166ae64519d9535c55e270b780226ba5d5669a5e5732b62",
+    "src/wallet/tools.rs": "cce26beae89d66b0ec8105915d4f874b3eeb8ae1984cb53b12eac82eaefec364",
+    "src/wallet/tron_send.rs": "ab7b200f785790077879a2f97d4a98d7a3f67835fd43f7c221c15f0cd32615fe",
+    "src/wallet/whitelist.rs": "9d816070016a5b5e83742222b29129513d1f63a1b8492cc51593852ccfeab616",
+    "src/wallet/whitelist_api_tests.rs": "2f3769758927a05c13f9607623e0d9e679e5d9b7559bf7a306a0c32effd74e79",
+    "src/wallet.rs": "960a374363e690cdb27a0bdb71b0cc29d7f367d3091cbffb665aadad8db06b9d",
+    "tests/cli.rs": "fd7b48cfaf4b0a4cbf008db6cb55991467a63951c92fd93828de2e97141e3513",
+    "tests/common/executable.rs": "2ff2a6a4137592688f4f9d9244bb9edf2b960b1879ccde2e78d557789e2db14c",
+    "tests/common/frame.rs": "e8a7f745bd403cc2f6d8eb930ad012269f991c39cc0148c8417b115a6d7eb5f2",
+    "tests/common/mod.rs": "035f17d3a5a4a0f663b1432f205cf52b50b06e41d7ee130c4935a5b933f996ec",
+    "tests/common/tron.rs": "45d667adda6c65c181fe44e96c53dbc2f28d8b25b9d298d1f826250301542b1e",
+    "tests/create_wallet.rs": "f4e431264e2ad061661ebcf11ac9beeab39f9a4c161349ca4b341b9481757fec",
+    "tests/evm_offline.rs": "a4f8df5bdea6159eccffdc900bbef072e08c3d273c63d922ef6d0a7c2c8d9dfb",
+    "tests/executable_copy.rs": "df1237141a1757b97564e618ff4260ab4d6b45a6c0b59f98805d7e2b7a99f6f0",
+    "tests/fixtures/explorer/README.md": "cbf3afa2e9b08deb61b12f705f096477913a508e0a54a2e3c937495068f4e3e0",
+    "tests/fixtures/explorer/transactions.json": "a62d0306f4836ef92d1442068c194493247a432f12e25204fdc100f1860134f9",
+    "tests/fixtures/tron-account-taken-over.json": "b25a72e19f904e70e91a53b9f4f82e6b3cdaf5506158b4c7ecf95952a607da48",
+    "tests/fixtures/tron-signed.json": "f6e1f989668e378b6b6e812c8a175e070ac526580eb68714df45050a6d6053c8",
+    "tests/fixtures/tron-unsigned.json": "d0c29dfc5827be5a2b73760f477d15e54d6449826bdb53005c695c854cff2e94",
+    "tests/history.rs": "4d573f11706252fe18d1bb613b25505011c7eb50ccc538562e3b402c873d2f4c",
+    "tests/live.rs": "0269535f44c28b1ceb41d5aa5a6c57bdaee9e30f6218988866b9be4505862848",
+    "tests/policy_limits.rs": "49af86264a89d464fec68e80b897e4e5f70dfee1083628e9be12514055437397",
+    "tests/replacement_review.rs": "122d4b60675ede602a25a4ff45911cdfd8dd75076688945bdd71cd0cf82b8d77",
+    "tests/review_receipt_deadline.rs": "11453eee1260bf972c7840b9adfc746d877d1668d21209f3b12dc52628859094",
+    "tests/review_whitelist_independent.rs": "284d43af526ac3a60962011aaa505acfdf62571c428510a4cc908de74d611626",
+    "tests/tool_wallet.rs": "30f4f581949c523315457c5a515f6ed24c407600476a9b952eb968f0b3f3be0e",
+    "tests/tools_pty.rs": "45a9f6340cce858034ff6da4083e8ab580d071c7e1f08c5cde27ce84e111f9ef",
+    "tests/transfer_review.rs": "83a6b0823f44d1d84ce3af6320fbfa7a9715b1994135ddede1153495a7ffcbcc",
+    "tests/tron_history.rs": "1ea6d2632c74a881a5dd8c4d881938d038d0d5811e5428fed740b8daeb9c6dbf",
+    "tests/tron_offline.rs": "37dd8003a00e7fea92d9a00cd5a312f67dddaf886a9e9ba5e3904be17d232b7e",
+    "tests/tron_review.rs": "6a662c44dbc19ce60c2f1802be51f5e23d380a2e794c615284dbe95c4f3de4f2",
+    "tests/tron_send.rs": "83010a401f073a7cec75ca7712cc43bc00a74aeb0193b6950116ee1fb80c249a",
+    "tests/tron_tui.rs": "59f491e2e43a0446f66e78c4baefb669275e509d41388dadd75efa4a372926be",
+    "tests/tron_tui_pty.rs": "396e1dac57291f8058e4ed99bcbf1482db04dee5f6d47eaea5ce8a699b6439f7",
+    "tests/tui.rs": "7b98bc57a74de7c754621493f7365d55d04601958e00e973fb76335258e69c9e",
+    "tests/tui_history.rs": "d01e52a3b28ae02b2723be3d0bdd08f19844da550e10a97ff761573b5cdafc63",
+    "tests/tui_late_read_error.rs": "fca59d945fb35f4ff1949574fa6511fa34a37c673e05f65cbbe376b15e756b4e",
+    "tests/tui_replacement.rs": "d24ddff5afd974ccfd14a5cb7a0d26b9c5b6060bbb95ea38cd08f93bd937e1da",
+    "tests/tui_tasks.rs": "4b557e5c523c3e0bd71b5c1aa28ce7e6333c1d91cd0dbd2e72049070c34d4ab7",
+    "tests/tui_terminal_output.rs": "659d4d9053b3d9be7016e13690e78b202bb600029c090efbf9009537b5c0fc3a",
+    "tests/tui_tools_late_read_error.rs": "9b834919c892d786a067c1d8782022b23e125f51e685129f7144a8ba7701008e",
+    "tests/tui_transfer.rs": "1f91196fd1d54d64f2760f3b30060ab4c9d7016fa5039a12f2572476d08640b4",
+    "tests/tui_transfer_deadline.rs": "93e697b58b4a65b30a0e29f721adf1bbfba5302be084d5eb82e55c2428bbc3fa",
+    "tests/tui_whitelist.rs": "874e229d90bc14a5abaefce9476039ceb0fc291cf100e88aedcdcb36cd3e9d14",
+    "tests/tui_whitelist_caps.rs": "7f29f51054a00d57f07180ba643f581be2607d713a51873c70c9b8aab08c06ea",
+    "tests/wallet_read.rs": "54e60f8ebc7f98d85f03380ee80103b36da43e6ccab0bd028deeb80745a567a8",
+    "tests/whitelist_daemon.rs": "35b4bf46e83aa2c6770fcf3307826ffa10218a407ea231a34c1a2d8c3c246b23",
+    "tests/whitelist_seed.rs": "04a431ef779a4c75e42c0f02b0161914baa37c9af2fb296fcc8cdc97a898768f"
+  },
+  "localGate": {
+    "fmt": "passed",
+    "clippyAllTargetsDenyWarnings": "passed",
+    "tests": {
+      "passed": 964,
+      "failed": 0,
+      "ignored": 15,
+      "suites": [
+        {
+          "suite": "Running unittests src/lib.rs",
+          "passed": 446,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running unittests src/main.rs",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/cli.rs",
+          "passed": 120,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/create_wallet.rs",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/evm_offline.rs",
+          "passed": 69,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/executable_copy.rs",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/history.rs",
+          "passed": 19,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "suite": "Running tests/live.rs",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 14
+        },
+        {
+          "suite": "Running tests/policy_limits.rs",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/replacement_review.rs",
+          "passed": 28,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/review_receipt_deadline.rs",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/review_whitelist_independent.rs",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tool_wallet.rs",
+          "passed": 27,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tools_pty.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/transfer_review.rs",
+          "passed": 24,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tron_history.rs",
+          "passed": 20,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tron_offline.rs",
+          "passed": 13,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tron_review.rs",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tron_send.rs",
+          "passed": 20,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tron_tui.rs",
+          "passed": 20,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tron_tui_pty.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui.rs",
+          "passed": 76,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui_history.rs",
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui_late_read_error.rs",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui_replacement.rs",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui_tasks.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui_terminal_output.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui_tools_late_read_error.rs",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui_transfer.rs",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui_transfer_deadline.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui_whitelist.rs",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/tui_whitelist_caps.rs",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/wallet_read.rs",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/whitelist_daemon.rs",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Running tests/whitelist_seed.rs",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "Doc-tests zwallet",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    }
+  },
+  "focusedIntegrationRegression": {
+    "passed": 89,
+    "failed": 0,
+    "scope": "one provenance-output test, 16 navigation tests, 28 replacement-review tests, 24 transfer-review tests and 20 Tron UI tests"
+  },
+  "ciEvidence": "https://github.com/2lab-ai/zwallet/pull/59/checks",
+  "deliveryReceipt": "https://github.com/2lab-ai/zwallet/issues/57",
+  "note": "Local observations only. Final submitted commit and both platform CI conclusions are recorded on the linked PR and issue after publication; predecessor CI is not evidence for this source."
+}

@@ -57,6 +57,7 @@ pub async fn run(cli: Cli) -> Result<Out> {
         Command::Transfer(a) => transfer(&home()?, a).await,
         Command::SignMessage(a) => sign_message(&home()?, a).await,
         Command::Tx(a) => tx(a).await,
+        Command::Task(a) => task(&home()?, a).await,
         Command::Status(qr) => status(&home()?, qr.no_qr).await,
         Command::Backup => backup(&home()?),
         Command::Unlock(a) => unlock(&home()?, a).await,
@@ -1408,6 +1409,54 @@ fn max_fee_wei(send: &SendArgs) -> Result<Option<u128>> {
         .transpose()
 }
 
+async fn task(home: &Path, args: crate::cli::TaskCommand) -> Result<Out> {
+    use crate::cli::TaskCommand;
+    use crate::wallet::tasks;
+    let value = match args {
+        TaskCommand::Create {
+            id,
+            chain,
+            key,
+            allocation,
+            rpc,
+        } => {
+            let chain = chains::find(&chain)?;
+            let file = store::read_wallet_file(home)?;
+            let key = file.key(key.key.as_deref())?.name.clone();
+            let input = tasks::TaskCreate {
+                id,
+                key,
+                allocations: tasks::parse_allocations(chain, &allocation)?,
+            };
+            serde_json::to_value(tasks::create(home, &net(chain, rpc.as_deref()), &input).await?)
+        }
+        TaskCommand::List => serde_json::to_value(tasks::list(home)?),
+        TaskCommand::Report {
+            id,
+            offline,
+            rpc,
+            reveal_addresses,
+        } => {
+            let info = tasks::info(home, &id)?;
+            let chain = chains::find(&info.chain)?;
+            serde_json::to_value(
+                tasks::report(
+                    home,
+                    &id,
+                    &net(chain, rpc.as_deref()),
+                    offline,
+                    reveal_addresses,
+                )
+                .await?,
+            )
+        }
+    }
+    .map_err(|_| WalletError::validation("cannot encode the task report"))?;
+    let text = serde_json::to_string_pretty(&value)
+        .map_err(|_| WalletError::validation("cannot encode the task report"))?;
+    Ok(Out::with_text(value, text))
+}
+
 async fn transfer(home: &Path, a: TransferArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
     let net = net(chain, a.rpc.as_deref());
@@ -1495,16 +1544,24 @@ async fn sign_and_send<F: ChainFamily>(
     from: &str,
     prepared: PreparedTx,
     send: &SendArgs,
-    out: Map<String, Value>,
+    mut out: Map<String, Value>,
     lock: Option<chains::SendLock>,
     kind: &str,
 ) -> Result<Out> {
+    if let Some(task) = &send.task {
+        wallet::tasks::validate_binding(home, task, net.chain, from)?;
+        out.insert("taskId".into(), json!(task));
+    }
+    if let Some(replaces) = &send.replace {
+        out.insert("replaces".into(), json!(replaces));
+    }
     let options = wallet::send::SendOptions {
         dry_run: send.dry_run,
         nonce: send.nonce,
         allow_duplicate: send.allow_duplicate,
         wait: send.wait,
         wait_timeout: send.wait_timeout,
+        duplicate_window_secs: None,
     };
     let result = wallet::send::send_prepared(
         fam,

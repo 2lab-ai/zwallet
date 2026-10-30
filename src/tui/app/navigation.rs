@@ -114,6 +114,11 @@ const IMPLEMENTED: &[ActionId] = &[
     ActionId::NativeCap,
     ActionId::TokenCap,
     ActionId::CalldataCap,
+    ActionId::DuplicateWindow,
+    ActionId::TaskCreate,
+    ActionId::TaskList,
+    ActionId::TaskReport,
+    ActionId::TaskAttribution,
     ActionId::MessagePolicy,
     ActionId::Reset,
     ActionId::WhitelistUnlock,
@@ -898,6 +903,35 @@ impl App {
             return work;
         }
         match action {
+            ActionId::TaskAttribution => {
+                if self.replacement_visible()
+                    && self.replacement.stage == super::replacement::Stage::Review
+                {
+                    return self.replacement_key(Key::Char('t')).unwrap_or_default();
+                }
+                if self.tab() == Tab::Tools && self.tools.stage == super::tools::Stage::InvokeReview
+                {
+                    return self.tools_key(Key::Char('t')).unwrap_or_default();
+                }
+                if matches!(
+                    self.transfer.stage,
+                    super::transfer::Stage::Review | super::transfer::Stage::Failed
+                ) && (self.transfer.draft.is_some() || self.transfer.tron.draft.is_some())
+                {
+                    self.nav.tab = Tab::Send;
+                    return self.transfer_key(Key::Char('t')).unwrap_or_default();
+                }
+                self.nav.popup = Some(Popup::Lines {
+                    title: "task attribution",
+                    lines: vec![Outside::detail(
+                        "Review a transfer or invoke first, then press t to choose its task ID.",
+                    )],
+                });
+                return vec![];
+            }
+            ActionId::TaskCreate | ActionId::TaskList | ActionId::TaskReport => {
+                return self.start_tasks(action);
+            }
             ActionId::CreateFirst | ActionId::CreateKey | ActionId::CreateUnlock => {
                 return self.begin_create();
             }

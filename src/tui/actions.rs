@@ -108,6 +108,11 @@ pub enum ActionId {
     NativeCap,
     TokenCap,
     CalldataCap,
+    DuplicateWindow,
+    TaskCreate,
+    TaskList,
+    TaskReport,
+    TaskAttribution,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,9 +253,9 @@ macro_rules! action {
     };
 }
 
-/// Matrix rows 1-52 followed by the three signed transaction-limit commands (60-62).
+/// Matrix rows 1-52 followed by signed limits, duplicate window, and native task controls (60-67).
 #[rustfmt::skip]
-pub static ACTIONS: [Action; 55] = [
+pub static ACTIONS: [Action; 60] = [
     action!(List, 1, "list", "1", Keys, "list keys", Always, Any),
     action!(VerifyKeys, 2, "list --verify", "V", Keys, "verify every key", Wallet, Any),
     action!(CreateFirst, 3, "create", "Enter", Keys, "create first wallet", FirstWallet, Any),
@@ -306,6 +311,11 @@ pub static ACTIONS: [Action; 55] = [
     action!(NativeCap, 60, "whitelist native-cap", "native-cap", Whitelist, "change the native amount limit", Wallet, Any),
     action!(TokenCap, 61, "whitelist token-cap", "token-cap", Whitelist, "change a token amount limit", Wallet, Any),
     action!(CalldataCap, 62, "whitelist calldata-cap", "calldata-cap", Whitelist, "change the calldata byte limit", Wallet, Any),
+    action!(DuplicateWindow, 63, "whitelist duplicate-window", "duplicate-window", Whitelist, "change the advisory duplicate window", Wallet, Any),
+    action!(TaskCreate, 64, "task create", "n", Tools, "create advisory task accounting", OpenKey, Any),
+    action!(TaskList, 65, "task list", "a", Tools, "list local tasks", Wallet, Any),
+    action!(TaskReport, 66, "task report", "report", Tools, "reconcile a task report", Wallet, Any),
+    action!(TaskAttribution, 67, "--task", "t", Send, "attribute a reviewed transfer or invoke", Verified, Any),
 ];
 
 pub fn by_id(id: ActionId) -> &'static Action {
@@ -457,13 +467,18 @@ mod tests {
             "whitelist native-cap",
             "whitelist token-cap",
             "whitelist calldata-cap",
+            "whitelist duplicate-window",
+            "task create",
+            "task list",
+            "task report",
+            "--task",
         ];
         assert_eq!(ACTIONS.map(|a| a.alias), aliases);
         let rows: Vec<_> = ACTIONS.iter().map(|a| a.row).collect();
-        assert_eq!(rows, (1..=52).chain(60..=62).collect::<Vec<_>>());
+        assert_eq!(rows, (1..=52).chain(60..=67).collect::<Vec<_>>());
         let ids: std::collections::HashSet<_> = ACTIONS.iter().map(|a| a.id).collect();
         assert_eq!(ids.len(), ACTIONS.len());
-        assert_eq!(Menu::new().title(), "actions (55)");
+        assert_eq!(Menu::new().title(), "actions (60)");
     }
 
     #[test]

@@ -1,0 +1,104 @@
+CREATE
+1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ tasks / advisory accounting -------------------------------------------------+
+|Local records and RPC observations; not a spending limit.                     |
+|Task: tui-tron-80                                                             |
+|Selected key: a / chain tron                                                  |
+|Baseline will be read from this session's RPC; no funds move.                 |
+|native = 123 base units                                                       |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+
+j/k scroll  Enter create local task  Esc cancel; no signature or budget
+tron | a TTdCnT...L5oa | verified by session
+signing (agent too) until 13:12Z | 127.0.0.1:56403
+stray: [], pending: ""
+OFFLINE
+1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ tasks / advisory accounting -------------------------------------------------+
+|Local records and RPC observations; not a spending limit.                     |
+|Task tui-tron-80 / tron / observed 1793365340 UTC epoch                       |
+|Source: local records only; outcomes unverified / addresses redacted          |
+|Owner: redacted:8047483bbb366de8                                              |
+|Observation began 1793365340 UTC epoch                                        |
+|Baseline source http://127.0.0.1:56403 / observed 1793365340 UTC epoch        |
+|Current source: unknown                                                       |
+|Warning: Local task/intent/submission records are mutable claims, not au      |
+|thorization or a complete account history. Untagged sends and missing/de      |
+|leted task files are not discovered.                                          |
+|Warning: A confirmed outcome means this node reports successful inclusio      |
+|n, not finality or a verified payment/delivery. Reorgs can change it. To      |
+|ken/contract effects are not inferred from intended value.                    |
+|Warning: Balances are separate latest node observations, not an atomic s      |
+|napshot. Their change includes all account activity. Fees and allocation      |
+|s never include fiat valuation or establish profit.                           |
+|Warning: Redaction omits account/payee addresses by default, but transac      |
+|tion hashes and task IDs remain linkable public evidence. Do not use per      |
++------------------------------------------------------------------------------+
+j/k scroll  Home top  r online refresh  o offline/online  a reveal/hide  Esc too
+tron | a TTdCnT...L5oa | verified by session
+signing (agent too) until 13:12Z | 127.0.0.1:56403
+stray: [], pending: ""
+ONLINE
+1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ tasks / advisory accounting -------------------------------------------------+
+|Local records and RPC observations; not a spending limit.                     |
+|Task tui-tron-80 / tron / observed 1793365340 UTC epoch                       |
+|Source: local records + session RPC observations / addresses redacted         |
+|Owner: redacted:8047483bbb366de8                                              |
+|Observation began 1793365340 UTC epoch                                        |
+|Baseline source http://127.0.0.1:56403 / observed 1793365340 UTC epoch        |
+|Current source: http://127.0.0.1:56403                                        |
+|Warning: Local task/intent/submission records are mutable claims, not au      |
+|thorization or a complete account history. Untagged sends and missing/de      |
+|leted task files are not discovered.                                          |
+|Warning: A confirmed outcome means this node reports successful inclusio      |
+|n, not finality or a verified payment/delivery. Reorgs can change it. To      |
+|ken/contract effects are not inferred from intended value.                    |
+|Warning: Balances are separate latest node observations, not an atomic s      |
+|napshot. Their change includes all account activity. Fees and allocation      |
+|s never include fiat valuation or establish profit.                           |
+|Warning: Redaction omits account/payee addresses by default, but transac      |
+|tion hashes and task IDs remain linkable public evidence. Do not use per      |
++------------------------------------------------------------------------------+
+j/k scroll  Home top  r online refresh  o offline/online  a reveal/hide  Esc too
+tron | a TTdCnT...L5oa | verified by session
+signing (agent too) until 13:12Z | 127.0.0.1:56403
+stray: [], pending: ""
+FINAL
+1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ tools / call ----------------------------------------------------------------+
+|call                                                                          |
+|                                                                              |
+|invoke                                                                        |
+|                                                                              |
+|raw invoke                                                                    |
+|                                                                              |
+|sign message                                                                  |
+|                                                                              |
+|token balance                                                                 |
+|                                                                              |
+|tasks / reports                                                               |
+|                                                                              |
+|Calls and token balances are reads. Invokes and messages require warm-up.     |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+
+Enter open  C call  i invoke  d raw  m message  t token  a tasks  ? actions
+tron | a TTdCnT...L5oa | verified by session
+signing (agent too) until 13:12Z | 127.0.0.1:56403
+stray: [], pending: ""

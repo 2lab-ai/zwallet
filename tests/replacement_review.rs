@@ -1872,8 +1872,8 @@ async fn tui_replacement_review_passes_the_global_tab_keys() {
 
 /// D3: the invoke and raw-invoke reviews show the pending and repeat guards' verdicts before the
 /// nickname, as the transfer review does, so `p`/`d` are chosen knowingly. The repeat key is the
-/// CLI's (chain, kind, contract, value, token): another calldata to the same contract with the
-/// same value is a repeat there too.
+/// CLI's chain/kind/contract/value/token plus encoded calldata: identical bytes repeat,
+/// while different arguments to the same contract and value do not.
 #[tokio::test]
 async fn tools_invoke_and_raw_reviews_show_the_pending_and_repeat_verdicts() {
     use zwallet::tui::app::tools::Stage;
@@ -1881,21 +1881,31 @@ async fn tools_invoke_and_raw_reviews_show_the_pending_and_repeat_verdicts() {
     let node = Node::new("ethereum");
     let mut app = invoke_from_tools(&f, &node, &capture).await;
     node.pending.store(7, Ordering::SeqCst);
-    for raw in [false, true] {
+    for (raw, same) in [(false, true), (true, true), (false, false), (true, false)] {
         press(&mut app, Key::Char('6'));
         let work = press(&mut app, Key::Char(if raw { 'd' } else { 'i' }));
         drive_ui(&mut app, &f, work).await;
         assert_eq!(app.tools().stage, Stage::Contracts, "{}", frame(&app));
         press(&mut app, Key::Enter);
         if raw {
-            type_text(&mut app, &format!("0x414bf389{}", "00".repeat(32 * 8)));
+            let data = if same {
+                format!("0x{}", alloy::hex::encode(captured(&capture)[0].input()))
+            } else {
+                format!("0x414bf389{}", "00".repeat(32 * 8))
+            };
+            type_text(&mut app, &data);
         } else {
             type_text(
                 &mut app,
                 "exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))",
             );
             press(&mut app, Key::Enter);
-            type_text(&mut app, &format!("({OTHER},{OTHER},500,{OTHER},9,8,7,0)"));
+            let args = if same {
+                format!("({OTHER},{OTHER},3000,{OTHER},1,2,3,0)")
+            } else {
+                format!("({OTHER},{OTHER},500,{OTHER},9,8,7,0)")
+            };
+            type_text(&mut app, &args);
         }
         press(&mut app, Key::Enter);
         press(&mut app, Key::Home);
@@ -1905,16 +1915,23 @@ async fn tools_invoke_and_raw_reviews_show_the_pending_and_repeat_verdicts() {
         drive_ui(&mut app, &f, work).await;
         assert_eq!(app.tools().stage, Stage::InvokeReview, "{}", frame(&app));
         let shown = frame(&app);
-        assert!(shown.contains("repeats 1 blocked"), "raw {raw}:\n{shown}");
+        let expected = if same {
+            "repeats 1 blocked"
+        } else {
+            "repeats 0 clear"
+        };
+        assert!(shown.contains(expected), "raw {raw}, same {same}:\n{shown}");
         // N1: a guard with nothing to block reads `clear`, not `blocked`.
         assert!(shown.contains("pending 0 clear"), "raw {raw}:\n{shown}");
-        let work = press(&mut app, Key::Char('d'));
-        drive_ui(&mut app, &f, work).await;
-        assert!(
-            frame(&app).contains("repeats 1 OVERRIDE"),
-            "{}",
-            frame(&app)
-        );
+        if same {
+            let work = press(&mut app, Key::Char('d'));
+            drive_ui(&mut app, &f, work).await;
+            assert!(
+                frame(&app).contains("repeats 1 OVERRIDE"),
+                "{}",
+                frame(&app)
+            );
+        }
         press(&mut app, Key::Esc);
     }
     assert_eq!(captured(&capture).len(), 1, "a review signs nothing");
@@ -1950,4 +1967,53 @@ async fn tui_replacement_review_survives_a_tab_round_trip_and_signs_once() {
     let actual = signed(&f);
     assert_eq!(actual.nonce(), 7);
     assert_eq!(actual.to().to_checksum(None), OTHER);
+}
+
+#[tokio::test]
+async fn task_attribution_is_retained_explicit_and_bound_before_replacement_review() {
+    let f = Fixture::new(false);
+    let node = Node::new("ethereum");
+    let path = f.dir.path().join("task-fixture.json");
+    let task = json!({"version":1,"id":"fixture","chain":"ethereum","owner":f.from,
+        "createdAt":1,"baselineSource":"http://127.0.0.1:9","allocations":{},
+        "baseline":{"native":"0"},"intents":[]});
+    std::fs::write(&path, serde_json::to_vec(&task).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    node.pending.store(7, Ordering::SeqCst);
+    let mut input = f.input(&node);
+    input.options.task_id = Some("fixture".into());
+    let transfer = wallet::review_transfer(f.dir.path(), &node.net, &f.checked, input)
+        .await
+        .unwrap();
+    assert_eq!(transfer.fields()["taskId"], "fixture");
+    let retained = OriginalIntent::from_transfer(&transfer.retained_intent()).unwrap();
+    assert_eq!(retained.task_id(), Some("fixture"));
+    node.pending.store(8, Ordering::SeqCst);
+    let row = original(&node, &f, 1, false, false);
+    let recovered = recovered(&node, &f, &row).await;
+    assert_eq!(
+        recovered.task_id(),
+        None,
+        "mutable history must not infer task attribution"
+    );
+    let attributed = recovered.with_task_id(Some("fixture".into())).unwrap();
+    let reviewed = review(&node, &f, &attributed, &row.tx_hash, Action::SpeedUp).await;
+    assert_eq!(reviewed.fields()["taskId"], "fixture");
+    assert_eq!(reviewed.fields()["replaces"], row.tx_hash);
+    assert_eq!(reviewed.retained_intent().task_id(), Some("fixture"));
+    let wrong = attributed.with_task_id(Some("missing".into())).unwrap();
+    assert!(
+        replacement::review_replacement(
+            f.dir.path(),
+            &node.net,
+            &f.checked,
+            &wrong,
+            &row.tx_hash,
+            Action::SpeedUp,
+            Options::default()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(f.signer.count(), 0);
 }

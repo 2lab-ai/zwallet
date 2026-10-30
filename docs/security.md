@@ -1,6 +1,6 @@
 # Security and custody
 
-[Back to README](../README.md) · [Command reference](commands.md) · [Feature status](features.md)
+[Back to README](../README.md) · [Command reference](commands.md) · [Feature status](features.md) · [Attack scenarios and evidence](security-threat-model.md)
 
 Read this before funding a wallet or giving an agent access to an unlocked session.
 The whitelist controls what the daemon signs; it does not isolate the agent from other
@@ -74,8 +74,9 @@ processes running as the same OS user.
   process can read the password from it or write a fake readiness line into it, even before the
   child turns non-dumpable (on Linux the daemon refuses to start on anything but a socket). Over
   that channel:
-  1. the child, whose first step (like every zwallet process's) disabled core dumps and, on
-     Linux, made it non-dumpable, asks for input;
+  1. the child, whose first application step (like every zwallet process's) requests a zero
+     core-dump limit and, on Linux, non-dumpable status, asks for input; these requests are
+     best effort and their return values are not checked;
   2. `unlock` writes the TTL and password into the channel. The password never goes over the
      socket file, argv or env;
   3. the child decrypts the wallet and says so. A wrong password ends here, and a session that was
@@ -138,9 +139,13 @@ processes running as the same OS user.
   secret-free workers with a two-second deadline including slot wait. Expiry and lock do not
   wait for those workers. Inspection failure or timeout erases the session, and late results
   cannot revive it or sign. The password/decrypt startup sequence is outside this guarantee.
-  Every zwallet process disables core dumps as its first step, and on Linux also becomes non-dumpable (out of
-  reach of same-user `/proc/<pid>/mem`, `/proc/<pid>/fd` and new ptrace attachments) from that
-  step on; not before it, since exec makes every process dumpable again.
+  Every zwallet process requests a zero core-dump limit as its first application step and,
+  on Linux, clears dumpability. These syscalls are best effort; their return values are not
+  checked. The same-user `/proc/<pid>/mem`, `/proc/<pid>/fd` and new-ptrace restriction applies
+  only if the kernel accepts the request, and does not remove an already attached tracer.
+  The exec/startup interval remains exposed. Principal secret buffers are zeroized on normal
+  drop, but dependency intermediates and ordinary backup string/JSON copies are not all wiped;
+  no complete erasure, swap or privileged-memory protection is promised.
 - **Secrets are never printed**: the mnemonic, password and private keys appear in no output, log
   or error. The single exception is `backup`, which prints the phrase only when stdin and stdout
   are both an interactive terminal, after the password is entered again.

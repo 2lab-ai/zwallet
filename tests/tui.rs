@@ -865,6 +865,10 @@ fn quit(tui: &mut PtyChild) -> Frame {
     assert_ne!(modes & libc::ECHO, 0, "echo is off");
     let last = tui.final_frame(PTY_WAIT);
     assert!(last.stray.is_empty() && last.pending.is_empty(), "{last}");
+    assert_eq!(
+        common::frame::restored_tail(&tui.final_output(PTY_WAIT)),
+        Some(&b"\x1b[?25h"[..])
+    );
     last
 }
 
@@ -961,9 +965,29 @@ fn t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo() {
     let modes = tui.local_modes();
     assert_eq!(modes & (libc::ICANON | libc::ECHO), 0, "not raw");
     tui.resize((79, 24));
-    tui.wait_frame(PTY_WAIT, |f| f.rows[0].trim_end() == ui::TOO_SMALL);
+    tui.wait_frame(PTY_WAIT, only_the_warning);
+    // Grow back through the real input loop and renderer. The maximal capture grid must have
+    // no old 120x40 cells outside the new 80x24 viewport.
+    tui.resize((80, 24));
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows[22].starts_with("ethereum | main 0x")
+            && f.rows[23].starts_with("locked | ")
+            && f.rows[23].contains(HOST)
+            && !f.rows[0].contains(ui::TOO_SMALL)
+    });
     let last = quit(&mut tui);
-    assert!(only_the_warning(&last), "{last}");
+    assert!(last.rows[22].starts_with("ethereum | main 0x"), "{last}");
+    assert!(last.rows[23].starts_with("locked | "), "{last}");
+    assert!(
+        last.rows[..24]
+            .iter()
+            .all(|row| row[80..].trim().is_empty()),
+        "{last}"
+    );
+    assert!(
+        last.rows[24..].iter().all(|row| row.trim().is_empty()),
+        "{last}"
+    );
     // Started at 79x24: the warning alone, judged on the last frame.
     let mut tui = tui_on_a_pty(&home, (79, 24));
     tui.wait_frame(PTY_WAIT, |f| f.rows[0].trim_end() == ui::TOO_SMALL);
@@ -1922,6 +1946,7 @@ mod navigation {
             "d raw",
             "m message",
             "t token",
+            "a tasks",
         ] {
             assert!(hint.contains(control), "missing {control}: {hint}");
         }
@@ -1929,7 +1954,7 @@ mod navigation {
         assert!(!text.contains("in a later version"), "{text}");
         app.update(Msg::Key(Key::Char('?')));
         assert!(matches!(app.navigation().popup, Some(Popup::Menu(_))));
-        assert!(view(&app).contains("actions (55)"));
+        assert!(view(&app).contains("actions (60)"));
     }
 
     #[test]
@@ -1937,7 +1962,7 @@ mod navigation {
         let mut app = locked_ab();
         app.update(Msg::Key(Key::Char('?')));
         let text = view(&app);
-        assert!(text.contains("actions (55)"));
+        assert!(text.contains("actions (60)"));
         assert!(text.contains(&zwallet::version_line()));
         assert!(!text.lines().nth(21).unwrap().contains("? actions"));
         // Every action is implemented in this tree; a Tron row on an EVM chain stays disabled.

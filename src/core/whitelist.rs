@@ -54,6 +54,9 @@ pub const WHITELIST_FILE: &str = "whitelist.json";
 pub const NEXT_FILE: &str = "whitelist.next.json";
 /// The list format this zwallet reads and signs.
 pub const LIST_VERSION: u32 = 1;
+/// Advisory duplicate detection reads a bounded local journal, never cumulative authority.
+pub const DEFAULT_DUPLICATE_WINDOW_SECS: u32 = 600;
+pub const MAX_DUPLICATE_WINDOW_SECS: u32 = 86_400;
 /// Legacy wildcard: accepted by EVM policy only (never a contract entry's).
 pub const ANY_CHAIN: &str = "*";
 /// Prefixed to the canonical bytes before signing, so a signature from this key can never be
@@ -175,6 +178,9 @@ pub struct Policy {
         deserialize_with = "unique_limit_keys"
     )]
     pub transaction_limits: BTreeMap<String, TransactionLimits>,
+    /// Optional global advisory duplicate window. Absence preserves legacy signed bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_window_secs: Option<u32>,
 }
 
 /// Per-transaction limits, not cumulative budgets. Token amounts are smallest base units.
@@ -274,7 +280,13 @@ impl Policy {
                 .collect(),
             allow_message_signing: false,
             transaction_limits: BTreeMap::new(),
+            duplicate_window_secs: None,
         }
+    }
+
+    pub fn duplicate_window_secs(&self) -> u32 {
+        self.duplicate_window_secs
+            .unwrap_or(DEFAULT_DUPLICATE_WINDOW_SECS)
     }
 
     /// The fee cap on chain `key`, if the list has one (a malformed one reads as none).
@@ -423,6 +435,15 @@ impl Whitelist {
         if self.generation == 0 {
             return Err(WalletError::validation(
                 "whitelist generation must be at least 1",
+            ));
+        }
+        if self
+            .policy
+            .duplicate_window_secs
+            .is_some_and(|secs| !(1..=MAX_DUPLICATE_WINDOW_SECS).contains(&secs))
+        {
+            return Err(WalletError::validation(
+                "duplicate window must be from 1 to 86400 seconds",
             ));
         }
         let (mut nicks, mut addrs) = (BTreeSet::new(), BTreeSet::new());
@@ -648,6 +669,10 @@ pub fn canonical_bytes(list: &Whitelist) -> Vec<u8> {
     } else {
         "false"
     });
+    if let Some(secs) = list.policy.duplicate_window_secs {
+        out.push_str(",\"duplicateWindowSecs\":");
+        out.push_str(&secs.to_string());
+    }
     out.push_str(",\"maxFeeWei\":{");
     // BTreeMap<String, _> iterates in byte order of the keys.
     for (i, (k, v)) in list.policy.max_fee_wei.iter().enumerate() {
@@ -1800,6 +1825,7 @@ mod tests {
                 ]),
                 allow_message_signing: true,
                 transaction_limits: Default::default(),
+                duplicate_window_secs: None,
             },
         }
     }
@@ -1843,6 +1869,50 @@ mod tests {
         assert_eq!(hex::encode(key.public_key()), GOLDEN_PUB);
         assert_eq!(hex::encode(signed.sig), GOLDEN_SIG);
         assert_eq!(hex::encode(digest(&list)), GOLDEN_DIGEST);
+    }
+
+    #[test]
+    fn duplicate_window_is_optional_bounded_and_authenticated() {
+        let key = WhitelistKey::from_secret(&[1; 32]);
+        let mut list = golden_list();
+        let legacy = canonical_bytes(&list);
+        assert_eq!(list.policy.duplicate_window_secs(), 600);
+        assert!(
+            !String::from_utf8(legacy.clone())
+                .unwrap()
+                .contains("duplicateWindow")
+        );
+        for seconds in [1, 600, 1800, 86_400] {
+            list.policy.duplicate_window_secs = Some(seconds);
+            list.validate(&RULES).unwrap();
+            let canonical = String::from_utf8(canonical_bytes(&list)).unwrap();
+            assert!(canonical.contains(&format!(
+                "\"allowMessageSigning\":true,\"duplicateWindowSecs\":{seconds},\"maxFeeWei\":"
+            )));
+            let signed = key.sign(&list);
+            let anchor = key.anchor_for(&signed);
+            let bytes = signed.to_file_bytes().unwrap();
+            let parsed = SignedList::from_file_bytes(&bytes).unwrap();
+            verify(&parsed, &anchor).unwrap();
+            let mut changed = parsed.clone();
+            changed.list.policy.duplicate_window_secs = Some(if seconds == 1 { 2 } else { 1 });
+            assert!(verify(&changed, &anchor).is_err());
+            changed.list.policy.duplicate_window_secs = None;
+            assert!(verify(&changed, &anchor).is_err());
+            let text = String::from_utf8(bytes).unwrap();
+            let duplicate = text.replace(
+                "\"duplicateWindowSecs\":",
+                "\"duplicateWindowSecs\": 1, \"duplicateWindowSecs\":",
+            );
+            assert!(SignedList::from_file_bytes(duplicate.as_bytes()).is_err());
+        }
+        for seconds in [0, 86_401, u32::MAX] {
+            list.policy.duplicate_window_secs = Some(seconds);
+            assert!(list.validate(&RULES).is_err());
+        }
+        list.policy.duplicate_window_secs = None;
+        assert_eq!(canonical_bytes(&list), legacy);
+        assert_eq!(hex::encode(key.sign(&list).sig), GOLDEN_SIG);
     }
 
     // Computed independently of this code (Python `cryptography` Ed25519 and OpenSSL
@@ -3243,7 +3313,11 @@ mod tests {
                 )),
                 "{what}: {msg}"
             );
-            assert!(!msg.contains("##") && !msg.contains("2J"), "{what}: {msg}");
+            // Neither the value nor its escape: `2J` alone can be in the file's random temp path.
+            assert!(
+                !msg.contains('\u{1b}') && !msg.contains("[2J") && !msg.contains("##"),
+                "{what}: {msg}"
+            );
         }
         // A fee cap of 79 digits is no wei amount either; a chain key zwallet does not know (yet)
         // is still a chain key's shape, so it reads.

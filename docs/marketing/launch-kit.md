@@ -123,7 +123,8 @@ Do not invent install metrics or imply video views demonstrate safe real-world u
   TRX/registry-USDT transfers on Tron under policy. Turnkey strategies, DeFi allowances,
   x402 and checkout adapters are WIP.
 - **Does it make profit?** No profit guarantee. Future strategies may lose money.
-- **Where are the reports?** CLI JSON, receipts and the send journal are available;
-  the demo computes a report externally. Native task reporting is planned.
+- **Where are the reports?** [Native task reports](../task-reports.md) reconcile
+  attributed intents, outcomes, fees and balances. They are advisory, not cumulative
+  budgets. The historical demo still computes its recorded report externally.
 - **Is it audited?** No independent audit is asserted by this launch. Tests and a
   local demo establish specific behavior, not a blanket security guarantee.

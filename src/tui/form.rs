@@ -12,6 +12,9 @@ use zeroize::Zeroizing;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Filter,
+    TaskId,
+    OptionalTaskId,
+    TaskAllocations,
     Nickname,
     KeyName,
     Amount,
@@ -20,6 +23,7 @@ pub enum Kind {
     LimitBytes,
     Bump,
     Duration,
+    DuplicateWindow,
     EvmAddress,
     TxHash,
     TronTxHash,
@@ -38,7 +42,9 @@ impl Kind {
     pub const fn max_len(self) -> usize {
         match self {
             Self::Filter => 64,
-            Self::Nickname | Self::KeyName | Self::Duration => 32,
+            Self::TaskId | Self::OptionalTaskId => 32,
+            Self::TaskAllocations => 4096,
+            Self::Nickname | Self::KeyName | Self::Duration | Self::DuplicateWindow => 32,
             Self::Amount | Self::LimitAmount | Self::Bump => 128,
             Self::LimitBytes => 10,
             Self::EvmAddress => 42,
@@ -59,7 +65,10 @@ impl Kind {
         }
         match self {
             Self::Filter | Self::Signature | Self::Arguments | Self::Message | Self::RpcUrl => true,
-            Self::Nickname | Self::KeyName => value
+            Self::TaskAllocations => value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"=,_-".contains(&b)),
+            Self::TaskId | Self::OptionalTaskId | Self::Nickname | Self::KeyName => value
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b)),
             Self::Amount | Self::Bump => {
@@ -70,6 +79,7 @@ impl Kind {
             Self::LimitBytes | Self::LimitRaw => {
                 "none".starts_with(value) || value.bytes().all(|b| b.is_ascii_digit())
             }
+            Self::DuplicateWindow => "default".starts_with(value) || Self::Duration.prefix(value),
             Self::Duration => {
                 let digits = value.bytes().take_while(u8::is_ascii_digit).count();
                 let suffix = &value[digits..];
@@ -113,13 +123,21 @@ impl Kind {
             return false;
         }
         match self {
-            Self::Filter | Self::Arguments | Self::Message => true,
+            Self::Filter | Self::Arguments | Self::Message | Self::TaskAllocations => true,
+            Self::TaskId => crate::wallet::tasks::validate_id(value).is_ok(),
+            Self::OptionalTaskId => {
+                value.is_empty() || crate::wallet::tasks::validate_id(value).is_ok()
+            }
             Self::EvmAddress | Self::TxHash | Self::Selector | Self::TronAddress => {
                 value.len() == self.max_len()
             }
             Self::TronTxHash => chains::tron::lookup::parse_hash(value).is_ok(),
             Self::Calldata => value.len() >= 2 && value.len().is_multiple_of(2),
             Self::Duration => parse_duration(value).is_ok(),
+            Self::DuplicateWindow => {
+                value == "default"
+                    || parse_duration(value).is_ok_and(|d| (1..=86_400).contains(&d.as_secs()))
+            }
             Self::WordCount => ["12", "15", "18", "21", "24"].contains(&value),
             Self::Amount | Self::Bump => {
                 value.bytes().any(|b| b.is_ascii_digit()) && !value.ends_with('.')

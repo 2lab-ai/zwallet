@@ -75,3 +75,26 @@ Rows here are snapshots taken when they moved.
 **Next (as it was).** Finish PR #42's deterministic observation/deadline repair and verify its new commit on both CI platforms. A/B1/B2 are implemented, independently reviewed and green at the linked commits; they await upstream merge permission. Complete TUI12 integration and its tests, then record final stress/live-read/Intel/preview evidence explicitly. Owner-funded TR23 and release publication are not authorized by the handoff. Completion is tracked in ../handoff-completion/completion-checklist.md. Done 2026-10-30 (PR #42 at 1a4f36f, CI40847935216; TUI-12 as #49; preview and real-terminal acceptance above), except TR23.
 
 **Spec review.** The spec passed the three-engine review in round 3 (2026-10-28: grok-4.7, gpt-6-astra and fable all APPROVE; rounds 1 and 2 are summarised in 05-tron.md). fable's two non-blocking round-3 remarks for C stay open in [`loop.md`](loop.md).
+
+
+## R2 — closed 2026-10-30 (remaining evidence notes, draft PR #59)
+
+Resolved in `05-tron.md` Fee field branches and contract recipients: exact
+`activationSun`/`bandwidthSun` branch values match `send::fees`; official java-tron
+b33eed89a6a424c498d4fb1b03ca2c86eddf4840 makes native contract-recipient rejection
+conditional on governance flags. No TR17 number changed and no funded transaction
+was performed. `pricesAtBlock` is qualified as the later observed reference block,
+not an atomic price snapshot. Independent source review found the clarification
+accurate; final documentation/gate receipt is tracked in security-assurance.
+
+### Original note snapshot
+
+## Open doc notes (fable, spec review round 3, 2026-10-28; non-blocking)
+
+Written for C; C shipped without either, and 05-tron.md does not answer them yet:
+- §Fees names the `fees` fields `activationSun` and `bandwidthSun` but not their values in each
+  branch (05-tron.md:479); define them in one line, so the TUI's "activation fee" and "bandwidth
+  burn" rows are fixed.
+- Whether java-tron refuses a TRX `TransferContract` to a contract account
+  (`TransferActuator.validate`) is unverified; read it and note it at TR17's contract case
+  (no change to the numbers).

@@ -90,7 +90,7 @@ pub async fn token_balance(net: &Net, owner: &str, token: &str) -> Result<Balanc
 pub struct MessageReview {
     home: PathBuf,
     chain: &'static Chain,
-    checked: CheckedList,
+    checked: Box<CheckedList>,
     key: KeyRow,
     address: String,
     message: String,
@@ -156,7 +156,7 @@ pub fn review_message(
     Ok(MessageReview {
         home: home.to_path_buf(),
         chain,
-        checked: checked.clone(),
+        checked: Box::new(checked.clone()),
         key: key.clone(),
         address,
         message: message.to_string(),
@@ -306,11 +306,15 @@ pub struct InvokeInput {
 /// A trusted in-session invoke original. Only a completed immutable review can create it.
 #[derive(Clone, Debug)]
 pub struct RetainedInvoke {
+    task_id: Option<String>,
     chain: &'static Chain,
     key: KeyRow,
     decoded: tx::DecodedUnsigned,
 }
 impl RetainedInvoke {
+    pub fn task_id(&self) -> Option<&str> {
+        self.task_id.as_deref()
+    }
     pub fn chain(&self) -> &'static Chain {
         self.chain
     }
@@ -346,6 +350,7 @@ pub struct InvokeReview {
 impl InvokeReview {
     pub fn retained_intent(&self) -> RetainedInvoke {
         RetainedInvoke {
+            task_id: self.input.options.task_id.clone(),
             chain: self.net.chain,
             key: self.input.key.clone(),
             decoded: self.decoded.clone(),
@@ -388,7 +393,8 @@ impl InvokeReview {
         self.checked.list.policy.max_fee_wei(self.net.chain.key)
     }
     fn same_intent(&self, next: &Self) -> bool {
-        self.decoded.chain_id() == next.decoded.chain_id()
+        self.input.options.task_id == next.input.options.task_id
+            && self.decoded.chain_id() == next.decoded.chain_id()
             && self.request.from == next.request.from
             && self.decoded.to() == next.decoded.to()
             && self.decoded.input() == next.decoded.input()
@@ -417,10 +423,14 @@ fn invoke_fields(
         InvokeData::Signature { args, .. } => args.clone(),
         _ => Vec::new(),
     };
-    Ok(json!({"chain":net.chain.key,"key":input.key.name,"from":request.from.to_checksum(None),
+    let mut fields = json!({"chain":net.chain.key,"key":input.key.name,"from":request.from.to_checksum(None),
         "to":request.to.to_checksum(None),"toNickname":input.contract.nickname,"sig":sig,"args":args,
         "data":format!("0x{}",hex::encode(&request.input)),"value":format_units(request.value,net.chain.decimals),
-        "valueRaw":request.value.to_string()}).as_object().unwrap().clone())
+        "valueRaw":request.value.to_string()}).as_object().unwrap().clone();
+    if let Some(task) = &input.options.task_id {
+        fields.insert("taskId".into(), task.clone().into());
+    }
+    Ok(fields)
 }
 
 fn assemble_invoke(
@@ -478,7 +488,10 @@ fn assemble_invoke(
         },
     );
     if request.nonce.is_none() {
-        let journal = chains::SendJournal::new(&home, net.chain, &request.from.to_checksum(None));
+        let window = checked.list.policy.duplicate_window_secs();
+        let journal = chains::SendJournal::new(&home, net.chain, &request.from.to_checksum(None))
+            .with_duplicate_window(window)?;
+        fields.insert("duplicateGuard".into(), json!({"windowSecs":window,"journalTailBytes":1 << 20,"advisory":true,"policySource":"password-checked-list"}));
         let duplicates = journal.recent_duplicates(
             &send_summary(&fields, net.chain, "invoke"),
             crate::core::time::unix_secs(std::time::SystemTime::now()),
@@ -511,6 +524,10 @@ pub async fn review_invoke(
 ) -> Result<InvokeReview> {
     whitelist::check_unchanged(home, &checked.fingerprint)?;
     chains::require_contract_calls(net.chain)?;
+    if let Some(task) = &input.options.task_id {
+        super::tasks::validate_binding_async(home, task, net.chain, &pinned_address(&input.key)?)
+            .await?;
+    }
     if input.contract.chain != net.chain.key
         || input.contract.fingerprint != checked.fingerprint
         || !invoke_contracts(checked, net.chain).iter().any(|c| {
@@ -650,6 +667,7 @@ pub async fn send_invoke(
             allow_duplicate: next.input.options.allow_duplicate,
             wait: false,
             wait_timeout: None,
+            duplicate_window_secs: Some(next.checked.list.policy.duplicate_window_secs()),
         },
         fields,
         Some(lock),

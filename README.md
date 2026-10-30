@@ -31,9 +31,10 @@ Investment, service-payment and shopping integrations are marked **WIP**.
 4. **You keep control.** Keys stay on your device. Lock the wallet to end signing access.
 
 zwallet is the local wallet component behind this workflow. It works with agents
-that can use its CLI; it does not require a zwallet service account. Reports are
-assembled by your agent from transaction evidence. Built-in task reports and
-cumulative budgets are ![WIP](https://img.shields.io/badge/status-WIP-yellow).
+that can use its CLI; it does not require a zwallet service account. [Native task
+reports](docs/task-reports.md) collect attributed intents, observed outcomes, fees and
+balances; your agent supplies the task logic and interpretation. These reports are
+advisory. Cumulative budget enforcement remains ![WIP](https://img.shields.io/badge/status-WIP-yellow).
 
 ## Why I built this
 
@@ -304,7 +305,7 @@ includes an actual terminal recording, transaction evidence and reproduction scr
 |---|---|
 | Agent builder | [Delegate a task and collect a spend report](docs/agent-workflow.md) |
 | Agent integrator or CLI user | [Command reference, JSON fields and errors](docs/commands.md) |
-| Wallet owner or security reviewer | [Security and custody](docs/security.md) |
+| Wallet owner or security reviewer | [Security and custody](docs/security.md), [attack scenarios and code/test evidence](docs/security-threat-model.md) |
 | Evaluator or contributor | [Feature status and implementation evidence](docs/features.md) |
 | Contributor or release maintainer | [Development and releases](docs/development.md) |
 | Contributor working on future features | [Product specification](.prd/01-spec.md) and [architecture](.prd/02-architecture.md) |

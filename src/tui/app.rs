@@ -7,6 +7,7 @@ pub mod create;
 pub mod history;
 mod navigation;
 pub mod replacement;
+pub mod tasks;
 pub mod tools;
 pub mod transfer;
 pub mod whitelist;
@@ -50,6 +51,7 @@ pub enum Msg {
     WhitelistPrepared(u64, Result<String>),
     WhitelistApplied(u64, whitelist::Applied),
     Tools(u64, tools::ToolMsg),
+    Tasks(u64, tasks::TaskMsg),
     Replacement(u64, replacement::Event),
     Transfer(u64, transfer::TransferMsg),
     HistoryOwner(HistoryTarget, Result<(String, Trust)>),
@@ -99,6 +101,7 @@ pub enum Effect {
     ApplyWhitelist(u64),
     DiscardWhitelist(u64),
     Tools(u64),
+    Tasks(u64),
     Replacement(u64),
     Transfer(u64),
     HistoryOwner(HistoryTarget),
@@ -222,6 +225,7 @@ pub enum PasswordPurpose {
 pub struct App {
     whitelist: whitelist::WhitelistUi,
     tools: tools::Tools,
+    tasks: tasks::Tasks,
     replacement: replacement::Replacement,
     transfer: transfer::Transfer,
     create: CreateUi,
@@ -263,6 +267,7 @@ impl App {
         Self {
             whitelist: whitelist::WhitelistUi::default(),
             tools: tools::Tools::default(),
+            tasks: tasks::Tasks::default(),
             replacement: replacement::Replacement::default(),
             transfer: transfer::Transfer::default(),
             nav: Navigation::new(net),
@@ -308,6 +313,10 @@ impl App {
             std::ops::ControlFlow::Break(msg) => msg,
         };
         let msg = match self.whitelist_update(msg) {
+            std::ops::ControlFlow::Continue(work) => return work,
+            std::ops::ControlFlow::Break(msg) => msg,
+        };
+        let msg = match self.tasks_update(msg) {
             std::ops::ControlFlow::Continue(work) => return work,
             std::ops::ControlFlow::Break(msg) => msg,
         };
@@ -655,7 +664,8 @@ impl App {
                 Vec::new()
             }
             // The navigation dispatcher consumes these variants before this match.
-            Msg::Tools(..)
+            Msg::Tasks(..)
+            | Msg::Tools(..)
             | Msg::Transfer(..)
             | Msg::HistoryOwner(..)
             | Msg::History(..)
@@ -821,6 +831,7 @@ impl App {
     /// `Checking` includes creation, cache repair and session startup.
     pub fn mutation_pending(&self) -> bool {
         self.locking
+            || self.tasks.creating
             || self.activating
             || self.sending()
             || self.whitelist_busy()

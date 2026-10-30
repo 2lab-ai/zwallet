@@ -413,8 +413,9 @@ pub fn derive_whitelist_secret(
 ///
 /// AES-GCM authenticates the anchor but gives it no freshness: an authentic older wallet.json can
 /// be restored by anyone who can write the home. One sealed with `{}` reads as "no whitelist",
-/// which refuses every value-moving signature (fails closed); one with an older anchor, restored
-/// together with its list, is the documented joint rollback.
+/// which refuses payee/contract sends but still permits EVM native self-transfers under default
+/// fee caps; one with an older anchor, restored together with its list, is the documented joint
+/// rollback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WhitelistAnchor {
     pub public_key: [u8; 32],

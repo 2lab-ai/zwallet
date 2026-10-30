@@ -19,6 +19,7 @@ pub const ACTIONS: &[ActionId] = &[
     ActionId::NativeCap,
     ActionId::TokenCap,
     ActionId::CalldataCap,
+    ActionId::DuplicateWindow,
     ActionId::MessagePolicy,
     ActionId::Reset,
     ActionId::WhitelistUnlock,
@@ -51,6 +52,7 @@ pub enum Draft {
         chain: String,
         value: String,
     },
+    DuplicateWindow(String),
     Message(bool),
     Reset,
 }
@@ -95,6 +97,7 @@ impl Draft {
                 value,
             } => wallet::Change::token_cap(chain, token, value),
             Self::Calldata { chain, value } => wallet::Change::calldata_cap(chain, value),
+            Self::DuplicateWindow(duration) => wallet::Change::duplicate_window(duration),
             Self::Message(on) => Ok(wallet::Change::message_signing(*on)),
             Self::Reset => Ok(wallet::Change::reset()),
         }
@@ -398,6 +401,7 @@ impl Form {
                 chain: text("chain"),
                 value: text("bytes or none"),
             },
+            ActionId::DuplicateWindow => Draft::DuplicateWindow(text("duration or default")),
             ActionId::MessagePolicy => match self.value("message signing") {
                 "on" => Draft::Message(true),
                 "off" => Draft::Message(false),
@@ -619,6 +623,15 @@ impl App {
                 rows.extend([chain(), field("bytes or none", Kind::LimitBytes, "", false)]);
                 "per-transaction calldata cap"
             }
+            ActionId::DuplicateWindow => {
+                rows.push(field(
+                    "duration or default",
+                    Kind::DuplicateWindow,
+                    "",
+                    false,
+                ));
+                "advisory duplicate window (1s..1d; default=10m)"
+            }
             ActionId::MessagePolicy => {
                 if !self.whitelist_verified() {
                     return Some(Vec::new());
@@ -797,6 +810,7 @@ impl App {
                     Input::Char('n') => Some(ActionId::NativeCap),
                     Input::Char('t') => Some(ActionId::TokenCap),
                     Input::Char('b') => Some(ActionId::CalldataCap),
+                    Input::Char('D') => Some(ActionId::DuplicateWindow),
                     Input::Char('m') => Some(ActionId::MessagePolicy),
                     Input::Char('R') => Some(ActionId::Reset),
                     Input::Char('u') => Some(ActionId::WhitelistUnlock),

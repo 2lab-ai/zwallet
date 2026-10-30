@@ -277,10 +277,17 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 frame,
                 16,
                 "",
-                Outside::detail(&if review.allow_duplicate() {
-                    format!("Repeat override: a new send may pay twice (previous: {repeats})")
-                } else {
-                    format!("Previous identical sends: {repeats}; allow repeat: false")
+                Outside::detail(&{
+                    let window = fields["duplicateGuard"]["windowSecs"]
+                        .as_u64()
+                        .unwrap_or(600);
+                    if review.allow_duplicate() {
+                        format!(
+                            "Repeat {repeats} OVERRIDE [{window}s/1MiB local]: a new send may pay twice"
+                        )
+                    } else {
+                        format!("Repeats {repeats}; override false; {window}s/1MiB local aid")
+                    }
                 }),
                 if repeats > 0 { WARNING } else { HINT },
                 placed,
