@@ -56,7 +56,7 @@ try {
   }
   await send('Page.enable'); await send('Runtime.enable'); await send('Page.bringToFront');
   await send('Emulation.setDeviceMetricsOverride', {width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false});
-  const source = new URL('motion.html', import.meta.url); source.search = `render&lang=${lang}`;
+  const source = new URL('../../docs/animation.html', import.meta.url); source.search = `render&lang=${lang}`;
   await send('Page.navigate', {url: source.href});
   let ready = false;
   for (let n = 0; n < 100; n++) {

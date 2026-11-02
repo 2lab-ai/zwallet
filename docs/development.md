@@ -30,6 +30,10 @@ live in [`.prd/`](../.prd/); they include features that have not shipped. Use
 
 ## Release
 
+The landing page has its own main-branch GitHub Pages workflow. For the one-time
+repository setup, local preview and native animation source, see [Landing page and
+GitHub Pages](site.md).
+
 Preview and stable publication depend on successful validation and builds for the exact
 commit being published. The reusable gate runs fmt, strict Clippy, tests and a version-line
 smoke test. Fork pull requests run validation without publish credentials; GitHub may require
