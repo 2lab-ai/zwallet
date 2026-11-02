@@ -23,7 +23,7 @@ use crate::chains::evm::policy::{self, ListView};
 use crate::chains::evm::{self, tx};
 use crate::chains::{self, Chain, Family, PRIMARY_CHAIN};
 use crate::core::amount::{format_units, parse_units};
-use crate::core::error::{Result, WalletError};
+use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::protocol::{self, DaemonExe};
 use crate::core::store::{self, WhitelistAnchor};
 use crate::core::time::{parse_duration, rfc3339_utc, unix_secs};
@@ -77,14 +77,7 @@ impl Limit {
     }
     fn target(&self, chain: &Chain) -> String {
         match self {
-            Self::Native(_) => format!(
-                "native value ({})",
-                if matches!(chain.family, Family::Tron(_)) {
-                    "sun"
-                } else {
-                    "wei"
-                }
-            ),
+            Self::Native(_) => format!("native value ({})", native_unit(chain)),
             Self::Token {
                 token,
                 symbol,
@@ -161,8 +154,7 @@ pub(crate) fn recipient(home: &Path, to: &str) -> Result<(String, Option<String>
     recipient_for_chain(home, to, None)
 }
 
-/// [`recipient`] for a send on `chain`: on Tron, an `@nickname` resolves only to an entry whose
-/// chains are exactly `["tron"]`.
+/// [`recipient`] for a send on `chain`: non-EVM nicknames require exactly that chain's scope.
 pub(crate) fn recipient_for_chain(
     home: &Path,
     to: &str,
@@ -182,14 +174,18 @@ pub(crate) fn recipient_for_chain(
         .list
         .by_nickname(nickname)
         .ok_or_else(|| unresolved("the whitelist has no entry by that name"))?;
-    if chain.is_some_and(|c| matches!(c.family, Family::Tron(_))) && entry.chains != ["tron"] {
+    if let Some(chain) = chain
+        && !matches!(chain.family, Family::Evm(_))
+        && entry.chains != [chain.key]
+    {
         return Err(unresolved(&format!(
-            "entry names chains {}, not tron",
-            chains_text(&entry.chains)
+            "entry names chains {}, not {}",
+            chains_text(&entry.chains),
+            chain.key
         )));
     }
     Ok((
-        if entry.chains == ["tron"] {
+        if entry.chains == ["tron"] || whitelist::tagged_address_family(&entry.address).is_some() {
             entry_address(entry)
         } else {
             entry.address.clone()
@@ -267,8 +263,9 @@ impl Mutation {
 pub struct Change(Mutation);
 
 impl Change {
-    /// Add an EVM payee/contract or a Tron payee. Empty chain keys choose the address family's
-    /// default. EVM wildcard scope never covers Tron. Zero addresses cannot be newly added.
+    /// Add an EVM payee/contract or an exact-chain native payee. Solana/TON require explicit
+    /// chain keys; empty keys preserve EVM/Tron inference. Wildcards apply only to EVM.
+    /// Zero addresses cannot be newly added.
     pub fn add(
         nickname: &str,
         address: &str,
@@ -278,15 +275,60 @@ impl Change {
     ) -> Result<Self> {
         whitelist::validate_nickname(nickname)?;
         let given = address.trim();
-        let is_tron = !given.starts_with("0x");
-        let address = if is_tron {
-            let payload = chains::tron::address::parse(given)
-                .map_err(|e| WalletError::validation(e.message))?;
-            format!("0x{}", hex::encode(&payload[1..]))
+        // Preserve the legacy zero-recipient guard before chain inference. In particular,
+        // the TUI may still have its default EVM chain selected when a Tron zero is pasted.
+        if evm::parse_address(given).is_ok_and(|address| address.is_zero())
+            || chains::tron::address::parse(given)
+                .is_ok_and(|address| address[1..].iter().all(|byte| *byte == 0))
+        {
+            return Err(WalletError::validation(
+                "the zero address cannot be added to the whitelist",
+            ));
+        }
+        // The explicit chain resolves ambiguous base58 strings. Without it, preserve the
+        // historical EVM / Tron inference; new families never silently steal a Tron address.
+        let mut keys: Vec<String> = chain_keys
+            .iter()
+            .map(|c| match c.trim() {
+                ANY_CHAIN => Ok(ANY_CHAIN.to_string()),
+                key => chains::find(key).map(|chain| chain.key.to_string()),
+            })
+            .collect::<Result<_>>()?;
+        let explicit = if keys.len() == 1 && keys[0] != ANY_CHAIN {
+            Some(chains::find(&keys[0])?)
         } else {
-            format!("0x{}", hex::encode(evm::parse_address(given)?))
+            None
         };
-        if address == "0x0000000000000000000000000000000000000000" {
+        // Only the new families need an explicit parser choice. Keep legacy address
+        // inference independent of its requested scope so a valid Tron/EVM address on
+        // the wrong chain reaches the deliberate family-scope validation below.
+        let family = explicit
+            .filter(|c| matches!(c.family, Family::Solana(_) | Family::Ton(_)))
+            .map(|c| c.family.name())
+            .unwrap_or_else(|| {
+                if given.starts_with("0x") {
+                    "evm"
+                } else {
+                    "tron"
+                }
+            });
+        let address = match family {
+            "solana" | "ton" => {
+                chains::ed25519::policy_address(explicit.expect("explicit family"), given)?
+            }
+            "tron" => {
+                let payload = chains::tron::address::parse(given)
+                    .map_err(|e| WalletError::validation(e.message))?;
+                format!("0x{}", hex::encode(&payload[1..]))
+            }
+            _ => format!("0x{}", hex::encode(evm::parse_address(given)?)),
+        };
+        let is_zero = address
+            .strip_prefix("0x")
+            .or_else(|| address.strip_prefix("solana:"))
+            .or_else(|| address.strip_prefix("ton:0:"))
+            .is_some_and(|body| body.bytes().all(|b| b == b'0'));
+        if is_zero {
             return Err(WalletError::validation(
                 "the zero address cannot be added to the whitelist",
             ));
@@ -296,25 +338,29 @@ impl Change {
                 "selectors require a contract entry",
             ));
         }
-        let keys: Vec<String> = if chain_keys.is_empty() {
-            vec![if is_tron { "tron" } else { PRIMARY_CHAIN }.to_string()]
-        } else {
-            chain_keys
-                .iter()
-                .map(|c| match c.trim() {
-                    ANY_CHAIN => Ok(ANY_CHAIN.to_string()),
-                    key => chains::find(key).map(|chain| chain.key.to_string()),
-                })
-                .collect::<Result<_>>()?
-        };
-        if is_tron && (keys != ["tron"] || kind == EntryKind::Contract) {
-            return Err(WalletError::validation(
-                "a Tron payee must name only --chains tron and cannot be a contract entry",
-            ));
+        if keys.is_empty() {
+            keys.push(
+                if family == "tron" {
+                    "tron"
+                } else {
+                    PRIMARY_CHAIN
+                }
+                .into(),
+            );
         }
-        if !is_tron && keys.iter().any(|c| c == "tron") {
+        if family != "evm" && (keys.len() != 1 || keys[0] != family || kind != EntryKind::Address) {
+            return Err(WalletError::validation(format!(
+                "a {family} payee must name only --chains {family} and cannot be a contract entry"
+            )));
+        }
+        if family == "evm"
+            && keys.iter().any(|key| {
+                key != ANY_CHAIN
+                    && chains::find(key).is_ok_and(|chain| !matches!(chain.family, Family::Evm(_)))
+            })
+        {
             return Err(WalletError::validation(
-                "a Tron payee is given as its T... address, with --chains tron only",
+                "an EVM address cannot be scoped to a non-EVM chain",
             ));
         }
         let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -397,6 +443,12 @@ impl Change {
                     entry.decimals,
                 )
             }
+            Family::Solana(_) | Family::Ton(_) => {
+                return Err(WalletError::new(
+                    ErrorCode::CapabilityUnsupported,
+                    "token caps are unavailable for native-only Solana and TON",
+                ));
+            }
         };
         Ok(Self(Mutation::Limit {
             chain,
@@ -412,6 +464,12 @@ impl Change {
     /// Per-transaction calldata bytes (u32), or `none`. This is not a network fee cap.
     pub fn calldata_cap(chain: &str, bytes: &str) -> Result<Self> {
         let chain = chains::find(chain)?;
+        if matches!(chain.family, Family::Solana(_) | Family::Ton(_)) {
+            return Err(WalletError::new(
+                ErrorCode::CapabilityUnsupported,
+                "calldata caps are unavailable for native-only Solana and TON",
+            ));
+        }
         let cap = if bytes == "none" {
             None
         } else {
@@ -816,7 +874,7 @@ fn summary(files: &ListFiles, change: &Mutation, unlock: Option<(&str, Duration)
     let mut lines = vec!["The password authorizes this whitelist change:".to_string()];
     match change {
         Mutation::Add(e) => {
-            lines.push(format!("  add {}: {}", e.nickname, kind_text(e.kind)));
+            lines.push(format!("  add {}: {}", e.nickname, kind_text(e)));
             lines.push(format!("    address: {}", entry_address(e)));
             if e.chains == ["tron"] {
                 lines.push(format!("    (stored as {}, the same 20 bytes)", e.address));
@@ -848,6 +906,9 @@ fn summary(files: &ListFiles, change: &Mutation, unlock: Option<(&str, Duration)
                 chain.key,
                 fee_text(chain, *wei)
             ));
+            if matches!(chain.family, Family::Ton(_)) {
+                lines.push("  TON uses a required reserve and RPC estimate; wallet V4R2 does not encode a maximum fee".into());
+            }
         }
         Mutation::Limit { chain, limit } => lines.push(format!(
             "  {} {}: {}: {limit_was} -> {}; per transaction, not cumulative",
@@ -1250,8 +1311,11 @@ fn local_time(secs: u64) -> Option<String> {
     ))
 }
 
-fn kind_text(kind: EntryKind) -> String {
-    match kind {
+fn kind_text(entry: &Entry) -> String {
+    match entry.kind {
+        EntryKind::Address if whitelist::tagged_address_family(&entry.address).is_some() => {
+            "a payee (native coin transfers only)".to_string()
+        }
         EntryKind::Address => {
             "a payee (native coin and registry tokens may be sent to it)".to_string()
         }
@@ -1259,9 +1323,17 @@ fn kind_text(kind: EntryKind) -> String {
     }
 }
 
-/// An address for a human: EIP-55, or escaped as found when it is not one.
+/// A family-native address for a human; invalid tagged identities are never guessed.
 /// The family is fixed by the entry's chain scope, never guessed from the stored body.
-fn entry_address(entry: &Entry) -> String {
+pub(crate) fn entry_address(entry: &Entry) -> String {
+    if let Some(family) = whitelist::tagged_address_family(&entry.address) {
+        return if entry.chains == [family] {
+            chains::ed25519::display_policy_address(&entry.address)
+                .unwrap_or_else(|_| INVALID.to_string())
+        } else {
+            INVALID.to_string()
+        };
+    }
     if entry.chains == ["tron"] {
         if let Ok(body) = entry.address.parse::<alloy::primitives::Address>() {
             return chains::tron::address::from_body(&body.0.0);
@@ -1273,11 +1345,13 @@ fn entry_address(entry: &Entry) -> String {
 
 fn shown_entry(entry: &Entry) -> Value {
     let mut value = json!(entry);
-    value["family"] = json!(if entry.chains == ["tron"] {
-        "tron"
-    } else {
-        "evm"
-    });
+    value["family"] = json!(whitelist::tagged_address_family(&entry.address).unwrap_or(
+        if entry.chains == ["tron"] {
+            "tron"
+        } else {
+            "evm"
+        }
+    ));
     value["address"] = json!(entry_address(entry));
     if is_zero_address(entry) {
         value["unavailablePayee"] = json!(true);
@@ -1313,12 +1387,17 @@ fn fee_text(chain: &Chain, wei: U256) -> String {
         "{} {} ({wei} {})",
         format_units(wei, chain.decimals),
         chain.symbol,
-        if matches!(chain.family, Family::Tron(_)) {
-            "sun"
-        } else {
-            "wei"
-        }
+        native_unit(chain)
     )
+}
+
+fn native_unit(chain: &Chain) -> &'static str {
+    match chain.family {
+        Family::Evm(_) => "wei",
+        Family::Tron(_) => "sun",
+        Family::Solana(_) => "lamports",
+        Family::Ton(_) => "nanotons",
+    }
 }
 
 fn on_off(on: bool) -> &'static str {
@@ -1457,6 +1536,8 @@ pub(crate) fn dry_run_check(
                 now_ms,
             )
         }
+        Family::Solana(_) => chains::solana::check_unsigned(chain, from, unsigned, &view),
+        Family::Ton(_) => chains::ton::check_unsigned(chain, from, unsigned, &view),
     };
     let Err(e) = check else {
         return Ok(DryRunCheck::Allowed);
@@ -1788,7 +1869,9 @@ fn entry_line(e: &Value) -> String {
         valid_or_invalid(&e["nickname"], |s| whitelist::validate_nickname(s).is_ok()),
         valid_or_invalid(&e["kind"], |s| matches!(s, "address" | "contract")),
         valid_or_invalid(&e["address"], |s| is_hex(s, 40)
-            || chains::tron::address::is_address(s)),
+            || chains::tron::address::is_address(s)
+            || chains::solana::normalize_address(s).is_ok()
+            || chains::ton::normalize_address(s).is_ok()),
         items_shown(&e["chains"], chain_shown)
     );
     if !e["selectors"].is_null() {
@@ -1890,6 +1973,11 @@ pub fn is_zero_address(entry: &Entry) -> bool {
         .address
         .parse::<alloy::primitives::Address>()
         .is_ok_and(|a| a.is_zero())
+        || entry
+            .address
+            .strip_prefix("solana:")
+            .or_else(|| entry.address.strip_prefix("ton:0:"))
+            .is_some_and(|body| body.len() == 64 && body.bytes().all(|b| b == b'0'))
 }
 
 /// Eligible payees of a locally checked list, after checking both files are still unchanged.
@@ -1911,6 +1999,11 @@ pub fn checked_payees(
                 && !is_zero_address(entry)
                 && match chain.family {
                     Family::Tron(_) => entry.chains == ["tron"],
+                    Family::Solana(_) | Family::Ton(_) => {
+                        entry.chains == [chain.key]
+                            && whitelist::tagged_address_family(&entry.address)
+                                == Some(chain.family.name())
+                    }
                     Family::Evm(_) => entry
                         .chains
                         .iter()
@@ -2091,6 +2184,8 @@ fn list_text(out: &Value, verify: bool) -> String {
             let native_units = match chains::find(chain).map(|c| c.family) {
                 Ok(Family::Tron(_)) => "sun",
                 Ok(Family::Evm(_)) => "wei",
+                Ok(Family::Solana(_)) => "lamports",
+                Ok(Family::Ton(_)) => "nanotons",
                 Err(_) => "base units",
             };
             lines.push(format!(
@@ -2133,6 +2228,61 @@ mod tests {
             .unwrap();
         std::io::Write::write_all(&mut f, &signed.to_file_bytes().unwrap()).unwrap();
         tmp
+    }
+
+    #[test]
+    fn tagged_payees_preserve_native_addresses_and_require_explicit_family_scope() {
+        for (key, raw) in [
+            ("solana", bs58::encode([2u8; 32]).into_string()),
+            ("ton", format!("0:{}", "22".repeat(32))),
+        ] {
+            let chain = chains::find(key).unwrap();
+            let Change(Mutation::Add(entry)) =
+                Change::add("bob", &raw, &[key], EntryKind::Address, &[]).unwrap()
+            else {
+                panic!("expected a validated add");
+            };
+            assert_eq!(
+                entry.address,
+                chains::ed25519::policy_address(chain, &raw).unwrap()
+            );
+            let expected = chains::ed25519::display_policy_address(&entry.address).unwrap();
+            let tmp = home_with(std::slice::from_ref(&entry));
+            assert_eq!(
+                recipient_for_chain(tmp.path(), "@bob", Some(chain)).unwrap(),
+                (expected.clone(), Some("bob".into()))
+            );
+            let other = chains::find(if key == "solana" { "ton" } else { "solana" }).unwrap();
+            assert!(recipient_for_chain(tmp.path(), "@bob", Some(other)).is_err());
+            let output = unverified_view(tmp.path(), None);
+            assert_eq!(output["entries"][0]["family"], key);
+            assert_eq!(output["entries"][0]["address"], expected);
+            assert!(list_text(&output, false).contains(&expected));
+            assert!(!entry_line(&output["entries"][0]).contains(INVALID));
+            assert!(
+                Change::add("wrong", &raw, &[key], EntryKind::Contract, &["0x12345678"]).is_err()
+            );
+            assert!(Change::add("wrong", &raw, &["*"], EntryKind::Address, &[]).is_err());
+            assert!(Change::token_cap(key, &raw, "1").is_err());
+            assert!(Change::calldata_cap(key, "1").is_err());
+            let Change(Mutation::Limit {
+                limit: Limit::Native(Some(cap)),
+                ..
+            }) = Change::native_cap(key, "1").unwrap()
+            else {
+                panic!("expected a native cap");
+            };
+            assert_eq!(cap, U256::from(1_000_000_000u64));
+            assert!(fee_text(chain, U256::from(1)).contains(if key == "solana" {
+                "lamports"
+            } else {
+                "nanotons"
+            }));
+        }
+        let sol_zero = bs58::encode([0u8; 32]).into_string();
+        let ton_zero = format!("0:{}", "00".repeat(32));
+        assert!(Change::add("zero", &sol_zero, &["solana"], EntryKind::Address, &[]).is_err());
+        assert!(Change::add("zero", &ton_zero, &["ton"], EntryKind::Address, &[]).is_err());
     }
 
     #[test]

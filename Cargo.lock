@@ -5499,10 +5499,12 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "alloy",
+ "base64 0.22.1",
  "bs58",
  "clap",
  "crossterm",
  "ed25519-dalek",
+ "hmac",
  "libc",
  "qrcode",
  "rand 0.8.8",

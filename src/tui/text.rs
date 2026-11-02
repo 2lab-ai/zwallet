@@ -45,13 +45,13 @@ impl Source {
         match self {
             Self::WhitelistName => 32,
             Self::Quantity => 78,
-            Self::TransactionHash => 66,
+            Self::TransactionHash => 88,
             Self::Detail => 72,
             Self::ListRow => PROSE_MAX,
             Self::Home => 64,
             Self::Input => 512,
             Self::KeyName | Self::RpcHost => 32,
-            Self::Address => 42,
+            Self::Address => 66,
             Self::Expiry => 64,
             Self::Error | Self::Warning => PROSE_MAX,
         }
@@ -85,7 +85,9 @@ impl Outside {
     pub fn transaction_hash(text: &str) -> Self {
         Self::inert(
             Source::TransactionHash,
-            if text.parse::<alloy::primitives::B256>().is_ok() {
+            if text.parse::<alloy::primitives::B256>().is_ok()
+                || (text.len() <= 88 && bs58::decode(text).into_vec().is_ok_and(|b| b.len() == 64))
+            {
                 text
             } else {
                 "<invalid>"
@@ -127,7 +129,7 @@ impl Outside {
     /// Only the status bar shortens addresses: six leading and four trailing characters.
     pub fn short_address(address: &str) -> Self {
         let full = Self::address(address).text;
-        let text = if full.len() == 42 || full.len() == 34 && full.starts_with('T') {
+        let text = if full.len() > 18 && full.is_ascii() {
             format!("{}...{}", &full[..6], &full[full.len() - 4..])
         } else {
             full

@@ -61,9 +61,10 @@ impl<B> FilteredBackend<B> {
 }
 
 /// Whether a cell's symbol may reach the terminal as it is.
-fn cell_ok(symbol: &str) -> bool {
-    let mut chars = symbol.chars();
-    matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && terminal_ok(c))
+fn cell_ok(cell: &Cell) -> bool {
+    let mut chars = cell.symbol().chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && (terminal_ok(c)
+        || (crate::tui::style::is_qr(cell.style()) && matches!(c, '█' | '▀' | '▄'))))
 }
 
 /// The columns ratatui's diff counts `cell` as covering (it skips all but the first): its own
@@ -87,7 +88,7 @@ impl<B: Backend> Backend for FilteredBackend<B> {
         let mut cells: Vec<(u16, u16, Cell)> = Vec::new();
         let width = self.width.load(Ordering::Relaxed);
         for (x, y, cell) in content {
-            if cell_ok(cell.symbol()) {
+            if cell_ok(cell) {
                 cells.push((x, y, cell.clone()));
                 continue;
             }

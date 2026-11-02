@@ -1,11 +1,14 @@
 //! Chain registry and the chain-family boundary.
 //!
-//! A family (EVM and Tron today) owns key derivation from the shared seed, signing,
+//! A family (EVM, Tron, Solana and TON) owns key derivation from the shared seed, signing,
 //! and its chain I/O. The split is deliberate: [`FamilyKeys`] is everything the unlock daemon may
 //! do (no network), [`ChainFamily`] adds what the one-shot CLI does over RPC.
 
+pub mod ed25519;
 pub mod evm;
 pub mod policy;
+pub mod solana;
+pub mod ton;
 pub mod tron;
 
 use crate::chains::policy::ListView;
@@ -35,6 +38,8 @@ pub const DEFAULT_FEE_CAPS_WEI: &[(&str, &str)] = &[
     ("avalanche", "50000000000000000"),
     ("sepolia", "10000000000000000"),
     ("tron", "30000000"),
+    ("solana", "100000"),
+    ("ton", "100000000"),
 ];
 
 /// Family-aware facts used to validate a list before it is signed.
@@ -75,6 +80,7 @@ fn registry_token_body_on_chain(key: &str, body: &str) -> bool {
             .parse::<alloy::primitives::Address>()
             .is_ok_and(|a| evm::registry::lookup(c.chain_id, &a).is_some()),
         Family::Tron(_) => tron_payload(body).is_some_and(|a| tron::registry::is_token(&a)),
+        Family::Solana(_) | Family::Ton(_) => false,
     }
 }
 
@@ -83,6 +89,8 @@ fn registry_token_body_on_chain(key: &str, body: &str) -> bool {
 pub enum Family {
     Evm(evm::EvmChain),
     Tron(tron::TronChain),
+    Solana(solana::SolanaChain),
+    Ton(ton::TonChain),
 }
 
 impl Family {
@@ -90,6 +98,8 @@ impl Family {
         match self {
             Family::Evm(_) => "evm",
             Family::Tron(_) => "tron",
+            Family::Solana(_) => "solana",
+            Family::Ton(_) => "ton",
         }
     }
 
@@ -98,6 +108,8 @@ impl Family {
         match self {
             Family::Evm(_) => &evm::Evm,
             Family::Tron(_) => &tron::Tron,
+            Family::Solana(_) => &solana::Solana,
+            Family::Ton(_) => &ton::Ton,
         }
     }
 }
@@ -209,6 +221,28 @@ pub const CHAINS: &[Chain] = &[
             genesis: tron::MAINNET_GENESIS,
         }),
     },
+    Chain {
+        key: "solana",
+        name: "Solana",
+        symbol: "SOL",
+        decimals: 9,
+        family: Family::Solana(solana::SolanaChain {
+            default_rpc: "https://api.mainnet-beta.solana.com",
+            explorer: "https://explorer.solana.com",
+            genesis: solana::MAINNET_GENESIS,
+        }),
+    },
+    Chain {
+        key: "ton",
+        name: "TON",
+        symbol: "TON",
+        decimals: 9,
+        family: Family::Ton(ton::TonChain {
+            default_rpc: "https://toncenter.com/api/v2/jsonRPC",
+            explorer: "https://tonviewer.com",
+            global_id: -239,
+        }),
+    },
     evm_chain(
         "sepolia",
         "Sepolia",
@@ -257,6 +291,8 @@ impl Chain {
         match &self.family {
             Family::Evm(c) => c.default_rpc,
             Family::Tron(c) => c.default_rpc,
+            Family::Solana(c) => c.default_rpc,
+            Family::Ton(c) => c.default_rpc,
         }
     }
 
@@ -276,6 +312,8 @@ impl Chain {
         match &self.family {
             Family::Evm(c) => Value::from(c.chain_id),
             Family::Tron(c) => Value::from(c.chain_id()),
+            Family::Solana(c) => Value::from(c.genesis),
+            Family::Ton(c) => Value::from(c.global_id),
         }
     }
 
@@ -283,6 +321,10 @@ impl Chain {
         match &self.family {
             Family::Evm(c) => format!("{}/tx/{tx_hash}", c.explorer),
             Family::Tron(c) => format!("{}/transaction/{tx_hash}", c.explorer),
+            Family::Solana(c) => format!("{}/tx/{tx_hash}", c.explorer),
+            // TON sends are tracked by their signed-body hash, not a chain transaction hash.
+            // A direct transaction link is available only after lookup resolves the latter.
+            Family::Ton(c) => c.explorer.to_string(),
         }
     }
 
@@ -290,6 +332,8 @@ impl Chain {
         match &self.family {
             Family::Evm(c) => format!("{}/address/{address}", c.explorer),
             Family::Tron(c) => format!("{}/address/{address}", c.explorer),
+            Family::Solana(c) => format!("{}/address/{address}", c.explorer),
+            Family::Ton(c) => format!("{}/{address}", c.explorer),
         }
     }
 }
@@ -316,7 +360,7 @@ pub fn derive_addresses(seed: &Seed, index: u32) -> Result<BTreeMap<String, Stri
 /// Key-side operations. Runs inside the unlock daemon; must never touch the network.
 ///
 /// `index` is the wallet's key index (creation order); each family maps it to its own path, e.g.
-/// EVM `m/44'/60'/0'/0/{index}` (later: Solana `m/44'/501'/{index}'/0'`, TON `m/44'/607'/{index}'`).
+/// EVM `m/44'/60'/0'/0/{index}`, Solana `m/44'/501'/{index}'/0'`, TON `m/44'/607'/{index}'`.
 pub trait FamilyKeys: Sync {
     fn derivation_path(&self, index: u32) -> String;
     fn derive_address(&self, seed: &Seed, index: u32) -> Result<String>;
@@ -743,7 +787,7 @@ impl SendLock {
     pub fn acquire(home: &Path, chain: &Chain, address: &str) -> Result<Self> {
         let path = home.join(format!(
             "nonce-{}-{}.lock",
-            chain.chain_id_json(),
+            file_chain_id(chain),
             journal_address(chain, address)
         ));
         match store::try_lock_exclusive(&path)? {
@@ -799,7 +843,18 @@ const SEND_KINDS: [&str; 3] = ["transfer", "token-transfer", "invoke"];
 /// A journal entry's `txHash` when it is a transaction hash (32 bytes of hex), as alloy writes
 /// one; anything else in that field is not shown, nor made into a lookup command.
 fn entry_hash(e: &Value) -> Option<String> {
-    if e["chain"] == "tron" {
+    if e["chain"] == "solana" {
+        return e["txHash"]
+            .as_str()
+            .filter(|h| {
+                h.len() <= 88
+                    && bs58::decode(h).into_vec().is_ok_and(|bytes| {
+                        bytes.len() == 64 && bs58::encode(bytes).into_string() == *h
+                    })
+            })
+            .map(str::to_string);
+    }
+    if e["chain"] == "tron" || e["chain"] == "ton" {
         return e["txHash"]
             .as_str()
             .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -815,6 +870,8 @@ fn entry_hash(e: &Value) -> Option<String> {
 fn is_address(s: &str) -> bool {
     (s.len() == 42 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit()))
         || tron::address::is_address(s)
+        || solana::normalize_address(s).is_ok()
+        || ton::normalize_address(s).is_ok()
 }
 
 /// `<digits>[.<digits>] <symbol>`, as zwallet writes a journal amount (`format_units`, a space,
@@ -986,12 +1043,23 @@ fn journal_address(chain: &Chain, address: &str) -> String {
             .map(|a| tron::address::hex41(&a))
             .unwrap_or_else(|_| "invalid-address".into()),
         Family::Evm(_) => address.to_ascii_lowercase(),
+        Family::Solana(_) => {
+            solana::policy_address(address).unwrap_or_else(|_| "invalid-address".into())
+        }
+        Family::Ton(_) => ton::policy_address(address).unwrap_or_else(|_| "invalid-address".into()),
     }
 }
+fn file_chain_id(chain: &Chain) -> String {
+    match chain.chain_id_json() {
+        Value::String(id) => id,
+        id => id.to_string(),
+    }
+}
+
 fn journal_path(home: &Path, chain: &Chain, address: &str) -> PathBuf {
     home.join(format!(
         "sends-{}-{}.jsonl",
-        chain.chain_id_json(),
+        file_chain_id(chain),
         journal_address(chain, address)
     ))
 }
@@ -1057,6 +1125,55 @@ impl SendJournal {
                 .iter()
                 .rev()
                 .filter_map(|entry| tron::journal::row(self.chain, &self.address, entry))
+                .collect());
+        }
+        if matches!(self.chain.family, Family::Solana(_) | Family::Ton(_)) {
+            return Ok(self
+                .entries()?
+                .iter()
+                .rev()
+                .filter_map(|e| {
+                    let normalize = |a: &str| match self.chain.family {
+                        Family::Solana(_) => solana::normalize_address(a),
+                        Family::Ton(_) => ton::normalize_address(a),
+                        _ => unreachable!(),
+                    };
+                    if e["chain"].as_str()? != self.chain.key
+                        || e["kind"] != "transfer"
+                        || !e["token"].is_null()
+                    {
+                        return None;
+                    }
+                    let from = normalize(e["from"].as_str()?).ok()?;
+                    if from != normalize(&self.address).ok()? {
+                        return None;
+                    }
+                    let raw = e["amountRaw"].as_str()?;
+                    if raw.is_empty() || raw.len() > 20 || !raw.bytes().all(|b| b.is_ascii_digit())
+                    {
+                        return None;
+                    }
+                    let amount = U256::from(raw.parse::<u64>().ok()?);
+                    Some(JournalRow {
+                        chain: self.chain.key,
+                        tx_hash: entry_hash(e)?,
+                        from,
+                        to: normalize(e["to"].as_str()?).ok()?,
+                        nonce: None,
+                        expiration_ms: None,
+                        timestamp: e["ts"]
+                            .as_str()
+                            .and_then(crate::core::time::parse_rfc3339_utc)?,
+                        kind: "transfer",
+                        amount_raw: Some(amount),
+                        value: format!(
+                            "{} {}",
+                            crate::core::amount::format_units(amount, self.chain.decimals),
+                            self.chain.symbol
+                        ),
+                        token: None,
+                    })
+                })
                 .collect());
         }
         use alloy::primitives::Address;
@@ -1338,7 +1455,11 @@ impl SendJournal {
     pub fn recent_duplicates(&self, send: &SendSummary, now: u64) -> Result<Vec<Value>> {
         let same_addr = |v: &Value, want: Option<&str>| match (v.as_str(), want) {
             (Some(a), Some(b)) => match self.chain.family {
-                Family::Tron(_) => a == b,
+                Family::Tron(_) | Family::Solana(_) => a == b,
+                Family::Ton(_) => ton::normalize_address(a)
+                    .ok()
+                    .zip(ton::normalize_address(b).ok())
+                    .is_some_and(|(a, b)| a == b),
                 Family::Evm(_) => a.eq_ignore_ascii_case(b),
             },
             (None, None) => v.is_null(),
@@ -1396,6 +1517,11 @@ impl SendJournal {
     /// The refusal of a send without `--nonce` that repeats `duplicates` (from
     /// [`Self::recent_duplicates`], not empty): nothing was signed.
     pub fn duplicate_error(&self, duplicates: Vec<Value>) -> WalletError {
+        if matches!(self.chain.family, Family::Solana(_) | Family::Ton(_)) {
+            return WalletError::validation(format!(
+                "this looks like a repeat of a recent send: {}; if it was included, this is a second payment; look it up first (`zwallet tx --chain {} <txid>`). Only for an intended second payment, pass --allow-duplicate; nothing was signed", self.entries_text(&duplicates), self.chain.key))
+                .with_detail("duplicateSends", inert_entries(&duplicates)).with_detail("journal", self.display());
+        }
         if matches!(self.chain.family, Family::Tron(_)) {
             return WalletError::validation(format!("this looks like a repeat of a recent send: {}; if it was included, this is a second payment; look it up first (`zwallet tx --chain tron <txid>`). Only for an intended second payment, pass --allow-duplicate; nothing was signed", self.entries_text(&duplicates)))
                 .with_detail("duplicateSends", inert_entries(&duplicates)).with_detail("journal", self.display());
@@ -1549,7 +1675,10 @@ pub fn after_send_error(
          look it up first ({})",
         lookup_hint(chain, hash)
     );
-    if let Some(n) = signed.nonce {
+    if let Some(n) = signed
+        .nonce
+        .filter(|_| matches!(chain.family, Family::Evm(_)))
+    {
         message.push_str(&format!(
             ", or retry with --nonce {n} --replace {hash} so that the retry replaces it instead \
              of sending twice"
@@ -1680,6 +1809,11 @@ fn with_tx_details(e: WalletError, signed: &SignedTx) -> WalletError {
 /// How to look `hash` up on `chain`: the `zwallet tx` command and the explorer page, for every
 /// message that sends the agent to a transaction before it sends anything again.
 pub fn lookup_hint(chain: &Chain, hash: &str) -> String {
+    if matches!(chain.family, Family::Ton(_)) {
+        return format!(
+            "`zwallet tx --chain ton {hash}` (signed-body id; lookup resolves the transaction)"
+        );
+    }
     format!(
         "`zwallet tx --chain {} {hash}` or {}",
         chain.key,
@@ -1724,11 +1858,11 @@ pub fn record_receipt(out: &mut Map<String, Value>, chain: &Chain, receipt: Resu
         .to_string();
     let lookup = lookup_hint(chain, &hash);
     let hint = match out.get("nonce").and_then(Value::as_u64) {
-        Some(n) => format!(
+        Some(n) if matches!(chain.family, Family::Evm(_)) => format!(
             "{}; look it up with {lookup}",
             pending_hint(state, n, &hash)
         ),
-        None => format!("{state}; look it up with {lookup} before sending again"),
+        _ => format!("{state}; look it up with {lookup} before sending again"),
     };
     out.insert("hint".into(), Value::from(hint));
 }
@@ -1796,7 +1930,7 @@ pub fn require_contract_calls(chain: &Chain) -> Result<()> {
     let supported = match &chain.family {
         Family::Evm(_) => evm::Evm.supports_contract_calls(),
         // No `call` or `invoke` on Tron (`.prd/05-tron.md` §Non-goals).
-        Family::Tron(_) => false,
+        Family::Tron(_) | Family::Solana(_) | Family::Ton(_) => false,
     };
     if supported {
         Ok(())
@@ -1822,7 +1956,7 @@ mod tests {
     fn find_is_case_insensitive_and_rejects_unknown() {
         assert_eq!(find("Base").unwrap().chain_id_json(), Value::from(8453));
         assert_eq!(
-            find("solana").unwrap_err().code,
+            find("bitcoin").unwrap_err().code,
             ErrorCode::ChainUnsupported
         );
     }
@@ -1920,9 +2054,20 @@ mod tests {
         // Every default endpoint prints as it is, including the 21- and 20-character labels
         // `avalanche-c-chain-rpc` and `ethereum-sepolia-rpc`.
         for chain in CHAINS {
-            assert_eq!(redact_url(chain.default_rpc()), chain.default_rpc());
-            assert_eq!(url_origin(chain.default_rpc()), chain.default_rpc());
-            assert!(url_secrets(chain.default_rpc()).is_empty(), "{}", chain.key);
+            if chain.key == "ton" {
+                // The public built-in path still follows the same conservative redaction as
+                // a user-supplied URL; path components can carry credentials on other hosts.
+                assert_eq!(
+                    redact_url(chain.default_rpc()),
+                    "https://toncenter.com/<redacted>"
+                );
+                assert_eq!(url_origin(chain.default_rpc()), "https://toncenter.com");
+                assert!(!url_secrets(chain.default_rpc()).contains(&"toncenter".to_string()));
+            } else {
+                assert_eq!(redact_url(chain.default_rpc()), chain.default_rpc());
+                assert_eq!(url_origin(chain.default_rpc()), chain.default_rpc());
+                assert!(url_secrets(chain.default_rpc()).is_empty(), "{}", chain.key);
+            }
         }
         for (url, shown) in [
             // 20+ characters in one run.
@@ -2989,6 +3134,14 @@ mod tests {
                 let want = match find(chain).unwrap().family {
                     Family::Evm(_) => evm,
                     Family::Tron(_) => tron,
+                    Family::Solana(_) => {
+                        assert!(solana::normalize_address(a).is_ok());
+                        continue;
+                    }
+                    Family::Ton(_) => {
+                        assert!(ton::normalize_address(a).is_ok());
+                        continue;
+                    }
                 };
                 assert_eq!(a, want, "{chain}");
             }
@@ -3021,6 +3174,61 @@ mod tests {
         // After Avalanche, before the testnet.
         let keys: Vec<&str> = CHAINS.iter().map(|c| c.key).collect();
         let at = keys.iter().position(|k| *k == "tron").unwrap();
-        assert_eq!((keys[at - 1], keys[at + 1]), ("avalanche", "sepolia"));
+        assert_eq!((keys[at - 1], keys[at + 1]), ("avalanche", "solana"));
+    }
+    #[test]
+    fn native_ed25519_journals_preserve_full_identities_and_safe_retry_hints() {
+        use crate::core::time::rfc3339_utc;
+        let home = temp_home();
+        let sol_from = bs58::encode([1u8; 32]).into_string();
+        let sol_to = bs58::encode([2u8; 32]).into_string();
+        let sol_hash = bs58::encode([3u8; 64]).into_string();
+        let ton_from = format!("0:{}", "01".repeat(32));
+        let ton_to = format!("0:{}", "02".repeat(32));
+        for (key, from, to, hash) in [
+            ("solana", sol_from, sol_to, sol_hash),
+            ("ton", ton_from, ton_to, "03".repeat(32)),
+        ] {
+            let chain = find(key).unwrap();
+            let journal = SendJournal::new(home.path(), chain, &from);
+            let summary = SendSummary {
+                kind: "transfer".into(),
+                to: to.clone(),
+                value: format!("0.000000123 {}", chain.symbol),
+                amount_raw: Some("123".into()),
+                token: None,
+                calldata_hash: None,
+            };
+            let entry = json!({"ts":rfc3339_utc(1_800_000_000),"chain":key,
+                "from":from,"to":to,"txHash":hash,"kind":"transfer",
+                "value":summary.value,"amountRaw":"123"});
+            journal.append(&entry).unwrap();
+            let rows = journal.recent().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                (&rows[0].from, &rows[0].to, &rows[0].tx_hash),
+                (&from, &to, &hash)
+            );
+            assert_eq!(rows[0].amount_raw, Some(U256::from(123)));
+            assert!(rows[0].nonce.is_none());
+            let duplicates = journal.recent_duplicates(&summary, 1_800_000_001).unwrap();
+            assert_eq!(duplicates.len(), 1);
+            let denial = journal.duplicate_error(duplicates);
+            assert!(denial.message.contains(&hash));
+            assert!(!denial.message.contains("--nonce"));
+            let signed = SignedTx {
+                raw: String::new(),
+                tx_hash: hash.clone(),
+                signer: from,
+                nonce: Some(42),
+            }; // even a stray seqno must not become an EVM retry instruction
+            let failure =
+                after_send_error(ErrorCode::BroadcastUncertain, chain, &signed, "timeout");
+            assert!(!failure.message.contains("--nonce"));
+            let mut out =
+                Map::from_iter([("txHash".into(), json!(hash)), ("nonce".into(), json!(42))]);
+            record_receipt(&mut out, chain, Ok(None));
+            assert!(!out["hint"].as_str().unwrap().contains("--nonce"));
+        }
     }
 }

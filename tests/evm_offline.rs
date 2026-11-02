@@ -1685,20 +1685,29 @@ fn rpc_url_path_and_query_are_never_printed() {
     assert!(!human.stdout.contains("SECRETKEY"), "{}", human.stdout);
     // A key in a subdomain label; the default hosts stay readable.
     let key_host = "https://k3y0a1b2c3d4e5f6.base.example.com";
-    let v = home
-        .run_env(&["chains", "--json"], &[("ZWALLET_RPC_BASE", key_host)])
-        .ok();
+    // Native-family test defaults are loopback. Exercise redaction for their full RPC paths
+    // as well; `chains` only displays configuration and never contacts these endpoints.
+    let native_keyed = "http://127.0.0.1:9/private/SECRETKEY9?apikey=SECRETKEY10";
+    let keyed_env = [
+        ("ZWALLET_RPC_BASE", key_host),
+        ("ZWALLET_RPC_SOLANA", native_keyed),
+        ("ZWALLET_RPC_TON", native_keyed),
+    ];
+    let v = home.run_env(&["chains", "--json"], &keyed_env).ok();
     for row in v.as_array().unwrap() {
         let shown = row["rpc"].as_str().unwrap();
         if row["key"] == "base" {
             assert_eq!(shown, "https://<redacted>.base.example.com");
+        } else if row["key"] == "solana" || row["key"] == "ton" {
+            assert_eq!(shown, "http://127.0.0.1:9/<redacted>");
         } else {
             assert!(shown.ends_with("-rpc.publicnode.com"), "{shown}");
             assert!(!shown.contains("redacted"), "{shown}");
         }
     }
-    let human = home.run_env(&["chains"], &[("ZWALLET_RPC_BASE", key_host)]);
+    let human = home.run_env(&["chains"], &keyed_env);
     assert!(!human.stdout.contains("k3y0a1b2"), "{}", human.stdout);
+    assert!(!human.stdout.contains("SECRETKEY"), "{}", human.stdout);
 
     home.create("t", &[]);
     let leaks = |r: &common::Run| r.stdout.contains("SECRETKEY") || r.stderr.contains("SECRETKEY");
@@ -1840,10 +1849,28 @@ fn every_chain_node(delay: Duration) -> Vec<(&'static str, MockRpc)> {
 /// none falls back to its public default RPC.
 fn rpc_env(nodes: &[(&str, MockRpc)], instead: &[(&str, &str)]) -> Vec<(String, String)> {
     let tron = tron_node();
+    let solana = common::tiny_rpc(|method| match method {
+        "getGenesisHash" => json!(zwallet::chains::solana::MAINNET_GENESIS),
+        "getBalance" => json!({"context":{"slot":123},"value":0}),
+        _ => panic!("unexpected Solana read method"),
+    });
+    let ton = common::tiny_rpc(|method| match method {
+        "getMasterchainInfo" => {
+            json!({"init":{"root_hash":"F6OpKZKqvqeFp6CQmFomXNMfMj2EnaUSOXN+Mh+wVWk=","file_hash":"XplPz01CXAps5qeSWUtxcyBfdAo5zVb1N979KLSKD24=","seqno":0,"workchain":-1}})
+        }
+        "getAddressInformation" => {
+            json!({"balance":"0","state":"uninitialized","code":"","data":""})
+        }
+        _ => panic!("unexpected TON read method"),
+    });
     let env: Vec<(String, String)> = nodes
         .iter()
         .map(|(key, node)| (*key, node.url.as_str()))
-        .chain([("tron", tron.url.as_str())])
+        .chain([
+            ("tron", tron.url.as_str()),
+            ("solana", solana.as_str()),
+            ("ton", ton.as_str()),
+        ])
         .map(|(key, url)| {
             let url = instead
                 .iter()
@@ -1878,7 +1905,7 @@ fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
 }
 
 /// Every chain key in the order `balance` without `--chain` lists them: mainnets, then Sepolia.
-const ALL_CHAINS_ORDER: [&str; 9] = [
+const ALL_CHAINS_ORDER: [&str; 11] = [
     "ethereum",
     "base",
     "arbitrum",
@@ -1887,6 +1914,8 @@ const ALL_CHAINS_ORDER: [&str; 9] = [
     "bsc",
     "avalanche",
     "tron",
+    "solana",
+    "ton",
     "sepolia",
 ];
 
@@ -1925,7 +1954,14 @@ fn balance_without_chain_reads_every_network_and_its_registry_tokens() {
         tron_row["native"],
         json!({ "symbol": "TRX", "decimals": 6, "balance": "0", "raw": "0" })
     );
-    for row in rows.iter().filter(|r| r["chain"] != "tron") {
+    for row in rows.iter().filter(|r| {
+        matches!(
+            zwallet::chains::find(r["chain"].as_str().unwrap())
+                .unwrap()
+                .family,
+            zwallet::chains::Family::Evm(_)
+        )
+    }) {
         let key = row["chain"].as_str().unwrap();
         let chain = zwallet::chains::find(key).unwrap();
         let id = zwallet::chains::evm::config(chain).unwrap().chain_id;
@@ -1987,6 +2023,16 @@ fn balance_without_chain_reads_every_network_and_its_registry_tokens() {
     // BNB Smart Chain has no registry token.
     assert_eq!(rows[5]["tokens"], json!([]));
 
+    let wallet: Value =
+        serde_json::from_slice(&std::fs::read(home.wallet_json()).unwrap()).unwrap();
+    let solana = wallet["keys"][0]["addresses"]["solana"].as_str().unwrap();
+    let ton = wallet["keys"][0]["addresses"]["ton"].as_str().unwrap();
+    for key in ["solana", "ton"] {
+        let row = rows.iter().find(|r| r["chain"] == key).unwrap();
+        assert_eq!(row["native"]["raw"], "0");
+        assert_eq!(row["address"], wallet["keys"][0]["addresses"][key]);
+        assert_eq!(row["tokens"], json!([]));
+    }
     // Human: one line per network, a held token under its network, then the count.
     let human = home.run_env(&["balance"], &env_refs(&env));
     assert_eq!(human.code, 0, "{}", human.stderr);
@@ -2003,8 +2049,10 @@ fn balance_without_chain_reads_every_network_and_its_registry_tokens() {
              bsc        0 BNB\n\
              avalanche  0 AVAX\n\
              tron       0 TRX ({tron})\n\
+             solana     0 SOL ({solana})\n\
+             ton        0 TON ({ton})\n\
              sepolia    0 ETH\n\
-             2 of 9 networks have a balance\n"
+             2 of 11 networks have a balance\n"
         )
     );
 }
@@ -2073,7 +2121,7 @@ fn balance_without_chain_shows_the_networks_that_answer() {
     assert!(polygon.chars().count() <= 110, "{polygon}");
     assert_eq!(
         lines.last(),
-        Some(&"2 of 9 networks have a balance; 1 did not answer"),
+        Some(&"2 of 11 networks have a balance; 1 did not answer"),
         "{}",
         human.stdout
     );
@@ -2181,7 +2229,7 @@ fn balance_without_chain_shows_a_failed_token_read_on_its_row_only() {
     assert!(lines[op + 2].starts_with("polygon "), "{}", human.stdout);
     assert_eq!(
         lines.last(),
-        Some(&"2 of 9 networks have a balance; 2 token reads failed"),
+        Some(&"2 of 11 networks have a balance; 2 token reads failed"),
         "{}",
         human.stdout
     );
@@ -2261,6 +2309,11 @@ fn balance_without_chain_cuts_each_networks_error_short_when_none_answers() {
             "{n}"
         );
         let error = n["error"].as_str().unwrap_or_else(|| panic!("{n}"));
+        if key == "solana" || key == "ton" {
+            // New native adapters deliberately do not echo untrusted RPC error bodies.
+            assert!(!error.contains(&whole), "{key}: {error}");
+            continue;
+        }
         let node_said = if key == "tron" {
             "the node answered an error: "
         } else {
@@ -2418,7 +2471,7 @@ fn balance_after_unlock_is_verified_by_the_session_with_the_code_last() {
     }
     // Every field it had before is still there.
     assert_eq!(one["balance"], "1.5");
-    assert_eq!(every["chains"].as_array().unwrap().len(), 9);
+    assert_eq!(every["chains"].as_array().unwrap().len(), 11);
 
     // Human: into a pipe, the text it always had; on a terminal, that text and then the code,
     // after the networks. --no-qr leaves the code out.
@@ -2449,7 +2502,7 @@ fn balance_after_unlock_is_verified_by_the_session_with_the_code_last() {
     }
     let piped = home.run_env(&["balance"], &env_refs(&env));
     assert!(
-        piped.stdout.ends_with("2 of 9 networks have a balance\n"),
+        piped.stdout.ends_with("2 of 11 networks have a balance\n"),
         "{}",
         piped.stdout
     );

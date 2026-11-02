@@ -5,6 +5,10 @@ pub(super) fn validate_family_address(chain: &Chain, address: &str) -> Result<()
     match chain.family {
         crate::chains::Family::Evm(_) => crate::chains::evm::parse_address(address).map(|_| ()),
         crate::chains::Family::Tron(_) => crate::chains::tron::address::parse(address).map(|_| ()),
+        crate::chains::Family::Solana(_) => {
+            crate::chains::solana::normalize_address(address).map(|_| ())
+        }
+        crate::chains::Family::Ton(_) => crate::chains::ton::normalize_address(address).map(|_| ()),
     }
 }
 impl App {

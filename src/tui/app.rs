@@ -622,7 +622,7 @@ impl App {
                 self.open_key
                     .clone()
                     .or_else(|| {
-                        matches!(self.chain.family, crate::chains::Family::Tron(_))
+                        (!matches!(self.chain.family, crate::chains::Family::Evm(_)))
                             .then(|| {
                                 self.nav
                                     .session

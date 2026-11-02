@@ -17,6 +17,8 @@ path = "src/main.rs"
 [dependencies]
 alloy = { version = "2.5", features = ["signer-mnemonic", "consensus", "network", "rlp", "eips", "sol-types", "dyn-abi", "json-abi", "k256"] }
 aes-gcm = "0.10"
+base64 = "0.22"
+hmac = "0.12"
 # Tron addresses are base58check (`.prd/05-tron.md` §Derivation); both are already in the build through
 # alloy's coins-bip32.
 bs58 = { version = "=0.5.1", features = ["check"] }

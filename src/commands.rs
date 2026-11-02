@@ -275,6 +275,8 @@ fn address_shaped(chain: &Chain, value: &str) -> bool {
                 && value[2..].bytes().all(|b| b.is_ascii_hexdigit())
         }
         Family::Tron(_) => tron::address::is_address(value),
+        Family::Solana(_) => chains::solana::normalize_address(value).is_ok(),
+        Family::Ton(_) => chains::ton::normalize_address(value).is_ok(),
     }
 }
 
@@ -283,6 +285,11 @@ fn address_shaped(chain: &Chain, value: &str) -> bool {
 fn same_address(chain: &str, a: &str, b: &str) -> bool {
     match chains::find(chain).map(|c| &c.family) {
         Ok(Family::Tron(_)) => tron::address::same(a, b),
+        Ok(Family::Solana(_)) => a == b,
+        Ok(Family::Ton(_)) => chains::ton::normalize_address(a)
+            .ok()
+            .zip(chains::ton::normalize_address(b).ok())
+            .is_some_and(|(a, b)| a == b),
         _ => a.eq_ignore_ascii_case(b),
     }
 }
@@ -667,12 +674,30 @@ fn with_qr(mut out: Out, verified: bool, chain: &Chain, address: Option<&str>, n
     let networks = match chain.family {
         Family::Evm(_) => EVERY_EVM_NETWORK,
         Family::Tron(_) => TRON_ONLY,
+        Family::Solana(_) => "(Solana mainnet only: native SOL; SPL tokens are not supported)",
+        Family::Ton(_) => "(TON mainnet only: native TON; BIP39 / V4R2 wallet)",
     };
     out.qr.push(Qr {
         caption: format!("scan to send to {address}\n{networks}"),
         code,
     });
     out
+}
+
+/// Public recovery parameters. These never include seed material and do not imply that a
+/// cache has been verified: the surrounding result's trust markers still decide that.
+fn recovery_metadata(out: &mut Value, chain: &Chain, index: u32) {
+    if !matches!(chain.family, Family::Solana(_) | Family::Ton(_)) {
+        return;
+    }
+    out["derivationPath"] = json!(chain.family.keys().derivation_path(index));
+    out["mnemonicScheme"] = json!("bip39-slip0010-ed25519");
+    out["bip39Passphrase"] = json!("empty");
+    if matches!(chain.family, Family::Ton(_)) {
+        out["walletVersion"] = json!("v4r2");
+        out["workchain"] = json!(0);
+        out["subwalletId"] = json!(698983191u32);
+    }
 }
 
 /// The chain whose address the key shows by default ([`PRIMARY_CHAIN`]).
@@ -918,6 +943,7 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
             "verified": true,
             "verifiedBy": BY_PASSWORD,
         });
+        recovery_metadata(&mut out, chain, key.index);
         // Chains this build derives that the cache lacked (added to zwallet after the key was
         // made): filled in from the seed, which is no sign of tampering.
         if !added.is_empty() {
@@ -992,6 +1018,7 @@ async fn address(home: &Path, a: AddressArgs) -> Result<Out> {
     let address = daemon.address(key, chain).await?;
     let trust = daemon.trust();
     let mut out = json!({ "chain": chain.key, "key": key.name, "address": address });
+    recovery_metadata(&mut out, chain, key.index);
     trust.mark(&mut out);
     Ok(with_qr(
         with_note(out, trust.note()),
@@ -1010,7 +1037,9 @@ async fn addresses(home: &Path, a: AddressesArgs) -> Result<Out> {
     let rows:Vec<Value>=addresses.rows.iter().map(|row| {
         if let Some(e)=&row.error {return json!({"chainId":row.chain.key,"error":e.message,"errorCode":e.code.as_str()});}
         if !codes.iter().any(|(chain,_)|chain.family.name()==row.chain.family.name()) {codes.push((row.chain,row.address.clone()));}
-        json!({"chainId":row.chain.key,"address":row.address})
+        let mut value = json!({"chainId":row.chain.key,"address":row.address});
+        recovery_metadata(&mut value,row.chain,key.index);
+        value
     }).collect();
     let trust = addresses.trust;
     let mut text = rows
@@ -1421,6 +1450,9 @@ async fn task(home: &Path, args: crate::cli::TaskCommand) -> Result<Out> {
             rpc,
         } => {
             let chain = chains::find(&chain)?;
+            if matches!(chain.family, Family::Solana(_) | Family::Ton(_)) {
+                return Err(unsupported(chain, "task attribution and accounting"));
+            }
             let file = store::read_wallet_file(home)?;
             let key = file.key(key.key.as_deref())?.name.clone();
             let input = tasks::TaskCreate {
@@ -1475,6 +1507,29 @@ async fn transfer(home: &Path, a: TransferArgs) -> Result<Out> {
             }
             tron::send::validate_token(a.token.as_deref())?;
             transfer_with(&tron::Tron, home, &net, a).await
+        }
+        Family::Solana(_) | Family::Ton(_) => {
+            if a.token.is_some()
+                || a.send.nonce.is_some()
+                || a.send.bump.is_some()
+                || a.send.replace.is_some()
+                || a.send.allow_pending
+                || a.send.max_fee_gwei.is_some()
+                || a.force
+            {
+                return Err(unsupported(
+                    chain,
+                    "tokens, force, EVM nonce/replacement or gas options",
+                ));
+            }
+            if a.send.task.is_some() {
+                return Err(unsupported(chain, "task attribution and accounting"));
+            }
+            match chain.family {
+                Family::Solana(_) => transfer_with(&chains::solana::Solana, home, &net, a).await,
+                Family::Ton(_) => transfer_with(&chains::ton::Ton, home, &net, a).await,
+                _ => unreachable!(),
+            }
         }
     }
 }
@@ -1633,14 +1688,44 @@ async fn tx(a: TxArgs) -> Result<Out> {
                 tron::lookup::lookup_tx(&net, &hash, expiration).await?
             }
         }
+        Family::Solana(_) => native_tx(&chains::solana::Solana, &net, &a).await?,
+        Family::Ton(_) => native_tx(&chains::ton::Ton, &net, &a).await?,
     };
     Ok(Out::json(Value::Object(found)))
+}
+
+async fn native_tx<F: ChainFamily>(fam: &F, net: &Net, a: &TxArgs) -> Result<Map<String, Value>> {
+    if !a.wait {
+        return fam.lookup_tx(net, &a.tx_hash).await;
+    }
+    let timeout = a.wait_timeout.unwrap_or(wallet::send::DEFAULT_WAIT_TIMEOUT);
+    let observed =
+        tokio::time::timeout(timeout, fam.wait_for_receipt(net, &a.tx_hash, timeout)).await;
+    match observed {
+        Ok(Ok(Some(Value::Object(found)))) => return Ok(found),
+        Ok(Ok(Some(_))) => {
+            return Err(WalletError::rpc(
+                "native receipt observation has an invalid shape",
+            ));
+        }
+        Ok(Err(error)) => return Err(error),
+        Ok(Ok(None)) | Err(_) => {}
+    }
+    // The configured wait budget is exhausted. A fresh lookup here would start new network
+    // work outside that budget. No receipt was established, so do not claim absence or failure.
+    let mut out = json!({"chain":net.chain.key,"txHash":a.tx_hash,"status":"unknown",
+        "timedOut":true,"hint":"receipt wait timed out; the transfer may still complete. Look it up again before retrying; a new transfer can pay twice"})
+        .as_object().unwrap().clone();
+    if matches!(net.chain.family, Family::Ton(_)) {
+        out.insert("hashKind".into(), json!("ton-signed-body"));
+    }
+    Ok(out)
 }
 
 async fn sign_message(home: &Path, a: SignMessageArgs) -> Result<Out> {
     let chain = chains::find(&a.chain)?;
     // Before the wallet is read: no Tron message is ever signed (`.prd/05-tron.md` §Non-goals).
-    if let Family::Tron(_) = chain.family {
+    if !matches!(chain.family, Family::Evm(_)) {
         return Err(unsupported(chain, "message signing"));
     }
     let file = store::read_wallet_file(home)?;

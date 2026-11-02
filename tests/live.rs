@@ -33,6 +33,8 @@ async fn every_default_rpc_serves_its_chain_id() {
         let checked = match chain.family {
             chains::Family::Evm(_) => evm::rpc::connect(&net).await.map(drop),
             chains::Family::Tron(_) => chains::tron::rpc::connect(&net).await.map(drop),
+            chains::Family::Solana(_) => chains::solana::validate_rpc(&net).await,
+            chains::Family::Ton(_) => chains::ton::validate_rpc(&net).await,
         };
         match checked {
             Ok(()) => println!("ok   {:<10} {}", chain.key, net.rpc_url),

@@ -9,11 +9,36 @@ policy before signing it. That boundary assumes an authentic running program, a
 trustworthy host and a password/seed that the attacker has not obtained.
 
 This is a source-backed security explanation, not an independent audit, a penetration
-test certificate or a proof of cryptographic correctness. Review date: 2026-10-30.
+test certificate or a proof of cryptographic correctness. Initial review: 2026-10-30; Solana/TON and receive-QR extension: 2026-11-02.
 Named tests below are regression evidence for the specified paths; their presence is
 not a claim that every adversarial interleaving or operating system was tested. The
 [completion record](../.prd/security-assurance/completion-checklist.md) identifies the submitted
 revision and actual validation. Planned features never count as current defenses.
+
+## Solana, TON and verified receive QR
+
+The [multichain contract](../.prd/11-multichain.md) adds native SOL and TON. This
+extends the attack surface; the following are bounded defenses, not a universal
+safety claim. [Current completion evidence](../.prd/multichain/completion-checklist.md)
+is separate from the earlier EVM/Tron report. Supported recovery paths and exact
+capability limits are in the [multichain guide](multichain.md).
+
+| Attack / ambiguity | Implemented defense and evidence surface | Remaining assumption or limit |
+|---|---|---|
+| Recover to the wrong chain/account from the same words | Explicit BIP39→SLIP-0010 paths, independent public vectors in [Ed25519 helpers](../src/chains/ed25519.rs) and SDK fixtures; TON pins V4R2/workchain 0/subwallet 698983191 | TON-native and BIP39 mnemonic schemes differ. No automatic TON-native import/discovery; another app may choose another path/contract. Seed compromise exposes all derived families. |
+| Replace case-sensitive recipients, reuse EVM wildcard permission, or alter new-family cache | Tagged canonical identities with exact chain scope in [whitelist](../src/core/whitelist.rs); authenticated address derivation/cache repair; immutable [native review](../src/wallet/ed25519_send.rs) | Signed old wallet/list rollback and same-user host compromise remain possible. Older binaries cannot consume new tagged payees. A human can still add an attacker's address. |
+| Smuggle Solana programs, extra instructions, lookup tables, signers or transfer amounts | Fixed canonical legacy single-System-Program transfer decoder, expected signer and real Ed25519 signature/payload verification in [Solana codec](../src/chains/solana/tx.rs) | No SPL/Token-2022 or arbitrary program support. The supported message has no encoded maximum fee or network ID. |
+| Smuggle TON plugins, carry-all/destroy send modes, exotic cells or arbitrary state | Bounded ordinary-cell parser, canonical V4R2 grammar, wallet-code and StateInit checks, exact signed payload in [TON codec](../src/chains/ton/tx.rs) and [cell parser](../src/chains/ton/cell.rs) | V4R2's network is not in the signed payload. Identical wallet state/seqno on another network may accept the same signature. No claim of cryptographic cross-network replay prevention. |
+| Exponential work through repeated TON BOC child references | Cached per-cell hashes/depths and bounded cell count/depth/bytes, with adversarial DAG tests in [TON tests](../src/chains/ton/tests.rs) | Resource bounds cover this parser, not every OS/allocator/dependency failure. RPC and local host denial of service remain possible. |
+| Malicious or stale RPC changes fees/network/expiry | RPC genesis/zero-state checks, bounded response bodies/timeouts, prebroadcast freshness checks; review records estimate/reserve and its limitations | RPC replies are untrusted observations, not light-client proofs. Solana 5,000-lamport base fee is a current protocol assumption. TON fee reserve/estimate is not an encoded maximum charge. A stolen seed bypasses all application checks. |
+| Claim payment succeeded after only a TON seqno change | TON lookup binds signed-message-body hash, source, decoded intent and matching outgoing payment before reporting success | V4R2 can commit seqno while a send action fails. Incomplete or contradictory node/indexer evidence remains uncertain. The submission body ID differs from the chain transaction hash. RPC itself can fabricate a coherent response. |
+| Replay/retry an uncertain payment | Per-account send lock, bounded local duplicate journal, explicit uncertain broadcast outcome and lookup guidance; Solana recent blockhash, TON seqno/valid_until | New blockhash/seqno can create a second payment; no EVM-style replacement workflow on the new families. Mutable local journal is advisory, not authoritative budget/replay state. |
+| Draw a forged address QR in the TUI | Receive QR is generated only from a password- or session-verified address; dedicated QR style and character allowlist, rendered-buffer decode and full-address coordinate tests in [TUI checks](../tests/tui_multichain.rs) | A compromised terminal/host can draw outside zwallet. Phone decoding still depends on terminal/font/camera; tests decode rendered pixels and do not certify every physical display. Recovery phrases remain CLI-only. |
+
+New-family native amount caps are checked on decoded transfer values; they are
+per transaction and do not include an authoritative rolling budget. SPL tokens,
+Jettons, new-family task accounting, arbitrary contract/message signing and staking
+are unsupported. They are not silently authorized by an existing EVM policy.
 
 ## Assets, attackers and trust boundaries
 

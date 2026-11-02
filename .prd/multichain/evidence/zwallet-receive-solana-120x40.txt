@@ -1,0 +1,41 @@
+chain=solana; viewport=120x40; QR=(0,1)..(36,19); address column=39; address first row=4
+Receive / Solana / a
+
+
+    █▀▀▀▀▀█ ▄▀ ▄█ ▄▀█  ▄▀ █▀▀▀▀▀█      Address
+    █ ███ █ ▀███▀  ▄ ▀▄█▀ █ ███ █      US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx
+    █ ▀▀▀ █ █▄ ▄ █ █▀ ▄▀▄ █ ▀▀▀ █
+    ▀▀▀▀▀▀▀ █▄▀ █ ▀ ▀▄█ █ ▀▀▀▀▀▀▀      Verified by session
+    █▀ █ ▄▀█  █▄ ▄█▄ █▄▄▀ ███▄▀▀
+      ▄▄▄█▀▄ ▀▀  ▀▄▄█ ▄█ ▀ ▄ ▀ █       Check chain and address
+    ▄▀█ █▀▀ █ ▄▄█   █▄█ ▀▄  ▀▄▀██      before sending funds.
+    ▀▄▀▀▄▀▀▄▄█▀ █▄▀ █  ▀▀ █▀ ▀▀▀
+    ▀█▄▀ ▀▀▄▄ ▀▀ ▄▄ ▄ █▀▄█ ▀█▄█▄▄
+    ▀ █ ▄ ▀▀▄ ▄▄ █▄ ▀▄▄▄  ▀▀ ▀▀▄▀
+    ▀  ▀▀ ▀▀█▀ ██▄  ▀▄█ █▀▀▀██ ▀▀
+    █▀▀▀▀▀█ ▀█▀████ ██ ▄█ ▀ █ ▄▀
+    █ ███ █ ▄███ ▄▀▄ █▄▄▀▀█▀▀ ▀██
+    █ ▀▀▀ █ ▄█▄█ ▀▀ ▄  █   ██▄▀▄█
+    ▀▀▀▀▀▀▀ ▀▀  ▀▀   ▀▀▀   ▀▀ ▀
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Q addresses  V verify  c chain  r refresh  q quit  ? actions

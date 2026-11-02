@@ -66,13 +66,13 @@ fn create_then_fresh_processes_read_the_same_wallet() {
     assert_eq!(base["address"], address.as_str());
     let all = home.run(&["addresses", "--json"]).ok();
     let rows = all["addresses"].as_array().unwrap();
-    // One address on every EVM chain; Tron's is its own (`T...`).
+    // Each family derives its own address from the same seed. EVM networks share theirs.
+    let expected = derived_addresses(&home);
+    assert_eq!(expected["ethereum"], address);
+    assert_eq!(rows.len(), expected.len());
     for r in rows {
-        if r["chainId"] == "tron" {
-            assert!(r["address"].as_str().unwrap().starts_with('T'), "{r}");
-        } else {
-            assert_eq!(r["address"], address.as_str(), "{r}");
-        }
+        let chain = r["chainId"].as_str().unwrap();
+        assert_eq!(r["address"], expected[chain], "{r}");
     }
     assert!(rows.iter().any(|r| r["chainId"] == "polygon"));
 
@@ -370,7 +370,7 @@ fn json_error_codes_offline() {
         .as_str()
         .unwrap()
         .to_string();
-    home.run(&["address", "--chain", "solana", "--json"])
+    home.run(&["address", "--chain", "bitcoin", "--json"])
         .err("CHAIN_UNSUPPORTED");
     let ens = home
         .run(&[
@@ -462,6 +462,8 @@ fn rpc_env_override_shows_in_chains() {
             "bsc",
             "avalanche",
             "tron",
+            "solana",
+            "ton",
             "sepolia"
         ]
     );
@@ -505,7 +507,12 @@ const TRON_POISON: &str = "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C";
 fn poison_cache(home: &Home) {
     home.edit_wallet(|v| {
         for (chain, a) in v["keys"][0]["addresses"].as_object_mut().unwrap() {
-            let poison = if chain == "tron" { TRON_POISON } else { POISON };
+            let poison = match chain.as_str() {
+                "tron" => TRON_POISON.to_string(),
+                "solana" => bs58::encode([2u8; 32]).into_string(),
+                "ton" => format!("0:{}", "02".repeat(32)),
+                _ => POISON.to_string(),
+            };
             *a = serde_json::json!(poison);
         }
     });
@@ -3715,6 +3722,8 @@ fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
         .unwrap()
         .to_string();
     let tron = derived_tron(&home);
+    let solana = cached_family(&home, "solana");
+    let ton = cached_family(&home, "ton");
     home.unlock("10m");
     let label = format!("scan to send to {addr}\n{EVERY_NETWORK}\n");
     for args in [
@@ -3727,7 +3736,7 @@ fn s2_after_unlock_the_address_views_on_a_terminal_show_the_qr_code() {
         // `addresses` draws a second code after the EVM one: the Tron address (05-tron.md §CLI
         // surface).
         let codes: Vec<&str> = if args[0] == "addresses" {
-            vec![&addr, &tron]
+            vec![&addr, &tron, &solana, &ton]
         } else {
             vec![&addr]
         };
@@ -5880,13 +5889,27 @@ fn a_repair_keeps_the_sealed_whitelist_and_the_running_session() {
 /// The two lines above the QR code of a Tron address.
 const TRON_CAPTION: &str = "(Tron only: TRX and TRC20 tokens; not an EVM address)";
 
-/// Key 0's Tron address as the seed derives it, read with the password in this process.
-fn derived_tron(home: &Home) -> String {
+/// Key 0's cached address for the requested family.
+fn cached_family(home: &Home, family: &str) -> String {
+    let wallet: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.wallet_json()).unwrap()).unwrap();
+    wallet["keys"][0]["addresses"][family]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Key 0's addresses as the seed derives them, read with the password in this process.
+fn derived_addresses(home: &Home) -> std::collections::BTreeMap<String, String> {
     let seed = store::unlock(home.path(), PW, &chains::derive_addresses)
         .unwrap()
         .0
         .seed;
-    chains::derive_addresses(&seed, 0).unwrap()["tron"].clone()
+    chains::derive_addresses(&seed, 0).unwrap()
+}
+
+fn derived_tron(home: &Home) -> String {
+    derived_addresses(home)["tron"].clone()
 }
 
 #[test]
@@ -5952,7 +5975,15 @@ fn tr2_create_caches_the_tron_address_and_a_session_verifies_it_without_a_prompt
             .find(&format!("scan to send to {tron}\n{TRON_CAPTION}\n"))
             .unwrap_or_else(|| panic!("{shown:?}"));
         assert!(evm_at < tron_at, "{shown:?}");
-        assert_eq!(common::scan_qr(&shown), [evm, tron.as_str()]);
+        assert_eq!(
+            common::scan_qr(&shown),
+            [
+                evm,
+                tron.as_str(),
+                cached_family(&home, "solana").as_str(),
+                cached_family(&home, "ton").as_str()
+            ]
+        );
     } else {
         assert_eq!(v["verified"], false, "{v}");
         let shown = home.run_on_terminal(&["address", "--chain", "tron"], &[], &[]);
@@ -6183,11 +6214,9 @@ fn tron_whitelist_rejects_wrong_families_checksums_and_contract_entries_before_p
 #[test]
 fn tr3_a_key_without_a_tron_cache_is_locked_until_unlock_or_verify_adds_it() {
     let home = Home::new();
-    let evm = home.create("main", &[])["address"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let tron = derived_tron(&home);
+    home.create("main", &[]);
+    let expected = derived_addresses(&home);
+    let tron = expected["tron"].clone();
     // As a wallet made before this version: no `tron` in its cache.
     home.edit_wallet(|v| {
         v["keys"][0]["addresses"]
@@ -6212,7 +6241,8 @@ fn tr3_a_key_without_a_tron_cache_is_locked_until_unlock_or_verify_adds_it() {
             assert_eq!(row["errorCode"], "WALLET_LOCKED", "{row}");
             assert!(row.get("address").is_none(), "{row}");
         } else {
-            assert_eq!(row["address"], evm.as_str(), "{row}");
+            let chain = row["chainId"].as_str().unwrap();
+            assert_eq!(row["address"], expected[chain], "{row}");
         }
     }
     // With the password: added from the seed, said so, and no tamper warning.

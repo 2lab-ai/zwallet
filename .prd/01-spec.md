@@ -6,12 +6,12 @@ are generated and kept on the machine. Chain access is plain JSON-RPC to public 
 **unlocks** the wallet for a duration they choose (`zwallet unlock 24h`, `365d`, `1y`). While it is
 unlocked, a small daemon holds the key, so the agent can sign without the human present. A human
 `zwallet lock` (or the end of that duration, or a reboot) locks it again. EVM chains ship first;
-Solana and TON are ![WIP](https://img.shields.io/badge/status-WIP-yellow); the architecture leaves room for them.
+Solana and TON native-coin support extends the same seed and family boundary ([11-multichain.md](11-multichain.md)).
 
 Status: **in-progress**, reviewed 2026-10-29. Implementation status (2026-10-30): the EVM CLI and
 signed whitelist are implemented; the TUI covers every CLI function ([`03-tui.md`](03-tui.md));
 Tron's address, balances and send are implemented ([`05-tron.md`](05-tron.md)), both shipped to
-preview 2026.10.29.2134 (PR #51); Solana and TON are WIP. See
+preview 2026.10.29.2134 (PR #51). Solana/TON and the receive QR are current-source additions tracked in [multichain](11-multichain.md), not a claim about that older preview. See
 [feature status](../docs/features.md) for the code-backed boundary. The goals and
 acceptance scenarios below include future work and are not a release checklist.
 Fixed user statement and scope: [`v0-1/ssot.md`](v0-1/ssot.md). Driver: [`v0-1/loop.md`](v0-1/loop.md).
@@ -62,9 +62,9 @@ no account, no API key, no telemetry and no OS keychain.
 - **G5 Human unlock.** `zwallet unlock <duration>` with a positional duration (s, m, h, d, w, y;
   `1y` = 365d), and `zwallet lock`. A daemon holds **only the key** for that duration. Everything
   else runs in a one-shot CLI process.
-- **G6 Chain families.** EVM is implemented. Solana and TON
-  ![WIP](https://img.shields.io/badge/status-WIP-yellow) slot in later behind the same family
-  boundary without changing the wallet file or the daemon protocol. Tron (TRX, TRC20 USDT) is the
+- **G6 Chain families.** EVM, Tron and native Solana/TON use the same family
+  boundary without replacing the seed or the daemon protocol. Solana/TON details and
+  protocol fee/network limitations are in [11-multichain.md](11-multichain.md). Tron (TRX, TRC20 USDT) is the
   first such family, implemented in v0.3: [`05-tron.md`](05-tron.md); funded mainnet acceptance
   remains owner-run.
 - **G8 Signed whitelist (v0.1, WU1b).** Funds leave only to entries of a list signed with a key
@@ -72,8 +72,8 @@ no account, no API key, no telemetry and no OS keychain.
   fee cap, and `sign-message` is gated ([`04-whitelist.md`](04-whitelist.md)).
 - **G9 TUI (v0.2).** Full CLI/TUI workflows are implemented: keys, warm-up, balances, history,
   transaction detail, checked transfers, replacement, whitelist editing and contract/message
-  tools. QR and recovery phrase remain the accepted CLI pointers; their alternative TUI
-  designs await the owner's choice ([`03-tui.md`](03-tui.md)).
+  tools. Receive QR codes now show the verified full address alongside; the recovery
+  phrase remains a CLI pointer ([`03-tui.md`](03-tui.md)).
 - **G7 Distribution.** The llmux/harn pattern: CI, preview prereleases on every `main` push, stable
   releases on `v*` tags, Homebrew formulae `2lab-ai/tap/zwallet` and `2lab-ai/tap/zwallet-preview`,
   and an `xbrew install zwallet` recipe.

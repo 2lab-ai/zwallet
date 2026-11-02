@@ -1,7 +1,7 @@
 //! History reads carry their selected key, chain, endpoint and owner through every await.
 use super::*;
 use crate::chains::evm::{explorer, rpc};
-use crate::chains::{JournalRow, SendJournal};
+use crate::chains::{ChainFamily, JournalRow, SendJournal};
 use crate::core::whitelist::{self, Fingerprint};
 use crate::history::{History, State};
 use std::path::Path;
@@ -49,25 +49,58 @@ pub use crate::history::tron::Detail as TronDetail;
 pub enum TransactionDetail {
     Evm(rpc::TxDetail),
     Tron(TronDetail),
+    Native(NativeDetail),
+}
+#[derive(Clone, Debug)]
+pub struct NativeDetail {
+    pub chain: &'static str,
+    pub tx_hash: String,
+    pub state: State,
+    pub success: Option<bool>,
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+impl NativeDetail {
+    fn new(
+        chain: &'static str,
+        tx_hash: String,
+        fields: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        let success = fields.get("success").and_then(serde_json::Value::as_bool);
+        let state = match fields.get("status").and_then(serde_json::Value::as_str) {
+            Some("mined" | "confirmed" | "finalized" | "success" | "reverted") => State::Mined,
+            Some("pending") => State::Pending,
+            Some("not found") => State::NotFound,
+            _ => State::Unknown,
+        };
+        Self {
+            chain,
+            tx_hash,
+            state,
+            success,
+            fields,
+        }
+    }
 }
 impl TransactionDetail {
     pub fn chain(&self) -> &'static str {
         match self {
             Self::Evm(d) => d.chain,
             Self::Tron(d) => d.chain,
+            Self::Native(d) => d.chain,
         }
     }
     pub fn hash(&self) -> &str {
         match self {
             Self::Evm(d) => &d.tx_hash,
             Self::Tron(d) => &d.tx_hash,
+            Self::Native(d) => &d.tx_hash,
         }
     }
 }
 pub struct HistoryView {
     pub scope: Option<HistoryScope>,
     pub rows: Pane<History>,
-    /// Shown journal rows whose on-chain lookup has not landed (lowercase hashes).
+    /// Shown journal rows whose on-chain lookup has not landed (family-normalized hashes).
     checking: std::collections::BTreeSet<String>,
     pub selected: usize,
     pub detail: Option<(DetailRequest, Pane<TransactionDetail>)>,
@@ -96,7 +129,7 @@ pub const SHOWN_ROWS: usize = 10;
 impl HistoryView {
     /// Whether this row's on-chain lookup is still running: the list says `checking`.
     pub fn checking(&self, hash: &str) -> bool {
-        self.checking.contains(&hash.to_ascii_lowercase())
+        self.checking.contains(hash)
     }
 }
 impl App {
@@ -168,9 +201,7 @@ impl App {
                                 && row.sources.contains(&crate::history::Source::Journal)
                         }) {
                             self.history.request += 1;
-                            self.history
-                                .checking
-                                .insert(row.tx_hash.to_ascii_lowercase());
+                            self.history.checking.insert(row.tx_hash.to_string());
                             lookups.push(Effect::LookupHistoryRow(Box::new(DetailRequest {
                                 scope: scope.clone(),
                                 request: self.history.request,
@@ -187,7 +218,7 @@ impl App {
             }
             Msg::HistoryRow(request, result) => {
                 let request = *request;
-                let hash = request.hash.to_ascii_lowercase();
+                let hash = request.hash.to_string();
                 if !self.target_matches(&request.scope.target)
                     || self.history.scope.as_ref() != Some(&request.scope)
                     || !self.history.checking.remove(&hash)
@@ -197,15 +228,13 @@ impl App {
                 // A failed lookup leaves the row `unknown`; the detail (Enter) says why.
                 if let (Ok(read), Pane::Ready(history)) = (result, &mut self.history.rows)
                     && read.detail.chain() == request.scope.target.endpoint.chain
-                    && read.detail.hash().eq_ignore_ascii_case(&hash)
-                    && let Some(row) = history
-                        .rows
-                        .iter_mut()
-                        .find(|row| row.tx_hash.eq_ignore_ascii_case(&hash))
+                    && read.detail.hash() == hash
+                    && let Some(row) = history.rows.iter_mut().find(|row| row.tx_hash == hash)
                 {
                     (row.state, row.success) = match &read.detail {
                         TransactionDetail::Evm(d) => (d.state, d.success),
                         TransactionDetail::Tron(d) => (d.state, d.success),
+                        TransactionDetail::Native(d) => (d.state, d.success),
                     };
                 }
                 Vec::new()
@@ -225,7 +254,7 @@ impl App {
                 let pane = match result {
                     Ok(read)
                         if read.detail.chain() == request.scope.target.endpoint.chain
-                            && read.detail.hash().eq_ignore_ascii_case(&request.hash) =>
+                            && read.detail.hash() == request.hash =>
                     {
                         self.accept_labels(request.scope.target.checked, read.list_unchanged);
                         Pane::Ready(read.detail)
@@ -401,18 +430,33 @@ fn list_unchanged(home: &Path, scope: &HistoryScope) -> bool {
         .checked
         .is_some_and(|fp| whitelist::check_unchanged(home, &fp).is_ok())
 }
-fn parse_hash(chain: &crate::chains::Chain, hash: &str) -> Result<String> {
+pub(crate) fn parse_hash(chain: &crate::chains::Chain, hash: &str) -> Result<String> {
     match chain.family {
         crate::chains::Family::Evm(_) => {
             crate::chains::evm::parse_tx_hash(hash).map(|h| format!("{h:#x}"))
         }
-        crate::chains::Family::Tron(_) => crate::chains::tron::lookup::parse_hash(hash),
+        crate::chains::Family::Tron(_) | crate::chains::Family::Ton(_) => {
+            crate::chains::tron::lookup::parse_hash(hash)
+        }
+        crate::chains::Family::Solana(_) => {
+            if hash.len() <= 88 && bs58::decode(hash).into_vec().is_ok_and(|b| b.len() == 64) {
+                Ok(hash.to_string())
+            } else {
+                Err(WalletError::validation(
+                    "expected a base58 Solana signature of 64 bytes",
+                ))
+            }
+        }
     }
 }
 fn validate_owner(chain: &crate::chains::Chain, owner: &str) -> Result<()> {
     match chain.family {
         crate::chains::Family::Evm(_) => crate::chains::evm::parse_address(owner).map(|_| ()),
         crate::chains::Family::Tron(_) => crate::chains::tron::address::parse(owner).map(|_| ()),
+        crate::chains::Family::Solana(_) => {
+            crate::chains::solana::normalize_address(owner).map(|_| ())
+        }
+        crate::chains::Family::Ton(_) => crate::chains::ton::normalize_address(owner).map(|_| ()),
     }
 }
 async fn check_owner(home: &Path, scope: &HistoryScope, net: &Net) -> Result<()> {
@@ -434,7 +478,9 @@ pub async fn read_history(home: &Path, scope: &HistoryScope) -> Result<HistoryRe
             explorer::fetch(net.chain, crate::chains::evm::parse_address(&scope.owner)?).await
         }
         // No Tron indexer is integrated. Do not contact an EVM explorer or imply incoming coverage.
-        crate::chains::Family::Tron(_) => Err(explorer::Unavailable::Unsupported),
+        crate::chains::Family::Tron(_)
+        | crate::chains::Family::Solana(_)
+        | crate::chains::Family::Ton(_) => Err(explorer::Unavailable::Unsupported),
     };
     Ok(HistoryRead {
         history: crate::history::merge(net.chain, journal, page),
@@ -448,9 +494,7 @@ pub async fn read_transaction(home: &Path, request: &DetailRequest) -> Result<De
         let hash = parse_hash(net.chain, &request.hash)?;
         // Re-read this owner's journal; a stale/caller-supplied row cannot supply the nonce.
         let journal = SendJournal::new(home, net.chain, &request.scope.owner).recent()?;
-        let saved = journal
-            .iter()
-            .find(|j| j.tx_hash.eq_ignore_ascii_case(&hash));
+        let saved = journal.iter().find(|j| j.tx_hash == hash);
         let detail = match net.chain.family {
             crate::chains::Family::Evm(_) => {
                 let owner = crate::chains::evm::parse_address(&request.scope.owner)?;
@@ -458,6 +502,16 @@ pub async fn read_transaction(home: &Path, request: &DetailRequest) -> Result<De
                 let provider = rpc::connect(&net).await?;
                 TransactionDetail::Evm(rpc::tx_detail(&provider, &net, hash, owner, saved).await?)
             }
+            crate::chains::Family::Solana(_) => TransactionDetail::Native(NativeDetail::new(
+                net.chain.key,
+                hash.clone(),
+                crate::chains::solana::Solana.lookup_tx(&net, &hash).await?,
+            )),
+            crate::chains::Family::Ton(_) => TransactionDetail::Native(NativeDetail::new(
+                net.chain.key,
+                hash.clone(),
+                crate::chains::ton::Ton.lookup_tx(&net, &hash).await?,
+            )),
             crate::chains::Family::Tron(_) => TransactionDetail::Tron(
                 crate::history::tron::lookup(&net, &hash, &request.scope.owner, saved).await?,
             ),
@@ -492,9 +546,20 @@ pub fn detail_lines(
 ) -> Vec<Outside> {
     use crate::core::amount::format_units;
     let mut lines = vec![
-        Outside::detail(&format!("hash: {}", request.hash)),
+        Outside::detail(&if request.hash.len() <= 66 {
+            format!("hash: {}", request.hash)
+        } else {
+            "Transaction identifier:".to_string()
+        }),
         Outside::detail("Source: this node's claim; sender is not a verified signing identity"),
     ];
+    if request.hash.len() > 66 {
+        for chunk in request.hash.as_bytes().chunks(72) {
+            lines.push(Outside::detail(
+                std::str::from_utf8(chunk).expect("validated hash"),
+            ));
+        }
+    }
     let Pane::Ready(detail) = pane else {
         return lines;
     };
@@ -581,6 +646,38 @@ pub fn detail_lines(
                     push(String::from_utf8_lossy(chunk).into_owned());
                 }
             }
+        }
+        TransactionDetail::Native(d) => {
+            push(format!("Status: {}", state_label(d.state, d.success)));
+            for key in [
+                "from",
+                "to",
+                "amount",
+                "value",
+                "valueRaw",
+                "symbol",
+                "feeRaw",
+                "fee",
+                "blockNumber",
+                "slot",
+                "nonce",
+                "seqno",
+                "transactionHash",
+                "hint",
+                "warning",
+            ] {
+                if let Some(value) = d.fields.get(key) {
+                    let text = value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_string);
+                    let value = Outside::warning(&format!("{key}: {text}"));
+                    for chunk in value.text().as_bytes().chunks(72) {
+                        push(std::str::from_utf8(chunk).expect("inert ASCII").to_string());
+                    }
+                }
+            }
+            push("Node evidence only; absence is not proof of non-payment.".into());
+            push("No replacement support. A new send may pay twice.".into());
         }
         TransactionDetail::Tron(d) => {
             let status = if d.state == State::Mined && d.success == Some(false) {

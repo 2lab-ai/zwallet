@@ -1,0 +1,42 @@
+{
+  "address": {
+    "text": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+    "x": 39,
+    "y": 4
+  },
+  "chain": "solana",
+  "height": 24,
+  "qr": {
+    "height": 19,
+    "width": 37,
+    "x": 0,
+    "y": 1
+  },
+  "rows": [
+    "Receive / Solana / a                                                            ",
+    "                                                                                ",
+    "                                                                                ",
+    "    █▀▀▀▀▀█ ▄▀ ▄█ ▄▀█  ▄▀ █▀▀▀▀▀█      Address                                  ",
+    "    █ ███ █ ▀███▀  ▄ ▀▄█▀ █ ███ █      US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCEL",
+    "    █ ▀▀▀ █ █▄ ▄ █ █▀ ▄▀▄ █ ▀▀▀ █      Fx                                       ",
+    "    ▀▀▀▀▀▀▀ █▄▀ █ ▀ ▀▄█ █ ▀▀▀▀▀▀▀                                               ",
+    "    █▀ █ ▄▀█  █▄ ▄█▄ █▄▄▀ ███▄▀▀       Verified by session                      ",
+    "      ▄▄▄█▀▄ ▀▀  ▀▄▄█ ▄█ ▀ ▄ ▀ █                                                ",
+    "    ▄▀█ █▀▀ █ ▄▄█   █▄█ ▀▄  ▀▄▀██      Check chain and address                  ",
+    "    ▀▄▀▀▄▀▀▄▄█▀ █▄▀ █  ▀▀ █▀ ▀▀▀       before sending funds.                    ",
+    "    ▀█▄▀ ▀▀▄▄ ▀▀ ▄▄ ▄ █▀▄█ ▀█▄█▄▄                                               ",
+    "    ▀ █ ▄ ▀▀▄ ▄▄ █▄ ▀▄▄▄  ▀▀ ▀▀▄▀                                               ",
+    "    ▀  ▀▀ ▀▀█▀ ██▄  ▀▄█ █▀▀▀██ ▀▀                                               ",
+    "    █▀▀▀▀▀█ ▀█▀████ ██ ▄█ ▀ █ ▄▀                                                ",
+    "    █ ███ █ ▄███ ▄▀▄ █▄▄▀▀█▀▀ ▀██                                               ",
+    "    █ ▀▀▀ █ ▄█▄█ ▀▀ ▄  █   ██▄▀▄█                                               ",
+    "    ▀▀▀▀▀▀▀ ▀▀  ▀▀   ▀▀▀   ▀▀ ▀                                                 ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "                                                                                ",
+    "Q addresses  V verify  c chain  r refresh  q quit  ? actions                    "
+  ],
+  "width": 80
+}

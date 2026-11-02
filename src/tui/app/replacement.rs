@@ -257,7 +257,7 @@ impl App {
         None
     }
     pub fn history_replacement_hint(&self) -> &'static str {
-        if self.on_tron() {
+        if self.on_tron() || self.on_native_ed25519() {
             // Tron has no nonce replacement.
             "s/x/R unavailable   r refresh   Esc history"
         } else if self.replacement_available().0 {
@@ -626,11 +626,15 @@ impl App {
             && self.history.detail.is_some()
             && matches!(key, Key::Char('s' | 'x' | 'R'))
         {
-            if self.on_tron() {
-                // Tron has no nonce: nothing can replace a broadcast Tron transaction.
-                self.notice = Some(Outside::detail(
-                    "Tron has no nonce replacement; speed-up, cancel and retry do not apply",
-                ));
+            if self.on_tron() || self.on_native_ed25519() {
+                self.notice = Some(Outside::detail(&if self.on_tron() {
+                    "Tron: no nonce replacement; a new send can pay twice.".into()
+                } else {
+                    format!(
+                        "{}: no replacement; a new send can pay twice.",
+                        self.chain.name
+                    )
+                }));
                 return Some(Vec::new());
             }
             return Some(self.history_replacement_key(key));
@@ -737,7 +741,7 @@ impl App {
             return None;
         }
         // A Tron status keeps its own handling: Tron has no nonce replacement.
-        if self.on_tron() {
+        if self.on_tron() || self.on_native_ed25519() {
             return None;
         }
         let action = match key {

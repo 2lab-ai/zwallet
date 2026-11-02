@@ -78,6 +78,8 @@ pub async fn validate_rpc(net: &Net) -> Result<()> {
         match net.chain.family {
             Family::Evm(_) => rpc::connect(net).await.map(|_| ()),
             Family::Tron(_) => chains::tron::rpc::connect(net).await.map(|_| ()),
+            Family::Solana(_) => chains::solana::validate_rpc(net).await,
+            Family::Ton(_) => chains::ton::validate_rpc(net).await,
         }
     })
     .await
@@ -107,6 +109,24 @@ pub async fn read_network_details(net: Net, owner: String) -> Result<NetworkRead
                 activated: Some(r.activated),
                 warning: r.warning,
             }),
+        Family::Solana(_) => chains::solana::Solana
+            .wallet_balances(&net, &owner, NETWORK_TIMEOUT)
+            .await
+            .map(native_network_read),
+        Family::Ton(_) => chains::ton::Ton
+            .wallet_balances(&net, &owner, NETWORK_TIMEOUT)
+            .await
+            .map(native_network_read),
+    }
+}
+fn native_network_read(
+    (native, tokens): (chains::Balance, Vec<chains::TokenBalance>),
+) -> NetworkRead {
+    NetworkRead {
+        native,
+        tokens,
+        activated: None,
+        warning: None,
     }
 }
 
@@ -174,8 +194,29 @@ pub async fn balance_detail(
                 warning: r.warning,
             }
         }
+        Family::Solana(_) => native_asset_read(&chains::solana::Solana, net, &owner, token).await?,
+        Family::Ton(_) => native_asset_read(&chains::ton::Ton, net, &owner, token).await?,
     };
     Ok((owner, trust, read))
+}
+
+async fn native_asset_read<F: ChainFamily>(
+    fam: &F,
+    net: &Net,
+    owner: &str,
+    token: Option<&str>,
+) -> Result<AssetRead> {
+    let balance = match token {
+        Some(token) => fam.token_balance(net, owner, token).await?,
+        None => fam.native_balance(net, owner).await?,
+    };
+    Ok(AssetRead {
+        balance,
+        activated: None,
+        token: None,
+        symbol_source: None,
+        warning: None,
+    })
 }
 
 pub async fn addresses(home: &Path, key_name: &str) -> Result<Addresses> {
@@ -196,7 +237,7 @@ pub async fn addresses(home: &Path, key_name: &str) -> Result<Addresses> {
                 error: None,
             }),
             Err(e)
-                if matches!(chain.family, Family::Tron(_)) && e.code == ErrorCode::WalletLocked =>
+                if !matches!(chain.family, Family::Evm(_)) && e.code == ErrorCode::WalletLocked =>
             {
                 rows.push(AddressRow {
                     chain,

@@ -1,0 +1,25 @@
+chain=tron; viewport=80x24; QR=(0,1)..(36,19); address column=39; address first row=4
+Receive / Tron / a
+
+
+    █▀▀▀▀▀█ ▄▀ ▄██▄▄▀█ ▀▄ █▀▀▀▀▀█      Address
+    █ ███ █ ▀███▀█▄▄▀▀█▄▄ █ ███ █      TWer2Ygk5TEheHp3TPuYeqxmB6SsGZmaL6
+    █ ▀▀▀ █ █▄ ▄ ██ ▀▀█▄  █ ▀▀▀ █
+    ▀▀▀▀▀▀▀ █▄▀ █ █ ▀▄█ █ ▀▀▀▀▀▀▀      Verified by session
+    ▀█▄█  ▀█▄ █▄  ▄█▀█  ▄▄█▀▀▄▀▀▄
+    █ ▄██ ▀▄█▀▀   ▄ ▄▀▀█▄▀  ██▄▀       Check chain and address
+    ▄  █▀▄▀▄  ▄▄█   ▄██▀▄██  ▀ █▀      before sending funds.
+    █▀▀█▄█▀█▄▀▄ █▄▄▄█▄ ▄█▄  ▀ ▀▀█
+    ▀▄██  ▀▄▄ ▄▀ ▀▀█▄ ▄▀ ▀▄▄▀▄▀▀
+    ▀  █▄▀▀ ▀  ▄ █ ▄▄██ ▀▄█ ▀█▀██
+    ▀  ▀  ▀▀█▄▄██▄▀ █▄▄ █▀▀▀█ ▀▀▀
+    █▀▀▀▀▀█ ▀█▀███▀▄█▀█▀█ ▀ █ ▄█▄
+    █ ███ █ ▄ ██ ▄█▀▀▄  ▀██▀▀ ▄▄▀
+    █ ▀▀▀ █ ▄▀ █ ▀▀ ▀▄▄▀ █  ▀█▀▄▀
+    ▀▀▀▀▀▀▀ ▀▀▀ ▀▀ ▀▀   ▀▀▀▀▀  ▀
+
+
+
+
+
+Q addresses  V verify  c chain  r refresh  q quit  ? actions

@@ -51,21 +51,22 @@ pub enum Command {
     Address(AddressArgs),
     /// Addresses of a key on every chain. Works while locked.
     Addresses(AddressesArgs),
-    /// Native or ERC-20 balance on one chain; without --chain, the native coin and every registry
+    /// Native coin or supported registry-token balance on one chain; without --chain, the native coin and every registry
     /// token on every network. Works while locked.
     Balance(BalanceArgs),
     /// Read-only contract call (eth_call). Works while locked.
     Call(CallArgs),
     /// State-changing contract transaction. Needs an unlocked wallet.
     Invoke(InvokeArgs),
-    /// Native or ERC-20 transfer. Needs an unlocked wallet.
+    /// Native coin or supported token transfer. Solana and TON support native SOL/TON only.
+    /// Needs an unlocked wallet.
     Transfer(TransferArgs),
     /// EIP-191 personal_sign. Needs an unlocked wallet.
     SignMessage(SignMessageArgs),
     /// Look a transaction up by hash: mined (with its receipt), pending, or not found. Works
     /// while locked, and without a wallet.
     Tx(TxArgs),
-    /// Local task accounting and read-only receipt reconciliation (never a spending limit).
+    /// Local task accounting and read-only receipt reconciliation on EVM/Tron (never a spending limit).
     #[command(subcommand)]
     Task(TaskCommand),
     /// Wallet, lock state, and active key.
@@ -322,7 +323,8 @@ pub enum TaskCommand {
 pub struct TransferArgs {
     #[arg(long)]
     pub chain: String,
-    /// Recipient: a 0x address, or @NICKNAME from the whitelist (ENS names are not supported).
+    /// Recipient: an address for the selected chain or @NICKNAME from its whitelist.
+    /// ENS names are not supported.
     #[arg(long)]
     pub to: String,
     /// Amount in whole units (e.g. 0.5); exact, no floating point.
@@ -347,10 +349,10 @@ pub struct TransferArgs {
 pub struct TxArgs {
     #[arg(long)]
     pub chain: String,
-    /// The transaction hash (0x and 64 hex digits).
+    /// EVM/Tron hash, Solana base58 signature, or TON signed-body hash returned by transfer.
     #[arg(value_name = "TXHASH")]
     pub tx_hash: String,
-    /// Wait for a Tron receipt or a final node observation (default 90 seconds).
+    /// Wait for a Tron, Solana or TON receipt observation (default 90 seconds).
     #[arg(long)]
     pub wait: bool,
     #[arg(long, value_name = "DURATION", requires = "wait", value_parser = duration_arg)]
@@ -394,7 +396,8 @@ pub enum WhitelistCommand {
     /// Remove the entry NICKNAME.
     Remove(WhitelistRemoveArgs),
     /// Set CHAIN's fee cap, in its coin: EVM gas cost or Tron contract fee_limit.
-    /// Tron bandwidth and activation fees are outside this signed cap.
+    /// Tron bandwidth/activation and TON protocol fees are not encoded fee-cap guarantees.
+    /// Solana uses the supported one-signature base-fee assumption; TON uses an RPC estimate.
     FeeCap(WhitelistFeeCapArgs),
     /// Cap native value per transaction in CHAIN's coin; `none` removes the cap.
     NativeCap(WhitelistNativeCapArgs),

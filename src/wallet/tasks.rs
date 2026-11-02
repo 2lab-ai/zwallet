@@ -2,7 +2,7 @@
 //! Local files are claims, RPC replies are observations, and neither is budget authority.
 use crate::chains::{self, Chain, Family, Net, evm, tron};
 use crate::core::{
-    error::{Result, WalletError},
+    error::{ErrorCode, Result, WalletError},
     store,
 };
 use alloy::primitives::{U256, keccak256};
@@ -211,10 +211,24 @@ fn raw(s: &str) -> Result<U256> {
     }
     U256::from_str_radix(s, 10).map_err(|_| invalid())
 }
+fn supported(chain: &Chain) -> Result<()> {
+    if matches!(chain.family, Family::Solana(_) | Family::Ton(_)) {
+        Err(WalletError::new(
+            ErrorCode::CapabilityUnsupported,
+            "task attribution and reconciled accounting are supported on EVM and Tron only",
+        ))
+    } else {
+        Ok(())
+    }
+}
 fn address(chain: &Chain, s: &str) -> Result<String> {
     match chain.family {
         Family::Evm(_) => Ok(evm::parse_address(s)?.to_checksum(None)),
         Family::Tron(_) => Ok(tron::address::encode(&tron::address::parse(s)?)),
+        Family::Solana(_) | Family::Ton(_) => {
+            supported(chain)?;
+            unreachable!()
+        }
     }
 }
 fn same_address(chain: &Chain, a: &str, b: &str) -> bool {
@@ -227,9 +241,14 @@ fn hash(chain: &Chain, s: &str) -> Result<String> {
     match chain.family {
         Family::Evm(_) => Ok(format!("{:#x}", evm::parse_tx_hash(s)?)),
         Family::Tron(_) => tron::lookup::parse_hash(s),
+        Family::Solana(_) | Family::Ton(_) => {
+            supported(chain)?;
+            unreachable!()
+        }
     }
 }
 fn asset(chain: &Chain, input: &str) -> Result<(String, String, u8)> {
+    supported(chain)?;
     if input == "native" {
         return Ok((input.into(), chain.symbol.into(), chain.decimals));
     }
@@ -255,6 +274,7 @@ fn asset(chain: &Chain, input: &str) -> Result<(String, String, u8)> {
                 })?;
             Ok((t.address.into(), t.symbol.into(), t.decimals))
         }
+        Family::Solana(_) | Family::Ton(_) => unreachable!(),
     }
 }
 
@@ -413,6 +433,7 @@ async fn balances(net: &Net, owner: &str) -> Result<BTreeMap<String, Option<Stri
 }
 
 pub async fn create(home: &Path, net: &Net, input: &TaskCreate) -> Result<TaskSummary> {
+    supported(net.chain)?;
     validate_id(&input.id)?;
     let mut allocations = BTreeMap::new();
     for (key, value) in &input.allocations {
@@ -461,6 +482,7 @@ pub async fn create(home: &Path, net: &Net, input: &TaskCreate) -> Result<TaskSu
 }
 
 pub fn validate_binding(home: &Path, id: &str, chain: &Chain, owner: &str) -> Result<()> {
+    supported(chain)?;
     let task = read(home, id)?;
     if task.chain != chain.key || !same_address(chain, &task.owner, owner) {
         return Err(WalletError::validation(
@@ -512,6 +534,7 @@ pub(crate) fn begin(
     let Some(id) = fields.get("taskId").and_then(Value::as_str) else {
         return Ok(None);
     };
+    supported(chain)?;
     let lock = store::MetaLock::acquire(home)?;
     let mut task = read(home, id)?;
     if task.chain != chain.key || !same_address(chain, &task.owner, owner) {
@@ -690,6 +713,7 @@ fn observed_intent(chain: &Chain, i: &Intent, o: &Map<String, Value>) -> bool {
                 && value == amount
                 && text("inputHash") == Some(input.as_str())
         }
+        Family::Solana(_) | Family::Ton(_) => false,
     }
 }
 
@@ -700,6 +724,10 @@ async fn observe(net: &Net, hash: &str) -> Result<Map<String, Value>> {
             evm::rpc::lookup_tx(&p, net, evm::parse_tx_hash(hash)?).await
         }
         Family::Tron(_) => tron::lookup::lookup_tx(net, hash, None).await,
+        Family::Solana(_) | Family::Ton(_) => {
+            supported(net.chain)?;
+            unreachable!()
+        }
     }
 }
 
@@ -724,6 +752,7 @@ pub async fn report(
     offline: bool,
     reveal_addresses: bool,
 ) -> Result<TaskReport> {
+    supported(net.chain)?;
     let deadline = tokio::time::Instant::now() + REPORT_TIME;
     let started = now();
     let home = home.to_path_buf();

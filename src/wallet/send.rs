@@ -73,6 +73,31 @@ pub(crate) fn send_summary(
     }
 }
 
+/// A conservative local estimate check, separate from the daemon's authenticated decision.
+/// A missing/malformed list is left for the daemon to diagnose; it cannot allow signing.
+fn native_fee_preflight(home: &Path, chain: &Chain, fee: U256) -> Result<Option<Value>> {
+    use crate::core::whitelist::{WHITELIST_FILE, read_list};
+    if !matches!(chain.family, Family::Solana(_) | Family::Ton(_)) {
+        return Ok(None);
+    }
+    let Ok(Some(signed)) = read_list(&home.join(WHITELIST_FILE)) else {
+        return Ok(None);
+    };
+    if signed.list.check_format().is_err() {
+        return Ok(None);
+    }
+    let cap = signed.list.policy.max_fee_wei(chain.key);
+    let check = json!({"advisory":true,"policySource":"local-file-unverified",
+        "feeEstimateRaw":fee.to_string(),"capRaw":cap.map(|v|v.to_string()),
+        "protocolFeeGuarantee":false});
+    if cap.is_none_or(|cap| fee > cap) {
+        return Err(WalletError::new(crate::core::error::ErrorCode::FeeCapExceeded,
+            "advisory fee preflight (local-file-unverified): the current native fee estimate exceeds the configured cap or no cap is set; nothing signed")
+            .with_detail("chain",chain.key).with_detail("feePreflight",check));
+    }
+    Ok(Some(check))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_prepared<F: ChainFamily>(
     fam: &F,
@@ -88,10 +113,19 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
     progress: Option<chains::SendProgress>,
 ) -> Result<SendOutput> {
     let PreparedTx {
-        unsigned, fields, ..
+        unsigned,
+        fields,
+        max_gas_cost,
+        ..
     } = prepared;
+    // TON has no encoded protocol fee cap. Match the UI's estimate preflight here, before
+    // requesting a signature; the daemon still applies its independent decoded policy.
+    let fee_preflight = native_fee_preflight(home, net.chain, max_gas_cost)?;
     for (k, v) in fields {
         out.entry(k).or_insert(v);
+    }
+    if let Some(check) = fee_preflight {
+        out.insert("feePreflight".into(), check);
     }
     let task = super::tasks::begin_async(home, net.chain, from, &out, kind, send.dry_run).await?;
     if let Some((_, intent)) = &task {
@@ -170,10 +204,25 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
             tx::verify_signed_payload(&signed.raw, &payload(&unsigned)?)?;
             signed
         }
+        Family::Solana(_) => {
+            let signed = fam.inspect_signed(net.chain, &signed_value)?;
+            chains::solana::verify_signed_payload(&signed, &unsigned)?;
+            signed
+        }
+        Family::Ton(_) => {
+            let signed = fam.inspect_signed(net.chain, &signed_value)?;
+            chains::ton::verify_signed_payload(&signed, &unsigned)?;
+            signed
+        }
     };
     let same_signer = match net.chain.family {
         Family::Tron(_) => tron::address::same(&signed.signer, from),
         Family::Evm(_) => signed.signer.eq_ignore_ascii_case(from),
+        Family::Solana(_) => signed.signer == from,
+        Family::Ton(_) => chains::ton::normalize_address(&signed.signer)
+            .ok()
+            .zip(chains::ton::normalize_address(from).ok())
+            .is_some_and(|(a, b)| a == b),
     };
     if !same_signer {
         return Err(WalletError::validation(format!(
@@ -241,7 +290,11 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
     }
     out.insert(
         "explorerUrl".into(),
-        json!(net.chain.explorer_tx_url(&signed.tx_hash)),
+        json!(if matches!(net.chain.family, Family::Ton(_)) {
+            net.chain.explorer_address_url(from)
+        } else {
+            net.chain.explorer_tx_url(&signed.tx_hash)
+        }),
     );
     out.insert("journal".into(), json!(record.journal.display()));
     if let Broadcast::KnownDespite {
@@ -287,9 +340,25 @@ pub(crate) async fn send_prepared<F: ChainFamily>(
                     );
                 }
             }
-        } else {
+        } else if matches!(net.chain.family, Family::Evm(_)) {
             let receipt = fam.wait_for_receipt(net, &signed.tx_hash, timeout).await;
             chains::record_receipt(&mut out, net.chain, receipt);
+        } else {
+            // These families have no EVM replacement command. Preserve the chain's own status
+            // vocabulary and never turn an unknown receipt into a failed payment.
+            match fam.wait_for_receipt(net, &signed.tx_hash, timeout).await {
+                Ok(Some(Value::Object(receipt))) => {
+                    out.extend(receipt);
+                }
+                Ok(_) => {
+                    out.insert("status".into(), json!("pending"));
+                }
+                Err(error) => {
+                    out.insert("status".into(), json!("unknown"));
+                    out.insert("receiptError".into(), json!(error.message));
+                }
+            }
+            out.insert("hint".into(), json!(format!("inspect `zwallet tx --chain {} {}` before retrying; a new transfer may pay twice", net.chain.key, signed.tx_hash)));
         }
     }
     Ok(SendOutput {
@@ -734,6 +803,42 @@ pub async fn send_transfer(
 #[cfg(test)]
 mod duplicate_tests {
     use super::*;
+    #[test]
+    fn native_fee_preflight_enforces_the_estimate_at_cap_without_claiming_authentication() {
+        use crate::core::whitelist::{WHITELIST_FILE, Whitelist, WhitelistKey};
+        let home = tempfile::Builder::new()
+            .prefix("zwt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let mut list = Whitelist::empty(&chains::WHITELIST_RULES);
+        list.generation = 1;
+        for key in ["solana", "ton"] {
+            list.policy
+                .max_fee_wei
+                .insert(key.into(), "100000000".into());
+        }
+        let signed = WhitelistKey::from_secret(&[41; 32]).sign(&list);
+        std::fs::write(
+            home.path().join(WHITELIST_FILE),
+            signed.to_file_bytes().unwrap(),
+        )
+        .unwrap();
+        for key in ["solana", "ton"] {
+            let chain = chains::find(key).unwrap();
+            let allowed = native_fee_preflight(home.path(), chain, U256::from(100_000_000))
+                .unwrap()
+                .unwrap();
+            assert_eq!(allowed["policySource"], "local-file-unverified");
+            assert_eq!(allowed["advisory"], true);
+            assert_eq!(allowed["protocolFeeGuarantee"], false);
+            let error =
+                native_fee_preflight(home.path(), chain, U256::from(100_000_001)).unwrap_err();
+            assert_eq!(error.code, crate::core::error::ErrorCode::FeeCapExceeded);
+            assert!(error.message.contains("nothing signed"));
+            assert_eq!(error.details["feePreflight"]["feeEstimateRaw"], "100000001");
+            assert!(native_fee_preflight(home.path(), chain, U256::from(99_999_999)).is_ok());
+        }
+    }
     #[test]
     fn invoke_summary_hashes_encoded_bytes_not_spelling_or_signature_form() {
         let chain = chains::find("ethereum").unwrap();

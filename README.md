@@ -72,7 +72,9 @@ or message signing.
 
 A person at the keyboard can reach every CLI function from the [terminal UI](#terminal-ui)
 (`zwallet tui`), under the same password, session and signing policy; the recovery phrase
-and QR codes stay in the CLI.
+stays in the CLI. Receive QR codes show a verified address beside the code.
+Solana (SOL) and TON (native TON) use the same seed; see the
+[derivation, recovery and capability guide](docs/multichain.md).
 
 For the task prompt, retry rules and receipt-based report format, see
 [Using zwallet with an agent](docs/agent-workflow.md). zwallet is the wallet component;
@@ -229,15 +231,15 @@ zwallet tui --chain sepolia
 ```
 
 Requires an interactive terminal of at least 80×24. Tabs `1`–`7` are keys, wallet, send,
-receive, whitelist, tools and session; `?` opens the 55-action menu. Use `j`/`k` or arrow keys
+receive, whitelist, tools and session; `?` opens the 60-action menu. Use `j`/`k` or arrow keys
 to browse, `r` to refresh, `L` to lock all sessions, and `q` or Ctrl-C to quit. The UI
-supports wallet and key creation, balances (EVM and Tron), receive addresses, password
-verification and repair, timed unlock, checked-payee transfers on EVM and Tron, transaction
+supports wallet and key creation, balances (EVM, Tron, Solana and TON), receive addresses, password
+verification and repair, timed unlock, checked-payee native transfers across all four families (registry tokens on EVM/Tron), transaction
 history and lookup, whitelist and per-transaction limit editing, and EVM contract and message
 tools. Pending EVM transactions expose speed-up/cancel only after original-intent
 verification; uncertain sends can be retried from their retained review in the same
 session. Tron has no nonce replacement. The TUI never shows the recovery phrase (`B` points
-to `zwallet backup`), and `Q` points to `zwallet address` for a QR code. See the
+to `zwallet backup`), and `Q` opens a verified receive QR with the full address beside it. See the
 [TUI command reference](docs/commands.md#key-management-and-terminal-ui) and [UI specification](.prd/03-tui.md).
 
 ## Before funding a wallet

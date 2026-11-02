@@ -1,0 +1,78 @@
+PICKER
+1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ send / native TON -----------------------------------------------------------+
+|Choose a password-checked payee scoped to this chain.                         |
+|ton-payee                                                                     |
+|0:1111111111111111111111111111111111111111111111111111111111111111            |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+
+arrows choose  Enter select  Esc back  q quit  ? actions
+ton | a 0:fe8e...6676 | verified by password
+signing (agent too) until 02:41Z | 127.0.0.1:64168
+stray: [], pending: ""
+REVIEW
+1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ send / native TON -----------------------------------------------------------+
+|Payee: ton-payee                                                              |
+|To: 0:1111111111111111111111111111111111111111111111111111111111111111        |
+|From: 0:fe8eeaf08bf0a9f5b5f8b8ffe1cd365cfe8d135117de0fc12b308e9be0916676      |
+|Amount: 0.001 TON                                                             |
+|Exact base units: 1000000                                                     |
+|RPC fee estimate: 0.05 TON                                                    |
+|Signed policy fee cap: 0.1                                                    |
+|TON fees are not capped by the signed wallet message.                         |
+|Whitelist allowed; balance sufficient                                         |
+|Repeats 0; no override [600s/1MiB local]                                      |
+|A new signature/send may pay twice; no replacement support.                   |
+|V4R2 seqno 0; expires at Unix 1793586809                                      |
+|TON fees are an RPC estimate/reserve, not a protocol maximum. Non-bounceable n|
+|ative transfer; sender execution does not prove downstream contract settlement|
+|. V4R2 signatures do not bind a network genesis.                              |
+|                                                                              |
+|                                                                              |
+|Enter opens confirmation; no signature yet.                                   |
++------------------------------------------------------------------------------+
+Enter confirm  d allow repeat  r refresh  Esc edit  ? actions
+ton | a 0:fe8e...6676 | verified by password
+signing (agent too) until 02:41Z | 127.0.0.1:64168
+stray: [], pending: ""
+STATUS
+1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ send / native TON -----------------------------------------------------------+
+|Send recorded; leaving this screen does not cancel it.                        |
+|                                                                              |
+|Hash: b063f52265f5d47f942183d9c5076def71d83c112c83c46223b8d80e05517734        |
+|TON / signed-body identifier                                                  |
+|Journal:                                                                      |
+|/tmp/zwt-ji8lZM/sends--239-ton:0:fe8eeaf08bf0a9f5b5f8b8f...(cut)              |
+|                                                                              |
+|pending; checking the receipt every 3 seconds                                 |
+|Polling deadline: 90 seconds from the latest wait                             |
+|                                                                              |
+|No replacement: a new send can be a second payment.                           |
+|                                                                              |
+|TON fees are an RPC estimate/reserve, not a protocol maximum. Non-bounceable n|
+|ative transfer; sender execution does not prove downstream contract settlement|
+|. V4R2 signatures do not bind a network genesis.                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+
+w wait longer  2 wallet  q quit  ? actions
+ton | a 0:fe8e...6676 | verified by password
+signing (agent too) until 02:41Z | 127.0.0.1:64168
+stray: [], pending: ""

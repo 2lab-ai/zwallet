@@ -961,10 +961,13 @@ mod terminal_failure_tests {
             addresses: crate::chains::CHAINS
                 .iter()
                 .map(|chain| {
-                    let address = if chain.family.name() == "tron" {
-                        "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C"
-                    } else {
-                        "0x1111111111111111111111111111111111111111"
+                    let address = match chain.family.name() {
+                        "tron" => "TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C",
+                        "solana" => "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+                        "ton" => {
+                            "0:2d527ea485fe0cc67001e1a40d7039543cd3ac2ed53c20e5596c869b173c3d29"
+                        }
+                        _ => "0x1111111111111111111111111111111111111111",
                     };
                     (chain.key.into(), address.into())
                 })

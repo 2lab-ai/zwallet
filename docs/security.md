@@ -47,7 +47,11 @@ processes running as the same OS user.
   `m/44'/60'/0'/0/<index>` (the standard BIP44 Ethereum account order), so the phrase imports into standard
   wallets with the same accounts. One address per key on every EVM chain. Tron uses
   `m/44'/195'/0'/0/<index>` (SLIP-44 coin 195; TronWeb's default path for index 0), one more
-  address per key. Indices stay below 2^31, where BIP32's hardened range starts
+  address per key. Solana uses `m/44'/501'/<index>'/0'` and TON uses
+  `m/44'/607'/<index>'`, both SLIP-0010 ed25519 from the same BIP39 seed.
+  TON uses V4R2, workchain 0 and subwallet 698983191; this is not the TON-native
+  mnemonic scheme. Recovery requires these exact paths and wallet settings;
+  see [multichain recovery](multichain.md). Indices stay below 2^31, where BIP32's hardened range starts
   (`VALIDATION_ERROR` at or above it).
 - **Daemon**: `unlock` pins the zwallet binary before it asks for the password. On Linux that is
   the running image (`/proc/self/exe`), so a file swapped in at the binary's path while the human
@@ -128,8 +132,9 @@ processes running as the same OS user.
   exactly the bytes it decoded. It never trusts intent fields from the CLI, which is the
   agent-controlled side. On `lock`, at expiry (wall clock), or on SIGTERM it wipes the seed and
   exits. A reboot or a dead daemon means locked. Everything else (RPC, ABI, tx building, broadcast)
-  runs in the one-shot CLI process, which checks every signature it gets back by recovering the
-  signer.
+  runs in the one-shot CLI process, which checks the exact returned payload and every signature
+  by recovering the EVM/Tron signer or verifying against the derived Solana/TON public key.
+  The native Solana and TON decoders accept only the restricted formats described below.
 - **Daemon lifetime**: each connection is served in its own task with a 10 s I/O budget, so a
   silent client never delays expiry. A separate monitor and requests other than `lock`
   (including `status`) check that `wallet.json`'s ciphertext is still the one it decrypted and
@@ -259,8 +264,10 @@ signs for such an agent. What it does not do:
 - **A change ends every session.** Like `lock`, a whitelist change stops every zwallet daemon of
   this user, for every home, and leaves them locked; `--unlock <duration>` starts a new session
   for this home only.
-- **The fee cap is per transaction.** It bounds each signature, not a total: repeated
-  transactions can each spend up to the cap.
+- **The fee policy is per transaction.** It does not limit a session total. EVM and Tron
+  have the exclusions below; native Solana and TON also have protocol and estimation
+  assumptions, described in their send boundary below. A policy pass is not a universal
+  bound on every chain's final charge.
 - **The L1 data fee is outside the cap** on the OP-stack chains (Base, Optimism): the cap covers
   `gasLimit × maxFeePerGas`, and the L1 fee for calldata is charged on top. Calldata can be up
   to about 512 KB unless a lower signed byte limit is configured. A calldata limit bounds
@@ -286,3 +293,27 @@ signing. A node can lie about state; these reads are not a light-client proof.
 Tron has no nonce replacement. The journal and send lock reduce accidental repeats but are
 writable by the same OS user. `expired-unseen` records one fresh node's observation, never a
 non-payment guarantee. Sending this payment again is a second payment if this one was included.
+
+### Solana and TON send boundary
+
+Solana accepts one canonical legacy System Program transfer with one signer. TON accepts
+one canonical V4R2 native transfer with send mode 3. The daemon independently decodes the
+recipient, amount and signed message structure, checks exact-family payee entries and
+optional native-value limits, and refuses arbitrary programs, tokens, extra instructions
+or unsupported wallet operations. TON also checks subwallet, expiry and seqno encoding.
+The CLI verifies the returned signature and exact unsigned payload before submission.
+
+Solana policy assumes the current 5,000-lamport base fee and the CLI checks RPC fee agreement.
+TON policy checks a 50,000,000-nanoton reserve; its wire message does not encode a hard
+maximum fee. CLI/TUI preflight compares the padded RPC estimate with the configured cap,
+but an agent can bypass that advisory preflight and a node can lie about estimates. Neither
+the TON reserve nor its estimate guarantees the final network charge. See the
+[fee assumptions](multichain.md) and [attack matrix](security-threat-model.md).
+
+RPC genesis/zerostate checks catch an accidentally wrong endpoint, not a malicious endpoint
+imitating the expected network. Solana blockhash expiry and TON seqno/expiry reduce replay;
+they do not establish non-payment after a timeout. TON's submission identifier is the signed
+message-body hash, distinct from the eventual transaction hash. Lookup requires a matching
+non-emulated transaction and outgoing native payment before reporting inclusion; a seqno
+increment alone is insufficient, and downstream recipient-contract settlement is not proven.
+Local journals remain writable by the same OS user. Never blindly repeat an uncertain send.

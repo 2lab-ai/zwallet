@@ -633,3 +633,28 @@ The historical `maxFeeWei` and `maxNativeWei` fields are denominated in sun on T
 Token limits use smallest token units, and calldata limits apply to TriggerSmartContract data.
 Bandwidth and activation fees are not bounded by signed fee_limit. The complete security
 contract, owner/expiration checks and fee limitations are in [05-tron.md](05-tron.md).
+
+
+## Solana and TON native policy
+
+Solana payees use `solana:<64 lower-case public-key hex>`; TON payees use
+`ton:0:<64 lower-case account hash hex>`. They must name exactly their own chain,
+with address kind and no selectors. User-facing Solana addresses stay case-sensitive
+base58, and TON addresses use raw workchain0 format; neither is lower-cased as if it
+were an EVM address. Legacy EVM/Tron entries and their canonical signed bytes stay
+unchanged. Old binaries reject the new tagged identities.
+
+Both use native base units with 9 decimals in the historical `maxFeeWei` and
+`maxNativeWei` fields. Fresh-list defaults are 0.0001 SOL and 0.1 TON. Existing signed
+lists do not silently gain a missing fee cap. The Solana signer checks a supported
+single-signature transfer against the current 5,000-lamport fee assumption; the
+legacy message contains no fee maximum. TON's signer checks a fixed 0.05 TON reserve,
+not a maximum charge encoded by V4R2. The CLI/TUI separately checks its RPC estimate
+against the displayed signed-file cap; this is an advisory preflight and a direct
+caller can bypass it. The human must see these fee limitations before confirmation.
+
+Native amount caps and exact recipients are checked against decoded canonical
+bytes by the daemon. Unsupported programs, wallet modes, message signing, SPL and
+Jettons are never enabled by these entries. Native caps remain per transaction,
+with #26/#27 unchanged. See [11-multichain.md](11-multichain.md) and the
+[multichain security evidence](../docs/security-threat-model.md#solana-ton-and-verified-receive-qr).

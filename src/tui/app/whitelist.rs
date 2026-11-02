@@ -319,7 +319,10 @@ impl FormRow {
                     })
             }
             Alphabet::Address => {
-                text.len() <= 42 && text.bytes().all(|b| b.is_ascii_alphanumeric())
+                text.len() <= 68
+                    && text
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_:".contains(&b))
             }
             Alphabet::Selectors => {
                 text.len() <= 175

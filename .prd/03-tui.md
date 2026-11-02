@@ -1,12 +1,10 @@
 # zwallet — TUI
 
-Status: **shipped** (preview 2026.10.29.2134, PR #51, 2026-10-30). `zwallet tui` has a path for
-every CLI function in §Coverage matrix, and acceptance T1–T44 is met except T18's QR code, which
-waits on the owner's trade-off Q (§Open trade-offs; Q1 and B1 are the shipped defaults). This page
-is the as-built contract of the TUI (v0.2), not a future target. Receipts:
-[`v0-2-tui/loop.done.md`](v0-2-tui/loop.done.md) R1 — the gate at 2a1ee64 and the real-terminal
-acceptance on the installed preview, where the coverage matrix's 59 TUI rows PASS at 120x40 and
-80x24. Code-backed boundary: [feature status](../docs/features.md).
+Status: **in-progress** for the 2026-11-02 multichain/receive-QR extension;
+the original TUI shipped in preview 2026.10.29.2134 (PR #51). The source contract
+below includes the extension in [11-multichain.md](11-multichain.md), not a claim
+that older binaries include it. The user explicitly requested the receive QR on
+2026-11-02, superseding Q1. Recovery-phrase choice B1 remains unchanged.
 
 Current-source extensions on 2026-10-30 add coverage rows 63–67 and acceptance
 T48–T52 for the advisory duplicate window and native task accounting. Their final
@@ -100,15 +98,15 @@ not have is not a TUI goal either.
 | No `invoke` screen | **dropped**: invoke on 6 tools (T34, T35) | the key daemon judges every call against the contract entries and their selectors ([README.md:294-301](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L294-L301)); the TUI offers only the checked list's contract entries on the chain and their selectors, so it adds no way past that judgement |
 | No swaps, no WalletConnect | **kept** | not a CLI function ([README.md:60-85](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L60-L85) has neither); the TUI covers what the CLI does |
 | No settings file | **kept** | not a CLI function, and a file in the home is writable by any process of this user ([README.md:845-848](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L845-L848)): it could preselect a chain, a duration or a payee on the human's screen |
-| No QR code | **open**: trade-off Q (§Open trade-offs) | the CLI draws its QR past the write filter (core/terminal.rs:6-7) in half blocks, which rule 1 turns into `?`; each way to draw one in the TUI costs something |
+| Receive QR | **changed** by the 2026-11-02 user request | Only password- or session-verified receive identity produces a locally generated QR in dedicated black/white styles. Printable outside text remains filtered; full address is rendered separately beside the QR. |
 | No second implementation | **kept** | the TUI calls the library entry points the CLI calls ([`v0-2-tui/flow.md`](v0-2-tui/flow.md)); the send lock, the journal, the guards and the daemon's whitelist apply unchanged |
 | allow-message-signing is not a TUI behaviour (flow.md §T7) | **dropped**: `m` on 5 whitelist (T25) | a whitelist change like `fee-cap`: the same summary, password and edit protocol |
 
 What stays out of the TUI after this (§Coverage matrix, Count): a typed payee (above),
 `transfer --force` (the zero address burns funds), a message to sign that the review cannot show
 whole, two sends the daemon never signs, the flags that only make sense for a one-shot command
-(`--json`, `--password-stdin`, `--no-qr`); and, until the owner picks trade-offs B and Q, the
-recovery phrase and the QR code, each a one-line pointer to the CLI.
+(`--json`, `--password-stdin`, `--no-qr`); the recovery phrase remains a CLI pointer (B1).
+The receive QR is implemented under the explicit 2026-11-02 instruction.
 
 ## Coverage matrix
 
@@ -138,7 +136,7 @@ which stays a start flag for the security reason written in it (review round 2).
 | 11 | `backup` | `backup` | 1 keys | `B` | trade-off B: B1 (recommended, built) is the line `run zwallet backup in a shell to see the recovery phrase`; B2 only if the owner picks it | T32 | TUI-10 |
 | 12 | `address [--chain]` | `address` | 4 receive | `4`, `c` | the full EIP-55 address and its trust words | T17 | TUI-4 |
 | 13 | `address --verify` (repair) | `address --verify` | 1 keys | `A` | the password, then the cached addresses repaired from the seed; the `repaired` list shown | T19 | TUI-4 |
-| 14 | `address` QR code | `qr` | 4 receive | `Q` | trade-off Q: Q1 (built until the owner picks) is the line `zwallet address shows it as a QR code`; Q3 (recommended) draws it | T18 | TUI-4 |
+| 14 | `address` QR code | `qr` | 4 receive | `Q` | Verified local QR and separate full address at 80×24/120×40; `Esc` returns | T18 | TUI-4 |
 | 15 | `addresses` | `addresses` | 4 receive | the list under the address | one address per family, every chain named | T17 | TUI-4 |
 | 16 | `balance` (every network) | `balance` | 2 wallet | `a` | every chain, the testnet last, a failed one on its own line | T15 | TUI-3 |
 | 17 | `balance --chain` | `balance --chain` | 2 wallet | `2`, `c` | the native coin and the registry tokens with a balance | T5 | TUI-3 |
@@ -209,11 +207,11 @@ conditional on it.
 
 | Kind | Rows | How many |
 |---|---|---|
-| Reachable in the TUI, EVM | 1–48 except 8, 11 and 14 | 45 |
+| Reachable in the TUI, EVM | 1–48 except 8 and 11 | 46 |
 | Signed transaction limits, reachable with TUI-6 | 60–62 | 3 |
 | Advisory duplicate policy and task accounting | 63–67 | 5 |
 | A start flag only, with a security reason (no key in the TUI) | 8 | 1 |
-| CLI pointer until the owner picks (B1, Q1 are built; B2, Q3 are not) | 11, 14 | 2 |
+| Recovery phrase CLI pointer (B1) | 11 | 1 |
 | Tron, reachable through the implemented family | 49–52 | 4 |
 | CLI-only, with a security reason | 53, 54, 59 | 3 |
 | Not a function: the daemon never signs it | 55, 56 | 2 |
@@ -227,7 +225,16 @@ unit: the TUI-3+4 PR builds Q1 and TUI-10 builds B1, the one-line pointers to th
 rows count as CLI pointers until then (§Coverage matrix, Count). Q3, if picked, lands as a delta
 of T18; B2 is built only if the owner picks it (T32).
 
-### Q. The QR code on 4 receive
+### Q. The QR code on 4 receive (historical alternatives)
+
+**Superseded on 2026-11-02:** the user requested the Tron QR and full address together.
+The implemented receive view uses locally generated half-block cells with dedicated
+black/white styles, within ratatui's buffer and filtered backend. Only those styles
+permit the four QR half-block/space characters; ordinary outside text cannot opt in.
+The QR is from a password- or session-verified address, with its full quiet zone; the separate
+address column is checked at 80×24 and 120×40. The alternatives below describe the
+previous decision record, not an outstanding approval gate.
+
 
 Facts: the CLI ends human output with a QR of an address verified by the password or by the
 session ([README.md:250-262](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L250-L262); `with_qr`, commands.rs:620). That code is the CLI's one write past its
@@ -508,12 +515,9 @@ to at most 512 characters, where a code that holds an Ethereum address needs ver
 = 625 modules ([README.md:198-200](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L198-L200)). The one list drawn with more than 512 characters from a file is
 a password-checked whitelist, which only the password holder signed. What is left is what the
 README already states: a same-user process can lay out at most 512 characters of ASCII art, and it
-can already write to the terminal directly. The TUI itself draws no QR code. Tests: a 512-character
+can already write to the terminal directly. The TUI draws only its own verified receive QR in dedicated styles. Tests: a 512-character
 outside error of `#` and spaces in the error view takes at most 7 rows; the style assertion of
-rule 2; the budget assertions of rule 3. Whether the TUI draws zwallet's own QR of a verified
-address is trade-off Q (§Open trade-offs): Q1 keeps this paragraph as it is; Q3 adds two style
-constants that only the QR overlay draws, from an address the TUI derived or pinned, never from
-outside text; Q2 adds one write past the filter, the CLI's own (core/terminal.rs:6-7).
+rule 2; the budget assertions of rule 3; rendered QR decoding and exact address/QR rectangles in `tests/tui_multichain.rs`. The QR uses the ratatui buffer and dedicated style allowlist, never a free-form outside value.
 
 **6. Nothing prints while the TUI holds the terminal.** Four places in today's code write to the
 terminal from inside the logic (flow.md Fact 3): the `broadcasting <hash>` line of every live send
@@ -1108,7 +1112,7 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T15 | 2 wallet, `a`, with all 8 `ZWALLET_RPC_<CHAIN>` set: two to mock nodes that answer, one to a mock that refuses, the other five to a closed port (`http://127.0.0.1:1`) | one line per network, testnet last; each failed one `error: … [CODE]` cut to 72 (`brief`); `2 of 8 networks have a balance; 6 did not answer`; zero tokens hidden; no test reaches a public RPC |
 | T16 | 7 session, a daemon of this home and one of another home | lock state, expiry, daemon pid, `other homes: 1 daemon`, the session's whitelist as `reports gen N, M entries (not checked here)`; with TUI-1c's argv-listed fake: its values escaped within their budgets, nothing drawn verified |
 | T17 | 4 receive, warm; then locked | warm: the full EIP-55 address and `verified by password`; locked: `not verified` and the `V` hint; every chain named under it |
-| T18 | `Q` on 4 receive | Q1 (default): the one line naming `zwallet address`. Q3: at 120x40 the overlay; the frame's `QR_DARK` cells decode (as src/qr.rs's tests decode, `rqrr`) to the address; an unverified address draws no code and says why; at 80x24 the size line; no cell outside the overlay has a QR style |
+| T18 | `Q` on 4 receive | At 80×24 and 120×40 the rendered QR cells decode to the password- or session-verified address; the full address is separately readable beside it. Unverified or impostor identity produces no QR. No non-QR cell uses its reserved styles. |
 | T19 | 1 keys `V`; then wallet.json's cached address of `beta` edited, `V` again, then `A` and the password | every row `verified`; after the edit `V` shows the CLI's `VALIDATION_ERROR` naming `A`; `A` shows `repaired` (`was` escaped, at most 64) and every row `verified`; `zwallet list --verify` agrees |
 | T20 | Linux, `kernel.yama.ptrace_scope` 0: the warm-up; then `zwallet tui --allow-ptrace-scope-0` and the warm-up; the menu row `unlock --allow-ptrace-scope-0`, Enter | the first refuses before the password field and names the start flag; the second shows `ptrace_scope 0 accepted` on 7 session and in the warm-up's password popup, and opens the session (`prepare_unlock` called with the flag); the menu row gives the start flag and its security reason, and Enter on it starts no `Effect`; no key in the TUI sets the flag |
 | T21 | review with nonce 12 pending; then a repeat of a send from 5 min ago | the pending line and `p`; confirm without `p` signs nothing (zero `SignTx`), with `p` once; the same for the repeat with `d` |

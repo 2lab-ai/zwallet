@@ -31,6 +31,10 @@ fn family_address(chain: &chains::Chain, address: &str) -> String {
         && let Ok(body) = chains::evm::parse_address(address)
     {
         chains::tron::address::from_body(&body.into_array())
+    } else if matches!(chain.family, chains::Family::Solana(_)) {
+        bs58::encode([7u8; 32]).into_string()
+    } else if matches!(chain.family, chains::Family::Ton(_)) {
+        format!("0:{}", "07".repeat(32))
     } else {
         address.into()
     }
@@ -78,7 +82,7 @@ fn checked_frame(screen: &mut Screen, app: &App) -> (Vec<String>, Vec<Placed>) {
             let cell = &buffer[(x, y)];
             let mut chars = cell.symbol().chars();
             assert!(
-                matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && terminal_ok(c)),
+                matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && (terminal_ok(c) || (style::is_qr(cell.style()) && matches!(c, '█' | '▀' | '▄')))),
                 "rule 1: cell ({x},{y}) holds {:?}",
                 cell.symbol()
             );
@@ -102,9 +106,9 @@ fn budget(source: Source) -> usize {
     match source {
         Source::WhitelistName => 32,
         Source::Quantity => 78,
-        Source::TransactionHash => 66,
+        Source::TransactionHash => 88,
         Source::KeyName | Source::RpcHost => 32,
-        Source::Address => 42,
+        Source::Address => 66,
         Source::Expiry | Source::Home => 64,
         Source::Detail => 72,
         Source::Input => 512,
@@ -447,14 +451,14 @@ fn line_1_fits_80_columns_for_every_chain_and_every_trust_with_a_32_character_ke
             app.update(Msg::Status(app.generation(), Ok(status)));
             // Status is primary-EVM metadata. Tron needs its own current-family observation.
             let address = family_address(chain, B);
-            if matches!(chain.family, chains::Family::Tron(_)) {
+            if !matches!(chain.family, chains::Family::Evm(_)) {
                 app.update(Msg::Address(
                     app.generation(),
                     name.clone(),
                     Ok((address.clone(), trust)),
                 ));
             }
-            let expected_address = if matches!(chain.family, chains::Family::Tron(_)) {
+            let expected_address = if !matches!(chain.family, chains::Family::Evm(_)) {
                 format!("{}...{}", &address[..6], &address[address.len() - 4..])
             } else {
                 "0x3C44...93BC".into()
@@ -1881,8 +1885,8 @@ mod navigation {
         assert_eq!(app.tab(), Tab::Session);
     }
 
-    /// D1: the chain picker and a read-only lines popup are lists, not text fields: the global
-    /// tab keys close them and switch tabs.
+    /// D1: the chain picker, read-only lines popup and receive QR are not text fields:
+    /// the global tab keys switch tabs, closing any popup.
     #[test]
     fn nav_chain_picker_and_lines_popup_pass_the_global_tab_keys() {
         let mut app = locked_ab();
@@ -1892,11 +1896,19 @@ mod navigation {
         assert_eq!(app.tab(), Tab::Wallet, "{}", view(&app));
         assert!(app.navigation().popup.is_none());
         app.update(Msg::Key(Key::Char('4')));
-        app.update(Msg::Key(Key::Char('Q')));
+        app.update(Msg::Key(Key::Char('?')));
+        paste(&mut app, "version");
+        app.update(Msg::Key(Key::Enter));
         assert!(matches!(app.navigation().popup, Some(Popup::Lines { .. })));
         app.update(Msg::Key(Key::Char(']')));
         assert_eq!(app.tab(), Tab::Whitelist, "{}", view(&app));
         assert!(app.navigation().popup.is_none());
+        app.update(Msg::Key(Key::Char('4')));
+        app.update(Msg::Key(Key::Char('Q')));
+        assert!(app.navigation().receive_qr);
+        assert!(app.navigation().popup.is_none());
+        app.update(Msg::Key(Key::Char(']')));
+        assert_eq!(app.tab(), Tab::Whitelist, "{}", view(&app));
     }
 
     /// The Keys tab's hint names every key it acts on, `u unlock` included (#43's merge dropped
@@ -2166,7 +2178,8 @@ mod navigation {
             assert!(text.contains(&format!("{}:", chain.key)));
         }
         app.update(Msg::Key(Key::Char('Q')));
-        assert!(view(&app).contains("zwallet address shows it as a QR code"));
+        assert!(view(&app).contains("Verified by password"));
+        assert!(view(&app).contains("▀") || view(&app).contains("▄"));
         app.update(Msg::Key(Key::Esc));
         app.update(Msg::Addresses(
             app.generation(),

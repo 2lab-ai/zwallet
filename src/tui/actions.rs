@@ -161,6 +161,7 @@ pub struct Context<'a> {
     pub pending_send: bool,
     pub retryable_send: bool,
     pub is_tron: bool,
+    pub is_native_ed25519: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,11 +186,25 @@ impl Action {
         if !context.implemented.contains(&self.id) {
             return Disabled("in a later version");
         }
-        if self.family == Family::Evm && context.is_tron {
-            return Disabled("not supported on Tron");
+        if self.family == Family::Evm && (context.is_tron || context.is_native_ed25519) {
+            return Disabled("requires an EVM chain");
         }
         if self.family == Family::Tron && !context.is_tron {
             return Disabled("select Tron with c");
+        }
+        if context.is_native_ed25519
+            && matches!(
+                self.id,
+                ActionId::TaskCreate
+                    | ActionId::TaskReport
+                    | ActionId::TaskAttribution
+                    | ActionId::TokenTransfer
+                    | ActionId::TokenBalance
+                    | ActionId::TokenCap
+                    | ActionId::CalldataCap
+            )
+        {
+            return Disabled("not supported for this native-only family");
         }
         match self.requirement {
             Requirement::FirstWallet if context.has_wallet => {
@@ -269,7 +284,7 @@ pub static ACTIONS: [Action; 60] = [
     action!(Backup, 11, "backup", "B", Keys, "recovery phrase in a shell", Always, Any),
     action!(Address, 12, "address", "4", Receive, "receive on this chain", OpenKey, Any),
     action!(Repair, 13, "address --verify", "A", Keys, "repair cached addresses", Wallet, Any),
-    action!(Qr, 14, "qr", "Q", Receive, "QR code in a shell", OpenKey, Any),
+    action!(Qr, 14, "qr", "Q", Receive, "QR beside the verified address", OpenKey, Any),
     action!(Addresses, 15, "addresses", "4", Receive, "addresses on every family", OpenKey, Any),
     action!(AllBalances, 16, "balance", "a", Wallet, "balances on every network", OpenKey, Any),
     action!(Balance, 17, "balance --chain", "2", Wallet, "balances on this chain", OpenKey, Any),

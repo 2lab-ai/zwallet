@@ -48,6 +48,17 @@ Commands that act on a key take `--key <name>` (default: the active key).
 | `whitelist reset [--unlock <dur>]` | a change + `{ dropped }` | asks for the password |
 | `tui [--chain <key>] [--warm <dur>] [--allow-ptrace-scope-0]` | none: a terminal UI for a human (`--json` is refused) | works |
 
+## Solana and TON
+
+`--chain solana` and `--chain ton` select native SOL/TON address, balance, transfer
+and lookup. Both derive from the existing BIP39 seed; no import command is added.
+Use explicit `whitelist add <nick> <address> --chains solana|ton`; EVM wildcard
+entries do not authorize these chains. See [multichain recovery and send rules](multichain.md)
+for paths, TON V4R2 identity, QR layout, exact units and protocol fee/network limits.
+SPL/Jettons, contract calls, message signing, EVM nonce/replacement flags and
+`--task` accounting are unsupported for the new families. TON submission IDs are
+signed-body hashes (`hashKind`), distinct from chain transaction hashes resolved by lookup.
+
 ## Key management and terminal UI
 
 `transfer` and `invoke` also accept `--task <id>` to record shaped intent and submission
@@ -78,7 +89,7 @@ before retrying an uncertain payment.
   never asks to verify the key the bar shows verified by session; it then flags the other keys,
   as `list` does. It needs 80x24 and says so on one line when the terminal is smaller. Text from
   wallet.json, the daemon socket and the environment is escaped and bounded as in the CLI, every
-  cell goes through one filter that lets only printable ASCII and `₮` through, and no QR code is
+  cell goes through one filter that lets only printable ASCII and `₮` through; only a verified local QR uses the dedicated black/white half-block style. No outside QR code is
   drawn. Tabs `1`–`7` and `[`/`]` navigate from any list, review or popup that is not a text
   field; `?` or `:` opens the 60-action menu. Typing in a field or menu keeps `q`, `?` and
   digits as input; Esc closes it. Actions belonging to later work are listed with their
@@ -89,7 +100,7 @@ before retrying an uncertain payment.
   enters an RPC URL for this process only. It is accepted only after a chain-id check; the
   field hides credentials, path/query and key-like host labels. No endpoint is saved to disk.
   `4 receive` shows the full address, its trust and every network address. `Q` points to
-  `zwallet address` for a terminal QR code. `V` verifies all keys from the seed on `1 keys`,
+  the verified receive QR and full address together (`Esc` closes it). `V` verifies all keys from the seed on `1 keys`,
   and the open plus active key elsewhere, without changing a signing session. `A` on `1 keys`
   repairs cached addresses and shows old/new values. `u` asks for a duration and then the wallet
   password before starting that signing session. `7 session` shows the home, expiry, daemon
@@ -360,8 +371,8 @@ before retrying an uncertain payment.
   T…` and `(Tron only: TRX and TRC20 tokens; not an EVM address)`. Scan that one and save it in the phone
   wallet's address book. The `create` that makes the master seed shows no code, only a line to run
   `zwallet backup` first: funds sent before the recovery phrase is written down are at risk.
-  `--no-qr` leaves either out. `addresses` shows two codes, the EVM one (the address is the same
-  on every EVM chain) then the Tron one, each under its lines, and `balance` shows the EVM one after
+  `--no-qr` leaves either out. `addresses` shows one code per verified family: EVM (shared across EVM chains),
+  Tron, Solana and TON, each under its chain-specific caption, and `balance` shows the EVM one after
   the networks. Nothing unverified prints one, and neither
   `--json` nor output into a pipe ever has one, so agents see the same text as before.
 ## The whitelist
