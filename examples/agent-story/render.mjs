@@ -73,7 +73,7 @@ try {
     return Buffer.from((await send('Page.captureScreenshot', {format: 'png'})).data, 'base64');
   }
   const stem = lang === 'ko' ? 'agent-story-ko' : 'agent-story';
-  for (const t of [1.8, 3.7, 6.5, 8.5, 12.7, 15.9, 18, 22.8, 25.8, 29, 34]) {
+  for (const t of [0, 1.8, 2.25, 3.7, 4.5, 6.5, 6.75, 8.5, 9, 12.7, 15.9, 18, 22.8, 25.8, 29, 34]) {
     await writeFile(join(review, `frame-${t}.png`), await frame(t));
   }
   await writeFile(join(output, `${stem}-poster.png`), await frame(12.7));

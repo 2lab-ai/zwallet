@@ -1,7 +1,7 @@
 # Your agent. Your money. Your rules.
 
-[Watch in English](https://ai-insightquest.github.io/zwallet/?v=flow-36) ·
-[한국어로 보기](https://ai-insightquest.github.io/zwallet/?lang=ko&v=flow-36) · [Back to zwallet](../../README.md)
+[Watch in English](https://ai-insightquest.github.io/zwallet/?v=foil-20261102) ·
+[한국어로 보기](https://ai-insightquest.github.io/zwallet/?lang=ko&v=foil-20261102) · [Back to zwallet](../../README.md)
 
 [English MP4](../../docs/assets/agent-story.mp4) · [한국어 MP4](../../docs/assets/agent-story-ko.mp4)
 
@@ -85,6 +85,13 @@ Output is 1600×1000 H.264, 60 fps, 36 seconds (2,160 frames), with matching pos
 in `docs/assets/`. Each frame is evaluated at its exact timeline position and painted
 before capture. The timeline uses one persistent diagram, eased pulses and fades.
 It does not record a browser or terminal at a variable frame rate.
+
+The wallet's silver foil surface follows a nine-second shallow tilt orbit (about
+10° pitch and 13° yaw), with a moving reflection, a restrained iridescent tint, fine
+engraving and a metallic rim. The wordmark has an eight-second light-sweep cycle;
+the agent mark gently breathes over four seconds. These are deterministic material
+accents on the existing diagram, not extra transaction states. Tilt and foil
+intensity ease down during refusal and locking so those states stay clear.
 
 Use `--stills-only` to inspect representative frames before encoding, `--output DIR`
 to change the destination, or `--review DIR` for keyframe images. The default review
