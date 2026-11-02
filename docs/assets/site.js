@@ -13,7 +13,6 @@
     $("language").href = "?lang=en";
     $("language").setAttribute("aria-label", "Read in English");
     document.querySelector("a.wordmark").href = "?lang=ko";
-    $("story-frame").src = "animation.html?embed&lang=ko";
     $("story-frame").title = "zwallet 작동 원리 애니메이션";
     document
       .querySelectorAll(".film-link")
@@ -75,11 +74,18 @@
     visible = false,
     started = false,
     chapter = -1;
-  const send = (action, time) =>
+  const pending = { time: null, playback: null };
+  const send = (action, time) => {
+    if (!ready && action !== "state") {
+      if (action === "seek") pending.time = time;
+      if (action === "play" || action === "pause") pending.playback = action;
+      return;
+    }
     frame.contentWindow?.postMessage(
       { type: "zwallet:control", action, time },
       location.origin,
     );
+  };
   const descriptions = [
     [
       "Fund a dedicated wallet with 50 USDT and gas, choose the payees, set a limit per payment and an access window. Give your agent the task.",
@@ -144,11 +150,18 @@
       typeof isPlaying !== "boolean"
     )
       return;
+    const firstState = !ready;
     ready = true;
     state(time, isPlaying);
+    if (firstState) {
+      if (pending.time !== null) send("seek", pending.time);
+      if (pending.playback !== null) send(pending.playback);
+    }
     maybeStart();
   });
   frame.addEventListener("load", () => send("state"));
+  // Install message handlers before starting the one selected-language frame.
+  frame.src = `${frame.dataset.src}&lang=${ko ? "ko" : "en"}`;
   send("state");
   new IntersectionObserver(
     (entries) => {

@@ -43,7 +43,8 @@ python3 -m http.server 8765 --directory _site
 Open `http://localhost:8765/`, then `?lang=ko`. Check the page at desktop and narrow
 phone widths. Play, pause, replay, seek and choose each chapter; check keyboard focus,
 the copy button, reduced motion and the separate film page. Player tests cover the
-final-frame notification, paused/reduced-motion startup and the message boundary.
+final-frame notification, paused/reduced-motion startup, the message boundary and
+chapter selections made before the lazy frame finishes loading.
 Site checks validate local links and JavaScript syntax, not visual design or the
 wallet's security.
 

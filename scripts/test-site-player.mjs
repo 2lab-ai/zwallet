@@ -109,3 +109,61 @@ test("ignores foreign player messages and clamps only finite seek positions", ()
   p.send("seek", -10);
   assert.equal(p.draws.at(-1), 0);
 });
+
+test("retains a chapter selection while the lazy frame is still loading", () => {
+  const messages = [],
+    listeners = new Map(),
+    elements = new Map();
+  const element = () => ({
+    classList: { toggle() {} },
+    style: {},
+    setAttribute() {},
+    addEventListener() {},
+  });
+  const child = { postMessage: (message) => messages.push(message) };
+  const frame = {
+    ...element(),
+    contentWindow: child,
+    dataset: { src: "animation.html?embed" },
+  };
+  const chapters = [{ ...element(), dataset: { time: "22.2" } }];
+  elements.set("story-frame", frame);
+  const document = {
+    body: element(),
+    getElementById(id) {
+      if (!elements.has(id)) elements.set(id, element());
+      return elements.get(id);
+    },
+    querySelector() {
+      return element();
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-time]" ? chapters : [];
+    },
+  };
+  const site = readFileSync(
+    new URL("../docs/assets/site.js", import.meta.url),
+    "utf8",
+  );
+  runInNewContext(site, {
+    document,
+    location: { search: "", origin: "https://example.test" },
+    URLSearchParams,
+    matchMedia: () => ({ matches: false, addEventListener() {} }),
+    IntersectionObserver: class {
+      observe() {}
+    },
+    addEventListener: (type, fn) => listeners.set(type, fn),
+  });
+  chapters[0].onclick();
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].action, "state");
+  listeners.get("message")({
+    source: child,
+    origin: "https://example.test",
+    data: { type: "zwallet:state", time: 0, playing: false },
+  });
+  assert.equal(messages[1].action, "seek");
+  assert.equal(messages[1].time, 22.2);
+  assert.equal(messages[2].action, "pause");
+});
