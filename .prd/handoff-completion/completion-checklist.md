@@ -67,7 +67,7 @@ not claim that the whole product specification has shipped (01-spec.md keeps its
 
 ## Issue inventory
 
-GitHub issue states below were fetched individually on 2026-10-30.
+GitHub issue states below were fetched individually on 2026-10-30; the #52, #55 and #63 rows were updated on 2026-11-04.
 
 | Issue | Delivered behavior or contract | Verification and PR | State |
 |---|---|---|---|
@@ -82,7 +82,7 @@ GitHub issue states below were fetched individually on 2026-10-30.
 | [#34](https://github.com/2lab-ai/zwallet/issues/34) | TUI v2 and Tron handoff | PR #51 (599bde9); preview 2026.10.29.2134; §What shipped | Closed completed by PR #51, 2026-10-29T21:34Z |
 | [#52](https://github.com/2lab-ai/zwallet/issues/52) | Linux-only test flakes: two harness races | PR #54, merged 6f1a2c9; main CI 40992407534 | Closed completed, 2026-10-30 |
 | [#55](https://github.com/2lab-ai/zwallet/issues/55) | Random path/hash collisions in never-echoed assertions | PR #56, merged d565adf; main CI 41680228250 | Closed completed, 2026-11-03 |
-| [#63](https://github.com/2lab-ai/zwallet/issues/63) | TUI kept the password-verified whitelist across a superseded read | PR #64, merged 8eaf051; main CI 41707747056; preview 2026.11.03.1955 | Closed completed, 2026-11-03 |
+| [#63](https://github.com/2lab-ai/zwallet/issues/63) | TUI dropped the password-verified whitelist when a read was superseded (fixed) | PR #64, merged 8eaf051; main CI 41707747056; preview 2026.11.03.1955 | Closed completed, 2026-11-03 |
 
 PR #29 merged 2026-10-29T06:17Z as 99fff4e. Its head validation receipt is
 [CI 40814597506](https://github.com/2lab-ai/zwallet/actions/runs/40814597506):
