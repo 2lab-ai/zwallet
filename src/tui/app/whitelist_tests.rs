@@ -1298,3 +1298,114 @@ fn t7_a_read_that_finds_the_list_changed_drops_the_carried_copy_for_good() {
     assert!(app.checked_list().is_none());
     assert!(!frame(&app, "decided-for-good").contains("verified by password"));
 }
+
+/// A wallet-tab history result whose request held no list (`checked` None: the list was parked
+/// for the outcome's read) checked nothing and revokes nothing. Back on 5, the read rechecks the
+/// parked copy and the list is verified again.
+#[test]
+fn t7_a_history_result_that_checked_no_list_keeps_the_parked_copy() {
+    use crate::tui::app::history::{HistoryRead, HistoryScope};
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    apply_edit(&mut app, &checked, false);
+    let (_, stale) = run_read(home.path(), key(&mut app, Key::Enter));
+    app.open_key = Some("main".into());
+    let work = key(&mut app, Key::Char('2'));
+    let target = work
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::HistoryOwner(target) => Some(target.clone()),
+            _ => None,
+        })
+        .expect("a history owner read");
+    assert!(target.checked.is_none(), "the list is parked for the read");
+    app.update(stale);
+    let owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8".to_string();
+    let load = app.update(Msg::HistoryOwner(
+        target.clone(),
+        Ok((owner.clone(), Trust::Unverified(None))),
+    ));
+    let scope = HistoryScope { target, owner };
+    assert!(
+        load.contains(&Effect::LoadHistory(scope.clone())),
+        "{load:?}"
+    );
+    let read = HistoryRead {
+        history: crate::history::History {
+            rows: vec![],
+            coverage: String::new(),
+            dropped: 0,
+        },
+        // `history::list_unchanged` is false whenever the request held no list.
+        list_unchanged: false,
+    };
+    app.update(Msg::History(scope, Ok(read)));
+    let (carried, fresh) = run_read(home.path(), key(&mut app, Key::Char('5')));
+    app.update(fresh);
+    let shown = frame(&app, "history-kept-parked");
+    assert!(shown.contains("verified by password: gen 2"), "{shown}");
+    assert_eq!(
+        carried.as_ref(),
+        Some(&checked),
+        "the read rechecks the parked copy"
+    );
+}
+
+/// A history check that ran and found the parked copy's bytes changed revokes the copy: once
+/// the file holds exactly the verified bytes again, the read that supersedes the parked one
+/// carries nothing.
+#[test]
+fn t7_a_history_check_that_finds_the_parked_list_changed_revokes_it() {
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    app.checked_list = Some(checked.clone());
+    let (_, stale) = run_read(home.path(), app.load_whitelist());
+    let mut changed = checked.list.clone();
+    changed.generation = 3;
+    sign_into(home.path(), &changed);
+    let found = crate::core::whitelist::check_unchanged(home.path(), &checked.fingerprint);
+    assert!(found.is_err());
+    let generation = app.generation;
+    app.update(Msg::HistoryList(generation, checked.fingerprint, found));
+    sign_into(home.path(), &checked.list);
+    assert_eq!(
+        ListFiles::read(home.path()).fingerprint(),
+        checked.fingerprint
+    );
+    let (carried, fresh) = run_read(home.path(), app.update(Msg::Tick));
+    app.update(stale);
+    app.update(fresh);
+    let shown = frame(&app, "history-revoked-parked");
+    assert!(!shown.contains("verified by password"), "{shown}");
+    assert!(app.checked_list().is_none());
+    assert!(carried.is_none(), "the read carried a revoked copy");
+}
+
+/// A drop refuses the read in flight: it checked the bytes before the drop, so its verified
+/// result restores nothing. The pane is not stuck: the next tick on 5 reads again, and that read
+/// lands.
+#[test]
+fn t7_a_read_refused_by_a_drop_restores_nothing_and_the_next_tick_reads_again() {
+    // Control: with no drop, the helper's read is accepted.
+    assert!(restored_after(|_| {}));
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    app.checked_list = Some(checked.clone());
+    let (_, in_flight) = run_read(home.path(), app.load_whitelist());
+    assert!(matches!(&in_flight, Msg::WhitelistRead(_, Ok(r)) if r.checked.is_some()));
+    let mut changed = checked.list.clone();
+    changed.generation = 3;
+    sign_into(home.path(), &changed);
+    let generation = app.generation;
+    let found = crate::core::whitelist::check_unchanged(home.path(), &checked.fingerprint);
+    app.update(Msg::HistoryList(generation, checked.fingerprint, found));
+    app.update(in_flight);
+    assert!(app.checked_list().is_none(), "the refused read restored it");
+    assert!(matches!(app.whitelist.lines, Pane::Loading));
+    let (carried, next) = run_read(home.path(), app.update(Msg::Tick));
+    assert!(carried.is_none());
+    app.update(next);
+    assert!(matches!(app.whitelist.lines, Pane::Ready(_)));
+    let shown = frame(&app, "refused-then-reread");
+    assert!(shown.contains("whitelist gen 3, not verified"), "{shown}");
+}

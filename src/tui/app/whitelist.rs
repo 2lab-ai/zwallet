@@ -501,10 +501,20 @@ impl App {
         vec![Effect::ReadWhitelist(self.whitelist.request, checked)]
     }
     /// Drops the checked list, with the copy a read in flight rechecks: a password check, an
-    /// edit or a failed pane decides it, as a read's result does.
+    /// edit, a failed pane or a check that found the bytes changed decides it, as a read's result
+    /// does. The read in flight checked the bytes before this drop, so its result restores nothing
+    /// when it lands; the next read (the tick on 5, Enter on an outcome) reads again.
     pub(super) fn drop_checked_list(&mut self) {
         self.checked_list = None;
         self.whitelist.rechecking = None;
+        self.whitelist.read_generation = None;
+    }
+    /// The fingerprint of the copy a read in flight rechecks, if one waits.
+    pub(super) fn rechecking_fingerprint(&self) -> Option<Fingerprint> {
+        self.whitelist
+            .rechecking
+            .as_ref()
+            .map(|list| list.fingerprint)
     }
     fn whitelist_verified(&mut self) -> bool {
         let Some(checked) = self.checked_list.as_ref() else {
@@ -994,6 +1004,35 @@ impl App {
         };
         std::ops::ControlFlow::Continue(work)
     }
+}
+
+/// #63, for the tests of each drop site: `revoke` drops the checked list while a whitelist read
+/// of it is in flight, then that read's verified result lands. Whether the list came back.
+#[cfg(test)]
+pub(super) fn restored_after(revoke: impl FnOnce(&mut App)) -> bool {
+    let net = crate::wallet::net(crate::chains::find("base").unwrap());
+    let mut app = App::new(&net, std::time::Duration::from_secs(600));
+    let list = CheckedList {
+        list: crate::core::whitelist::Whitelist::empty(&crate::chains::WHITELIST_RULES),
+        source: "whitelist.json",
+        fingerprint: crate::core::whitelist::ListFiles::read(Path::new(
+            "/tmp/zwt-drop-site-absent-fixture",
+        ))
+        .fingerprint(),
+    };
+    app.checked_list = Some(list.clone());
+    app.load_whitelist();
+    let id = app.whitelist.request;
+    revoke(&mut app);
+    app.update(Msg::WhitelistRead(
+        id,
+        Ok(Read {
+            checked: Some(list),
+            text: "verified by password".into(),
+            reason: None,
+        }),
+    ));
+    app.checked_list.is_some()
 }
 
 #[cfg(test)]
