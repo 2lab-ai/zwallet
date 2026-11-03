@@ -40,3 +40,19 @@ Rows here are snapshots taken when they moved.
 **Result, 2026-10-30.** Receipts in [`completion-checklist.md`](completion-checklist.md) §What shipped: PR #51 merged 2026-10-29T21:34Z as 599bde9; preview `preview-2026-10-29-2134-599bde9ee211` = Homebrew `zwallet-preview 2026.10.29.2134` (tap PR #18), installed and verified; gate at 2a1ee64 (macOS 923 passed; Linux 916 passed on the second full run, the first run's one pty failure tracked as #52; CI run 40955576162 macOS and ubuntu success); real-terminal acceptance, six scenarios PASS at 120x40 and 80x24 (152 checks on the 2a1ee64 build, 154 on the installed preview), coverage matrix 59 of 59 PASS at each size; the QA run's logs are kept off-repo; the results are in [PR #51's body](https://github.com/2lab-ai/zwallet/pull/51).
 
 **Notes (as they were).** Run only one full CLI suite at once. Agent worktrees are under .worktrees; each unit owns its isolated tree and reports changes for integration before heavy gates. H1 independent review found stale Keys overwriting activation failure and a blocking metadata lock on the UI runtime. Both have observed RED regressions and fixes; fresh full gate follows.
+
+## R2 — closed 2026-11-04 (post-delivery follow-up, issue #57)
+
+- result: the follow-up items the handoff issue [#57](https://github.com/2lab-ai/zwallet/issues/57) named, plus one found on the way, merged with RED-first receipts, two external reviews each and CI on both platforms; details in [`../v0-2-tui/loop.done.md`](../v0-2-tui/loop.done.md) R2 · closed: #52 (PR #54, 6f1a2c9), #55 (PR #56, d565adf), #63 (PR #64, 8eaf051) · preview 2026.11.03.1955 (tap PR 2lab-ai/homebrew-tap#20)
+
+### Closed rows
+
+| ID | Scope | Owner | Status | Evidence |
+|---|---|---|---|---|
+| #52 | Linux-only test flakes (harness races) | dispatcher + coding agent | ✅ | PR #54 · 6f1a2c9 · main CI 40992407534 |
+| #55 | random-collision "never echoed" assertions | dispatcher + coding agent | ✅ | PR #56 · d565adf · main CI 41680228250 |
+| #63 | TUI loses the password-verified whitelist on a superseded read | dispatcher + coding agent | ✅ | PR #64 · 8eaf051 · main CI 41707747056 · preview 2026.11.03.1955 |
+
+### Round section (as it was, with the result)
+
+**Still the owner's** ([`loop.md`](loop.md)): TR23, trade-offs Q and B, the owner's acceptance on the current preview, a stable release, and #26/#27 (design only). Draft PR #59 (Solana/TON, task reports; another stream) is the owner's merge decision.
