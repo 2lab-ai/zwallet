@@ -148,3 +148,21 @@ v0.2; avalanche through Routescan stays out of v0.2; the coverage per chain is u
 **From "Open for TUI-2b".** Round 4 of TUI-1c's review closed a third line, the stderr join in `PtyChild::stderr()`: a daemon the warm-up starts inherits neither that pipe nor the pty slave, since `spawn_daemon` gives it `Stdio::null()` for stderr and marks every fd from 3 up close-on-exec (src/core/protocol.rs:1354, :1363). The other two lines stay open in [`loop.md`](loop.md).
 
 **Next (as it was).** Merge `integ/tui-tron-final` as one PR (it marks #35 and #37–#49 merged), then move the 🟡 rows to `loop.done.md`. The previews M1–M5 can collapse into one preview of that merge: the owner unlocks again (new cdhash) and accepts the TUI on it. T18's trade-off Q stays with the owner; the existing Q1 and B1 pointers remain the defaults, and the handoff does not authorize phrase display or a new QR implementation. Done 2026-10-30 except the owner's steps.
+
+## R2 — closed 2026-11-04 (post-delivery fixes: #52, #55, #63)
+
+- result: three issues found after PR #51 closed, each with RED first, two external reviews and CI on both platforms; the product fix (#63) shipped to preview 2026.11.03.1955 (tap PR 2lab-ai/homebrew-tap#20) · closed: #52, #55, #63 · merges: 6f1a2c9, d565adf, 8eaf051
+
+### Closed rows
+
+| Issue | What | PR · merge | Evidence | State |
+|---|---|---|---|---|
+| [#52](https://github.com/2lab-ai/zwallet/issues/52) | two Linux-only test flakes: `lookup()` pressed `2` and reloaded the tab before the hash was accepted; `Home::edit_wallet` wrote wallet.json in place, so a daemon could read a torn file | [#54](https://github.com/2lab-ai/zwallet/pull/54) · 6f1a2c9 (2026-10-30) | t27_t28 11/30 failed under Linux load before, 0/30 after; guard test RED 3/3 with the in-place writer; src/ unchanged (the debug-only daemon note sink was removed in review) | ✅ |
+| [#55](https://github.com/2lab-ai/zwallet/issues/55) | "never echoed" assertions with short needles (`2J`, `xfer`, `0x02f8`) that a random temp path, hash or address can contain | [#56](https://github.com/2lab-ai/zwallet/pull/56) · d565adf (2026-11-03) | RED with a TMPDIR holding `2J`; echo proofs E1–E4 still fail; sweep of 478 negated checks; macOS full 924/0/15 | ✅ |
+| [#63](https://github.com/2lab-ai/zwallet/issues/63) | the TUI dropped the password-verified whitelist when a read was superseded in flight (the 5 s refresh tick, or `L` → `Locked` → Enter) | [#64](https://github.com/2lab-ai/zwallet/pull/64) · 8eaf051 (2026-11-03) | app-level REDs for both paths and for each revocation site; macOS full 935/0/15; tui_transfer t2_t6_t7 ×30 under load 0 failed | ✅ |
+
+### Round section (as it was, with the result)
+
+**Real-terminal acceptance on 8eaf051 (2026-11-04).** All six scenarios at 120×40 and 80×24 under tmux with loopback mocks and `sandbox-exec`, on a debug build scoped to `/tmp/zqa-` (every lock and whitelist edit stops only QA daemons; the harness refuses that mode for a release binary). Coverage matrix: 59 of 59 rows PASS at each size; 3 rows are not TUI features (row 8 `unlock --allow-ptrace-scope-0`, row 57 `--json`/`--password-stdin`/`--no-qr`, row 58 `daemon`). No non-loopback connection. A live owner session on the same machine was untouched. The QA logs are kept off-repo.
+
+**Preview.** `preview-2026-11-03-1955-8eaf05155751` = Homebrew `zwallet-preview 2026.11.03.1955`; the macOS aarch64 asset matched its release digest and SHA256SUMS and reports `preview 8eaf05155751`.

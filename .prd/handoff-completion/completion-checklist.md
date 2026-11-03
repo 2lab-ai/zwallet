@@ -44,10 +44,9 @@ not claim that the whole product specification has shipped (01-spec.md keeps its
 - **TR23**: the funded mainnet TRX and USDT send.
 - **T18 / trade-off Q**: a QR code on receive. Q1, the safe pointer line, is shipped.
 - **Trade-off B**: the recovery phrase in the TUI. B1, the CLI pointer, is shipped.
-- **The owner's own acceptance** on preview 2026.10.29.2134.
+- **The owner's own acceptance** on preview 2026.11.03.1955 or later.
 - **A stable release or `v*` tag**, and BSC USDT.
 - **#26 and #27**: design only; runtime enforcement deferred by the owner.
-- **#52**: the once-seen Linux pty flake, tracked.
 
 ## Original requests and preserved decisions
 
@@ -68,7 +67,7 @@ not claim that the whole product specification has shipped (01-spec.md keeps its
 
 ## Issue inventory
 
-GitHub issue states below were fetched individually on 2026-10-30.
+GitHub issue states below were fetched individually on 2026-10-30; the #52, #55 and #63 rows were updated on 2026-11-04.
 
 | Issue | Delivered behavior or contract | Verification and PR | State |
 |---|---|---|---|
@@ -81,7 +80,9 @@ GitHub issue states below were fetched individually on 2026-10-30.
 | [#27](https://github.com/2lab-ai/zwallet/issues/27) | Approved trusted-freshness design boundary | PR #35 (in PR #51), 09-policy-freshness-design.md; comment 6490909782 | Open deliberately; runtime protection deferred by owner |
 | [#28](https://github.com/2lab-ai/zwallet/issues/28) | Unlock wire protocol separated without API change | PR #29; existing full protocol/integration suite | Closed completed |
 | [#34](https://github.com/2lab-ai/zwallet/issues/34) | TUI v2 and Tron handoff | PR #51 (599bde9); preview 2026.10.29.2134; §What shipped | Closed completed by PR #51, 2026-10-29T21:34Z |
-| [#52](https://github.com/2lab-ai/zwallet/issues/52) | Once-seen Linux pty flake in `t27_t28_pty_restart_…` | Gate at 2a1ee64, Linux first full run | Open; tracked |
+| [#52](https://github.com/2lab-ai/zwallet/issues/52) | Linux-only test flakes: two harness races | PR #54, merged 6f1a2c9; main CI 40992407534 | Closed completed, 2026-10-30 |
+| [#55](https://github.com/2lab-ai/zwallet/issues/55) | Random path/hash collisions in never-echoed assertions | PR #56, merged d565adf; main CI 41680228250 | Closed completed, 2026-11-03 |
+| [#63](https://github.com/2lab-ai/zwallet/issues/63) | TUI dropped the password-verified whitelist when a read was superseded (fixed) | PR #64, merged 8eaf051; main CI 41707747056; preview 2026.11.03.1955 | Closed completed, 2026-11-03 |
 
 PR #29 merged 2026-10-29T06:17Z as 99fff4e. Its head validation receipt is
 [CI 40814597506](https://github.com/2lab-ai/zwallet/actions/runs/40814597506):
