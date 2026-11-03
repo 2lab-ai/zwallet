@@ -271,10 +271,17 @@ fn dry_run_prints_no_broadcastable_raw_tx() {
     let v = home.run(&transfer(&rpc.url, &["--dry-run"])).ok();
     assert_eq!(v["dryRun"], true);
     assert!(v.get("rawTx").is_none(), "dry-run printed rawTx: {v:#}");
-    assert!(
-        !v.to_string().contains("0x02f8"),
-        "signed bytes leaked: {v:#}"
-    );
+    // Signed bytes would be a `0x02f8` run longer than a hash: this txHash and address are
+    // random, so either can start with `0x02f8`.
+    let text = v.to_string();
+    let signed = text.match_indices("0x02f8").any(|(at, _)| {
+        text[at + 2..]
+            .bytes()
+            .take_while(u8::is_ascii_hexdigit)
+            .count()
+            > 64
+    });
+    assert!(!signed, "signed bytes leaked: {v:#}");
     assert_eq!(v["recoveredFrom"], me.as_str());
     assert!(v["txHash"].as_str().unwrap().starts_with("0x"));
     assert_eq!(v["signerDecoded"]["action"]["kind"], "native-transfer");

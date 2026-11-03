@@ -2341,6 +2341,8 @@ mod tests {
         let text = format!("{one}\n{two}");
         // Spaces in an amount, points in an amount, a bogus kind, a non-RFC 3339 time, an
         // address with spaces, a 200-digit amount and a hash that is none: never their own text.
+        // Looked for without the journal's path, whose random temp name can hold `xfer`.
+        let fields = text.replace(&journal.display(), "");
         for bad in [
             "## ##",
             "1.2.3",
@@ -2350,7 +2352,7 @@ mod tests {
             "88888888888",
             "[2J",
         ] {
-            assert!(!text.contains(bad), "{bad}: {text}");
+            assert!(!fields.contains(bad), "{bad}: {text}");
         }
         assert_eq!(text.matches(INVALID).count(), 7, "{text}");
         // What zwallet writes shows as it is: a time, a kind, `USD₮0` and `USDC.e`.
