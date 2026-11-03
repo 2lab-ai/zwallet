@@ -341,7 +341,7 @@ impl App {
             self.quit_error.get_or_insert_with(|| e.clone());
         }
         if e.message.contains("changed after it was shown") {
-            self.checked_list = None;
+            self.drop_checked_list();
             self.list_reason = Some(Outside::detail(
                 "not verified: whitelist changed; V checks it again",
             ));
@@ -1081,5 +1081,16 @@ mod completion_tests {
             );
             assert_eq!(app.take_quit_error(), quit.then(original_error));
         }
+    }
+
+    /// #63: a tool refused because the list changed drops the checked list; a whitelist read
+    /// still in flight checked the bytes before that and restores nothing.
+    #[test]
+    fn a_list_changed_refusal_is_not_undone_by_a_whitelist_read_in_flight() {
+        assert!(!crate::tui::app::whitelist::restored_after(|app| {
+            app.tools_error(WalletError::validation(
+                "whitelist.json changed after it was shown; nothing in the whitelist changed",
+            ))
+        }));
     }
 }

@@ -1024,3 +1024,388 @@ fn a_tab_round_trip_on_the_summary_keeps_the_prepared_plan_applicable() {
     assert!(matches!(app.whitelist.stage, Stage::List));
     assert!(work.iter().any(|e| matches!(e, Effect::ReadWhitelist(..))));
 }
+
+/// #63: a home whose whitelist.json is a list of `generation` signed with a fixed test key, and
+/// an injected, previously checked fixture of it: the `CheckedList` a password check or an edit's
+/// recheck would leave, built here against those bytes. It is not proof of password
+/// authentication; the read under test only rechecks the bytes.
+fn signed_home(generation: u64) -> (tempfile::TempDir, CheckedList) {
+    use crate::core::store;
+    let home = tempfile::Builder::new()
+        .prefix("zwt-wlrace-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    store::create_master(
+        home.path(),
+        "whitelist race test password",
+        "main",
+        store::MasterOptions {
+            kdf: store::KdfParams {
+                log_n: store::KDF_MIN_LOG_N,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        &crate::chains::derive_addresses,
+    )
+    .unwrap();
+    let mut list = checked().list;
+    list.generation = generation;
+    sign_into(home.path(), &list);
+    let checked = CheckedList {
+        list,
+        source: "whitelist.json",
+        fingerprint: ListFiles::read(home.path()).fingerprint(),
+    };
+    (home, checked)
+}
+fn sign_into(home: &Path, list: &Whitelist) {
+    use crate::core::whitelist::{WHITELIST_FILE, WhitelistKey};
+    let signed = WhitelistKey::from_secret(&[9; 32]).sign(list);
+    std::fs::write(home.join(WHITELIST_FILE), signed.to_file_bytes().unwrap()).unwrap();
+}
+/// The one whitelist read among `effects`, run now as `tui::start` runs it (`read` of `home`):
+/// the checked list it carried, and the message it sends.
+fn run_read(home: &Path, effects: Vec<Effect>) -> (Option<CheckedList>, Msg) {
+    let mut reads = effects.into_iter().filter_map(|effect| match effect {
+        Effect::ReadWhitelist(id, carried) => Some((id, carried)),
+        _ => None,
+    });
+    let (id, carried) = reads.next().expect("a whitelist read");
+    assert!(reads.next().is_none(), "one whitelist read");
+    (carried.clone(), Msg::WhitelistRead(id, read(home, carried)))
+}
+/// An add applied through its review and password, its recheck `checked`; `lock` presses L while
+/// it runs, so the outcome locks after it.
+fn apply_edit(app: &mut App, checked: &CheckedList, lock: bool) -> Vec<Effect> {
+    prepare_add(app, "0x3333333333333333333333333333333333333333", false);
+    review(
+        app,
+        "The password authorizes this exact change\nafter the change: the wallet stays locked",
+    );
+    enter_password(app);
+    let id = app.whitelist.request;
+    assert_eq!(
+        app.update(Msg::PasswordSubmitted),
+        vec![Effect::ApplyWhitelist(id)]
+    );
+    if lock {
+        assert!(key(app, Key::Char('L')).is_empty());
+    }
+    let outcome = WhitelistOutcome {
+        list: checked.list.clone(),
+        stopped_daemons: vec![8],
+        session: EditSession::Locked,
+        warning: None,
+        checked: Ok(checked.clone()),
+        output: json!({"locked":true}),
+        text: "added bob; stopped daemon 8; wallet stays locked".into(),
+    };
+    let work = app.update(Msg::WhitelistApplied(id, Applied(Ok(outcome))));
+    assert_eq!(app.checked_list(), Some(checked));
+    work
+}
+
+/// #63, as the pty test met it (`t2_t6_t7`): Enter on the outcome reads the list with the edit's
+/// checked list, and the refresh tick (`tui::REFRESH`) reads it again before that read lands. The
+/// superseded read is dropped; the checked list it carried must not go with it.
+#[test]
+fn t7_a_refresh_superseding_the_outcome_read_keeps_the_edited_list_verified() {
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    let work = apply_edit(&mut app, &checked, false);
+    assert!(!work.contains(&Effect::LockAll), "{work:?}");
+    let (_, stale) = run_read(home.path(), key(&mut app, Key::Enter));
+    assert!(matches!(app.whitelist.stage, Stage::List));
+    let (carried, fresh) = run_read(home.path(), app.update(Msg::Tick));
+    app.update(stale);
+    app.update(fresh);
+    let shown = frame(&app, "tick-superseded");
+    assert!(shown.contains("verified by password: gen 2"), "{shown}");
+    assert_eq!(app.checked_list(), Some(&checked));
+    assert_eq!(
+        carried.as_ref(),
+        Some(&checked),
+        "the newer read rechecks it"
+    );
+}
+
+/// #63, as the issue reads it: L during the edit locks after it, the lock's reload reads the list
+/// with the checked list, and Enter on the outcome reads it again before that read lands.
+#[test]
+fn t7_enter_superseding_the_lock_reload_read_keeps_the_edited_list_verified() {
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    let work = apply_edit(&mut app, &checked, true);
+    assert!(work.contains(&Effect::LockAll), "{work:?}");
+    let (_, stale) = run_read(home.path(), app.update(Msg::Locked(Ok(vec![8]))));
+    assert!(matches!(app.whitelist.stage, Stage::Outcome { .. }));
+    let (carried, fresh) = run_read(home.path(), key(&mut app, Key::Enter));
+    app.update(stale);
+    app.update(fresh);
+    let shown = frame(&app, "lock-reload-superseded");
+    assert!(shown.contains("verified by password: gen 2"), "{shown}");
+    assert_eq!(app.checked_list(), Some(&checked));
+    assert_eq!(
+        carried.as_ref(),
+        Some(&checked),
+        "the newer read rechecks it"
+    );
+}
+
+/// A list changed under a read in flight is never shown as verified. The newer read rechecks the
+/// carried list against the files as they are then; the superseded read checked the old bytes and
+/// says verified, and it is dropped whichever of the two lands first.
+#[test]
+fn t7_a_list_changed_under_a_superseded_read_ends_not_verified() {
+    for stale_first in [true, false] {
+        let (home, checked) = signed_home(2);
+        let mut app = new_app();
+        apply_edit(&mut app, &checked, false);
+        let (_, stale) = run_read(home.path(), key(&mut app, Key::Enter));
+        assert!(matches!(&stale, Msg::WhitelistRead(_, Ok(r)) if r.checked.is_some()));
+        let mut changed = checked.list.clone();
+        changed.generation = 3;
+        changed
+            .add(Entry::new_address(
+                "mallory",
+                "0x4444444444444444444444444444444444444444",
+                &["base"],
+            ))
+            .unwrap();
+        sign_into(home.path(), &changed);
+        let (carried, fresh) = run_read(home.path(), app.update(Msg::Tick));
+        let (first, second) = if stale_first {
+            (stale, fresh)
+        } else {
+            (fresh, stale)
+        };
+        app.update(first);
+        app.update(second);
+        let shown = frame(&app, "changed-under-read");
+        assert!(!shown.contains("verified by password"), "{shown}");
+        assert!(shown.contains("not verified"), "{shown}");
+        assert!(app.checked_list().is_none());
+        assert_eq!(
+            carried.as_ref(),
+            Some(&checked),
+            "the newer read rechecks it"
+        );
+    }
+}
+
+/// What drops the checked list while a read of it is in flight stays dropped. The in-flight
+/// read's verified result lands right after the drop, before any newer read, and restores
+/// nothing; the next read carries nothing a failed pane, a password check or an edit's
+/// submission dropped.
+#[test]
+fn t7_a_checked_list_dropped_under_a_read_in_flight_stays_dropped() {
+    for drop in ["failed pane", "password check", "edit"] {
+        let (home, checked) = signed_home(2);
+        let mut app = new_app();
+        app.checked_list = Some(checked.clone());
+        let (_, stale) = run_read(home.path(), app.load_whitelist());
+        let deliver_stale = |app: &mut App, stale: Msg| {
+            app.update(stale);
+            assert!(
+                app.checked_list().is_none(),
+                "{drop}: the in-flight read restored a dropped list"
+            );
+        };
+        let next = match drop {
+            "failed pane" => {
+                let generation = app.generation;
+                app.update(Msg::Keys(
+                    generation,
+                    Err(WalletError::validation("the key list changed")),
+                ));
+                deliver_stale(&mut app, stale);
+                app.update(Msg::Tick)
+            }
+            "password check" => {
+                key(&mut app, Key::Char('V'));
+                app.update(Msg::Prepared(Ok(())));
+                app.update(Msg::PasswordSubmitted);
+                deliver_stale(&mut app, stale);
+                let opened = crate::wallet::Opened {
+                    keys: vec![],
+                    active: "main".into(),
+                    warning: None,
+                    anchor: Ok(None),
+                    salted: false,
+                };
+                app.update(Msg::Checked(Ok((opened, Err("list refused".into())))))
+            }
+            _ => {
+                prepare_add(
+                    &mut app,
+                    "0x3333333333333333333333333333333333333333",
+                    false,
+                );
+                review(&mut app, "The password authorizes this exact change");
+                enter_password(&mut app);
+                app.update(Msg::PasswordSubmitted);
+                deliver_stale(&mut app, stale);
+                let id = app.whitelist.request;
+                app.update(Msg::WhitelistApplied(
+                    id,
+                    Applied(Err(WalletError::validation("edit refused before writing"))),
+                ));
+                key(&mut app, Key::Enter)
+            }
+        };
+        let (carried, fresh) = run_read(home.path(), next);
+        assert!(
+            carried.is_none(),
+            "{drop}: the next read carried a dropped list"
+        );
+        app.update(fresh);
+        assert!(app.checked_list().is_none(), "{drop}");
+        assert!(
+            !frame(&app, "dropped").contains("verified by password"),
+            "{drop}"
+        );
+    }
+}
+
+/// A read's result decides the carried copy for good: a read that finds whitelist.json changed
+/// drops the list, and no later read carries it back, even once the file holds exactly the
+/// verified bytes again.
+#[test]
+fn t7_a_read_that_finds_the_list_changed_drops_the_carried_copy_for_good() {
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    app.checked_list = Some(checked.clone());
+    let mut changed = checked.list.clone();
+    changed.generation = 3;
+    sign_into(home.path(), &changed);
+    let (carried, found_changed) = run_read(home.path(), app.update(Msg::Tick));
+    assert_eq!(carried.as_ref(), Some(&checked));
+    app.update(found_changed);
+    assert!(
+        app.checked_list().is_none(),
+        "the read found the list changed"
+    );
+    sign_into(home.path(), &checked.list);
+    assert_eq!(
+        ListFiles::read(home.path()).fingerprint(),
+        checked.fingerprint,
+        "the verified bytes are back"
+    );
+    let (carried, restored) = run_read(home.path(), app.update(Msg::Tick));
+    app.update(restored);
+    assert!(carried.is_none(), "a copy a read decided came back");
+    assert!(app.checked_list().is_none());
+    assert!(!frame(&app, "decided-for-good").contains("verified by password"));
+}
+
+/// A wallet-tab history result whose request held no list (`checked` None: the list was parked
+/// for the outcome's read) checked nothing and revokes nothing. Back on 5, the read rechecks the
+/// parked copy and the list is verified again.
+#[test]
+fn t7_a_history_result_that_checked_no_list_keeps_the_parked_copy() {
+    use crate::tui::app::history::{HistoryRead, HistoryScope};
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    apply_edit(&mut app, &checked, false);
+    let (_, stale) = run_read(home.path(), key(&mut app, Key::Enter));
+    app.open_key = Some("main".into());
+    let work = key(&mut app, Key::Char('2'));
+    let target = work
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::HistoryOwner(target) => Some(target.clone()),
+            _ => None,
+        })
+        .expect("a history owner read");
+    assert!(target.checked.is_none(), "the list is parked for the read");
+    app.update(stale);
+    let owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8".to_string();
+    let load = app.update(Msg::HistoryOwner(
+        target.clone(),
+        Ok((owner.clone(), Trust::Unverified(None))),
+    ));
+    let scope = HistoryScope { target, owner };
+    assert!(
+        load.contains(&Effect::LoadHistory(scope.clone())),
+        "{load:?}"
+    );
+    let read = HistoryRead {
+        history: crate::history::History {
+            rows: vec![],
+            coverage: String::new(),
+            dropped: 0,
+        },
+        // `history::list_unchanged` is false whenever the request held no list.
+        list_unchanged: false,
+    };
+    app.update(Msg::History(scope, Ok(read)));
+    let (carried, fresh) = run_read(home.path(), key(&mut app, Key::Char('5')));
+    app.update(fresh);
+    let shown = frame(&app, "history-kept-parked");
+    assert!(shown.contains("verified by password: gen 2"), "{shown}");
+    assert_eq!(
+        carried.as_ref(),
+        Some(&checked),
+        "the read rechecks the parked copy"
+    );
+}
+
+/// A history check that ran and found the parked copy's bytes changed revokes the copy: once
+/// the file holds exactly the verified bytes again, the read that supersedes the parked one
+/// carries nothing.
+#[test]
+fn t7_a_history_check_that_finds_the_parked_list_changed_revokes_it() {
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    app.checked_list = Some(checked.clone());
+    let (_, stale) = run_read(home.path(), app.load_whitelist());
+    let mut changed = checked.list.clone();
+    changed.generation = 3;
+    sign_into(home.path(), &changed);
+    let found = crate::core::whitelist::check_unchanged(home.path(), &checked.fingerprint);
+    assert!(found.is_err());
+    let generation = app.generation;
+    app.update(Msg::HistoryList(generation, checked.fingerprint, found));
+    sign_into(home.path(), &checked.list);
+    assert_eq!(
+        ListFiles::read(home.path()).fingerprint(),
+        checked.fingerprint
+    );
+    let (carried, fresh) = run_read(home.path(), app.update(Msg::Tick));
+    app.update(stale);
+    app.update(fresh);
+    let shown = frame(&app, "history-revoked-parked");
+    assert!(!shown.contains("verified by password"), "{shown}");
+    assert!(app.checked_list().is_none());
+    assert!(carried.is_none(), "the read carried a revoked copy");
+}
+
+/// A drop refuses the read in flight: it checked the bytes before the drop, so its verified
+/// result restores nothing. The pane is not stuck: the next tick on 5 reads again, and that read
+/// lands.
+#[test]
+fn t7_a_read_refused_by_a_drop_restores_nothing_and_the_next_tick_reads_again() {
+    // Control: with no drop, the helper's read is accepted.
+    assert!(restored_after(|_| {}));
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    app.checked_list = Some(checked.clone());
+    let (_, in_flight) = run_read(home.path(), app.load_whitelist());
+    assert!(matches!(&in_flight, Msg::WhitelistRead(_, Ok(r)) if r.checked.is_some()));
+    let mut changed = checked.list.clone();
+    changed.generation = 3;
+    sign_into(home.path(), &changed);
+    let generation = app.generation;
+    let found = crate::core::whitelist::check_unchanged(home.path(), &checked.fingerprint);
+    app.update(Msg::HistoryList(generation, checked.fingerprint, found));
+    app.update(in_flight);
+    assert!(app.checked_list().is_none(), "the refused read restored it");
+    assert!(matches!(app.whitelist.lines, Pane::Loading));
+    let (carried, next) = run_read(home.path(), app.update(Msg::Tick));
+    assert!(carried.is_none());
+    app.update(next);
+    assert!(matches!(app.whitelist.lines, Pane::Ready(_)));
+    let shown = frame(&app, "refused-then-reread");
+    assert!(shown.contains("whitelist gen 3, not verified"), "{shown}");
+}

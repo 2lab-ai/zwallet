@@ -201,6 +201,10 @@ pub struct WhitelistUi {
     pub request: u64,
     // A read may restore cached authority only in the trust generation that requested it.
     read_generation: Option<u64>,
+    // The checked list the newest read rechecks, until a read's result or `drop_checked_list`
+    // decides it. Never shown or used: a newer read takes it over, so a superseded read cannot
+    // drop it unchecked (#63).
+    rechecking: Option<CheckedList>,
     pub home: PathBuf,
 }
 impl Default for WhitelistUi {
@@ -213,6 +217,7 @@ impl Default for WhitelistUi {
             next_unlock: String::new(),
             request: 0,
             read_generation: None,
+            rechecking: None,
             home: PathBuf::new(),
         }
     }
@@ -485,9 +490,31 @@ impl App {
     pub(super) fn load_whitelist(&mut self) -> Vec<Effect> {
         self.whitelist.request += 1;
         self.whitelist.read_generation = Some(self.generation);
-        let checked = self.checked_list.take();
+        // The read takes the checked list until its result decides. One still in flight holds
+        // it: this read rechecks it, rather than starting without it.
+        let checked = self
+            .checked_list
+            .take()
+            .or_else(|| self.whitelist.rechecking.take());
+        self.whitelist.rechecking = checked.clone();
         self.whitelist.lines = Pane::Loading;
         vec![Effect::ReadWhitelist(self.whitelist.request, checked)]
+    }
+    /// Drops the checked list, with the copy a read in flight rechecks: a password check, an
+    /// edit, a failed pane or a check that found the bytes changed decides it, as a read's result
+    /// does. The read in flight checked the bytes before this drop, so its result restores nothing
+    /// when it lands; the next read (the tick on 5, Enter on an outcome) reads again.
+    pub(super) fn drop_checked_list(&mut self) {
+        self.checked_list = None;
+        self.whitelist.rechecking = None;
+        self.whitelist.read_generation = None;
+    }
+    /// The fingerprint of the copy a read in flight rechecks, if one waits.
+    pub(super) fn rechecking_fingerprint(&self) -> Option<Fingerprint> {
+        self.whitelist
+            .rechecking
+            .as_ref()
+            .map(|list| list.fingerprint)
     }
     fn whitelist_verified(&mut self) -> bool {
         let Some(checked) = self.checked_list.as_ref() else {
@@ -838,6 +865,7 @@ impl App {
                     && self.whitelist.read_generation == Some(self.generation) =>
             {
                 self.whitelist.read_generation = None;
+                self.whitelist.rechecking = None;
                 match result {
                     Ok(read) => {
                         self.checked_list = read.checked;
@@ -845,7 +873,7 @@ impl App {
                         self.whitelist.lines = Pane::Ready(list_rows(&read.text));
                     }
                     Err(error) => {
-                        self.checked_list = None;
+                        self.drop_checked_list();
                         self.whitelist.lines = Pane::Failed(Outside::error(&error));
                     }
                 }
@@ -873,7 +901,7 @@ impl App {
             {
                 self.password = PasswordState::Idle;
                 self.pending_key = None;
-                self.checked_list = None;
+                self.drop_checked_list();
                 let text = match result {
                     Ok(outcome) => {
                         let mut text = outcome.text;
@@ -921,7 +949,7 @@ impl App {
                     let id = review.id;
                     self.whitelist.stage = Stage::Applying(review);
                     self.password = PasswordState::Checking;
-                    self.checked_list = None;
+                    self.drop_checked_list();
                     vec![Effect::ApplyWhitelist(id)]
                 } else {
                     self.whitelist.stage = stage;
@@ -976,6 +1004,35 @@ impl App {
         };
         std::ops::ControlFlow::Continue(work)
     }
+}
+
+/// #63, for the tests of each drop site: `revoke` drops the checked list while a whitelist read
+/// of it is in flight, then that read's verified result lands. Whether the list came back.
+#[cfg(test)]
+pub(super) fn restored_after(revoke: impl FnOnce(&mut App)) -> bool {
+    let net = crate::wallet::net(crate::chains::find("base").unwrap());
+    let mut app = App::new(&net, std::time::Duration::from_secs(600));
+    let list = CheckedList {
+        list: crate::core::whitelist::Whitelist::empty(&crate::chains::WHITELIST_RULES),
+        source: "whitelist.json",
+        fingerprint: crate::core::whitelist::ListFiles::read(Path::new(
+            "/tmp/zwt-drop-site-absent-fixture",
+        ))
+        .fingerprint(),
+    };
+    app.checked_list = Some(list.clone());
+    app.load_whitelist();
+    let id = app.whitelist.request;
+    revoke(&mut app);
+    app.update(Msg::WhitelistRead(
+        id,
+        Ok(Read {
+            checked: Some(list),
+            text: "verified by password".into(),
+            reason: None,
+        }),
+    ));
+    app.checked_list.is_some()
 }
 
 #[cfg(test)]

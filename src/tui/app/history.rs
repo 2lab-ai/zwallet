@@ -249,13 +249,20 @@ impl App {
         std::ops::ControlFlow::Continue(work)
     }
     fn accept_labels(&mut self, checked: Option<Fingerprint>, unchanged: bool) {
-        if self.checked_list.as_ref().map(|list| list.fingerprint) != checked {
+        let held = self.checked_list.as_ref().map(|list| list.fingerprint);
+        // Only a check that ran and found the bytes changed revokes, and it revokes the list it
+        // checked: the one held, or the copy a whitelist read rechecks (#63). With no list
+        // (`checked` is None) nothing was checked.
+        if !unchanged
+            && checked.is_some()
+            && (held == checked || self.rechecking_fingerprint() == checked)
+        {
+            self.drop_checked_list();
+        }
+        if held != checked {
             return;
         }
         self.history.labels = if unchanged { checked } else { None };
-        if !unchanged {
-            self.checked_list = None;
-        }
     }
     pub(super) fn history_tick(&mut self) -> Vec<Effect> {
         self.history.labels = None;

@@ -477,7 +477,7 @@ impl App {
         if error.details.get("checkedListChanged") == Some(&Value::Bool(true))
             || error.message.contains("changed after it was shown")
         {
-            self.checked_list = None;
+            self.drop_checked_list();
             self.transfer.payees.clear();
             self.transfer.tron = TronTransfer::default();
             self.transfer.review = None;
@@ -1062,5 +1062,16 @@ mod quit_error_tests {
         assert!(!app.quitting());
         assert!(app.transfer().notice.is_some());
         assert!(app.take_quit_error().is_none());
+    }
+
+    /// #63: a payee or review refused because the list changed drops the checked list; a
+    /// whitelist read still in flight checked the bytes before that and restores nothing.
+    #[test]
+    fn a_list_changed_refusal_is_not_undone_by_a_whitelist_read_in_flight() {
+        assert!(!crate::tui::app::whitelist::restored_after(|app| {
+            app.transfer_error(WalletError::validation(
+                "whitelist.json changed after it was shown; nothing in the whitelist changed",
+            ))
+        }));
     }
 }
