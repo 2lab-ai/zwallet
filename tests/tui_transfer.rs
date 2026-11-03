@@ -168,8 +168,8 @@ mod warmup_sync {
             let budget = match p.outside.source() {
                 Source::WhitelistName | Source::KeyName | Source::RpcHost => 32,
                 Source::Quantity => 78,
-                Source::TransactionHash => 66,
-                Source::Address => 42,
+                Source::TransactionHash => 88,
+                Source::Address => 66,
                 Source::Expiry | Source::Home => 64,
                 Source::Detail => 72,
                 Source::Input | Source::Error | Source::Warning | Source::ListRow => 512,

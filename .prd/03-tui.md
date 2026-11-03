@@ -1,12 +1,15 @@
 # zwallet — TUI
 
-Status: **shipped** (preview 2026.10.29.2134, PR #51, 2026-10-30). `zwallet tui` has a path for
-every CLI function in §Coverage matrix, and acceptance T1–T44 is met except T18's QR code, which
-waits on the owner's trade-off Q (§Open trade-offs; Q1 and B1 are the shipped defaults). This page
-is the as-built contract of the TUI (v0.2), not a future target. Receipts:
-[`v0-2-tui/loop.done.md`](v0-2-tui/loop.done.md) R1 — the gate at 2a1ee64 and the real-terminal
-acceptance on the installed preview, where the coverage matrix's 59 TUI rows PASS at 120x40 and
-80x24. Code-backed boundary: [feature status](../docs/features.md).
+Status: **in-progress** for the 2026-11-02 multichain/receive-QR extension;
+the original TUI shipped in preview 2026.10.29.2134 (PR #51). The source contract
+below includes the extension in [11-multichain.md](11-multichain.md), not a claim
+that older binaries include it. The user explicitly requested the receive QR on
+2026-11-02, superseding Q1. Recovery-phrase choice B1 remains unchanged.
+
+Current-source extensions on 2026-10-30 add coverage rows 63–67 and acceptance
+T48–T52 for the advisory duplicate window and native task accounting. Their final
+source/CI receipt is tracked in [`security-assurance`](security-assurance/loop.md);
+the historical preview receipt above does not certify these later additions.
 
 History: revised 2026-10-20 after two spec reviews, 2026-10-27 against PRs #6–#12 (`origin/main`
 c7d3f13) and after review rounds 1 and 2 the same day, on 2026-10-28 for TUI-1b (§Changes on
@@ -95,15 +98,15 @@ not have is not a TUI goal either.
 | No `invoke` screen | **dropped**: invoke on 6 tools (T34, T35) | the key daemon judges every call against the contract entries and their selectors ([README.md:294-301](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L294-L301)); the TUI offers only the checked list's contract entries on the chain and their selectors, so it adds no way past that judgement |
 | No swaps, no WalletConnect | **kept** | not a CLI function ([README.md:60-85](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L60-L85) has neither); the TUI covers what the CLI does |
 | No settings file | **kept** | not a CLI function, and a file in the home is writable by any process of this user ([README.md:845-848](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L845-L848)): it could preselect a chain, a duration or a payee on the human's screen |
-| No QR code | **open**: trade-off Q (§Open trade-offs) | the CLI draws its QR past the write filter (core/terminal.rs:6-7) in half blocks, which rule 1 turns into `?`; each way to draw one in the TUI costs something |
+| Receive QR | **changed** by the 2026-11-02 user request | Only password- or session-verified receive identity produces a locally generated QR in dedicated black/white styles. Printable outside text remains filtered; full address is rendered separately beside the QR. |
 | No second implementation | **kept** | the TUI calls the library entry points the CLI calls ([`v0-2-tui/flow.md`](v0-2-tui/flow.md)); the send lock, the journal, the guards and the daemon's whitelist apply unchanged |
 | allow-message-signing is not a TUI behaviour (flow.md §T7) | **dropped**: `m` on 5 whitelist (T25) | a whitelist change like `fee-cap`: the same summary, password and edit protocol |
 
 What stays out of the TUI after this (§Coverage matrix, Count): a typed payee (above),
 `transfer --force` (the zero address burns funds), a message to sign that the review cannot show
 whole, two sends the daemon never signs, the flags that only make sense for a one-shot command
-(`--json`, `--password-stdin`, `--no-qr`); and, until the owner picks trade-offs B and Q, the
-recovery phrase and the QR code, each a one-line pointer to the CLI.
+(`--json`, `--password-stdin`, `--no-qr`); the recovery phrase remains a CLI pointer (B1).
+The receive QR is implemented under the explicit 2026-11-02 instruction.
 
 ## Coverage matrix
 
@@ -111,9 +114,9 @@ Every CLI command and every user-meaningful flag (README.md §Commands, src/cli.
 24f4b5b), and the Tron functions the owner asked for on 2026-10-28. "Screen" is the tab (§Screens
 and keys). Mockups: [`03-tui-screens.md`](03-tui-screens.md).
 
-**Alias.** Each of rows 1–52 and 60–62 is one row of the action menu, and the Alias column is that row's
+**Alias.** Each of rows 1–52 and 60–67 is one row of the action menu, and the Alias column is that row's
 alias token, spelled exactly as here (two menu rows may share a token: rows 3 and 4, rows 33 and
-35). So the menu has exactly 55 rows, and T12 compares the menu's alias tokens with this column,
+35). So the menu has exactly 60 rows, and T12 compares the menu's alias tokens with this column,
 row for row. Rows 53–59 have no menu row. A **start flag** or **env var** in the Key(s) column is
 read when `zwallet tui` starts; each such row also names its path inside the TUI, except row 8,
 which stays a start flag for the security reason written in it (review round 2).
@@ -133,7 +136,7 @@ which stays a start flag for the security reason written in it (review round 2).
 | 11 | `backup` | `backup` | 1 keys | `B` | trade-off B: B1 (recommended, built) is the line `run zwallet backup in a shell to see the recovery phrase`; B2 only if the owner picks it | T32 | TUI-10 |
 | 12 | `address [--chain]` | `address` | 4 receive | `4`, `c` | the full EIP-55 address and its trust words | T17 | TUI-4 |
 | 13 | `address --verify` (repair) | `address --verify` | 1 keys | `A` | the password, then the cached addresses repaired from the seed; the `repaired` list shown | T19 | TUI-4 |
-| 14 | `address` QR code | `qr` | 4 receive | `Q` | trade-off Q: Q1 (built until the owner picks) is the line `zwallet address shows it as a QR code`; Q3 (recommended) draws it | T18 | TUI-4 |
+| 14 | `address` QR code | `qr` | 4 receive | `Q` | Verified local QR and separate full address at 80×24/120×40; `Esc` returns | T18 | TUI-4 |
 | 15 | `addresses` | `addresses` | 4 receive | the list under the address | one address per family, every chain named | T17 | TUI-4 |
 | 16 | `balance` (every network) | `balance` | 2 wallet | `a` | every chain, the testnet last, a failed one on its own line | T15 | TUI-3 |
 | 17 | `balance --chain` | `balance --chain` | 2 wallet | `2`, `c` | the native coin and the registry tokens with a balance | T5 | TUI-3 |
@@ -182,6 +185,11 @@ which stays a start flag for the security reason written in it (review round 2).
 | 60 | `whitelist native-cap` | `whitelist native-cap` | 5 whitelist | action menu | chain, per-transaction native amount ceiling or `none`, summary, password, outcome; the chain's units are explicit | T45 | TUI-6 |
 | 61 | `whitelist token-cap` | `whitelist token-cap` | 5 whitelist | action menu | chain, registry token, per-transaction amount ceiling in integer base units or `none`, summary, password, outcome; token decimals and units are explicit | T46 | TUI-6 |
 | 62 | `whitelist calldata-cap` | `whitelist calldata-cap` | 5 whitelist | action menu | chain, per-transaction calldata byte ceiling or `none`, summary, password, outcome | T47 | TUI-6 |
+| 63 | `whitelist duplicate-window` | `whitelist duplicate-window` | 5 whitelist | `D`, action menu | 1s–1d or default, advisory scope/1 MiB tail summary, password, effective setting | T48 | S7 |
+| 64 | `task create` | `task create` | 6 tools | action menu; `n` in task list | selected key/chain, bounded ID, exact-unit allocations, confirm local baseline capture; no signing | T49 | S6 |
+| 65 | `task list` | `task list` | 6 tools | action menu | redacted account list, selection; Enter opens report | T50 | S6 |
+| 66 | `task report` | `task report` | 6 tools | action menu | ID, provenance/time, six states, exact amounts/unknowns, scroll; `r` online, `o` offline, `a` reveal | T51 | S6 |
+| 67 | `transfer/invoke --task` | `--task` | send/tools review | `t`, action menu | optional bound task ID retained by immutable transfer/invoke/replacement review; empty removes attribution | T52 | S6 |
 
 **TUI functions with no CLI command** (from [`v0-2-tui/ssot.md`](v0-2-tui/ssot.md), 2026-10-20):
 the history of the last 10 transactions (T3, T3b), the transaction detail with its fee,
@@ -195,15 +203,16 @@ and the TUI's address fields (rule 3) gain that alphabet. Inputs, outputs and er
 49–52 come from 05-tron.md; the screens are the EVM ones with Tron's values. T38–T41 stay
 conditional on it.
 
-**Count.** 62 rows; rows 60–62 preserve the earlier row IDs and add the signed limits merged in PR #29:
+**Count.** 67 rows; 60–62 retain the signed limits from PR #29, and 63–67 add the current-source duplicate/task paths:
 
 | Kind | Rows | How many |
 |---|---|---|
-| Reachable in the TUI, EVM | 1–48 except 8, 11 and 14 | 45 |
+| Reachable in the TUI, EVM | 1–48 except 8 and 11 | 46 |
 | Signed transaction limits, reachable with TUI-6 | 60–62 | 3 |
+| Advisory duplicate policy and task accounting | 63–67 | 5 |
 | A start flag only, with a security reason (no key in the TUI) | 8 | 1 |
-| CLI pointer until the owner picks (B1, Q1 are built; B2, Q3 are not) | 11, 14 | 2 |
-| Tron, reachable once 05-tron.md and its library land | 49–52 | 4 |
+| Recovery phrase CLI pointer (B1) | 11 | 1 |
+| Tron, reachable through the implemented family | 49–52 | 4 |
 | CLI-only, with a security reason | 53, 54, 59 | 3 |
 | Not a function: the daemon never signs it | 55, 56 | 2 |
 | Not applicable | 57, 58 | 2 |
@@ -216,7 +225,16 @@ unit: the TUI-3+4 PR builds Q1 and TUI-10 builds B1, the one-line pointers to th
 rows count as CLI pointers until then (§Coverage matrix, Count). Q3, if picked, lands as a delta
 of T18; B2 is built only if the owner picks it (T32).
 
-### Q. The QR code on 4 receive
+### Q. The QR code on 4 receive (historical alternatives)
+
+**Superseded on 2026-11-02:** the user requested the Tron QR and full address together.
+The implemented receive view uses locally generated half-block cells with dedicated
+black/white styles, within ratatui's buffer and filtered backend. Only those styles
+permit the four QR half-block/space characters; ordinary outside text cannot opt in.
+The QR is from a password- or session-verified address, with its full quiet zone; the separate
+address column is checked at 80×24 and 120×40. The alternatives below describe the
+previous decision record, not an outstanding approval gate.
+
 
 Facts: the CLI ends human output with a QR of an address verified by the password or by the
 session ([README.md:250-262](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L250-L262); `with_qr`, commands.rs:620). That code is the CLI's one write past its
@@ -305,7 +323,7 @@ zwallet [1 keys] 2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
    text equals an alias exactly, the menu shows only the rows with that alias (so `whitelist add`
    leaves one row, not `whitelist add --contract` too); otherwise every row whose words or alias
    contain it, exact matches first. The menu has
-   exactly one row per §Coverage matrix row 1–52 and 60–62 (its title says `actions (55)`); the navigation
+   exactly one row per §Coverage matrix row 1–52 and 60–67 (its title says `actions (60)`); the navigation
    keys (tabs, `[` `]`, `j`/`k`, `r`, Esc, `q`) are listed on its last lines, with
    `zwallet --version`'s line, and are not counted as actions. It is the help screen: there is no
    other.
@@ -497,12 +515,9 @@ to at most 512 characters, where a code that holds an Ethereum address needs ver
 = 625 modules ([README.md:198-200](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L198-L200)). The one list drawn with more than 512 characters from a file is
 a password-checked whitelist, which only the password holder signed. What is left is what the
 README already states: a same-user process can lay out at most 512 characters of ASCII art, and it
-can already write to the terminal directly. The TUI itself draws no QR code. Tests: a 512-character
+can already write to the terminal directly. The TUI draws only its own verified receive QR in dedicated styles. Tests: a 512-character
 outside error of `#` and spaces in the error view takes at most 7 rows; the style assertion of
-rule 2; the budget assertions of rule 3. Whether the TUI draws zwallet's own QR of a verified
-address is trade-off Q (§Open trade-offs): Q1 keeps this paragraph as it is; Q3 adds two style
-constants that only the QR overlay draws, from an address the TUI derived or pinned, never from
-outside text; Q2 adds one write past the filter, the CLI's own (core/terminal.rs:6-7).
+rule 2; the budget assertions of rule 3; rendered QR decoding and exact address/QR rectangles in `tests/tui_multichain.rs`. The QR uses the ratatui buffer and dedicated style allowlist, never a free-form outside value.
 
 **6. Nothing prints while the TUI holds the terminal.** Four places in today's code write to the
 terminal from inside the logic (flow.md Fact 3): the `broadcasting <hash>` line of every live send
@@ -926,10 +941,10 @@ and one rule covers every one of them.
   without the review, `R` is not offered, and the screen says what to do instead: look the hash
   up first (`/`, or `zwallet tx`); once the node knows it, `s` and `x` are offered under (b). A new
   send through the normal send flow is not a retry: it is a new payment at a new nonce, and it
-  may pay twice even without `d`, because the repeat check looks back only 10 minutes
-  (`DUPLICATE_WINDOW_SECS = 600`, chains/mod.rs:836; [README.md:572-574](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L572-L574)) and reads a journal any
-  process of this user can edit (review round 3 deleted the claim that only `d` could pay twice).
-  The screen says, in these words: `the node does not know this hash; that is no proof the send failed. A new send is a new payment at a new nonce: it can pay twice, also without d (the repeat check looks back 10 minutes, in a journal any process of this user can edit). Look the hash up first.` T29.
+  may pay twice even without `d`: the advisory repeat check uses the configured window
+  (default 600 seconds) and only the last 1 MiB of a journal any process of this user can
+  edit. The screen says, in these words: `the node does not know this hash; that is no proof the send failed. A new send uses a new nonce: it can pay twice, also without d. The advisory check uses a configured window (default 10 minutes) and the last 1 MiB of editable local journal. Look the hash up first.` T29.
+
 - **Judged by kind.** A transfer's speed-up or retry needs its payee to be an address entry of
   the checked list on this chain; the review shows its nickname, typed at confirm. An invoke's
   speed-up or retry needs the contract to be a contract entry of the checked list on this chain
@@ -1091,13 +1106,13 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T9 | 80×24 resize; 79×24; `q`; forced panic | layout fits at 80×24; one `terminal too small` line at 79×24; the terminal is restored after both |
 | T10 | `zwallet lock` from another shell | the TUI shows `locked` within two refreshes (10 s) |
 | T11 | pty test across T2 and T7 | no echo; the password appears in no captured frame; cancel mid-entry, then a retry, works |
-| T12 | `?`; type `whitelist add`; Enter | the menu's title says `actions (55)` and it has exactly 55 rows, whose alias tokens equal §Coverage matrix's Alias column for rows 1–52 then 60–62, row for row (the test holds that column as a list: a matrix row without a menu row fails, and the other way); the filter leaves one row (key `a`, tab 5), and Enter opens the add form; a row that cannot run now shows its reason (`needs: …`, `in a later version`, `start flag`), and Enter on it starts no `Effect` |
+| T12 | `?`; type `whitelist add`; Enter | the menu's title says `actions (60)` and it has exactly 60 rows, whose alias tokens equal §Coverage matrix's Alias column for rows 1–52 then 60–67, row for row (the test holds that column as a list: a matrix row without a menu row fails, and the other way); the filter leaves one row (key `a`, tab 5), and Enter opens the add form; a row that cannot run now shows its reason (`needs: …`, `in a later version`, `start flag`), and Enter on it starts no `Effect` |
 | T13 | from the start: `1` … `7`, `[`, `]`, Esc in a popup and in a sub-screen; each frame the TUI-3+4 PR draws, at 80x24 | each tab reached; the hint rule of §Screens and keys holds (a frame whose focus is not a text field, a menu or a popup ends its hint line with `? actions`; one whose focus is shows no `? actions`); Esc closes the popup, then returns to the tab; each of those frames fits 80x24 (`TestBackend`); a tab whose screens a later unit brings says `in a later version`. Each later unit runs the same size and hint checks on the frames it adds (units.md §Every unit) |
 | T14 | 7 session, `u`, `10m`, the password | the bar says `signing (agent too) until` ≈ now+10m; `zwallet status --json` has the same `expiresAt` |
 | T15 | 2 wallet, `a`, with all 8 `ZWALLET_RPC_<CHAIN>` set: two to mock nodes that answer, one to a mock that refuses, the other five to a closed port (`http://127.0.0.1:1`) | one line per network, testnet last; each failed one `error: … [CODE]` cut to 72 (`brief`); `2 of 8 networks have a balance; 6 did not answer`; zero tokens hidden; no test reaches a public RPC |
 | T16 | 7 session, a daemon of this home and one of another home | lock state, expiry, daemon pid, `other homes: 1 daemon`, the session's whitelist as `reports gen N, M entries (not checked here)`; with TUI-1c's argv-listed fake: its values escaped within their budgets, nothing drawn verified |
 | T17 | 4 receive, warm; then locked | warm: the full EIP-55 address and `verified by password`; locked: `not verified` and the `V` hint; every chain named under it |
-| T18 | `Q` on 4 receive | Q1 (default): the one line naming `zwallet address`. Q3: at 120x40 the overlay; the frame's `QR_DARK` cells decode (as src/qr.rs's tests decode, `rqrr`) to the address; an unverified address draws no code and says why; at 80x24 the size line; no cell outside the overlay has a QR style |
+| T18 | `Q` on 4 receive | At 80×24 and 120×40 the rendered QR cells decode to the password- or session-verified address; the full address is separately readable beside it. Unverified or impostor identity produces no QR. No non-QR cell uses its reserved styles. |
 | T19 | 1 keys `V`; then wallet.json's cached address of `beta` edited, `V` again, then `A` and the password | every row `verified`; after the edit `V` shows the CLI's `VALIDATION_ERROR` naming `A`; `A` shows `repaired` (`was` escaped, at most 64) and every row `verified`; `zwallet list --verify` agrees |
 | T20 | Linux, `kernel.yama.ptrace_scope` 0: the warm-up; then `zwallet tui --allow-ptrace-scope-0` and the warm-up; the menu row `unlock --allow-ptrace-scope-0`, Enter | the first refuses before the password field and names the start flag; the second shows `ptrace_scope 0 accepted` on 7 session and in the warm-up's password popup, and opens the session (`prepare_unlock` called with the flag); the menu row gives the start flag and its security reason, and Enter on it starts no `Effect`; no key in the TUI sets the flag |
 | T21 | review with nonce 12 pending; then a repeat of a send from 5 min ago | the pending line and `p`; confirm without `p` signs nothing (zero `SignTx`), with `p` once; the same for the repeat with `d` |
@@ -1128,6 +1143,11 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T45 | 5 whitelist, `whitelist native-cap`, a chain and amount, summary, password | the same signed per-transaction ceiling as the CLI is saved; its units and impact are shown before the password; `none` explicitly removes the amount limit, and invalid input writes nothing |
 | T46 | 5 whitelist, `whitelist token-cap`, a chain, registry token and amount, summary, password | the signed token ceiling matches CLI verification in integer base units (`none` removes it); a token outside the registry is refused before the password |
 | T47 | 5 whitelist, `whitelist calldata-cap`, a chain and byte count, summary, password | the signed calldata ceiling matches CLI verification; zero bytes is a deliberate empty-data limit, `none` removes it, and an overflow is refused before the password |
+| T48 | whitelist duplicate-window form, valid/invalid/default values, review and password | same signed setting as CLI; legacy bytes unchanged when absent; effective advisory source/window/tail visible including refusals |
+| T49 | task create on EVM and Tron at 80x24 and 120x40 | open key/selected chain captured, exact allocations confirmed, baseline saved without signature; invalid input cannot create; submitted write is not falsely cancelled |
+| T50 | task list and selection | account addresses hidden; no unbounded rows; selected task opens its report; late cancelled results do not repopulate the view |
+| T51 | task report online/offline/reveal/refresh and scroll | provenance/time and unknowns visible, exact large integers preserved, regular Tick retains report, context changes cancel reads; report never signs |
+| T52 | task attribution on transfer, invoke and retained replacement/cancel | immutable bound task identity shown and carried to execution; wrong account/chain fails before signing; unconfirmed persistence warning survives successful receipt updates |
 
 **Tests:**
 - `TestBackend` buffer assertions for each screen, through `FilteredBackend`, with the style and

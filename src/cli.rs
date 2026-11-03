@@ -51,20 +51,24 @@ pub enum Command {
     Address(AddressArgs),
     /// Addresses of a key on every chain. Works while locked.
     Addresses(AddressesArgs),
-    /// Native or ERC-20 balance on one chain; without --chain, the native coin and every registry
+    /// Native coin or supported registry-token balance on one chain; without --chain, the native coin and every registry
     /// token on every network. Works while locked.
     Balance(BalanceArgs),
     /// Read-only contract call (eth_call). Works while locked.
     Call(CallArgs),
     /// State-changing contract transaction. Needs an unlocked wallet.
     Invoke(InvokeArgs),
-    /// Native or ERC-20 transfer. Needs an unlocked wallet.
+    /// Native coin or supported token transfer. Solana and TON support native SOL/TON only.
+    /// Needs an unlocked wallet.
     Transfer(TransferArgs),
     /// EIP-191 personal_sign. Needs an unlocked wallet.
     SignMessage(SignMessageArgs),
     /// Look a transaction up by hash: mined (with its receipt), pending, or not found. Works
     /// while locked, and without a wallet.
     Tx(TxArgs),
+    /// Local task accounting and read-only receipt reconciliation on EVM/Tron (never a spending limit).
+    #[command(subcommand)]
+    Task(TaskCommand),
     /// Wallet, lock state, and active key.
     Status(QrArg),
     /// Print the recovery phrase. Interactive terminals only, after the password.
@@ -242,6 +246,9 @@ pub struct InvokeArgs {
 /// Options shared by the commands that sign and broadcast a transaction.
 #[derive(Debug, Args)]
 pub struct SendArgs {
+    /// Attribute this prepared intent and submission to a task created with `task create`.
+    #[arg(long, value_name = "ID")]
+    pub task: Option<String>,
     /// Build and sign from live chain state, but do not broadcast.
     #[arg(long)]
     pub dry_run: bool,
@@ -271,7 +278,7 @@ pub struct SendArgs {
     #[arg(long, conflicts_with = "nonce")]
     pub allow_pending: bool,
     /// Send even though the send journal has the same send (recipient, value, token) from the
-    /// last 10 minutes. Only for a real second payment: a re-run of a send that went through
+    /// configured window (default 10 minutes). Only for a real second payment: a re-run of a send that went through
     /// would pay twice.
     #[arg(long, conflicts_with = "nonce")]
     pub allow_duplicate: bool,
@@ -281,11 +288,43 @@ pub struct SendArgs {
     pub max_fee_gwei: Option<String>,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    /// Start a local task and observe its account balances. Allocations are advisory.
+    Create {
+        id: String,
+        #[arg(long)]
+        chain: String,
+        #[command(flatten)]
+        key: KeyArg,
+        /// Exact base units, e.g. native=1000000000000000; repeat for registry token addresses.
+        #[arg(long, value_name = "ASSET=BASE_UNITS")]
+        allocation: Vec<String>,
+        #[arg(long)]
+        rpc: Option<String>,
+    },
+    /// List bounded local task metadata. No RPC or signing.
+    List,
+    /// Reconcile recorded attempts and balances against one node; no signing or writes.
+    Report {
+        id: String,
+        /// Show local intent/submission claims only, without RPC.
+        #[arg(long)]
+        offline: bool,
+        #[arg(long, conflicts_with = "offline")]
+        rpc: Option<String>,
+        /// Include account/payee/contract addresses in the exported report.
+        #[arg(long)]
+        reveal_addresses: bool,
+    },
+}
+
 #[derive(Debug, Args)]
 pub struct TransferArgs {
     #[arg(long)]
     pub chain: String,
-    /// Recipient: a 0x address, or @NICKNAME from the whitelist (ENS names are not supported).
+    /// Recipient: an address for the selected chain or @NICKNAME from its whitelist.
+    /// ENS names are not supported.
     #[arg(long)]
     pub to: String,
     /// Amount in whole units (e.g. 0.5); exact, no floating point.
@@ -310,10 +349,10 @@ pub struct TransferArgs {
 pub struct TxArgs {
     #[arg(long)]
     pub chain: String,
-    /// The transaction hash (0x and 64 hex digits).
+    /// EVM/Tron hash, Solana base58 signature, or TON signed-body hash returned by transfer.
     #[arg(value_name = "TXHASH")]
     pub tx_hash: String,
-    /// Wait for a Tron receipt or a final node observation (default 90 seconds).
+    /// Wait for a Tron, Solana or TON receipt observation (default 90 seconds).
     #[arg(long)]
     pub wait: bool,
     #[arg(long, value_name = "DURATION", requires = "wait", value_parser = duration_arg)]
@@ -357,7 +396,8 @@ pub enum WhitelistCommand {
     /// Remove the entry NICKNAME.
     Remove(WhitelistRemoveArgs),
     /// Set CHAIN's fee cap, in its coin: EVM gas cost or Tron contract fee_limit.
-    /// Tron bandwidth and activation fees are outside this signed cap.
+    /// Tron bandwidth/activation and TON protocol fees are not encoded fee-cap guarantees.
+    /// Solana uses the supported one-signature base-fee assumption; TON uses an RPC estimate.
     FeeCap(WhitelistFeeCapArgs),
     /// Cap native value per transaction in CHAIN's coin; `none` removes the cap.
     NativeCap(WhitelistNativeCapArgs),
@@ -365,6 +405,8 @@ pub enum WhitelistCommand {
     TokenCap(WhitelistTokenCapArgs),
     /// Cap calldata bytes per transaction; `none` removes it. Not an L1 fee cap.
     CalldataCap(WhitelistCalldataCapArgs),
+    /// Advisory duplicate-send window for all chains (1s..1d); `default` restores 10m.
+    DuplicateWindow(WhitelistDuplicateWindowArgs),
     /// Let `sign-message` sign (on) or refuse it (off, the default).
     AllowMessageSigning(WhitelistToggleArgs),
     /// A new whitelist key and an empty list, for a list that does not verify (or one made by
@@ -460,6 +502,14 @@ pub struct WhitelistCalldataCapArgs {
     pub chain: String,
     /// Maximum number of calldata bytes, including selector, or `none`.
     pub bytes: String,
+    #[command(flatten)]
+    pub edit: WhitelistEditArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct WhitelistDuplicateWindowArgs {
+    /// Positive duration from 1s to 1d, or `default`. Reads at most the last 1 MiB of journal.
+    pub duration: String,
     #[command(flatten)]
     pub edit: WhitelistEditArgs,
 }
@@ -1088,3 +1138,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod terminal_observation_tests;

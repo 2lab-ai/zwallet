@@ -466,6 +466,13 @@ pub fn zwallet_at_with(exe: impl AsRef<OsStr>, debug_assertions: bool) -> Comman
     // port unless the test names its own mock (`ZWALLET_EXPLORER_<CHAIN>`).
     for chain in zwallet::chains::CHAINS {
         cmd.env(chain.explorer_env_var(), CLOSED_EXPLORER);
+        // Newly added families must never fall through an older fixture to public RPC.
+        if matches!(
+            chain.family,
+            zwallet::chains::Family::Solana(_) | zwallet::chains::Family::Ton(_)
+        ) {
+            cmd.env(chain.rpc_env_var(), CLOSED_EXPLORER);
+        }
     }
     cmd
 }
@@ -677,13 +684,30 @@ impl FakeDaemon {
         on_tron["address"] = Value::from(tron);
         on_tron["chain"] = Value::from("tron");
         let (evm, tron) = (reply(&result), reply(&on_tron));
+        // A squatter can read all public caches. Keep each newly added family's own shape,
+        // so these tests still exercise peer provenance rather than a malformed-address error.
+        let wallet: Value = serde_json::from_slice(
+            &std::fs::read(path.parent().unwrap().join("wallet.json")).unwrap(),
+        )
+        .unwrap();
+        let mut extra = std::collections::BTreeMap::new();
+        for chain in ["solana", "ton"] {
+            let mut row = result.clone();
+            row["address"] = wallet["keys"][0]["addresses"][chain].clone();
+            row["chain"] = Value::from(chain);
+            extra.insert(chain, reply(&row));
+        }
         Self::bind_with(path, move |request| {
             let asked: Value = serde_json::from_slice(request).unwrap_or(Value::Null);
-            if asked["op"] == "address" && asked["chain"] == "tron" {
-                tron.clone()
-            } else {
-                evm.clone()
+            if asked["op"] == "address" {
+                if asked["chain"] == "tron" {
+                    return tron.clone();
+                }
+                if let Some(bytes) = asked["chain"].as_str().and_then(|c| extra.get(c)) {
+                    return bytes.clone();
+                }
             }
+            evm.clone()
         })
     }
 
@@ -848,10 +872,11 @@ static void logev(const char *ev, long n) {
 }
 /* One connection, in its own process: read what the client sends (bounded by SO_RCVTIMEO so a
    client that is slow to send its request or its EOF never blocks us), then answer. */
-static void handle(int s, const char *reply, const char *reply_tron) {
+static void handle(int s, const char *reply, const char *reply_tron,
+                   const char *reply_solana, const char *reply_ton) {
   struct timeval to; to.tv_sec = 2; to.tv_usec = 0;
   setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof to);
-  /* The request's first 4 KiB, to tell an address request on tron from any other. */
+  /* The request's first 4 KiB, to select the matching native-family poison address. */
   char req[4096]; size_t kept = 0;
   char b[1024]; ssize_t n; long got = 0;
   while ((n = read(s, b, sizeof b)) > 0) {
@@ -861,7 +886,11 @@ static void handle(int s, const char *reply, const char *reply_tron) {
   }
   req[kept] = 0;
   logev(n == 0 ? "eof" : "read-stop", got);
-  if (strstr(req, "\"op\":\"address\"") && strstr(req, "\"chain\":\"tron\"")) reply = reply_tron;
+  if (strstr(req, "\"op\":\"address\"")) {
+    if (strstr(req, "\"chain\":\"tron\"")) reply = reply_tron;
+    else if (strstr(req, "\"chain\":\"solana\"")) reply = reply_solana;
+    else if (strstr(req, "\"chain\":\"ton\"")) reply = reply_ton;
+  }
   size_t len = strlen(reply), off = 0;
   while (off < len) { ssize_t w = write(s, reply + off, len - off); if (w <= 0) break; off += w; }
   logev("replied", got);
@@ -894,8 +923,12 @@ int main(int argc, char **argv) {
   const char *raw = getenv("ATTACKER_REPLY");
   size_t cap = (raw ? strlen(raw) : strlen(exp) + strlen(wl)) + 512;
   char *reply = malloc(cap), *reply_tron = malloc(cap);
-  if (!reply || !reply_tron) return 4;
-  if (raw) { snprintf(reply, cap, "%s\n", raw); snprintf(reply_tron, cap, "%s\n", raw); }
+  char *reply_solana = malloc(cap), *reply_ton = malloc(cap);
+  if (!reply || !reply_tron || !reply_solana || !reply_ton) return 4;
+  if (raw) {
+    snprintf(reply, cap, "%s\n", raw); snprintf(reply_tron, cap, "%s\n", raw);
+    snprintf(reply_solana, cap, "%s\n", raw); snprintf(reply_ton, cap, "%s\n", raw);
+  }
   else {
     snprintf(reply, cap,
       "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
@@ -907,6 +940,17 @@ int main(int argc, char **argv) {
       "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"tron\",\"index\":0,"
       "\"active\":\"main\",\"address\":\"TPjjvMwjPoDC32V2dGDYTkLH4E5LAtBZ6C\"}}\n",
       (int)getpid(), exp, wl);
+    /* These are the native encodings of [2; 32], matching tests/cli.rs poison_cache. */
+    snprintf(reply_solana, cap,
+      "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
+      "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"solana\",\"index\":0,"
+      "\"active\":\"main\",\"address\":\"8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR\"}}\n",
+      (int)getpid(), exp, wl);
+    snprintf(reply_ton, cap,
+      "{\"v\":2,\"ok\":true,\"result\":{\"locked\":false,\"pid\":%d,"
+      "\"expiresAt\":\"%s\",\"whitelist\":%s,\"chain\":\"ton\",\"index\":0,"
+      "\"active\":\"main\",\"address\":\"0:0202020202020202020202020202020202020202020202020202020202020202\"}}\n",
+      (int)getpid(), exp, wl);
   }
   logev("listening", 0);
   for (;;) {
@@ -916,7 +960,7 @@ int main(int argc, char **argv) {
     /* Each connection is served in its own child, so a client that is slow on one connection
        never keeps us from accepting and answering another. */
     pid_t pid = fork();
-    if (pid == 0) { close(l); handle(s, reply, reply_tron); _exit(0); }
+    if (pid == 0) { close(l); handle(s, reply, reply_tron, reply_solana, reply_ton); _exit(0); }
     close(s);
   }
 }
@@ -1238,8 +1282,34 @@ impl PtyChild {
             "the child still runs"
         );
         let size = self.full_screen().size;
-        let output = self.wait_output(limit, |output| Frame::last(output, size).is_some());
-        Frame::last(&output, size).unwrap()
+        let output = self.final_output(limit);
+        Frame::last(&output, size).expect("the completed stream did not restore the terminal")
+    }
+
+    /// After process exit, join the PTY reader through EOF before examining any output tail.
+    /// Seeing the first restore sequence is not proof that the last write has been read.
+    pub fn final_output(&mut self, limit: Duration) -> Vec<u8> {
+        assert!(
+            matches!(self.child.try_wait(), Ok(Some(_))),
+            "the child still runs"
+        );
+        let start = Instant::now();
+        while self
+            .full_screen()
+            .reader
+            .as_ref()
+            .is_some_and(|r| !r.is_finished())
+        {
+            assert!(
+                start.elapsed() < limit,
+                "PTY output did not end after child exit"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some(reader) = self.screen.as_mut().unwrap().reader.take() {
+            reader.join().expect("PTY reader stopped");
+        }
+        self.output()
     }
 
     /// Sets the window to `(columns, rows)`, as a human resizing the terminal does: the kernel
@@ -1581,15 +1651,12 @@ fn read_all_along(
                 Ok(n) => into.lock().unwrap().extend_from_slice(&buf[..n]),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => return,
+                Err(e) if e.raw_os_error() == Some(libc::EIO) => return, // PTY EOF.
+                Err(e) => panic!("PTY reader failed before EOF: {e}"),
             }
         }
     })
 }
-
-/// The sequence a full-screen program writes when it gives the terminal back (crossterm's
-/// `LeaveAlternateScreen`); `zwallet tui`'s guard writes it once, last.
-pub const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
 
 /// The whitelist summary's caption, `Summary rows <start>-<end> of <total>`: (start, total).
 pub fn whitelist_summary_position(frame: &Frame) -> Option<(usize, usize)> {
@@ -1623,91 +1690,8 @@ pub fn open_whitelist_password(tui: &mut PtyChild, limit: Duration) {
     });
 }
 
-/// What a terminal shows after a full-screen program's output, as ratatui's crossterm backend
-/// writes it: `CSI row;col H` moves the cursor, `CSI 2J` and `CSI ?1049h` (the alternate screen)
-/// clear it, any other CSI (styles, the cursor's visibility, leaving the alternate screen) changes
-/// no cell; CR, LF (raw mode: no CR added) and BS move the cursor. Every other ESC and every
-/// other control character is kept in `stray`: none may come from a cell's content (03-tui.md
-/// §Display integrity rule 1). A sequence the bytes end inside (a lone ESC, or a CSI before its
-/// final byte) is `pending`, not stray: a read of a live terminal ends anywhere.
-pub struct Frame {
-    /// One string per row, every column (trailing spaces included).
-    pub rows: Vec<String>,
-    pub stray: Vec<String>,
-    /// The unfinished sequence the bytes end with, if any.
-    pub pending: String,
-}
-
-impl Frame {
-    pub fn parse(bytes: &[u8], (columns, rows): (u16, u16)) -> Self {
-        let blank = || vec![vec![' '; usize::from(columns)]; usize::from(rows)];
-        let (mut cells, mut stray, mut pending) = (blank(), Vec::new(), String::new());
-        let (mut x, mut y) = (0usize, 0usize);
-        let text = String::from_utf8_lossy(bytes);
-        let mut chars = text.chars().peekable();
-        while let Some(c) = chars.next() {
-            match c {
-                '\u{1b}' if chars.peek() == Some(&'[') => {
-                    chars.next();
-                    let mut params = String::new();
-                    let end = loop {
-                        match chars.next() {
-                            Some(c) if ('\u{20}'..='\u{3f}').contains(&c) => params.push(c),
-                            other => break other,
-                        }
-                    };
-                    match (end, params.as_str()) {
-                        (None, _) => pending = format!("\u{1b}[{params}"),
-                        (Some('H'), at) => {
-                            let mut at = at.split(';').map(|n| n.parse().unwrap_or(1).max(1));
-                            y = at.next().unwrap_or(1) - 1;
-                            x = at.next().unwrap_or(1) - 1;
-                        }
-                        (Some('J'), "2") | (Some('h'), "?1049") => cells = blank(),
-                        (Some('@'..='~'), _) => {}
-                        _ => stray.push(format!("CSI {params:?} {end:?}")),
-                    }
-                }
-                '\u{1b}' if chars.peek().is_none() => pending.push(c),
-                '\r' => x = 0,
-                '\n' => y += 1,
-                '\u{8}' => x = x.saturating_sub(1),
-                c if c.is_control() => stray.push(format!("{c:?}")),
-                c => {
-                    if let Some(cell) = cells.get_mut(y).and_then(|r| r.get_mut(x)) {
-                        *cell = c;
-                    }
-                    x += 1;
-                }
-            }
-        }
-        Self {
-            rows: cells.into_iter().map(String::from_iter).collect(),
-            stray,
-            pending,
-        }
-    }
-
-    /// The last frame of a full-screen program, from its whole output: what the terminal showed
-    /// when the program gave it back (the bytes before [`LEAVE_ALTERNATE_SCREEN`]); `None` before
-    /// it has. Every draw is done by then, so the frame is finished, and its `stray` covers the
-    /// whole run.
-    pub fn last(bytes: &[u8], size: (u16, u16)) -> Option<Self> {
-        let end = bytes
-            .windows(LEAVE_ALTERNATE_SCREEN.len())
-            .position(|w| w == LEAVE_ALTERNATE_SCREEN)?;
-        Some(Self::parse(&bytes[..end], size))
-    }
-}
-
-impl std::fmt::Display for Frame {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for row in &self.rows {
-            writeln!(f, "{}", row.trim_end())?;
-        }
-        write!(f, "stray: {:?}, pending: {:?}", self.stray, self.pending)
-    }
-}
+pub mod frame;
+pub use frame::Frame;
 
 /// A minimal JSON-RPC node on 127.0.0.1 answering each method with `result(method)`, for the
 /// commands that need RPC (e.g. `balance`). Returns its URL; it lives until the test exits.

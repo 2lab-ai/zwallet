@@ -23,6 +23,7 @@ pub enum Stage {
     Review,
     Confirm,
     Bump,
+    Task,
     Sending,
     Failed,
 }
@@ -256,7 +257,7 @@ impl App {
         None
     }
     pub fn history_replacement_hint(&self) -> &'static str {
-        if self.on_tron() {
+        if self.on_tron() || self.on_native_ed25519() {
             // Tron has no nonce replacement.
             "s/x/R unavailable   r refresh   Esc history"
         } else if self.replacement_available().0 {
@@ -625,11 +626,15 @@ impl App {
             && self.history.detail.is_some()
             && matches!(key, Key::Char('s' | 'x' | 'R'))
         {
-            if self.on_tron() {
-                // Tron has no nonce: nothing can replace a broadcast Tron transaction.
-                self.notice = Some(Outside::detail(
-                    "Tron has no nonce replacement; speed-up, cancel and retry do not apply",
-                ));
+            if self.on_tron() || self.on_native_ed25519() {
+                self.notice = Some(Outside::detail(&if self.on_tron() {
+                    "Tron: no nonce replacement; a new send can pay twice.".into()
+                } else {
+                    format!(
+                        "{}: no replacement; a new send can pay twice.",
+                        self.chain.name
+                    )
+                }));
                 return Some(Vec::new());
             }
             return Some(self.history_replacement_key(key));
@@ -695,6 +700,19 @@ impl App {
                     }
                     Vec::new()
                 }
+                Key::Char('t') if self.replacement.stage == Stage::Review => {
+                    let task = self
+                        .replacement
+                        .review
+                        .as_ref()
+                        .and_then(|r| r.original().task_id())
+                        .unwrap_or("");
+                    self.replacement.field = Some(
+                        Field::with_value(Kind::OptionalTaskId, task).expect("validated task ID"),
+                    );
+                    self.replacement.stage = Stage::Task;
+                    Vec::new()
+                }
                 Key::Char('b') if self.replacement.stage == Stage::Review => {
                     self.replacement.field = Some(Field::new(Kind::Bump));
                     self.replacement.stage = Stage::Bump;
@@ -723,7 +741,7 @@ impl App {
             return None;
         }
         // A Tron status keeps its own handling: Tron has no nonce replacement.
-        if self.on_tron() {
+        if self.on_tron() || self.on_native_ed25519() {
             return None;
         }
         let action = match key {
@@ -767,6 +785,20 @@ impl App {
             Edit::Cancel => {
                 self.replacement.stage = Stage::Review;
                 return Vec::new();
+            }
+            Edit::Submit if self.replacement.stage == Stage::Task => {
+                if let Some(context) = &mut self.replacement.context
+                    && let Some(original) = context.original.take()
+                {
+                    context.original = Some(
+                        original
+                            .with_task_id(
+                                (!field.value().is_empty()).then(|| field.value().to_string()),
+                            )
+                            .expect("validated task ID"),
+                    );
+                }
+                return self.prepare_replacement_again();
             }
             Edit::Submit if self.replacement.stage == Stage::Bump => {
                 match chains::parse_bump(field.value()) {
@@ -820,8 +852,8 @@ impl App {
     pub fn replacement_hint(&self) -> &'static str {
         match self.replacement.stage {
             Stage::Preparing => "checking original...   Esc back   q quit",
-            Stage::Review => "Enter confirm   b bump   r review again   j/k scroll   Esc back",
-            Stage::Confirm | Stage::Bump => "Enter submit   Esc back   Ctrl-C quit",
+            Stage::Review => "Enter confirm  b bump  t task  r review  j/k scroll  Esc back",
+            Stage::Confirm | Stage::Bump | Stage::Task => "Enter submit   Esc back   Ctrl-C quit",
             Stage::Failed => "r review again   Esc back   q quit",
             _ => match self.replacement_available() {
                 (true, true) => "s speed up   x cancel   R retry this uncertain send",

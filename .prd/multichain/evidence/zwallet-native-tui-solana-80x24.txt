@@ -1,0 +1,78 @@
+PICKER
+1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ send / native SOL -----------------------------------------------------------+
+|Choose a password-checked payee scoped to this chain.                         |
+|solana-payee                                                                  |
+|US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx                                   |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+
+arrows choose  Enter select  Esc back  q quit  ? actions
+solana | a HvuEai...rkZX | verified by password
+signing (agent too) until 02:41Z | 127.0.0.1:64152
+stray: [], pending: ""
+REVIEW
+1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ send / native SOL -----------------------------------------------------------+
+|Payee: solana-payee                                                           |
+|To: US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx                               |
+|From: HvuEaidBqjX7QkdPXYXoBpBEx4zWNUFjYo1KWAtDrkZX                            |
+|Amount: 0.001 SOL                                                             |
+|Exact base units: 1000000                                                     |
+|Fee: 0.000005 SOL                                                             |
+|Signed policy fee cap: 0.0001                                                 |
+|One SystemProgram transfer; no other instructions.                            |
+|Whitelist allowed; balance sufficient                                         |
+|Repeats 0; no override [600s/1MiB local]                                      |
+|A new signature/send may pay twice; no replacement support.                   |
+|Last valid block height: 150                                                  |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|Enter opens confirmation; no signature yet.                                   |
++------------------------------------------------------------------------------+
+Enter confirm  d allow repeat  r refresh  Esc edit  ? actions
+solana | a HvuEai...rkZX | verified by password
+signing (agent too) until 02:41Z | 127.0.0.1:64152
+stray: [], pending: ""
+STATUS
+1 keys  2 wallet  3 send  4 receive  5 whitelist  6 tools  7 session
++ send / native SOL -----------------------------------------------------------+
+|Send recorded; leaving this screen does not cancel it.                        |
+|589b7i3rUXTS7rgtYtZ9XNGczPk4xHQCkazh6CT9gahGc6dicjmJZeySY7nGx1hB9vUa8QDU38MKPZ|
+|FucZAzCWLw                                                                    |
+|Solana / transaction signature                                                |
+|Journal:                                                                      |
+|/tmp/zwt-ji8lZM/sends-5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKu...(cut)              |
+|                                                                              |
+|mined: success                                                                |
+|Polling deadline: 90 seconds from the latest wait                             |
+|                                                                              |
+|No replacement: a new send can be a second payment.                           |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+
+w wait longer  n new payment  2 wallet  q quit  ? actions
+solana | a HvuEai...rkZX | verified by password
+signing (agent too) until 02:41Z | 127.0.0.1:64152
+stray: [], pending: ""

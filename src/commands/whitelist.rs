@@ -35,6 +35,7 @@ pub(super) async fn run(home: &Path, cmd: WhitelistCommand) -> Result<Out> {
             a.edit,
         ),
         WhitelistCommand::CalldataCap(a) => (Change::calldata_cap(&a.chain, &a.bytes)?, a.edit),
+        WhitelistCommand::DuplicateWindow(a) => (Change::duplicate_window(&a.duration)?, a.edit),
         WhitelistCommand::AllowMessageSigning(a) => {
             (Change::message_signing(a.setting == Toggle::On), a.edit)
         }

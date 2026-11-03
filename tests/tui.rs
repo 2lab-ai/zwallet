@@ -31,6 +31,10 @@ fn family_address(chain: &chains::Chain, address: &str) -> String {
         && let Ok(body) = chains::evm::parse_address(address)
     {
         chains::tron::address::from_body(&body.into_array())
+    } else if matches!(chain.family, chains::Family::Solana(_)) {
+        bs58::encode([7u8; 32]).into_string()
+    } else if matches!(chain.family, chains::Family::Ton(_)) {
+        format!("0:{}", "07".repeat(32))
     } else {
         address.into()
     }
@@ -78,7 +82,7 @@ fn checked_frame(screen: &mut Screen, app: &App) -> (Vec<String>, Vec<Placed>) {
             let cell = &buffer[(x, y)];
             let mut chars = cell.symbol().chars();
             assert!(
-                matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && terminal_ok(c)),
+                matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && (terminal_ok(c) || (style::is_qr(cell.style()) && matches!(c, '█' | '▀' | '▄')))),
                 "rule 1: cell ({x},{y}) holds {:?}",
                 cell.symbol()
             );
@@ -102,9 +106,9 @@ fn budget(source: Source) -> usize {
     match source {
         Source::WhitelistName => 32,
         Source::Quantity => 78,
-        Source::TransactionHash => 66,
+        Source::TransactionHash => 88,
         Source::KeyName | Source::RpcHost => 32,
-        Source::Address => 42,
+        Source::Address => 66,
         Source::Expiry | Source::Home => 64,
         Source::Detail => 72,
         Source::Input => 512,
@@ -447,14 +451,14 @@ fn line_1_fits_80_columns_for_every_chain_and_every_trust_with_a_32_character_ke
             app.update(Msg::Status(app.generation(), Ok(status)));
             // Status is primary-EVM metadata. Tron needs its own current-family observation.
             let address = family_address(chain, B);
-            if matches!(chain.family, chains::Family::Tron(_)) {
+            if !matches!(chain.family, chains::Family::Evm(_)) {
                 app.update(Msg::Address(
                     app.generation(),
                     name.clone(),
                     Ok((address.clone(), trust)),
                 ));
             }
-            let expected_address = if matches!(chain.family, chains::Family::Tron(_)) {
+            let expected_address = if !matches!(chain.family, chains::Family::Evm(_)) {
                 format!("{}...{}", &address[..6], &address[address.len() - 4..])
             } else {
                 "0x3C44...93BC".into()
@@ -865,6 +869,10 @@ fn quit(tui: &mut PtyChild) -> Frame {
     assert_ne!(modes & libc::ECHO, 0, "echo is off");
     let last = tui.final_frame(PTY_WAIT);
     assert!(last.stray.is_empty() && last.pending.is_empty(), "{last}");
+    assert_eq!(
+        common::frame::restored_tail(&tui.final_output(PTY_WAIT)),
+        Some(&b"\x1b[?25h"[..])
+    );
     last
 }
 
@@ -961,9 +969,29 @@ fn t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo() {
     let modes = tui.local_modes();
     assert_eq!(modes & (libc::ICANON | libc::ECHO), 0, "not raw");
     tui.resize((79, 24));
-    tui.wait_frame(PTY_WAIT, |f| f.rows[0].trim_end() == ui::TOO_SMALL);
+    tui.wait_frame(PTY_WAIT, only_the_warning);
+    // Grow back through the real input loop and renderer. The maximal capture grid must have
+    // no old 120x40 cells outside the new 80x24 viewport.
+    tui.resize((80, 24));
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows[22].starts_with("ethereum | main 0x")
+            && f.rows[23].starts_with("locked | ")
+            && f.rows[23].contains(HOST)
+            && !f.rows[0].contains(ui::TOO_SMALL)
+    });
     let last = quit(&mut tui);
-    assert!(only_the_warning(&last), "{last}");
+    assert!(last.rows[22].starts_with("ethereum | main 0x"), "{last}");
+    assert!(last.rows[23].starts_with("locked | "), "{last}");
+    assert!(
+        last.rows[..24]
+            .iter()
+            .all(|row| row[80..].trim().is_empty()),
+        "{last}"
+    );
+    assert!(
+        last.rows[24..].iter().all(|row| row.trim().is_empty()),
+        "{last}"
+    );
     // Started at 79x24: the warning alone, judged on the last frame.
     let mut tui = tui_on_a_pty(&home, (79, 24));
     tui.wait_frame(PTY_WAIT, |f| f.rows[0].trim_end() == ui::TOO_SMALL);
@@ -1857,8 +1885,8 @@ mod navigation {
         assert_eq!(app.tab(), Tab::Session);
     }
 
-    /// D1: the chain picker and a read-only lines popup are lists, not text fields: the global
-    /// tab keys close them and switch tabs.
+    /// D1: the chain picker, read-only lines popup and receive QR are not text fields:
+    /// the global tab keys switch tabs, closing any popup.
     #[test]
     fn nav_chain_picker_and_lines_popup_pass_the_global_tab_keys() {
         let mut app = locked_ab();
@@ -1868,11 +1896,19 @@ mod navigation {
         assert_eq!(app.tab(), Tab::Wallet, "{}", view(&app));
         assert!(app.navigation().popup.is_none());
         app.update(Msg::Key(Key::Char('4')));
-        app.update(Msg::Key(Key::Char('Q')));
+        app.update(Msg::Key(Key::Char('?')));
+        paste(&mut app, "version");
+        app.update(Msg::Key(Key::Enter));
         assert!(matches!(app.navigation().popup, Some(Popup::Lines { .. })));
         app.update(Msg::Key(Key::Char(']')));
         assert_eq!(app.tab(), Tab::Whitelist, "{}", view(&app));
         assert!(app.navigation().popup.is_none());
+        app.update(Msg::Key(Key::Char('4')));
+        app.update(Msg::Key(Key::Char('Q')));
+        assert!(app.navigation().receive_qr);
+        assert!(app.navigation().popup.is_none());
+        app.update(Msg::Key(Key::Char(']')));
+        assert_eq!(app.tab(), Tab::Whitelist, "{}", view(&app));
     }
 
     /// The Keys tab's hint names every key it acts on, `u unlock` included (#43's merge dropped
@@ -1922,6 +1958,7 @@ mod navigation {
             "d raw",
             "m message",
             "t token",
+            "a tasks",
         ] {
             assert!(hint.contains(control), "missing {control}: {hint}");
         }
@@ -1929,7 +1966,7 @@ mod navigation {
         assert!(!text.contains("in a later version"), "{text}");
         app.update(Msg::Key(Key::Char('?')));
         assert!(matches!(app.navigation().popup, Some(Popup::Menu(_))));
-        assert!(view(&app).contains("actions (55)"));
+        assert!(view(&app).contains("actions (60)"));
     }
 
     #[test]
@@ -1937,7 +1974,7 @@ mod navigation {
         let mut app = locked_ab();
         app.update(Msg::Key(Key::Char('?')));
         let text = view(&app);
-        assert!(text.contains("actions (55)"));
+        assert!(text.contains("actions (60)"));
         assert!(text.contains(&zwallet::version_line()));
         assert!(!text.lines().nth(21).unwrap().contains("? actions"));
         // Every action is implemented in this tree; a Tron row on an EVM chain stays disabled.
@@ -2141,7 +2178,8 @@ mod navigation {
             assert!(text.contains(&format!("{}:", chain.key)));
         }
         app.update(Msg::Key(Key::Char('Q')));
-        assert!(view(&app).contains("zwallet address shows it as a QR code"));
+        assert!(view(&app).contains("Verified by password"));
+        assert!(view(&app).contains("▀") || view(&app).contains("▄"));
         app.update(Msg::Key(Key::Esc));
         app.update(Msg::Addresses(
             app.generation(),

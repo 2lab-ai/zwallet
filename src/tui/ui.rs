@@ -5,7 +5,10 @@
 
 mod create;
 pub(crate) mod history;
+mod native_transfer;
+mod receive;
 mod replacement;
+mod tasks;
 mod tools;
 mod transfer;
 mod tron_transfer;
@@ -98,6 +101,14 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
             .draw(frame, line(area, 0), &mut placed);
         return placed;
     }
+    if app.tab() == Tab::Receive
+        && app.navigation().receive_qr
+        && app.navigation().popup.is_none()
+        && app.password_state() == PasswordState::Idle
+    {
+        receive::draw(frame, app, &mut placed);
+        return placed;
+    }
     let [title, pane, hint, bar1, bar2] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
@@ -122,6 +133,8 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         keys_pane(frame, pane, app, &mut placed);
     } else if let Some(popup) = &app.navigation().popup {
         popup_pane(frame, pane, app, popup, &mut placed);
+    } else if app.tasks_visible() {
+        tasks::pane(frame, pane, app, &mut placed);
     } else if app.tab() == Tab::Tools {
         tools::pane(frame, pane, app, &mut placed);
     } else if app.replacement_visible() {
@@ -158,6 +171,12 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
             "arrows move/edit   Enter choose   Esc back   Ctrl-C quit",
             HINT,
         )
+    } else if app.tasks_visible() {
+        if let Some(notice) = &app.tasks().notice {
+            Row::default().outside(&notice.cut(usize::from(hint.width)), ERROR)
+        } else {
+            Row::default().text(app.tasks_hint(), HINT)
+        }
     } else if app.tab() == Tab::Tools {
         if let Some(notice) = &app.tools().notice {
             Row::default().outside(&notice.cut(usize::from(hint.width)), ERROR)
@@ -198,7 +217,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
             Tab::Wallet => {
                 "Tab focus  j/k  Enter detail  / hash  a networks  c chain  r  ? actions"
             }
-            Tab::Receive => "V verify  Q QR hint  c chain  r refresh  q quit  ? actions",
+            Tab::Receive => "V verify  Q QR/address  c chain  r refresh  q quit  ? actions",
             Tab::Session => "u unlock  L lock all  r refresh  q quit  ? actions",
             _ => "1 keys  c chain  L lock all  q quit  ? actions",
         };

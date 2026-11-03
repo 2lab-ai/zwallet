@@ -1398,6 +1398,16 @@ pub async fn lookup_tx(p: &EvmProvider, net: &Net, hash: B256) -> Result<Map<Str
     );
     out.insert("valueRaw".into(), json!(value.map(|v| v.to_string())));
     out.insert("symbol".into(), json!(chain.symbol));
+    // A bounded digest lets task accounting compare an invoke without exposing arbitrary
+    // calldata. Neither this digest nor the RPC's values are a consensus proof.
+    let input_hash = tx
+        .as_ref()
+        .and_then(|t| t.get("input"))
+        .and_then(Value::as_str)
+        .filter(|s| s.len() <= 2 * (1 << 20) + 2)
+        .and_then(|s| alloy::hex::decode(s).ok())
+        .map(|b| format!("{:#x}", alloy::primitives::keccak256(b)));
+    out.insert("inputHash".into(), json!(input_hash));
     out.insert("explorerUrl".into(), json!(chain.explorer_tx_url(&shown)));
     if status == "mined" {
         out.insert("blockNumber".into(), json!(block));
@@ -1408,9 +1418,59 @@ pub async fn lookup_tx(p: &EvmProvider, net: &Net, hash: B256) -> Result<Map<Str
         out.insert("success".into(), json!(success));
     }
     if let Some(r) = &receipt {
+        // A report needs one coherent inclusion snapshot, not different sides of a reorg.
+        let consistent = tx.as_ref().is_some_and(|t| {
+            let block = |v: &Value| quantity(v.get("blockNumber").and_then(Value::as_str));
+            let block_hash = |v: &Value| {
+                v.get("blockHash")
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.parse::<B256>().ok())
+            };
+            let addr = |v: &Value, k: &str| {
+                v.get(k)
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.parse::<Address>().ok())
+            };
+            block(t).zip(block(r)).is_some_and(|(a, b)| a == b)
+                && block_hash(t)
+                    .zip(block_hash(r))
+                    .is_some_and(|(a, b)| a == b)
+                && addr(t, "from")
+                    .zip(addr(r, "from"))
+                    .is_some_and(|(a, b)| a == b)
+                && addr(t, "to")
+                    .zip(addr(r, "to"))
+                    .is_some_and(|(a, b)| a == b)
+        });
+        out.insert("receiptConsistent".into(), json!(consistent));
         let used =
             quantity(r.get("gasUsed").and_then(Value::as_str)).and_then(|g| u64::try_from(g).ok());
         out.insert("gasUsed".into(), json!(used));
+        let price = quantity(r.get("effectiveGasPrice").and_then(Value::as_str));
+        let execution_fee = used
+            .zip(price)
+            .and_then(|(gas, price)| price.checked_mul(U256::from(gas)));
+        let l1_fee = quantity(r.get("l1Fee").and_then(Value::as_str));
+        // OP fee components vary by fork/provider. Missing operatorFee is not evidence of
+        // zero: retain known components but withhold an all-in total until each is explicit.
+        let operator_fee = quantity(r.get("operatorFee").and_then(Value::as_str));
+        let total = match &chain.family {
+            crate::chains::Family::Evm(c) if c.op_stack => execution_fee
+                .zip(l1_fee)
+                .zip(operator_fee)
+                .and_then(|((a, b), c)| a.checked_add(b)?.checked_add(c)),
+            _ => execution_fee,
+        };
+        out.insert(
+            "executionFeeWei".into(),
+            json!(execution_fee.map(|v| v.to_string())),
+        );
+        out.insert("l1FeeWei".into(), json!(l1_fee.map(|v| v.to_string())));
+        out.insert(
+            "operatorFeeWei".into(),
+            json!(operator_fee.map(|v| v.to_string())),
+        );
+        out.insert("feeWei".into(), json!(total.map(|v| v.to_string())));
     }
     let hint = match (status, nonce) {
         ("mined", _) if success.is_none() => {

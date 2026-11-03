@@ -61,9 +61,10 @@ impl<B> FilteredBackend<B> {
 }
 
 /// Whether a cell's symbol may reach the terminal as it is.
-fn cell_ok(symbol: &str) -> bool {
-    let mut chars = symbol.chars();
-    matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && terminal_ok(c))
+fn cell_ok(cell: &Cell) -> bool {
+    let mut chars = cell.symbol().chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && (terminal_ok(c)
+        || (crate::tui::style::is_qr(cell.style()) && matches!(c, '█' | '▀' | '▄'))))
 }
 
 /// The columns ratatui's diff counts `cell` as covering (it skips all but the first): its own
@@ -87,7 +88,7 @@ impl<B: Backend> Backend for FilteredBackend<B> {
         let mut cells: Vec<(u16, u16, Cell)> = Vec::new();
         let width = self.width.load(Ordering::Relaxed);
         for (x, y, cell) in content {
-            if cell_ok(cell.symbol()) {
+            if cell_ok(cell) {
                 cells.push((x, y, cell.clone()));
                 continue;
             }
@@ -1159,6 +1160,40 @@ mod tests {
         }
     }
 
+    fn exact_second_panic_stderr(bytes: &[u8]) -> bool {
+        // Each writer's short pipe write is atomic, but either thread may win the order.
+        // The fixture's synchronization marker is allowed exactly once, never extra bytes.
+        let marker = b"second: panicking\n";
+        bytes == [marker.as_slice(), PANIC_OUTPUT].concat()
+            || bytes == [PANIC_OUTPUT, marker.as_slice()].concat()
+    }
+
+    #[test]
+    fn second_panic_stderr_rejects_every_unexpected_post_restore_byte() {
+        let marker = b"second: panicking\n";
+        for valid in [
+            [marker.as_slice(), PANIC_OUTPUT],
+            [PANIC_OUTPUT, marker.as_slice()],
+        ] {
+            let good = valid.concat();
+            assert!(exact_second_panic_stderr(&good));
+            for extra in [
+                b"x".as_slice(),
+                b"\x1b[2J",
+                b"\x07",
+                marker.as_slice(),
+                PANIC_OUTPUT,
+            ] {
+                // The old containment check passed these complete, poisoned streams.
+                let bad = [good.as_slice(), extra].concat();
+                assert!(bad.windows(PANIC_OUTPUT.len()).any(|w| w == PANIC_OUTPUT));
+                assert!(!exact_second_panic_stderr(&bad));
+            }
+        }
+        assert!(!exact_second_panic_stderr(marker));
+        assert!(!exact_second_panic_stderr(PANIC_OUTPUT));
+    }
+
     /// Runs [`panic_child`] in `mode` with its stdin on a pty, killing it after [`WAIT`] (and
     /// failing then), and asserts how it ended: exit 101 (in `stuck`, from the deadline's
     /// handler); canonical mode with echo back on the pty; the screen given back on stdout and
@@ -1184,12 +1219,28 @@ mod tests {
         if !stdout_full && !stuck {
             assert!(holds(out, LEAVE_ALTERNATE_SCREEN), "{mode}: {stdout}");
             assert!(holds(out, SHOW_CURSOR), "{mode}: {stdout}");
+            let restores: Vec<_> = out
+                .windows(LEAVE_ALTERNATE_SCREEN.len())
+                .enumerate()
+                .filter(|(_, w)| *w == LEAVE_ALTERNATE_SCREEN)
+                .collect();
+            assert_eq!(restores.len(), 1, "{mode}: {stdout}");
+            assert_eq!(
+                &out[restores[0].0 + LEAVE_ALTERNATE_SCREEN.len()..],
+                SHOW_CURSOR,
+                "only Show may follow the terminal restore: {mode}"
+            );
         }
         if !stderr_full && !stuck {
-            assert!(
-                stderr.contains(&format!("{PANIC_LINE}\n")),
-                "{mode}: {stderr}"
-            );
+            if mode == "two" {
+                assert!(exact_second_panic_stderr(err), "{mode}: {stderr}");
+            } else {
+                assert_eq!(
+                    err.as_slice(),
+                    PANIC_OUTPUT,
+                    "{mode}: stderr must be the one fixed line"
+                );
+            }
         }
         assert!(!stdout.contains("CONTINUED"), "{mode}: {stdout}");
         for text in [&stdout, &stderr] {

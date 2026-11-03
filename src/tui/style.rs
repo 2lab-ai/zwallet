@@ -17,5 +17,16 @@ pub const WARNING: Style = Style::new().fg(Color::Yellow);
 /// An error.
 pub const ERROR: Style = Style::new().fg(Color::Red);
 
+/// Only locally encoded, verified-address QR modules use this style.
+pub const QR: Style = Style::new().fg(Color::Black).bg(Color::White);
+
+/// Ratatui materializes reset colors in `Cell::style`; compare the fields we set.
+pub fn is_qr(style: Style) -> bool {
+    style.fg == Some(Color::Black)
+        && style.bg == Some(Color::White)
+        && style.add_modifier.is_empty()
+        && style.sub_modifier.is_empty()
+}
+
 /// Every style above.
-pub const ALL: [Style; 6] = [NORMAL, TITLE, SELECTED, HINT, WARNING, ERROR];
+pub const ALL: [Style; 7] = [NORMAL, TITLE, SELECTED, HINT, WARNING, ERROR, QR];

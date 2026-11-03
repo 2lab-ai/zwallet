@@ -1,0 +1,17 @@
+const fs = require('fs');
+const {Keypair, Transaction, SystemProgram, PublicKey} = require('@solana/web3.js');
+const {derivePath}=require('ed25519-hd-key');
+const {mnemonicToSeedSync}=require('bip39');
+const root = require('path').resolve(__dirname, '../../..');
+const text=fs.readFileSync(root+'/src/core/seed.rs','utf8');
+const phrase=text.match(/TEST_MNEMONIC: &str =\s*"([^"]+)"/)[1];
+const seed=mnemonicToSeedSync(phrase);
+const paths=["m/44'/501'/0'/0'","m/44'/501'/1'/0'"];
+const keys=paths.map(p=>Keypair.fromSeed(derivePath(p,seed.toString('hex')).key));
+const blockhash=new PublicKey(new Uint8Array(32).fill(9)).toBase58();
+const tx=new Transaction({feePayer:keys[0].publicKey,recentBlockhash:blockhash});
+tx.add(SystemProgram.transfer({fromPubkey:keys[0].publicKey,toPubkey:keys[1].publicKey,lamports:1000000}));
+tx.sign(keys[0]);
+const data={source:'@solana/web3.js 1.98.4 + ed25519-hd-key 1.3.0 + bip39 3.1.0; 2026-11-02; existing public TEST_MNEMONIC fixture; no network',paths,addresses:keys.map(k=>k.publicKey.toBase58()),blockhash,lamports:1000000,messageHex:tx.serializeMessage().toString('hex'),rawBase64:tx.serialize().toString('base64'),signatureBase58:require('bs58').encode(tx.signature)};
+fs.writeFileSync(root+'/tests/fixtures/solana/native-transfer.json',JSON.stringify(data,null,2)+'\n');
+console.log('Wrote independent SDK public vector. Message bytes='+tx.serializeMessage().length+'; transaction bytes='+tx.serialize().length);

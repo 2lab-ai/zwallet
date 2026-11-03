@@ -467,6 +467,7 @@ fn t23_t25_each_menu_action_has_a_real_form_and_removal_takes_only_checked_selec
         ActionId::NativeCap,
         ActionId::TokenCap,
         ActionId::CalldataCap,
+        ActionId::DuplicateWindow,
         ActionId::WhitelistContract,
         ActionId::MessagePolicy,
         ActionId::Reset,
@@ -1023,4 +1024,20 @@ fn a_tab_round_trip_on_the_summary_keeps_the_prepared_plan_applicable() {
     let work = key(&mut app, Key::Enter);
     assert!(matches!(app.whitelist.stage, Stage::List));
     assert!(work.iter().any(|e| matches!(e, Effect::ReadWhitelist(..))));
+}
+
+#[test]
+fn duplicate_window_form_dispatches_the_global_advisory_setting() {
+    for duration in ["30m", "default"] {
+        let mut app = new_app();
+        app.whitelist_action(ActionId::DuplicateWindow).unwrap();
+        field(&mut app, duration);
+        let effects = field(&mut app, "");
+        let [Effect::PrepareWhitelist(request)] = &effects[..] else {
+            panic!("{effects:?}")
+        };
+        assert_eq!(request.draft, Draft::DuplicateWindow(duration.into()));
+        assert!(request.draft.change().is_ok());
+        frame(&app, &format!("duplicate-window-{duration}"));
+    }
 }

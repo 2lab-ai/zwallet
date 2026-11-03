@@ -73,6 +73,7 @@ pub enum Purpose {
     Message,
     Token,
     Fee,
+    Task,
     Confirm,
     SignConfirm,
 }
@@ -306,7 +307,7 @@ impl App {
         };
         vec![Effect::Tools(id)]
     }
-    fn tools_reset(&mut self) {
+    pub(super) fn tools_reset(&mut self) {
         let counter = self.tools.counter;
         let retained = std::mem::take(&mut self.tools.retained);
         self.tools = Tools::default();
@@ -373,6 +374,7 @@ impl App {
         Ok((key, checked))
     }
     pub(super) fn start_tool(&mut self, tool: Tool) -> Vec<Effect> {
+        self.close_tasks();
         self.nav.tab = Tab::Tools;
         self.nav.popup = None;
         self.tools_reset();
@@ -554,7 +556,7 @@ impl App {
             other => Break(other),
         }
     }
-    fn tools_key(&mut self, key: Key) -> Option<Vec<Effect>> {
+    pub(super) fn tools_key(&mut self, key: Key) -> Option<Vec<Effect>> {
         if self.tools.field.is_some() {
             return Some(self.tools_input(super::navigation::input(key)));
         }
@@ -577,10 +579,12 @@ impl App {
         match self.tools.stage {
             Stage::Menu => match key {
                 Key::Up => self.tools.selected = self.tools.selected.saturating_sub(1),
-                Key::Down => {
-                    self.tools.selected = (self.tools.selected + 1).min(Tool::ALL.len() - 1)
+                Key::Down => self.tools.selected = (self.tools.selected + 1).min(Tool::ALL.len()),
+                Key::Enter if self.tools.selected == Tool::ALL.len() => {
+                    return Some(self.start_tasks(ActionId::TaskList));
                 }
                 Key::Enter => return Some(self.start_tool(Tool::ALL[self.tools.selected])),
+                Key::Char('a') => return Some(self.start_tasks(ActionId::TaskList)),
                 Key::Char('C') => return Some(self.start_tool(Tool::Call)),
                 Key::Char('i') => return Some(self.start_tool(Tool::Invoke)),
                 Key::Char('d') => return Some(self.start_tool(Tool::RawInvoke)),
@@ -626,6 +630,10 @@ impl App {
                 _ => {}
             },
             Stage::InvokeReview => match key {
+                Key::Char('t') => {
+                    let value = self.tools.options.task_id.clone().unwrap_or_default();
+                    self.tool_field(Purpose::Task, Kind::OptionalTaskId, &value);
+                }
                 Key::Down | Key::Char('j') => {
                     self.tools.review_scroll = self.tools.review_scroll.saturating_add(1);
                 }
@@ -742,6 +750,10 @@ impl App {
     fn submit_tool_field(&mut self, value: String) -> Vec<Effect> {
         self.tools.notice = None;
         match self.tools.purpose {
+            Purpose::Task => {
+                self.tools.options.task_id = (!value.is_empty()).then_some(value);
+                return self.prepare_invoke();
+            }
             Purpose::Address => {
                 if let Err(e) = crate::chains::evm::parse_address(&value) {
                     self.tools.notice = Some(Outside::error(&e));
@@ -980,7 +992,7 @@ impl App {
     pub fn tools_hint(&self) -> &'static str {
         match self.tools.stage {
             Stage::Menu => {
-                "arrows pick  Enter open  C call  i invoke  d raw  m message  t token  ? actions"
+                "Enter open  C call  i invoke  d raw  m message  t token  a tasks  ? actions"
             }
             Stage::Field | Stage::Confirm | Stage::MessageConfirm => {
                 "Enter continue  arrows edit  Esc cancel  Ctrl-C quit"
@@ -988,7 +1000,7 @@ impl App {
             Stage::Contracts => "arrows choose checked contract  Enter continue  Esc back",
             Stage::MessageReview => "Enter confirm  e edit (drops review)  Esc cancel",
             Stage::InvokeReview => {
-                "Enter confirm  j/k scroll  e edit  p pending  d duplicate  g fee  Esc back"
+                "Enter confirm  j/k scroll  e edit  p pending  d repeat  g fee  t task  Esc back"
             }
             Stage::Loading => "reading...  Esc cancel",
             Stage::Signing => "signing reviewed bytes...",

@@ -25,13 +25,15 @@ src/
 **Family trait**: derive address from seed; native balance; token balance; build an unsigned
 transfer; sign (in the daemon); broadcast; sign a message. `call`/`invoke` are an EVM capability.
 A family without a capability returns `CAPABILITY_UNSUPPORTED`. Registry rows carry
-`family: Evm` plus EVM config (chainId, default RPC, explorer). Later rows will carry `Solana` or
-`Ton` with their own config. `Tron` (default RPC, explorer, genesis block id) implements the Tron family:
+`family: Evm` plus EVM config (chainId, default RPC, explorer). `Solana` and
+`Ton` carry their own RPC/network config; native transfer support is specified in [11-multichain.md](11-multichain.md). `Tron` (default RPC, explorer, genesis block id) implements the Tron family:
 [`05-tron.md`](05-tron.md).
 
-**Extension points (not implemented)** ![WIP](https://img.shields.io/badge/status-WIP-yellow): Solana = ed25519 SLIP-0010 `m/44'/501'/0'/0'`.
-TON = ed25519 `m/44'/607'/0'` plus a wallet-contract address (v4R2/v5R1). Both derive from the same
-seed, so the wallet file and the daemon protocol do not change.
+**Ed25519 families:** Solana = SLIP-0010 `m/44'/501'/i'/0'`.
+TON = SLIP-0010 `m/44'/607'/i'` plus V4R2, workchain 0, subwallet 698983191.
+Both derive from the same BIP39 seed; old EVM/Tron addresses, sealed wallet format and
+daemon request protocol are preserved. Tagged exact-family whitelist identities extend
+the existing canonical format; older binaries reject the new tags.
 
 ## Custody
 
@@ -42,7 +44,7 @@ seed, so the wallet file and the daemon protocol do not change.
   `keys: [{ name, index, createdAt, addresses: { <chain>: addr } }]` and `active`.
 - **Keys**: a key = an index `i` under the master, assigned in creation order and never reused.
   Each family maps `i` to its own path. EVM uses `m/44'/60'/0'/0/i` (the standard BIP44 Ethereum account order).
-  Solana will use `m/44'/501'/i'/0'` and TON `m/44'/607'/i'`. Tron uses `m/44'/195'/0'/0/i`
+  Solana uses `m/44'/501'/i'/0'` and TON `m/44'/607'/i'`. Tron uses `m/44'/195'/0'/0/i`
   ([`05-tron.md`](05-tron.md) §Derivation). Every command acts on the active key
   unless `--key <name>` is given. `create <name>` on an existing master derives the next index
   through the unlocked daemon, or through a one-off password prompt.
@@ -298,7 +300,9 @@ the same payment.
     the first 64, plus `pendingRange` and `pendingCount`, so a bogus count is never enumerated)
     and their journal entries. `--allow-pending` overrides.
   - **Duplicate guard:** refused if the journal has the same chain, kind, `to` and **base-unit
-    amount** (and token contract) from the last 10 minutes. It never compares the display string,
+    amount** (and token contract), plus exact encoded calldata hash for invokes, within the
+    signed advisory window (default 10 minutes). Only the last 1 MiB of local journal is read;
+    legacy or malformed calldata hashes match conservatively. It never compares the display string,
     so a failed `symbol()` call cannot defeat it. This catches "my first attempt was killed,
     re-run" even when that attempt has already been mined. `--allow-duplicate` overrides.
 - **Lookup:** `zwallet tx --chain <c> <txHash>` reports mined / pending / not found from the chain,

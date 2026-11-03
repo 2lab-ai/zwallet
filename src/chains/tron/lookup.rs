@@ -165,6 +165,8 @@ pub(super) async fn observe(
         out.insert("energyUsed".into(), json!(energy));
         out.insert("netUsage".into(), json!(bandwidth));
         out.insert("feeSun".into(), json!(fee.to_string()));
+        // Protobuf defaults can omit zero. Task accounting requires explicit cost evidence.
+        out.insert("feeKnown".into(), json!(info.contains_key("fee")));
         if success != Some(true) {
             let why = status
                 .map(|s| c.shown(s))

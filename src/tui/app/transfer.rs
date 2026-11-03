@@ -1,6 +1,7 @@
 //! The transfer flow holds its reviewed intent until a separate nickname confirmation.
 //! Workers own requests; UI effects carry only a unique id, so cloning an effect cannot send twice.
 use super::*;
+pub mod native;
 pub mod tron;
 use crate::chains::{self, ChainFamily, evm::Evm};
 use crate::core::{amount::format_units, error::ErrorCode, whitelist};
@@ -10,6 +11,7 @@ use crate::wallet::{
     self, CheckedPayee, SendTransferOutcome, TransferInput, TransferOptions, TransferReview,
 };
 use alloy::primitives::U256;
+use native::{NativeJob, NativeMsg, NativeTransfer};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,6 +37,7 @@ pub enum Stage {
     Review,
     Confirm,
     Fee,
+    Task,
     Sending,
     Status,
     Wait,
@@ -58,12 +61,15 @@ pub struct SendStatus {
     pub state: ReceiptState,
     pub wait: Duration,
     pub note: Option<Outside>,
+    /// Submission accounting warnings survive subsequent chain receipt updates.
+    pub task_warning: Option<Outside>,
     pub uncertain: bool,
     pub net: Net,
 }
 #[derive(Debug)]
 pub enum TransferMsg {
     Tron(TronMsg),
+    Native(NativeMsg),
     Assets(Result<Vec<Asset>>),
     Payees(Result<Vec<CheckedPayee>>),
     Review(Result<Box<TransferReview>>),
@@ -78,6 +84,7 @@ pub enum TransferMsg {
 
 pub struct Transfer {
     pub tron: TronTransfer,
+    pub native: NativeTransfer,
     pub stage: Stage,
     pub assets: Vec<Asset>,
     pub payees: Vec<CheckedPayee>,
@@ -104,6 +111,7 @@ impl Default for Transfer {
     fn default() -> Self {
         Self {
             tron: TronTransfer::default(),
+            native: NativeTransfer::default(),
             stage: Stage::Inactive,
             assets: Vec::new(),
             payees: Vec::new(),
@@ -130,6 +138,7 @@ impl Default for Transfer {
 /// Owned work extracted once by the event loop. `run` is also the mock integration-test seam.
 pub enum TransferJob {
     Tron(TronJob),
+    Native(NativeJob),
     Assets {
         net: Net,
         from: String,
@@ -165,6 +174,7 @@ impl TransferJob {
     pub async fn run(self, id: u64, home: &Path, tx: &UnboundedSender<Msg>) {
         let event = match self {
             Self::Tron(job) => job.run(id, home, tx).await,
+            Self::Native(job) => job.run(id, home, tx).await,
             Self::Assets { net, from, checked } => {
                 let result = async {
                     unchanged(home, &checked)?;
@@ -196,6 +206,13 @@ impl TransferJob {
                         unchanged(home, &checked)
                             .map(|()| wallet::tron_send::tron_transfer_payees(&checked)),
                     ))
+                } else if matches!(
+                    net.chain.family,
+                    chains::Family::Solana(_) | chains::Family::Ton(_)
+                ) {
+                    TransferMsg::Native(NativeMsg::Payees(unchanged(home, &checked).map(|()| {
+                        wallet::ed25519_send::native_transfer_payees(&checked, net.chain)
+                    })))
                 } else {
                     TransferMsg::Payees(
                         unchanged(home, &checked)
@@ -257,6 +274,16 @@ impl TransferJob {
                         match net.chain.family {
                             chains::Family::Evm(_) => {
                                 Evm.wait_for_receipt(&net, &hash, timeout).await
+                            }
+                            chains::Family::Solana(_) => {
+                                chains::solana::Solana
+                                    .wait_for_receipt(&net, &hash, timeout)
+                                    .await
+                            }
+                            chains::Family::Ton(_) => {
+                                chains::ton::Ton
+                                    .wait_for_receipt(&net, &hash, timeout)
+                                    .await
                             }
                             chains::Family::Tron(_) => {
                                 crate::chains::tron::lookup::wait(&net, &hash, expiration, timeout)
@@ -382,7 +409,7 @@ impl App {
     /// until it is mined, its status keeps the second-payment warning and offers nothing that
     /// reads as a resend (TR25). EVM's pending status has `s`/`x`/`R` and offers `n` throughout.
     pub(super) fn new_payment_offered(&self) -> bool {
-        !(self.on_tron() && self.transfer.stage == Stage::Status)
+        !((self.on_tron() || self.on_native_ed25519()) && self.transfer.stage == Stage::Status)
             || self.transfer.status.as_ref().is_some_and(|s| {
                 matches!(
                     s.state,
@@ -444,6 +471,7 @@ impl App {
         self.transfer.context = Some(context);
         self.transfer.wanted = None;
         self.transfer.tron = TronTransfer::default();
+        self.transfer.native = NativeTransfer::default();
         self.transfer.review = None;
         self.transfer.draft = None;
         self.transfer.field = None;
@@ -480,6 +508,7 @@ impl App {
             self.checked_list = None;
             self.transfer.payees.clear();
             self.transfer.tron = TronTransfer::default();
+            self.transfer.native = NativeTransfer::default();
             self.transfer.review = None;
             self.transfer.draft = None;
             self.list_reason = Some(Outside::detail(
@@ -493,6 +522,9 @@ impl App {
     fn review_draft(&mut self) -> Vec<Effect> {
         if self.on_tron() {
             return self.review_tron_draft();
+        }
+        if self.on_native_ed25519() {
+            return self.review_native_draft();
         }
         let (_, _, _, checked) = match self.transfer_ready() {
             Ok(v) => v,
@@ -539,11 +571,14 @@ impl App {
         }
         let send_finished = matches!(
             &event,
-            TransferMsg::Sent(_) | TransferMsg::Tron(TronMsg::Changed(_))
+            TransferMsg::Sent(_)
+                | TransferMsg::Tron(TronMsg::Changed(_))
+                | TransferMsg::Native(NativeMsg::Changed(_))
         );
         let mut work =
             match event {
                 TransferMsg::Tron(event) => self.tron_transfer_message(event),
+                TransferMsg::Native(event) => self.native_transfer_message(event),
                 TransferMsg::Assets(Ok(rows)) => {
                     self.transfer.active = None;
                     self.transfer.assets = rows;
@@ -595,6 +630,7 @@ impl App {
                         state: ReceiptState::Pending,
                         wait: SEND_WAIT,
                         note: None,
+                        task_warning: None,
                         uncertain: false,
                         net: self.net().clone(),
                     });
@@ -619,7 +655,24 @@ impl App {
                             ));
                             Vec::new()
                         }
-                        Ok(SendTransferOutcome::Sent(_)) => {
+                        Ok(SendTransferOutcome::Sent(output)) => {
+                            if let Some(status) = &mut self.transfer.status {
+                                if matches!(
+                                    status.net.chain.family,
+                                    chains::Family::Solana(_) | chains::Family::Ton(_)
+                                ) {
+                                    status.note = output
+                                        .fields
+                                        .get("warning")
+                                        .and_then(Value::as_str)
+                                        .map(Outside::warning);
+                                }
+                                status.task_warning = output
+                                    .fields
+                                    .get("taskWarning")
+                                    .and_then(Value::as_str)
+                                    .map(Outside::warning);
+                            }
                             self.transfer.stage = Stage::Status;
                             self.start_receipt_wait(SEND_WAIT)
                         }
@@ -724,7 +777,7 @@ impl App {
         let key = match action {
             ActionId::Transfer | ActionId::TokenTransfer | ActionId::DryRun => {
                 self.nav.tab = Tab::Send;
-                if self.transfer.stage == Stage::Status {
+                if self.transfer.stage == Stage::Status && self.new_payment_offered() {
                     self.transfer.context = None;
                 }
                 return Some(self.show_transfer());
@@ -756,8 +809,38 @@ impl App {
             return Some(self.transfer_input(super::navigation::input(key)));
         }
         self.transfer.notice = None;
+        if matches!(self.transfer.stage, Stage::Review | Stage::Failed) && key == Key::Char('t') {
+            if self.on_native_ed25519() {
+                self.transfer.notice = Some(Outside::detail(
+                    "Task attribution is not supported on this native-only family.",
+                ));
+                return Some(vec![]);
+            }
+            let value = if self.on_tron() {
+                self.transfer
+                    .tron
+                    .draft
+                    .as_ref()
+                    .and_then(|d| d.task_id.as_deref())
+            } else {
+                self.transfer
+                    .draft
+                    .as_ref()
+                    .and_then(|d| d.options.task_id.as_deref())
+            }
+            .unwrap_or("");
+            self.transfer.field =
+                Some(Field::with_value(Kind::OptionalTaskId, value).expect("validated task ID"));
+            self.transfer.stage = Stage::Task;
+            return Some(vec![]);
+        }
         if self.on_tron()
             && let Some(work) = self.tron_transfer_key(key)
+        {
+            return Some(work);
+        }
+        if self.on_native_ed25519()
+            && let Some(work) = self.native_transfer_key(key)
         {
             return Some(work);
         }
@@ -772,6 +855,8 @@ impl App {
                 } else {
                     if self.on_tron() {
                         self.transfer.tron.payees.len()
+                    } else if self.on_native_ed25519() {
+                        self.transfer.native.payees.len()
                     } else {
                         self.transfer.payees.len()
                     }
@@ -877,8 +962,11 @@ impl App {
         Some(work)
     }
     fn transfer_input(&mut self, input: Input<'_>) -> Vec<Effect> {
-        if self.on_tron() && self.transfer.stage != Stage::Wait {
+        if self.on_tron() && !matches!(self.transfer.stage, Stage::Wait | Stage::Task) {
             return self.tron_transfer_input(input);
+        }
+        if self.on_native_ed25519() && self.transfer.stage != Stage::Wait {
+            return self.native_transfer_input(input);
         }
         let Some(mut field) = self.transfer.field.take() else {
             return Vec::new();
@@ -886,6 +974,19 @@ impl App {
         self.transfer.notice = None;
         match field.edit(input) {
             Edit::Submit => match self.transfer.stage {
+                Stage::Task => {
+                    let task_id = (!field.value().is_empty()).then(|| field.value().to_string());
+                    if self.on_tron() {
+                        if let Some(draft) = &mut self.transfer.tron.draft {
+                            draft.task_id = task_id;
+                        }
+                        return self.review_tron_draft();
+                    }
+                    if let Some(draft) = &mut self.transfer.draft {
+                        draft.options.task_id = task_id;
+                    }
+                    return self.review_draft();
+                }
                 Stage::Amount => {
                     if let Some(draft) = &mut self.transfer.draft {
                         draft.amount = field.value().into();
@@ -957,20 +1058,29 @@ impl App {
     }
     pub fn transfer_hint(&self) -> &'static str {
         match self.transfer.stage {
-            Stage::Amount | Stage::Fee | Stage::Confirm | Stage::Wait => {
+            Stage::Amount | Stage::Fee | Stage::Task | Stage::Confirm | Stage::Wait => {
                 "type value  Enter accept  Esc back  Ctrl-C quit"
             }
             Stage::Loading => "reading...  q quit  ? actions",
             Stage::Sending => "sending... q quits when done; do not resend  ? actions",
-            Stage::Review if self.on_tron() => "Enter confirm  d allow repeat  Esc edit  ? actions",
-            Stage::Review => "Enter confirm  p allow pending  d allow repeat  g fee  ? actions",
+            Stage::Review if self.on_native_ed25519() => {
+                "Enter confirm  d allow repeat  r refresh  Esc edit  ? actions"
+            }
+            Stage::Review if self.on_tron() => {
+                "Enter confirm  d allow repeat  t task  Esc edit  ? actions"
+            }
+            Stage::Review => "Enter confirm  p pending  d repeat  g fee  t task  ? actions",
             Stage::Payees | Stage::Assets => {
                 "arrows choose  Enter select  Esc back  q quit  ? actions"
             }
-            Stage::Status if self.on_tron() && self.new_payment_offered() => {
+            Stage::Status
+                if (self.on_tron() || self.on_native_ed25519()) && self.new_payment_offered() =>
+            {
                 "w wait longer  n new payment  2 wallet  q quit  ? actions"
             }
-            Stage::Status if self.on_tron() => "w wait longer  2 wallet  q quit  ? actions",
+            Stage::Status if self.on_tron() || self.on_native_ed25519() => {
+                "w wait longer  2 wallet  q quit  ? actions"
+            }
             Stage::Status => "w wait longer  n new payment  2 wallet  q quit  ? actions",
             _ => "V verify  u warm-up  r retry  q quit  ? actions",
         }

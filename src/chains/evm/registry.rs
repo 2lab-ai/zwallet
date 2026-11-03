@@ -368,7 +368,7 @@ mod tests {
         for c in CHAINS {
             assert!((rules.chain_known)(c.key), "{}", c.key);
         }
-        for bad in ["Base", " base", "*", "solana", ""] {
+        for bad in ["Base", " base", "*", "bitcoin", ""] {
             assert!(!(rules.chain_known)(bad), "{bad:?}");
         }
         assert!((rules.is_registry_token)(
@@ -412,6 +412,8 @@ mod tests {
             ("avalanche", "0.05"),
             ("sepolia", "0.01"),
             ("tron", "30"),
+            ("solana", "0.0001"),
+            ("ton", "0.1"),
         ];
         assert_eq!(DEFAULT_FEE_CAPS_WEI.len(), CHAINS.len());
         for c in CHAINS {

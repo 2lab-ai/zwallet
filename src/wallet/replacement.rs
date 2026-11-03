@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
 pub const CANCEL_RACE: &str = "a cancel replaces nonce N only if it is mined first; if the original is mined first, the payment stands and the cancel fails";
-pub const RETRY_WARNING: &str = "the node does not know this hash; that is no proof the send failed. A new send is a new payment at a new nonce: it can pay twice, also without d (the repeat check looks back 10 minutes, in a journal any process of this user can edit). Look the hash up first.";
+pub const RETRY_WARNING: &str = "the node does not know this hash; that is no proof the send failed. A new send uses a new nonce: it can pay twice, also without d. The advisory check uses a configured window (default 10 minutes) and the last 1 MiB of editable local journal. Look the hash up first.";
 const DISAGREE: &str = "the journal and the node disagree about the original transaction; look it up with zwallet tx; nothing was signed";
 const TOKEN_OR_INVOKE: &str = "a token transfer and an invoke of that token have the same bytes, and only the review of the session that sent it can tell them apart: speed-up and retry are refused here, cancel is offered; the CLI's transfer --token with --nonce and --replace states the intent; nothing was signed";
 
@@ -63,6 +63,7 @@ impl Kind {
 /// transaction matched to a journal row. It holds no password, secret key or raw signed bytes.
 #[derive(Clone, Debug)]
 pub struct OriginalIntent {
+    task_id: Option<String>,
     chain: &'static Chain,
     key_name: String,
     index: u32,
@@ -85,6 +86,7 @@ impl OriginalIntent {
             }
         };
         Ok(Self {
+            task_id: review.options().task_id.clone(),
             chain: review.chain(),
             key_name: review.key_name().into(),
             index: review.index(),
@@ -98,6 +100,7 @@ impl OriginalIntent {
     /// Only the invoke review can construct this retained provenance-bearing value.
     pub fn from_invoke(review: &super::tools::RetainedInvoke) -> Result<Self> {
         Ok(Self {
+            task_id: review.task_id().map(str::to_string),
             chain: review.chain(),
             key_name: review.key_name().to_string(),
             index: review.index(),
@@ -106,6 +109,17 @@ impl OriginalIntent {
             kind: Kind::Invoke,
             node_hash: None,
         })
+    }
+    pub fn task_id(&self) -> Option<&str> {
+        self.task_id.as_deref()
+    }
+    /// Explicit advisory attribution; it never changes authenticated transaction bytes.
+    pub fn with_task_id(mut self, id: Option<String>) -> Result<Self> {
+        if let Some(id) = &id {
+            super::tasks::validate_id(id)?;
+        }
+        self.task_id = id;
+        Ok(self)
     }
     pub fn chain(&self) -> &'static Chain {
         self.chain
@@ -221,6 +235,7 @@ pub async fn replaced_intent(
         ));
     }
     Ok(OriginalIntent {
+        task_id: None,
         chain: net.chain,
         key_name: key.name.clone(),
         index: key.index,
@@ -329,7 +344,8 @@ impl ReplacementReview {
         self.checked.list.policy.max_fee_wei(self.net.chain.key)
     }
     fn same_intent(&self, next: &Self) -> bool {
-        self.hash == next.hash
+        self.original.task_id == next.original.task_id
+            && self.hash == next.hash
             && self.action == next.action
             && self.confirm == next.confirm
             && self.original.from == next.original.from
@@ -489,6 +505,12 @@ fn display_fields(
         "to": if action == Action::Cancel { original.from() } else { destination(original).to_checksum(None) },
         "toNickname": confirm, "replacementAction": match action { Action::SpeedUp => "speed-up", Action::Cancel => "cancel", Action::Retry => "retry" },
         "data": format!("0x{}", alloy::hex::encode(&request.input))}).as_object().unwrap().clone();
+    if let Some(task) = original.task_id() {
+        out.insert("taskId".into(), task.into());
+    }
+    if let Some(hash) = request.replace {
+        out.insert("replaces".into(), format!("{hash:#x}").into());
+    }
     if action == Action::Cancel {
         out.extend(
             json!({"amount":"0","amountRaw":"0","symbol":original.chain.symbol,"race":CANCEL_RACE})
@@ -528,6 +550,9 @@ pub async fn review_replacement(
     options: Options,
 ) -> Result<ReplacementReview> {
     evm_chain(net)?;
+    if let Some(task) = original.task_id() {
+        super::tasks::validate_binding_async(home, task, net.chain, &original.from()).await?;
+    }
     if original.chain.key != net.chain.key
         || original.decoded.chain_id() != evm::config(net.chain)?.chain_id
     {
@@ -714,6 +739,7 @@ pub async fn send_replacement(
             allow_duplicate: false,
             wait: false,
             wait_timeout: None,
+            duplicate_window_secs: Some(next.checked.list.policy.duplicate_window_secs()),
         },
         fields,
         Some(lock),

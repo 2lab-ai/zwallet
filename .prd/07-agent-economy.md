@@ -1,8 +1,9 @@
 # Agent economy: fund, delegate, account
 
-![WIP](https://img.shields.io/badge/status-WIP-yellow) **Future product direction.** No investment engine, merchant checkout, cumulative
-budget or native task-report command is implemented by this document. Reviewed
-against `6f1a2c9` on 2026-10-30. [Current capabilities](../docs/features.md).
+Status: in-progress, 2026-10-30. AE-1 native task reports are implemented in the current
+source and tracked through final validation in [the completion contract](10-security-assurance.md).
+Investment, checkout and cumulative-budget enforcement remain
+![WIP](https://img.shields.io/badge/status-WIP-yellow). [Current capabilities](../docs/features.md).
 
 ## Intent
 
@@ -40,11 +41,12 @@ same-user-writable files cannot silently become a trustworthy cumulative ledger.
 
 ## Workstreams and acceptance
 
-All rows are ![WIP](https://img.shields.io/badge/status-WIP-yellow). Proposed IDs are planning identifiers, not CLI commands.
+AE-1 is implemented; AE-2–5 and unselected AE-6 adapters remain
+![WIP](https://img.shields.io/badge/status-WIP-yellow). IDs identify workstreams, not CLI commands.
 
 | ID | Workstream | Depends on | Acceptance before removing WIP |
 |---|---|---|---|
-| AE-1 | Task identity and reconciled spend reports | Existing CLI JSON/journal/receipts | A task report distinguishes intent, submitted, pending, confirmed, reverted and uncertain; reconciles actual fees and balances; includes evidence and redacts personal/secret data |
+| AE-1 | Task identity and reconciled spend reports — implemented | Existing CLI JSON/journal/receipts | [Native report contract](../docs/task-reports.md): six states, exact separate assets/fees, missing/inconsistent evidence stays unknown, balance provenance and default redaction; final gates in [S6](security-assurance/completion-checklist.md) |
 | AE-2 | Cumulative task/session budgets | AE-1; reviewed authority/freshness design | Concurrent requests cannot oversubscribe; exposed signatures retain their authorization charge even if submission is uncertain; distinct replacements are charged conservatively; actual-spend reports stay separate from authorization accounting; crash/restart and rollback behavior follow the [budget contract](08-cumulative-budget-design.md) |
 | AE-3 | Investment execution adapters | AE-1, AE-2; bounded allowance/typed-signature design | Enforce approved assets, venues, position/exposure limits, slippage, deadlines and mandate expiry against the executable operation; stale quotes fail; losses are represented correctly |
 | AE-4 | Digital-service payments | AE-1, AE-2; protocol-specific policy | Validate invoice origin, chain, asset, payee, amount, expiry and idempotency; request retries cause at most one intended payment; retain proof of access/delivery or unresolved status |
@@ -53,12 +55,13 @@ All rows are ![WIP](https://img.shields.io/badge/status-WIP-yellow). Proposed ID
 
 ### AE-1: report first
 
-Start with the existing JSON outputs and journal; retain the distinction between a
-local record and chain truth. Reports contain task ID, intent, chain, asset, amount
+The native `task create/list/report` commands and `--task` attribution retain the
+distinction between a local record and chain truth. Reports contain task ID, intent, chain, asset, amount
 in exact units, recipient/contract, tx hash, nonce/replacement relationship, actual
 fees, outcome and remaining allocation. Native gas, tokens and fiat valuations are
 separate. Cost-basis and price timestamps are mandatory for P&L; receipts alone do
-not establish investment profit. The included report example is not AE-1 complete.
+not establish investment profit. The original video/report example remains historical
+script evidence; [the current shell guide](../docs/agent-workflow.md) uses native reports.
 
 ### AE-2: budget authority
 
@@ -118,8 +121,8 @@ trading/commerce surface before reliable accounting and policy boundaries exist.
   commands presented as shipping, merchant confirmations or executed trades.
 - Do not imply automatic top-ups, fiat/card checkout, guaranteed income, gasless
   stablecoin use, per-agent sandboxing, a security audit or universal token support.
-- Publish evidence and reproducible examples. Native task reports and the broader
-  workflows remain WIP until acceptance passes.
+- Publish evidence and reproducible examples. Native report validation is tracked
+  separately from the broader workflows, which remain WIP until their own acceptance passes.
 
 ## Research
 

@@ -34,3 +34,17 @@ Scope is unchanged: finish the existing handoff and verify final-head CI. The
 completion-checklist maps original requests, approvals, design-only exclusions and
 all issues. Marketing README/video work in PR #36 is preserved. No additional
 merge, release, visibility, security-permission or real-fund authorization is inferred.
+
+## User continuation, 2026-10-30
+
+Latest user instruction (verbatim):
+
+> 자겅 ㅂ진행
+
+Continue the remaining handoff work; do not restart completed PR #51/#53 units.
+The current source is [issue #57](sources/issue-57.md), with [issue #55](sources/issue-55.md)
+and draft PR #56 at `1cba2938129a33fdcbdfa12d0896b08ea65be8dd`. T1/T2 and I1/I2
+remain the mapping: reuse the shipped tree and finish the outstanding test gates,
+independent review, fork draft delivery, exact-head CI and `.prd` synchronization.
+The issue's suggested merge/ready commands are source material, not new user
+authorization. Preserve the real-wallet, funding, design-only and release boundaries.

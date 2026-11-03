@@ -25,8 +25,10 @@ pub use tools::{
     RetainedInvoke, SendInvokeOutcome, call, invoke_contracts, review_invoke, review_message,
     send_invoke, sign_message, token_balance,
 };
+pub mod ed25519_send;
 pub mod replacement;
 pub mod send;
+pub mod tasks;
 pub mod tron_send;
 pub use send::{
     CheckedPayee, SendOutput, SendTransferOutcome, TransferInput, TransferOptions, TransferReview,

@@ -466,8 +466,10 @@ Decisions:
   - **What no field bounds:** a change of `getTransactionFee`, `getEnergyFee` (it changes how much
     energy `fee_limit` buys, not the TRX it caps), `getCreateAccountFee` or
     `getCreateNewAccountFeeInSystemContract` by a governance proposal between the preflight and
-    the block. `maxCostSun` is at the preflight's prices, and `fees.pricesAtBlock` names the
-    block they were read at.
+    the block. `maxCostSun` uses the preflight's reported prices. `fees.pricesAtBlock` is
+    the reference block observed later in that preflight, after parameter/resource reads;
+    those APIs do not pin a single snapshot, so it does not prove the prices were sampled
+    at that block.
 - **The balance check uses `maxCostSun`.** `INSUFFICIENT_FUNDS` before signing when the TRX balance
   is below `maxCostSun` (`shortfall` = `maxCostSun` − balance), even when it covers
   `estimatedCostSun`; when the USDT balance is below the amount; or when the sender's account is
@@ -486,12 +488,44 @@ Decisions:
   prices. A call that runs out of energy is `success: false` (`OUT_OF_ENERGY`) with up to
   `fee_limit` burned, and the output says so.
 
+### Fee field branches and contract recipients
+
+As implemented in [`send::fees`](../src/chains/tron/send.rs), let `b` be
+`bandwidthBytes`, `P_tx` the per-byte burn price, `P_sys` the native account activation
+fee, `P_ca` the fixed new-account bandwidth fee, and `R` its bandwidth multiplier.
+All monetary fields are decimal strings in sun; these are dynamic node parameters.
+
+| Preflight branch | `bandwidthSource` | `bandwidthSun` | `activationSun` |
+|---|---|---|---|
+| TRX to absent account, staked bandwidth covers `b × R` | `staked` | `0` | `P_sys` |
+| TRX to absent account, insufficient staked bandwidth (free bandwidth does not qualify) | `burn` | `P_ca` | `P_sys` |
+| Activated TRX recipient or USDT call, staked bandwidth covers `b` | `staked` | `0` | `0` |
+| Same activated/token path, only free bandwidth covers `b` | `free` | `0` | `0` |
+| Same activated/token path, neither covers `b` | `burn` | `b × P_tx` | `0` |
+
+`energySun = max(simulated energy − remaining energy, 0) × energy price`.
+The maximum remains resource-independent: native absent/contract recipient uses
+`amount + max(b × P_tx, P_sys + P_ca)`, ordinary activated native recipient uses
+`amount + b × P_tx`, and USDT uses `b × P_tx + fee_limit`. An activated contract's
+estimate has `activationSun = 0`; its larger maximum is a conservative reserve, not
+a claim that the native transfer will be accepted or execute TVM.
+
+For TR17's contract-recipient case, official
+[`TransferActuator.validate` at b33eed89a6a4](https://github.com/tronprotocol/java-tron/blob/b33eed89a6a424c498d4fb1b03ca2c86eddf4840/actuator/src/main/java/org/tron/core/actuator/TransferActuator.java)
+rejects a contract recipient when `ForbidTransferToContract == 1`, and separately
+rejects a version-1 contract recipient when `AllowTvmCompatibleEvm == 1`. This is
+conditional chain behavior, not an unconditional rule for every endpoint. The
+[`BandwidthProcessor` at the same revision](https://github.com/tronprotocol/java-tron/blob/b33eed89a6a424c498d4fb1b03ca2c86eddf4840/chainbase/src/main/java/org/tron/core/db/BandwidthProcessor.java)
+separates new-account staked-bandwidth/fixed-burn handling from ordinary staked/free/
+per-byte handling. These source observations do not attest an endpoint's current
+governance flags. No funded transfer was used to establish this documentation.
+
 ### Send safety without a nonce
 
 [`02-architecture.md`](02-architecture.md) §Send safety is built on the EVM nonce. Tron has none,
 so:
 - **Kept:** one send per key and chain (`SendLock`, `src/chains/mod.rs:644-679`); the send journal,
-  appended and fsynced before the broadcast; the 10-minute duplicate guard on chain, kind, `to` and
+  appended and fsynced before the broadcast; the configured duplicate guard (default 10 minutes) on chain, kind, `to` and
   base-unit amount, with `--allow-duplicate`.
 - **Refused on `tron`** with `VALIDATION_ERROR` before any RPC: `--nonce`, `--replace`, `--bump`,
   `--allow-pending`, `--max-fee-gwei` ("Tron has no nonce; …").
@@ -517,7 +551,7 @@ so:
     `expired-unseen`;
   - a txID that is not found and not in the journal has no known expiration: `status: "not
     found"`.
-  No message says or implies that sending again is safe. A repeat within 10 minutes still needs
+  No message says or implies that sending again is safe. A repeat within the configured window still needs
   `--allow-duplicate`, and the duplicate refusal names the earlier txID and its `expiresAt` with
   "if it was included, this is a second payment; look it up first (`zwallet tx --chain tron
   <txid>`)". A wording test, as 04's round 8 test does for restore hints, refuses these phrases

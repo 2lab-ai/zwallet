@@ -4,7 +4,8 @@
 
 This guide is for a developer delegating on-chain work to an agent that can run shell
 commands. zwallet supplies a wallet, policy enforcement and transaction evidence.
-Your agent supplies the task logic and the final report. No particular model, agent
+Native [task reports](task-reports.md) collect accounting evidence; your agent supplies
+the task logic and final interpretation. No particular model, agent
 framework or wallet-service account is required.
 
 ## Human setup
@@ -46,10 +47,11 @@ budget. The daemon enforces the configured signing policy on transaction bytes.
 | Step | Current mechanism | What to preserve |
 |---|---|---|
 | Inspect | `balance --chain … --json` | Chain, asset, exact base units, remaining gas balance |
+| Start attribution | `task create <id> --chain … --allocation native=<base units> --json` | Bounded nonpersonal task ID, advisory allocation and baseline observation |
 | Preview | `transfer … --dry-run --json` | Intended payee/value, policy result, funds check; this can sign but never broadcasts |
-| Execute | `transfer … --wait --json` or a permitted `invoke` | `txHash`, nonce, journal path and outcome |
+| Execute | `transfer … --task <id> --wait --json` or a permitted `invoke --task <id>` | `txHash`, task/intent identity, nonce, journal path and outcome |
 | Reconcile | `tx --chain … <hash> --json` | Receipt success/revert/pending/unknown; a journal entry alone is not success |
-| Report | Agent or example script | Purpose, amount, actual gas, outcome, remaining balance and evidence source |
+| Report | `task report <id> --json` (or `--offline` for local claims) | Six outcome states, exact fees/amounts, balance provenance, unknowns and replacement relationship; agent adds purpose outside the wallet |
 
 For accurate EVM gas expense, a report can read the receipt over the same RPC and
 multiply `gasUsed` by `effectiveGasPrice`. On chains with extra fees, account for
@@ -70,6 +72,8 @@ receipt, unchanged nonce after policy refusal and the exact balance equation:
 
 `initial allocation = confirmed payment + actual gas + remaining balance`
 
-The example's report is a script built on current outputs. ![WIP](https://img.shields.io/badge/status-WIP-yellow) A native task ledger/report
-command, cumulative budgets and investment/merchant adapters are future work in the
+The committed recording's report remains the historical script result; its assets
+have not been regenerated to imply a new execution. For current shell integration,
+use [native task reports](task-reports.md). Cumulative budgets and investment/merchant
+adapters remain ![WIP](https://img.shields.io/badge/status-WIP-yellow) in the
 [agent-economy PRD](../.prd/07-agent-economy.md).

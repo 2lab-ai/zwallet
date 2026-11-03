@@ -63,6 +63,7 @@ pub struct Navigation {
     pub lines: Pane<Vec<Outside>>,
     pub scroll: usize,
     pub popup_scroll: usize,
+    pub receive_qr: bool,
     pub every: bool,
     pub session: Option<StatusView>,
     pub home: Outside,
@@ -90,6 +91,7 @@ impl Navigation {
             lines: Pane::Loading,
             scroll: 0,
             popup_scroll: 0,
+            receive_qr: false,
             every: false,
             session: None,
             home: Outside::home(""),
@@ -114,6 +116,11 @@ const IMPLEMENTED: &[ActionId] = &[
     ActionId::NativeCap,
     ActionId::TokenCap,
     ActionId::CalldataCap,
+    ActionId::DuplicateWindow,
+    ActionId::TaskCreate,
+    ActionId::TaskList,
+    ActionId::TaskReport,
+    ActionId::TaskAttribution,
     ActionId::MessagePolicy,
     ActionId::Reset,
     ActionId::WhitelistUnlock,
@@ -195,6 +202,7 @@ impl App {
                 .is_some_and(|key| self.family_pinned(key, self.chain)),
             unlocked: matches!(&self.status, Pane::Ready(bar) if matches!(bar.lock, LockLine::Open(_))),
             is_tron: self.chain.key == "tron",
+            is_native_ed25519: self.on_native_ed25519(),
             pending_send,
             retryable_send,
         }
@@ -640,13 +648,13 @@ impl App {
                 }
                 self.nav.popup = Some(Popup::Field {
                     purpose: FieldPurpose::TxHash,
-                    field: Field::new(
-                        if matches!(self.chain.family, crate::chains::Family::Tron(_)) {
+                    field: Field::new(match self.chain.family {
+                        crate::chains::Family::Tron(_) | crate::chains::Family::Ton(_) => {
                             Kind::TronTxHash
-                        } else {
-                            Kind::TxHash
-                        },
-                    ),
+                        }
+                        crate::chains::Family::Solana(_) => Kind::SolanaTxHash,
+                        crate::chains::Family::Evm(_) => Kind::TxHash,
+                    }),
                 });
                 Some(Vec::new())
             }
@@ -669,11 +677,13 @@ impl App {
                 self.invalidate_reads();
                 Some(self.load_view())
             }
+            Key::Esc if self.nav.tab == Tab::Receive && self.nav.receive_qr => {
+                self.nav.receive_qr = false;
+                Some(Vec::new())
+            }
             Key::Char('Q') if self.nav.tab == Tab::Receive => {
-                self.nav.popup = Some(Popup::Lines {
-                    title: "QR code",
-                    lines: vec![Outside::detail("zwallet address shows it as a QR code")],
-                });
+                self.nav.receive_qr = !self.nav.receive_qr;
+                self.nav.scroll = 0;
                 Some(Vec::new())
             }
             Key::Up | Key::Char('k') if self.nav.tab != Tab::Keys => {
@@ -898,6 +908,35 @@ impl App {
             return work;
         }
         match action {
+            ActionId::TaskAttribution => {
+                if self.replacement_visible()
+                    && self.replacement.stage == super::replacement::Stage::Review
+                {
+                    return self.replacement_key(Key::Char('t')).unwrap_or_default();
+                }
+                if self.tab() == Tab::Tools && self.tools.stage == super::tools::Stage::InvokeReview
+                {
+                    return self.tools_key(Key::Char('t')).unwrap_or_default();
+                }
+                if matches!(
+                    self.transfer.stage,
+                    super::transfer::Stage::Review | super::transfer::Stage::Failed
+                ) && (self.transfer.draft.is_some() || self.transfer.tron.draft.is_some())
+                {
+                    self.nav.tab = Tab::Send;
+                    return self.transfer_key(Key::Char('t')).unwrap_or_default();
+                }
+                self.nav.popup = Some(Popup::Lines {
+                    title: "task attribution",
+                    lines: vec![Outside::detail(
+                        "Review a transfer or invoke first, then press t to choose its task ID.",
+                    )],
+                });
+                return vec![];
+            }
+            ActionId::TaskCreate | ActionId::TaskList | ActionId::TaskReport => {
+                return self.start_tasks(action);
+            }
             ActionId::CreateFirst | ActionId::CreateKey | ActionId::CreateUnlock => {
                 return self.begin_create();
             }
@@ -931,7 +970,8 @@ impl App {
             ActionId::Repair => return self.begin_password(PasswordPurpose::Repair),
             ActionId::Qr => {
                 self.nav.tab = Tab::Receive;
-                return self.navigation_key(Key::Char('Q')).unwrap_or_default();
+                self.nav.receive_qr = true;
+                return self.load_view();
             }
             ActionId::Balance | ActionId::AllBalances => {
                 self.nav.tab = Tab::Wallet;
@@ -947,13 +987,13 @@ impl App {
                 let work = self.reload();
                 self.nav.popup = Some(Popup::Field {
                     purpose: FieldPurpose::TxHash,
-                    field: Field::new(
-                        if matches!(self.chain.family, crate::chains::Family::Tron(_)) {
+                    field: Field::new(match self.chain.family {
+                        crate::chains::Family::Tron(_) | crate::chains::Family::Ton(_) => {
                             Kind::TronTxHash
-                        } else {
-                            Kind::TxHash
-                        },
-                    ),
+                        }
+                        crate::chains::Family::Solana(_) => Kind::SolanaTxHash,
+                        crate::chains::Family::Evm(_) => Kind::TxHash,
+                    }),
                 });
                 return work;
             }

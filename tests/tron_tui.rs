@@ -819,9 +819,13 @@ async fn t40_repeat_override_warns_in_review_and_typed_confirmation() {
     review(&mut app, &f, false).await;
     let effects = key(&mut app, Key::Char('d'));
     drive(&mut app, &f, effects).await;
-    assert!(screen(&app).contains("a new send may pay twice"));
+    let shown = screen(&app);
+    assert!(shown.contains("a new send may pay twice"), "{shown}");
+    assert!(shown.contains("OVERRIDE [600s/1MiB local]"), "{shown}");
     key(&mut app, Key::Enter);
-    assert!(screen(&app).contains("a new send may pay twice"));
+    let shown = screen(&app);
+    assert!(shown.contains("a new send may pay twice"), "{shown}");
+    assert!(shown.contains("OVERRIDE [600s/1MiB local]"), "{shown}");
     assert_eq!(app.transfer().stage, Stage::Confirm);
     assert_eq!(f.count(), 0);
 }

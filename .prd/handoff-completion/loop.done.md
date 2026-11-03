@@ -40,3 +40,27 @@ Rows here are snapshots taken when they moved.
 **Result, 2026-10-30.** Receipts in [`completion-checklist.md`](completion-checklist.md) §What shipped: PR #51 merged 2026-10-29T21:34Z as 599bde9; preview `preview-2026-10-29-2134-599bde9ee211` = Homebrew `zwallet-preview 2026.10.29.2134` (tap PR #18), installed and verified; gate at 2a1ee64 (macOS 923 passed; Linux 916 passed on the second full run, the first run's one pty failure tracked as #52; CI run 40955576162 macOS and ubuntu success); real-terminal acceptance, six scenarios PASS at 120x40 and 80x24 (152 checks on the 2a1ee64 build, 154 on the installed preview), coverage matrix 59 of 59 PASS at each size; the QA run's logs are kept off-repo; the results are in [PR #51's body](https://github.com/2lab-ai/zwallet/pull/51).
 
 **Notes (as they were).** Run only one full CLI suite at once. Agent worktrees are under .worktrees; each unit owns its isolated tree and reports changes for integration before heavy gates. H1 independent review found stale Keys overwriting activation failure and a blocking metadata lock on the UI runtime. Both have observed RED regressions and fixes; fresh full gate follows.
+
+## R2 — closed 2026-10-30 (PR #54)
+
+Issue [#52](https://github.com/2lab-ai/zwallet/issues/52) is closed completed by
+[PR #54](https://github.com/2lab-ai/zwallet/pull/54), merged as
+`6f1a2c91ab3a0bdaf9bf039afc27110eff0c1c6a`. Main
+[CI 40992407534](https://github.com/2lab-ai/zwallet/actions/runs/40992407534) passed on
+Linux and macOS. Product source is unchanged; the fixes are in the test harness.
+
+### Closed rows
+
+| ID | Scope | Owner | Status | Evidence |
+|---|---|---|---|---|
+| H23 | Close #52's Linux daemon/PTY timing investigation and synchronize its stale open notes | upstream PR #54 / root docs | ✅ | PR #54 merged as 6f1a2c9; main CI40992407534 Linux/macOS success. t27/t28 reproduction and present-history readiness fix, atomic edit_wallet fixture writes, bounded diagnostics and review results are in PR #54. |
+
+### Round section (as it was in loop.md, with the result)
+
+- **#52**: a once-seen Linux pty flake (`t27_t28_pty_restart_original_proof_speedup_and_cancel_verify_signed_bytes`); tracked.
+
+**Result.** The original tracked flake was reproduced and repaired in PR #54.
+The a_cache single-edit failure was not reproduced; its torn-write mechanism was
+shown by a churn probe and removed by atomic fixture writes. Neither result claims
+that a future session failure has the same cause. The #55 tr4 observation remains
+a separate inferred attribution, with follow-up evidence tracked under #57.

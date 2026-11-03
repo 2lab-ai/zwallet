@@ -498,7 +498,19 @@ async fn pending_and_duplicate_overrides_are_held_from_review() {
             if allowed {
                 assert!(matches!(result.unwrap(), SendTransferOutcome::Sent(_)));
             } else {
-                assert!(result.is_err());
+                let error = result.err().unwrap();
+                if !pending {
+                    assert_eq!(
+                        error.details["duplicateGuard"],
+                        json!({
+                            "windowSecs": 600,
+                            "journalTailBytes": 1 << 20,
+                            "advisory": true,
+                            "policySource": "password-checked-list"
+                        })
+                    );
+                    assert!(error.message.starts_with("advisory duplicate guard (policy: password-checked-list; window 600s; last 1 MiB of local journal): "));
+                }
             }
             assert_eq!(f.signer.count(), usize::from(allowed));
         }
@@ -928,6 +940,13 @@ async fn tui_pending_and_repeat_guards_require_separate_override_keys() {
         drive(&mut app, &f, work).await;
         assert_eq!(f.signer.count(), 0);
         assert_eq!(app.transfer().stage, Stage::Failed);
+        if !pending {
+            let notice = app.transfer().notice.as_ref().unwrap().text();
+            assert!(notice.starts_with("advisory duplicate guard (policy: password-checked-list; window 600s; last 1 MiB of local journal): "));
+            let screen = frame(&app);
+            assert!(screen.contains("advisory duplicate guard"), "{screen}");
+            assert!(screen.contains("password-checked-list"), "{screen}");
+        }
         let work = key(&mut app, Key::Char(if pending { 'p' } else { 'd' }));
         drive(&mut app, &f, work).await;
         assert!(frame(&app).contains("OVERRIDE"));
@@ -1232,4 +1251,5 @@ async fn tui_send_review_guard_labels_say_clear_blocked_or_override() {
     drive(&mut app, &f, work).await;
     let shown = frame(&app);
     assert!(shown.contains("repeats 0 OVERRIDE"), "{shown}");
+    assert!(shown.contains("600s/1MiB local"), "{shown}");
 }

@@ -171,6 +171,7 @@ impl App {
                     state: ReceiptState::Pending,
                     wait: SEND_WAIT,
                     note: None,
+                    task_warning: None,
                     uncertain: false,
                     net: self.net().clone(),
                 })
@@ -213,6 +214,7 @@ impl App {
                     }
                 };
                 self.transfer.tron.draft = Some(TronTransferInput {
+                    task_id: None,
                     key_name,
                     index,
                     from,

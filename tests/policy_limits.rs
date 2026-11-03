@@ -238,3 +238,68 @@ fn limit_encoding_roundtrips_and_rejects_duplicate_or_malformed_fields() {
         .insert("ethereum".into(), bad);
     assert!(list.validate(&WHITELIST_RULES).is_err());
 }
+
+#[test]
+fn duplicate_window_human_edit_is_signed_verified_resettable_and_bounded() {
+    let _exclusive = common::exclusive();
+    let home = Home::new();
+    home.create("main", &[]);
+    for duration in ["0s", "2d", "invalid"] {
+        let result = home.run(&["whitelist", "duplicate-window", duration, "--json"]);
+        assert_ne!(result.code, 0);
+        assert!(!result.stderr.contains("Wallet password"));
+    }
+    let change = edit(&home, &["duplicate-window", "30m"]);
+    assert_eq!(change["duplicateWindowSecs"], 1800);
+    assert_eq!(change["advisory"], true);
+    assert_eq!(change["policy"]["duplicateWindowSecs"], 1800);
+    let verified = home
+        .run_stdin(
+            &[
+                "whitelist",
+                "list",
+                "--verify",
+                "--password-stdin",
+                "--json",
+            ],
+            &format!("{PW}\n"),
+        )
+        .ok();
+    assert_eq!(verified["verified"], true);
+    assert_eq!(verified["policy"]["duplicateWindowSecs"], 1800);
+    let shown = home.run(&["whitelist", "list"]).stdout;
+    assert!(shown.contains("duplicate window: 1800 seconds; advisory, last 1 MiB"));
+    let path = home.path().join(whitelist::WHITELIST_FILE);
+    let bytes = std::fs::read(&path).unwrap();
+    let mut forged: Value = serde_json::from_slice(&bytes).unwrap();
+    forged["policy"]["duplicateWindowSecs"] = json!(1);
+    std::fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
+    let unverified = home.run_stdin(
+        &[
+            "whitelist",
+            "list",
+            "--verify",
+            "--password-stdin",
+            "--json",
+        ],
+        &format!("{PW}\n"),
+    );
+    assert_ne!(unverified.json()["verified"], true);
+    std::fs::write(&path, bytes).unwrap();
+    let restored = edit(&home, &["duplicate-window", "default"]);
+    assert_eq!(restored["duplicateWindowSecs"], 600);
+    assert!(restored["policy"].get("duplicateWindowSecs").is_none());
+    edit(&home, &["duplicate-window", "1d"]);
+    let reset = home.run_stdin(
+        &["whitelist", "reset", "--password-stdin", "--json"],
+        &format!("{PW}\n"),
+    );
+    reset.ok();
+    assert!(
+        reset
+            .stderr
+            .contains("advisory duplicate window returns to 600 seconds")
+    );
+    let list = home.run(&["whitelist", "list", "--json"]).ok();
+    assert!(list["policy"].get("duplicateWindowSecs").is_none());
+}

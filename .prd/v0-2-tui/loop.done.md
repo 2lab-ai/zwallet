@@ -148,3 +148,42 @@ v0.2; avalanche through Routescan stays out of v0.2; the coverage per chain is u
 **From "Open for TUI-2b".** Round 4 of TUI-1c's review closed a third line, the stderr join in `PtyChild::stderr()`: a daemon the warm-up starts inherits neither that pipe nor the pty slave, since `spawn_daemon` gives it `Stdio::null()` for stderr and marks every fd from 3 up close-on-exec (src/core/protocol.rs:1354, :1363). The other two lines stay open in [`loop.md`](loop.md).
 
 **Next (as it was).** Merge `integ/tui-tron-final` as one PR (it marks #35 and #37–#49 merged), then move the 🟡 rows to `loop.done.md`. The previews M1–M5 can collapse into one preview of that merge: the owner unlocks again (new cdhash) and accepts the TUI on it. T18's trade-off Q stays with the owner; the existing Q1 and B1 pointers remain the defaults, and the handoff does not authorize phrase display or a new QR implementation. Done 2026-10-30 except the owner's steps.
+
+## R2 — closed 2026-10-30 (issue #52)
+
+The once-seen Linux pty flake in
+`t27_t28_pty_restart_original_proof_speedup_and_cancel_verify_signed_bytes` was tracked as #52.
+
+**Result.** [PR #54](https://github.com/2lab-ai/zwallet/pull/54) fixed the reproduced
+history-readiness race and changed fixture wallet edits to atomic rename. It merged
+as `6f1a2c91ab3a0bdaf9bf039afc27110eff0c1c6a`, closing #52. Main
+[CI 40992407534](https://github.com/2lab-ai/zwallet/actions/runs/40992407534) succeeded
+on Linux and macOS. See the [handoff R2](../handoff-completion/loop.done.md#r2--closed-2026-10-30-pr-54)
+for the bounded conclusion about the unreproduced single-edit a_cache observation.
+Existing shipped acceptance rows and R1 receipts above are unchanged.
+
+
+## R3 — closed 2026-10-30 (remaining evidence notes, draft PR #59)
+
+Resolved in the current continuation (draft PR #59): actual full runtime with refresh
+ticks disabled observes 120x40 → 79x24 → 80x24; shared PTY output through EOF proves
+cursor restoration precedes the exact failed-lock error; panic streams allow only
+the fixed output. Tests: `actual_sigwinch_redraws_shrink_and_grow_without_refresh_ticks`,
+`failed_lock_then_quit_restores_before_exact_cli_error_output`, complete-stream
+counterexamples and production T9. The focused unit observed 26 passed, 0 failed.
+The final integrated gate/CI is tracked in security-assurance; this is not a new
+preview-release claim.
+
+### Original note snapshot
+
+## Open test notes (TUI-1c review rounds 1 and 2, 2026-10-28)
+
+For the next unit whose pty runs resize or print after the TUI. Both still hold at 599bde9:
+- T9 shrinks a running terminal (120x40 to 79x24) and sees the warning alone, but does not tell
+  whether SIGWINCH's `Msg::Resize` or the next refresh tick redrew it (a probe on 2026-10-28 saw
+  the redraw 5 ms after the resize), and no test grows the window back
+  (`t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo`, tests/tui.rs:950-973,
+  only shrinks).
+- `quit()`'s stray and pending check (tests/tui.rs:858) covers only the bytes before the first
+  `CSI ?1049l` (`Frame::last`, tests/common/mod.rs:1645-1650). What is written after it goes
+  unchecked: the line for a failed `L` stop, and the panic hook's fixed line.

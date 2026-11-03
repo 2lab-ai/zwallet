@@ -35,8 +35,9 @@
 //! generation standing or the staged one promotable. The caller stops every daemon first (a
 //! re-seal ends a running session anyway: the daemon notices wallet.json's ciphertext changed).
 //!
-//! The format is EVM-shaped (20-byte addresses, 4-byte selectors); which chain keys exist and
-//! which addresses are registry tokens come from the chains layer through [`ChainRules`].
+//! Legacy identities are 20-byte hex; Ed25519 family identities are tagged 32-byte hex.
+//! Existing canonical bytes remain unchanged. Chain membership and token facts come from
+//! the chains layer through [`ChainRules`].
 
 use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::store::{self, MetaLock, WhitelistAnchor};
@@ -54,6 +55,9 @@ pub const WHITELIST_FILE: &str = "whitelist.json";
 pub const NEXT_FILE: &str = "whitelist.next.json";
 /// The list format this zwallet reads and signs.
 pub const LIST_VERSION: u32 = 1;
+/// Advisory duplicate detection reads a bounded local journal, never cumulative authority.
+pub const DEFAULT_DUPLICATE_WINDOW_SECS: u32 = 600;
+pub const MAX_DUPLICATE_WINDOW_SECS: u32 = 86_400;
 /// Legacy wildcard: accepted by EVM policy only (never a contract entry's).
 pub const ANY_CHAIN: &str = "*";
 /// Prefixed to the canonical bytes before signing, so a signature from this key can never be
@@ -94,8 +98,8 @@ impl EntryKind {
     }
 }
 
-/// One whitelist entry. Stored exactly in canonical form: `address` and `selectors` lower-case
-/// `0x` hex. `selectors` is present on contract entries only.
+/// One whitelist entry. Stored in canonical lower-case hex: legacy `0x` bodies or tagged
+/// 32-byte identities; selectors remain `0x` hex and occur on contract entries only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
@@ -175,6 +179,9 @@ pub struct Policy {
         deserialize_with = "unique_limit_keys"
     )]
     pub transaction_limits: BTreeMap<String, TransactionLimits>,
+    /// Optional global advisory duplicate window. Absence preserves legacy signed bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_window_secs: Option<u32>,
 }
 
 /// Per-transaction limits, not cumulative budgets. Token amounts are smallest base units.
@@ -274,7 +281,13 @@ impl Policy {
                 .collect(),
             allow_message_signing: false,
             transaction_limits: BTreeMap::new(),
+            duplicate_window_secs: None,
         }
+    }
+
+    pub fn duplicate_window_secs(&self) -> u32 {
+        self.duplicate_window_secs
+            .unwrap_or(DEFAULT_DUPLICATE_WINDOW_SECS)
     }
 
     /// The fee cap on chain `key`, if the list has one (a malformed one reads as none).
@@ -379,6 +392,20 @@ impl Whitelist {
                     "a non-EVM payee must name exactly one chain and cannot be a contract entry",
                 ));
             }
+            let tagged = tagged_address_family(&e.address);
+            let family_matches = match tagged {
+                Some(family) => e.chains.len() == 1 && (rules.family_of)(&e.chains[0]) == family,
+                None => !e
+                    .chains
+                    .iter()
+                    .any(|c| matches!((rules.family_of)(c), "solana" | "ton")),
+            };
+            if !family_matches {
+                return Err(entry_error(
+                    e,
+                    "the address identity does not match its chain family",
+                ));
+            }
             if e.kind == EntryKind::Contract && (rules.is_registry_token)(&e.address) {
                 return Err(entry_error(
                     e,
@@ -415,8 +442,8 @@ impl Whitelist {
     }
 
     /// The checks that need no chain knowledge: generation from 1; nicknames per
-    /// [`validate_nickname`] and unique; each address `0x` + 40 lower-case hex digits and listed
-    /// once; chains non-empty and unique, `"*"` only alone and only on an address entry;
+    /// [`validate_nickname`] and unique; each canonical legacy or tagged identity listed once;
+    /// chains non-empty and unique, `"*"` only alone and only on a legacy address entry;
     /// selectors on contract entries only, non-empty, unique, `0x` + 8 lower-case hex digits;
     /// fee caps decimal wei without leading zeros.
     pub fn check_format(&self) -> Result<()> {
@@ -425,19 +452,36 @@ impl Whitelist {
                 "whitelist generation must be at least 1",
             ));
         }
+        if self
+            .policy
+            .duplicate_window_secs
+            .is_some_and(|secs| !(1..=MAX_DUPLICATE_WINDOW_SECS).contains(&secs))
+        {
+            return Err(WalletError::validation(
+                "duplicate window must be from 1 to 86400 seconds",
+            ));
+        }
         let (mut nicks, mut addrs) = (BTreeSet::new(), BTreeSet::new());
         for e in &self.entries {
             validate_nickname(&e.nickname)?;
             if !nicks.insert(e.nickname.as_str()) {
                 return Err(entry_error(e, "nickname listed twice"));
             }
-            if !is_lower_hex(&e.address, 20) {
+            if !is_lower_hex(&e.address, 20) && tagged_address_family(&e.address).is_none() {
                 return Err(entry_error(
                     e,
                     &format!(
-                        "address {} must be 0x and 40 lower-case hex digits",
+                        "address {} must be canonical 20-byte hex or a tagged 32-byte family identity",
                         quote(&e.address)
                     ),
+                ));
+            }
+            if tagged_address_family(&e.address).is_some()
+                && (e.kind != EntryKind::Address || e.chains.len() != 1 || e.chains[0] == ANY_CHAIN)
+            {
+                return Err(entry_error(
+                    e,
+                    "a tagged payee needs exactly one explicit chain and cannot be a contract",
                 ));
             }
             if !addrs.insert(e.address.as_str()) {
@@ -591,6 +635,20 @@ fn is_lower_hex(s: &str, bytes: usize) -> bool {
     })
 }
 
+/// Tagged canonical identities keep base58 addresses case-sensitive before serialization.
+/// No chain code is called here: these are the two supported wire shapes, not a trust claim.
+pub fn tagged_address_family(address: &str) -> Option<&'static str> {
+    let (family, body) = if let Some(body) = address.strip_prefix("solana:") {
+        ("solana", body)
+    } else if let Some(body) = address.strip_prefix("ton:0:") {
+        ("ton", body)
+    } else {
+        return None;
+    };
+    (body.len() == 64 && body.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .then_some(family)
+}
+
 /// The shape of a chain key: 1-32 of a-z 0-9 -, starting with a letter or digit.
 fn is_chain_key(s: &str) -> bool {
     let b = s.as_bytes();
@@ -648,6 +706,10 @@ pub fn canonical_bytes(list: &Whitelist) -> Vec<u8> {
     } else {
         "false"
     });
+    if let Some(secs) = list.policy.duplicate_window_secs {
+        out.push_str(",\"duplicateWindowSecs\":");
+        out.push_str(&secs.to_string());
+    }
     out.push_str(",\"maxFeeWei\":{");
     // BTreeMap<String, _> iterates in byte order of the keys.
     for (i, (k, v)) in list.policy.max_fee_wei.iter().enumerate() {
@@ -835,7 +897,7 @@ fn is_hex(s: &str, bytes: usize) -> bool {
 }
 
 /// Every value of a parsed list file in the shape zwallet writes: a nickname per
-/// [`validate_nickname`], an address `0x` and 40 hex digits, each chain [`ANY_CHAIN`] or a chain
+/// [`validate_nickname`], a legacy `0x` body or canonical tagged identity, each chain [`ANY_CHAIN`] or a chain
 /// key's shape (not membership: a newer zwallet's chain must not make an older one's read fail),
 /// each selector `0x` and 8 hex digits, and each fee cap keyed by a chain key's shape with at most
 /// [`WEI_DIGITS`] decimal digits. So no other text from the file reaches anything that shows a
@@ -853,7 +915,7 @@ fn check_shapes(file: &ListFile) -> Result<()> {
         if validate_nickname(&e.nickname).is_err() {
             return bad(format!("the nickname of entry {n}"));
         }
-        if !is_hex(&e.address, 20) {
+        if !is_hex(&e.address, 20) && tagged_address_family(&e.address).is_none() {
             return bad(format!("the address of entry {n}"));
         }
         if e.chains.iter().any(|c| c != ANY_CHAIN && !is_chain_key(c)) {
@@ -1800,6 +1862,7 @@ mod tests {
                 ]),
                 allow_message_signing: true,
                 transaction_limits: Default::default(),
+                duplicate_window_secs: None,
             },
         }
     }
@@ -1843,6 +1906,113 @@ mod tests {
         assert_eq!(hex::encode(key.public_key()), GOLDEN_PUB);
         assert_eq!(hex::encode(signed.sig), GOLDEN_SIG);
         assert_eq!(hex::encode(digest(&list)), GOLDEN_DIGEST);
+    }
+
+    #[test]
+    fn duplicate_window_is_optional_bounded_and_authenticated() {
+        let key = WhitelistKey::from_secret(&[1; 32]);
+        let mut list = golden_list();
+        let legacy = canonical_bytes(&list);
+        assert_eq!(list.policy.duplicate_window_secs(), 600);
+        assert!(
+            !String::from_utf8(legacy.clone())
+                .unwrap()
+                .contains("duplicateWindow")
+        );
+        for seconds in [1, 600, 1800, 86_400] {
+            list.policy.duplicate_window_secs = Some(seconds);
+            list.validate(&RULES).unwrap();
+            let canonical = String::from_utf8(canonical_bytes(&list)).unwrap();
+            assert!(canonical.contains(&format!(
+                "\"allowMessageSigning\":true,\"duplicateWindowSecs\":{seconds},\"maxFeeWei\":"
+            )));
+            let signed = key.sign(&list);
+            let anchor = key.anchor_for(&signed);
+            let bytes = signed.to_file_bytes().unwrap();
+            let parsed = SignedList::from_file_bytes(&bytes).unwrap();
+            verify(&parsed, &anchor).unwrap();
+            let mut changed = parsed.clone();
+            changed.list.policy.duplicate_window_secs = Some(if seconds == 1 { 2 } else { 1 });
+            assert!(verify(&changed, &anchor).is_err());
+            changed.list.policy.duplicate_window_secs = None;
+            assert!(verify(&changed, &anchor).is_err());
+            let text = String::from_utf8(bytes).unwrap();
+            let duplicate = text.replace(
+                "\"duplicateWindowSecs\":",
+                "\"duplicateWindowSecs\": 1, \"duplicateWindowSecs\":",
+            );
+            assert!(SignedList::from_file_bytes(duplicate.as_bytes()).is_err());
+        }
+        for seconds in [0, 86_401, u32::MAX] {
+            list.policy.duplicate_window_secs = Some(seconds);
+            assert!(list.validate(&RULES).is_err());
+        }
+        list.policy.duplicate_window_secs = None;
+        assert_eq!(canonical_bytes(&list), legacy);
+        assert_eq!(hex::encode(key.sign(&list).sig), GOLDEN_SIG);
+    }
+
+    #[test]
+    fn tagged_family_identities_roundtrip_without_changing_legacy_signed_bytes() {
+        const FAMILY_RULES: ChainRules = ChainRules {
+            chain_known: |key| ["base", "solana", "ton"].contains(&key),
+            family_of: |key| match key {
+                "solana" => "solana",
+                "ton" => "ton",
+                _ => "evm",
+            },
+            is_registry_token: |_| false,
+            registry_token_on_chain: |_, _| false,
+            default_fee_caps_wei: &[],
+        };
+        let key = WhitelistKey::from_secret(&[1u8; 32]);
+        // The established pre-extension fixture is byte-for-byte identical.
+        assert_eq!(hex::encode(key.sign(&golden_list()).sig), GOLDEN_SIG);
+        assert_eq!(hex::encode(digest(&golden_list())), GOLDEN_DIGEST);
+        for (family, prefix) in [("solana", "solana:"), ("ton", "ton:0:")] {
+            let identity = format!("{prefix}{}", "12".repeat(32));
+            let mut list = Whitelist::empty(&FAMILY_RULES);
+            list.generation = 1;
+            list.add(Entry::new_address("bob", &identity, &[family]))
+                .unwrap();
+            list.validate(&FAMILY_RULES).unwrap();
+            let signed = key.sign(&list);
+            let parsed = SignedList::from_file_bytes(&signed.to_file_bytes().unwrap()).unwrap();
+            verify(&parsed, &key.anchor_for(&signed)).unwrap();
+            assert_eq!(parsed.list.entries[0].address, identity);
+            for scope in [
+                "*",
+                "base",
+                if family == "solana" { "ton" } else { "solana" },
+            ] {
+                let mut wrong = list.clone();
+                wrong.entries[0].chains = vec![scope.into()];
+                assert!(wrong.validate(&FAMILY_RULES).is_err());
+            }
+            let mut wrong = list.clone();
+            wrong.entries[0].kind = EntryKind::Contract;
+            wrong.entries[0].selectors = Some(vec!["0x12345678".into()]);
+            assert!(wrong.validate(&FAMILY_RULES).is_err());
+            let mut changed = parsed.clone();
+            changed.list.entries[0].address = format!("{prefix}{}", "34".repeat(32));
+            assert!(verify(&changed, &key.anchor_for(&signed)).is_err());
+            for invalid in [
+                format!("{prefix}{}", "AB".repeat(32)),
+                format!("{prefix}{}", "12".repeat(31)),
+                format!("{prefix}{}\u{1b}[2J", "12".repeat(32)),
+            ] {
+                let mut value: Value =
+                    serde_json::from_slice(&signed.to_file_bytes().unwrap()).unwrap();
+                value["entries"][0]["address"] = Value::String(invalid);
+                let error =
+                    SignedList::from_file_bytes(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+                assert!(error.message.contains("the address of entry 1"));
+                assert!(!error.message.contains('\u{1b}'));
+            }
+            let mut wrong = list.clone();
+            wrong.entries[0].address = "0x1111111111111111111111111111111111111111".into();
+            assert!(wrong.validate(&FAMILY_RULES).is_err());
+        }
     }
 
     // Computed independently of this code (Python `cryptography` Ed25519 and OpenSSL

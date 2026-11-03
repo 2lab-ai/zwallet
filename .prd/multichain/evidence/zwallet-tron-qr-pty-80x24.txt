@@ -1,0 +1,26 @@
+address row=4
+Receive / Tron / a
+
+
+    █▀▀▀▀▀█  ▀▄▄█▀▄▄█▄▄█  █▀▀▀▀▀█      Address
+    █ ███ █ ▀██▄▀██▄▀ █▄  █ ███ █      TMwhJuBGPLAwzanzcwLZDdtabihxzR3CEx
+    █ ▀▀▀ █  ▄▀  ▄▀  ▄▀█  █ ▀▀▀ █
+    ▀▀▀▀▀▀▀ █▄█ █▄█ █▄█▄█ ▀▀▀▀▀▀▀      Verified by password
+    █▀▀▄▀█▀█▀ ██  ██▀█ ▄█▀█  ▄█▄▄
+    ▀█ ▀▄▄▀ █▀ ▄ ▀ ▄▀█▀ ▀▄▄▀  ▀▀█      Check chain and address
+      █▀ ▀▀▄▀  ▄█▄ ▀▄▀ █▄██▀ ▄█▀█      before sending funds.
+     ███ ▄▀ █▀█▀█▄█▄▄▄█▄█ ▀█▀  ▀▀
+    ▀ ▄▀  ▀▀▀▄ █  █▄█▀ ████ ▀▀ █
+    ▀▄▀▀▄▀▀▄█▄▄▄ ▀   ▄▀ ▄█▄ █▀▀█▀
+    ▀ ▀▀  ▀ ▄█ ▄█▄ ▄█▀▄ █▀▀▀█▄▀▀▀
+    █▀▀▀▀▀█ ██▄▀█▄█  ▄▀▀█ ▀ █  ██
+    █ ███ █ ▀█▄█  █  ▀▄ █▀▀█▀ ▀▄█
+    █ ▀▀▀ █ █▄ ▄ ▀  ▀█▀▄██▄█▀▀ ▄▀
+    ▀▀▀▀▀▀▀ ▀   ▀      ▀▀   ▀▀▀▀▀
+
+
+
+
+
+Q addresses  V verify  c chain  r refresh  q quit  ? actions
+stray: [], pending: ""

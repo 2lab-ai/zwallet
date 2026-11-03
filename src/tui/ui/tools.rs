@@ -42,6 +42,18 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
             }
             row(
                 frame,
+                10,
+                "tasks / reports",
+                None,
+                if state.selected == Tool::ALL.len() {
+                    SELECTED
+                } else {
+                    NORMAL
+                },
+                placed,
+            );
+            row(
+                frame,
                 12,
                 "Calls and token balances are reads. Invokes and messages require warm-up.",
                 None,
@@ -145,6 +157,7 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 Purpose::Message => "Message: printable ASCII, at most 512 bytes",
                 Purpose::Token => "ERC-20 contract address",
                 Purpose::Fee => "Maximum gas price (gwei)",
+                Purpose::Task => "Optional task ID; blank clears it (advisory, not a budget)",
                 Purpose::Confirm => "Contract nickname",
                 Purpose::SignConfirm => "Type sign exactly",
             };
@@ -285,6 +298,20 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 ("Execution fee + estimated L1 fee in wei:".into(), HINT),
                 (review.max_total_fee().to_string(), NORMAL),
             ];
+            values.insert(
+                0,
+                (
+                    format!(
+                        "Task: {} (advisory)",
+                        review
+                            .fields()
+                            .get("taskId")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("none")
+                    ),
+                    TITLE,
+                ),
+            );
             // The send guards' verdicts, as the transfer review shows them: what `p` and `d`
             // would override, before the nickname is asked for.
             let pending = review
@@ -308,6 +335,15 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 } else {
                     NORMAL
                 },
+            ));
+            values.push((
+                format!(
+                    "Repeat aid: {}s / last 1 MiB; local claims, not chain proof.",
+                    review.fields()["duplicateGuard"]["windowSecs"]
+                        .as_u64()
+                        .unwrap_or(600)
+                ),
+                HINT,
             ));
             if state.options.allow_pending || state.options.allow_duplicate {
                 values.push((

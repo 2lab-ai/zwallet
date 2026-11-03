@@ -107,7 +107,12 @@ pub fn merge(
         if row.chain != chain.key || row.chain_id != chain_id {
             return;
         }
-        let key = (row.chain_id.clone(), row.tx_hash.to_ascii_lowercase());
+        let hash_key = if matches!(chain.family, crate::chains::Family::Solana(_)) {
+            row.tx_hash.clone()
+        } else {
+            row.tx_hash.to_ascii_lowercase()
+        };
+        let key = (row.chain_id.clone(), hash_key);
         let explorer_transaction = row.sources.contains(&Source::Explorer) && row.nonce.is_some();
         if let Some((old, has_transaction)) = by_hash.get_mut(&key) {
             if explorer_transaction {
@@ -222,5 +227,36 @@ pub fn merge(
         rows,
         coverage,
         dropped,
+    }
+}
+
+#[cfg(test)]
+mod multichain_identity_tests {
+    use super::*;
+    #[test]
+    fn solana_history_does_not_case_fold_transaction_signatures() {
+        let chain = crate::chains::find("solana").unwrap();
+        let hash = bs58::encode([3u8; 64]).into_string();
+        let different = hash.to_ascii_lowercase();
+        assert_ne!(hash, different);
+        let row = |h| JournalRow {
+            chain: "solana",
+            tx_hash: h,
+            from: bs58::encode([1u8; 32]).into_string(),
+            to: bs58::encode([2u8; 32]).into_string(),
+            nonce: None,
+            expiration_ms: None,
+            timestamp: 1,
+            kind: "transfer",
+            amount_raw: Some(U256::from(1)),
+            value: "0.000000001 SOL".into(),
+            token: None,
+        };
+        let history = merge(
+            chain,
+            vec![row(hash), row(different)],
+            Err(Unavailable::Unsupported),
+        );
+        assert_eq!(history.rows.len(), 2);
     }
 }

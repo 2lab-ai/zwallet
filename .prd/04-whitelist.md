@@ -586,8 +586,6 @@ request):
 [feature status](../docs/features.md#planned-features).
 
 - Cumulative amount budgets (rolling 24 h native and per-token caps).
-- The `invoke` duplicate key on calldata, and the duplicate window as a policy setting (R4 N-3 and
-  N-4).
 - User-added tokens.
 - Moving the whitelist key to the Secure Enclave or hardware.
 
@@ -606,6 +604,24 @@ Human edits use `native-cap <chain> <coin amount|none>`,
 These are not cumulative budgets, general contract-argument constraints or L1 total-fee caps.
 Full acceptance and delivery status: [`06-review-hardening.md`](06-review-hardening.md).
 
+## Advisory duplicate guard (2026-10-30)
+
+The implemented optional signed `policy.duplicateWindowSecs` is an integer from 1 to
+86400. Absence and reset use 600 seconds and preserve the old canonical signing bytes.
+Human `whitelist duplicate-window <duration|default>` and the TUI whitelist action
+use the existing authenticated edit boundary. This closes planned R4 N-3/N-4 in the
+current source; final validation/delivery is tracked by
+[`10-security-assurance.md`](10-security-assurance.md).
+
+`invoke` repeat identity includes keccak256 of normalized encoded calldata. Signature
+and raw-hex forms producing the same bytes match; different valid hashes do not.
+Missing/malformed legacy hashes match conservatively. Only the last 1 MiB of journal
+is searched, so even a configured window is not exhaustive. CLI reports the local-file
+setting as unverified; the TUI pins its password-checked list's setting. The daemon
+still verifies the whole policy before signing, but performs no duplicate accounting.
+`--allow-duplicate`, fixed-nonce paths, direct callers and mutable/deleted records remain
+outside this advisory guard. It is neither replay protection nor a cumulative budget.
+
 
 ## Tron family policy
 
@@ -617,3 +633,28 @@ The historical `maxFeeWei` and `maxNativeWei` fields are denominated in sun on T
 Token limits use smallest token units, and calldata limits apply to TriggerSmartContract data.
 Bandwidth and activation fees are not bounded by signed fee_limit. The complete security
 contract, owner/expiration checks and fee limitations are in [05-tron.md](05-tron.md).
+
+
+## Solana and TON native policy
+
+Solana payees use `solana:<64 lower-case public-key hex>`; TON payees use
+`ton:0:<64 lower-case account hash hex>`. They must name exactly their own chain,
+with address kind and no selectors. User-facing Solana addresses stay case-sensitive
+base58, and TON addresses use raw workchain0 format; neither is lower-cased as if it
+were an EVM address. Legacy EVM/Tron entries and their canonical signed bytes stay
+unchanged. Old binaries reject the new tagged identities.
+
+Both use native base units with 9 decimals in the historical `maxFeeWei` and
+`maxNativeWei` fields. Fresh-list defaults are 0.0001 SOL and 0.1 TON. Existing signed
+lists do not silently gain a missing fee cap. The Solana signer checks a supported
+single-signature transfer against the current 5,000-lamport fee assumption; the
+legacy message contains no fee maximum. TON's signer checks a fixed 0.05 TON reserve,
+not a maximum charge encoded by V4R2. The CLI/TUI separately checks its RPC estimate
+against the displayed signed-file cap; this is an advisory preflight and a direct
+caller can bypass it. The human must see these fee limitations before confirmation.
+
+Native amount caps and exact recipients are checked against decoded canonical
+bytes by the daemon. Unsupported programs, wallet modes, message signing, SPL and
+Jettons are never enabled by these entries. Native caps remain per transaction,
+with #26/#27 unchanged. See [11-multichain.md](11-multichain.md) and the
+[multichain security evidence](../docs/security-threat-model.md#solana-ton-and-verified-receive-qr).

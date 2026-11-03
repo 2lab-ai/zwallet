@@ -312,6 +312,176 @@ fn dry_run_prints_no_broadcastable_raw_tx() {
     assert!(rpc.sent().is_empty(), "a dry-run broadcast");
 }
 
+#[test]
+fn native_task_reports_link_intent_submission_and_exact_receipt_cost_without_signing_again() {
+    let (home, me) = unlocked();
+    let owner = me.clone();
+    let transactions = Arc::new(Mutex::new(
+        std::collections::BTreeMap::<String, Value>::new(),
+    ));
+    let observed = transactions.clone();
+    let rpc = MockRpc::start(move |method, params| match method {
+        "eth_call" => Reply::Result(json!(format!("0x{:064x}", 5u64))),
+        "eth_sendRawTransaction" => {
+            let raw = params[0].as_str().unwrap();
+            let bytes = alloy::hex::decode(raw).unwrap();
+            let tx = TxEnvelope::decode_2718(&mut bytes.as_slice()).unwrap();
+            let hash = tx_hash_of(raw);
+            observed.lock().unwrap().insert(hash.clone(), json!({"hash":hash,"from":owner,
+                "to":tx.to().map(|a|a.to_checksum(None)),"nonce":hex(tx.nonce().into()),
+                "value":format!("{:#x}",tx.value()),"input":format!("0x{}",alloy::hex::encode(tx.input())),"blockNumber":"0x7","blockHash":format!("0x{:064x}",7)}));
+            Reply::Result(json!(hash))
+        }
+        "eth_getTransactionByHash" => Reply::Result(
+            observed
+                .lock()
+                .unwrap()
+                .get(params[0].as_str().unwrap())
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
+        "eth_getTransactionReceipt" => {
+            let tx = observed
+                .lock()
+                .unwrap()
+                .get(params[0].as_str().unwrap())
+                .cloned();
+            Reply::Result(tx.map(|tx|json!({"transactionHash":params[0],"from":tx["from"],"to":tx["to"],"blockNumber":"0x7","blockHash":format!("0x{:064x}",7),"status":"0x1","gasUsed":"0x5208","effectiveGasPrice":"0x2"})).unwrap_or(Value::Null))
+        }
+        _ => healthy(method, params),
+    });
+    home.run(&[
+        "task",
+        "create",
+        "dev-17",
+        "--chain",
+        "ethereum",
+        "--allocation",
+        "native=20000000000000000",
+        "--rpc",
+        &rpc.url,
+        "--json",
+    ])
+    .ok();
+    home.run(&transfer(&rpc.url, &["--task", "dev-17", "--dry-run"]))
+        .ok();
+    let sent = home.run(&transfer(&rpc.url, &["--task", "dev-17"])).ok();
+    assert_eq!(sent["taskId"], "dev-17");
+    let offline = home
+        .run(&["task", "report", "dev-17", "--offline", "--json"])
+        .ok();
+    assert_eq!(offline["records"][0]["outcome"], "intent");
+    assert_eq!(offline["records"][1]["outcome"], "submitted");
+    let report = home
+        .run(&["task", "report", "dev-17", "--rpc", &rpc.url, "--json"])
+        .ok();
+    assert_eq!(report["records"][1]["outcome"], "confirmed", "{report}");
+    assert_eq!(report["records"][1]["actualFeeRaw"], "42000");
+    let native = report["assets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["asset"] == "native")
+        .unwrap();
+    assert_eq!(native["remainingAllocationRaw"], "9999999999958000");
+    assert_eq!(
+        rpc.sent().len(),
+        1,
+        "reporting did not broadcast or sign another transaction"
+    );
+    assert!(!report.to_string().contains(&me));
+    assert!(!report.to_string().contains(OTHER));
+    assert!(
+        !std::fs::read_to_string(home.path().join("task-dev-17.json"))
+            .unwrap()
+            .contains("rawTx")
+    );
+    let journal = std::fs::read_to_string(journal_path(&home, &me)).unwrap();
+    assert!(journal.contains("\"taskId\":\"dev-17\""));
+}
+
+#[test]
+fn native_task_keeps_broadcast_uncertainty_and_never_guesses_zero_fees() {
+    let (home, _) = unlocked();
+    let rpc = MockRpc::start(|method, params| match method {
+        "eth_call" => Reply::Result(json!(format!("0x{:064x}", 0))),
+        "eth_sendRawTransaction" => Reply::Drop,
+        _ => healthy(method, params),
+    });
+    home.run(&[
+        "task",
+        "create",
+        "uncertain",
+        "--chain",
+        "ethereum",
+        "--rpc",
+        &rpc.url,
+        "--json",
+    ])
+    .ok();
+    home.run(&transfer(&rpc.url, &["--task", "uncertain"]))
+        .err("BROADCAST_UNCERTAIN");
+    let r = home
+        .run(&["task", "report", "uncertain", "--offline", "--json"])
+        .ok();
+    assert_eq!(r["records"][0]["outcome"], "uncertain");
+    assert!(r["records"][0]["actualFeeRaw"].is_null());
+    assert!(r["records"][0]["txHash"].is_string());
+}
+
+#[test]
+fn task_receipt_fee_components_and_coherent_inclusion_are_required() {
+    for (chain, id, l1, operator, block_match, missing_block, overflow, expected) in [
+        ("ethereum", 1, None, None, true, false, false, Some("6")),
+        ("base", 8453, None, None, true, false, false, None),
+        ("base", 8453, Some("0x4"), None, true, false, false, None),
+        (
+            "base",
+            8453,
+            Some("0x4"),
+            Some("0x5"),
+            true,
+            false,
+            false,
+            Some("15"),
+        ),
+        ("ethereum", 1, None, None, false, false, false, Some("6")),
+        ("ethereum", 1, None, None, true, true, false, Some("6")),
+        ("ethereum", 1, None, None, true, false, true, None),
+    ] {
+        let hash = format!("0x{:064x}", 91);
+        let queried = hash.clone();
+        let rpc = MockRpc::start(move |method, params| {
+            Reply::Result(match method {
+                "eth_chainId" => hex(id),
+                "eth_getTransactionByHash" => {
+                    json!({"hash":queried,"from":OTHER,"to":ROUTER,"nonce":"0x1","value":"0x0","input":"0x","blockNumber":"0x7","blockHash":format!("0x{:064x}",7)})
+                }
+                "eth_getTransactionReceipt" => {
+                    let mut r = json!({"transactionHash":params[0],"from":OTHER,"to":ROUTER,"status":"0x1","gasUsed":"0x2","effectiveGasPrice":if overflow {format!("{:#x}",alloy::primitives::U256::MAX)}else{"0x3".into()},"blockNumber":if block_match {"0x7"}else{"0x8"},"blockHash":format!("0x{:064x}",7)});
+                    if missing_block {
+                        r.as_object_mut().unwrap().remove("blockNumber");
+                    }
+                    if let Some(v) = l1 {
+                        r["l1Fee"] = json!(v);
+                    }
+                    if let Some(v) = operator {
+                        r["operatorFee"] = json!(v);
+                    }
+                    r
+                }
+                _ => panic!("unexpected task lookup method {method}"),
+            })
+        });
+        let home = Home::new();
+        let r = home
+            .run(&["tx", "--chain", chain, &hash, "--rpc", &rpc.url, "--json"])
+            .ok();
+        assert_eq!(r["feeWei"].as_str(), expected, "{r}");
+        assert_eq!(r["receiptConsistent"], block_match && !missing_block, "{r}");
+    }
+}
+
 /// A listener on `at` that relays each request to the key daemon on `to` and its reply back, with
 /// `decoded` put in place of a signing reply's own `decoded` view: what a process squatting on
 /// `d.sock` in front of a genuine daemon can do. Stops when dropped.
@@ -1515,20 +1685,29 @@ fn rpc_url_path_and_query_are_never_printed() {
     assert!(!human.stdout.contains("SECRETKEY"), "{}", human.stdout);
     // A key in a subdomain label; the default hosts stay readable.
     let key_host = "https://k3y0a1b2c3d4e5f6.base.example.com";
-    let v = home
-        .run_env(&["chains", "--json"], &[("ZWALLET_RPC_BASE", key_host)])
-        .ok();
+    // Native-family test defaults are loopback. Exercise redaction for their full RPC paths
+    // as well; `chains` only displays configuration and never contacts these endpoints.
+    let native_keyed = "http://127.0.0.1:9/private/SECRETKEY9?apikey=SECRETKEY10";
+    let keyed_env = [
+        ("ZWALLET_RPC_BASE", key_host),
+        ("ZWALLET_RPC_SOLANA", native_keyed),
+        ("ZWALLET_RPC_TON", native_keyed),
+    ];
+    let v = home.run_env(&["chains", "--json"], &keyed_env).ok();
     for row in v.as_array().unwrap() {
         let shown = row["rpc"].as_str().unwrap();
         if row["key"] == "base" {
             assert_eq!(shown, "https://<redacted>.base.example.com");
+        } else if row["key"] == "solana" || row["key"] == "ton" {
+            assert_eq!(shown, "http://127.0.0.1:9/<redacted>");
         } else {
             assert!(shown.ends_with("-rpc.publicnode.com"), "{shown}");
             assert!(!shown.contains("redacted"), "{shown}");
         }
     }
-    let human = home.run_env(&["chains"], &[("ZWALLET_RPC_BASE", key_host)]);
+    let human = home.run_env(&["chains"], &keyed_env);
     assert!(!human.stdout.contains("k3y0a1b2"), "{}", human.stdout);
+    assert!(!human.stdout.contains("SECRETKEY"), "{}", human.stdout);
 
     home.create("t", &[]);
     let leaks = |r: &common::Run| r.stdout.contains("SECRETKEY") || r.stderr.contains("SECRETKEY");
@@ -1670,10 +1849,28 @@ fn every_chain_node(delay: Duration) -> Vec<(&'static str, MockRpc)> {
 /// none falls back to its public default RPC.
 fn rpc_env(nodes: &[(&str, MockRpc)], instead: &[(&str, &str)]) -> Vec<(String, String)> {
     let tron = tron_node();
+    let solana = common::tiny_rpc(|method| match method {
+        "getGenesisHash" => json!(zwallet::chains::solana::MAINNET_GENESIS),
+        "getBalance" => json!({"context":{"slot":123},"value":0}),
+        _ => panic!("unexpected Solana read method"),
+    });
+    let ton = common::tiny_rpc(|method| match method {
+        "getMasterchainInfo" => {
+            json!({"init":{"root_hash":"F6OpKZKqvqeFp6CQmFomXNMfMj2EnaUSOXN+Mh+wVWk=","file_hash":"XplPz01CXAps5qeSWUtxcyBfdAo5zVb1N979KLSKD24=","seqno":0,"workchain":-1}})
+        }
+        "getAddressInformation" => {
+            json!({"balance":"0","state":"uninitialized","code":"","data":""})
+        }
+        _ => panic!("unexpected TON read method"),
+    });
     let env: Vec<(String, String)> = nodes
         .iter()
         .map(|(key, node)| (*key, node.url.as_str()))
-        .chain([("tron", tron.url.as_str())])
+        .chain([
+            ("tron", tron.url.as_str()),
+            ("solana", solana.as_str()),
+            ("ton", ton.as_str()),
+        ])
         .map(|(key, url)| {
             let url = instead
                 .iter()
@@ -1708,7 +1905,7 @@ fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
 }
 
 /// Every chain key in the order `balance` without `--chain` lists them: mainnets, then Sepolia.
-const ALL_CHAINS_ORDER: [&str; 9] = [
+const ALL_CHAINS_ORDER: [&str; 11] = [
     "ethereum",
     "base",
     "arbitrum",
@@ -1717,6 +1914,8 @@ const ALL_CHAINS_ORDER: [&str; 9] = [
     "bsc",
     "avalanche",
     "tron",
+    "solana",
+    "ton",
     "sepolia",
 ];
 
@@ -1755,7 +1954,14 @@ fn balance_without_chain_reads_every_network_and_its_registry_tokens() {
         tron_row["native"],
         json!({ "symbol": "TRX", "decimals": 6, "balance": "0", "raw": "0" })
     );
-    for row in rows.iter().filter(|r| r["chain"] != "tron") {
+    for row in rows.iter().filter(|r| {
+        matches!(
+            zwallet::chains::find(r["chain"].as_str().unwrap())
+                .unwrap()
+                .family,
+            zwallet::chains::Family::Evm(_)
+        )
+    }) {
         let key = row["chain"].as_str().unwrap();
         let chain = zwallet::chains::find(key).unwrap();
         let id = zwallet::chains::evm::config(chain).unwrap().chain_id;
@@ -1817,6 +2023,16 @@ fn balance_without_chain_reads_every_network_and_its_registry_tokens() {
     // BNB Smart Chain has no registry token.
     assert_eq!(rows[5]["tokens"], json!([]));
 
+    let wallet: Value =
+        serde_json::from_slice(&std::fs::read(home.wallet_json()).unwrap()).unwrap();
+    let solana = wallet["keys"][0]["addresses"]["solana"].as_str().unwrap();
+    let ton = wallet["keys"][0]["addresses"]["ton"].as_str().unwrap();
+    for key in ["solana", "ton"] {
+        let row = rows.iter().find(|r| r["chain"] == key).unwrap();
+        assert_eq!(row["native"]["raw"], "0");
+        assert_eq!(row["address"], wallet["keys"][0]["addresses"][key]);
+        assert_eq!(row["tokens"], json!([]));
+    }
     // Human: one line per network, a held token under its network, then the count.
     let human = home.run_env(&["balance"], &env_refs(&env));
     assert_eq!(human.code, 0, "{}", human.stderr);
@@ -1833,8 +2049,10 @@ fn balance_without_chain_reads_every_network_and_its_registry_tokens() {
              bsc        0 BNB\n\
              avalanche  0 AVAX\n\
              tron       0 TRX ({tron})\n\
+             solana     0 SOL ({solana})\n\
+             ton        0 TON ({ton})\n\
              sepolia    0 ETH\n\
-             2 of 9 networks have a balance\n"
+             2 of 11 networks have a balance\n"
         )
     );
 }
@@ -1903,7 +2121,7 @@ fn balance_without_chain_shows_the_networks_that_answer() {
     assert!(polygon.chars().count() <= 110, "{polygon}");
     assert_eq!(
         lines.last(),
-        Some(&"2 of 9 networks have a balance; 1 did not answer"),
+        Some(&"2 of 11 networks have a balance; 1 did not answer"),
         "{}",
         human.stdout
     );
@@ -2011,7 +2229,7 @@ fn balance_without_chain_shows_a_failed_token_read_on_its_row_only() {
     assert!(lines[op + 2].starts_with("polygon "), "{}", human.stdout);
     assert_eq!(
         lines.last(),
-        Some(&"2 of 9 networks have a balance; 2 token reads failed"),
+        Some(&"2 of 11 networks have a balance; 2 token reads failed"),
         "{}",
         human.stdout
     );
@@ -2091,6 +2309,11 @@ fn balance_without_chain_cuts_each_networks_error_short_when_none_answers() {
             "{n}"
         );
         let error = n["error"].as_str().unwrap_or_else(|| panic!("{n}"));
+        if key == "solana" || key == "ton" {
+            // New native adapters deliberately do not echo untrusted RPC error bodies.
+            assert!(!error.contains(&whole), "{key}: {error}");
+            continue;
+        }
         let node_said = if key == "tron" {
             "the node answered an error: "
         } else {
@@ -2248,7 +2471,7 @@ fn balance_after_unlock_is_verified_by_the_session_with_the_code_last() {
     }
     // Every field it had before is still there.
     assert_eq!(one["balance"], "1.5");
-    assert_eq!(every["chains"].as_array().unwrap().len(), 9);
+    assert_eq!(every["chains"].as_array().unwrap().len(), 11);
 
     // Human: into a pipe, the text it always had; on a terminal, that text and then the code,
     // after the networks. --no-qr leaves the code out.
@@ -2279,7 +2502,7 @@ fn balance_after_unlock_is_verified_by_the_session_with_the_code_last() {
     }
     let piped = home.run_env(&["balance"], &env_refs(&env));
     assert!(
-        piped.stdout.ends_with("2 of 9 networks have a balance\n"),
+        piped.stdout.ends_with("2 of 11 networks have a balance\n"),
         "{}",
         piped.stdout
     );
@@ -2332,7 +2555,7 @@ fn a_repeat_of_a_recent_send_is_refused_unless_allow_duplicate() {
     let msg = r.err("VALIDATION_ERROR");
     println!("{msg}");
     assert!(
-        msg.starts_with(
+        msg.contains(
             "this looks like a repeat of a recent send; look those hashes up first. If this \
              really is a second payment, pass --allow-duplicate"
         ),
@@ -2349,7 +2572,10 @@ fn a_repeat_of_a_recent_send_is_refused_unless_allow_duplicate() {
         ),
         "{msg}"
     );
+    assert!(msg.starts_with("advisory duplicate guard (policy: local-file-unverified; window 600s; last 1 MiB of local journal): "));
     let v = r.json();
+    assert_eq!(v["duplicateGuard"]["policySource"], "local-file-unverified");
+    assert_eq!(v["duplicateGuard"]["advisory"], true);
     let dup = &v["duplicateSends"][0];
     assert_eq!(dup["txHash"], first_hash.as_str(), "{v:#}");
     assert_eq!(dup["nonce"], 7);
@@ -2409,7 +2635,7 @@ fn a_dry_runs_duplicate_sends_line_shows_journal_fields_only_in_zwallets_shape()
         dup[0]
     );
     assert!(
-        !human.stdout.contains("VERIFIED") && !human.stdout.contains("verified\""),
+        !human.stdout.contains("VERIFIED") && !human.stdout.contains("\"verified\":"),
         "{}",
         human.stdout
     );
@@ -4000,4 +4226,76 @@ fn f1_a_dry_run_the_list_allows_is_signed_by_the_daemon() {
     let r = home.run(&pay("ethereum", OTHER, &rpc.url, &[]));
     r.err("WHITELIST_DENIED");
     assert!(rpc.sent().is_empty());
+}
+
+#[test]
+fn invoke_duplicate_identity_is_encoded_calldata_with_signed_window_and_explicit_overrides() {
+    let (home, me) = listed(|list| {
+        contract(list, "router", ROUTER, &["ethereum"], &[DEPOSIT]);
+        list.policy.duplicate_window_secs = Some(1800);
+    });
+    let rpc = mining_node();
+    let first = home
+        .run(&invoke(ROUTER, &["--sig", "deposit()"], &rpc.url, &[]))
+        .ok();
+    assert_eq!(first["duplicateGuard"]["windowSecs"], 1800);
+    assert_eq!(
+        first["duplicateGuard"]["policySource"],
+        "local-file-unverified"
+    );
+    let path = journal_path(&home, &me);
+    let mut entry: Value =
+        serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+    assert_eq!(
+        entry["calldataHash"],
+        format!("{:#x}", keccak256(alloy::hex::decode(DEPOSIT).unwrap()))
+    );
+    assert!(entry.get("data").is_none());
+    // 20 minutes is beyond the legacy 10m default but within the signed 30m setting.
+    entry["ts"] = json!(zwallet::core::time::rfc3339_utc(
+        zwallet::core::time::unix_secs(std::time::SystemTime::now()) - 1200
+    ));
+    std::fs::write(&path, format!("{entry}\n")).unwrap();
+    let equivalent = format!("0x{}", DEPOSIT[2..].to_ascii_uppercase());
+    let refused = home.run(&invoke(ROUTER, &["--data", &equivalent], &rpc.url, &[]));
+    let refusal = refused.err("VALIDATION_ERROR");
+    assert!(refusal.starts_with("advisory duplicate guard (policy: local-file-unverified; window 1800s; last 1 MiB of local journal): "));
+    assert_eq!(refused.json()["duplicateGuard"], first["duplicateGuard"]);
+    let mut human_args = invoke(ROUTER, &["--data", &equivalent], &rpc.url, &[]);
+    human_args.retain(|arg| *arg != "--json");
+    let human = home.run(&human_args);
+    assert_ne!(human.code, 0);
+    assert!(human.stderr.starts_with("error: advisory duplicate guard (policy: local-file-unverified; window 1800s; last 1 MiB of local journal): "), "{}", human.stderr);
+    assert_eq!(rpc.sent().len(), 1);
+    let different = format!("{DEPOSIT}01");
+    let other = home
+        .run(&invoke(ROUTER, &["--data", &different], &rpc.url, &[]))
+        .ok();
+    assert_eq!(other["duplicateSends"], json!([]));
+    let dry = home
+        .run(&invoke(
+            ROUTER,
+            &["--data", DEPOSIT],
+            &rpc.url,
+            &["--dry-run"],
+        ))
+        .ok();
+    assert_eq!(dry["duplicateSends"][0]["txHash"], first["txHash"]);
+    home.run(&invoke(
+        ROUTER,
+        &["--data", DEPOSIT],
+        &rpc.url,
+        &["--allow-duplicate"],
+    ))
+    .ok();
+    let fixed = home
+        .run(&invoke(
+            ROUTER,
+            &["--data", DEPOSIT],
+            &rpc.url,
+            &["--nonce", "10"],
+        ))
+        .ok();
+    assert!(fixed.get("duplicateSends").is_none());
+    assert_eq!(rpc.sent().len(), 4);
 }
