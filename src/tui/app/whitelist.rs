@@ -201,6 +201,9 @@ pub struct WhitelistUi {
     pub request: u64,
     // A read may restore cached authority only in the trust generation that requested it.
     read_generation: Option<u64>,
+    // The checked list the newest read rechecks, until a read's result decides it. Never shown
+    // or used: a newer read takes it over, so a superseded read cannot drop it unchecked (#63).
+    rechecking: Option<CheckedList>,
     pub home: PathBuf,
 }
 impl Default for WhitelistUi {
@@ -213,6 +216,7 @@ impl Default for WhitelistUi {
             next_unlock: String::new(),
             request: 0,
             read_generation: None,
+            rechecking: None,
             home: PathBuf::new(),
         }
     }
@@ -485,9 +489,21 @@ impl App {
     pub(super) fn load_whitelist(&mut self) -> Vec<Effect> {
         self.whitelist.request += 1;
         self.whitelist.read_generation = Some(self.generation);
-        let checked = self.checked_list.take();
+        // The read takes the checked list until its result decides. One still in flight holds
+        // it: this read rechecks it, rather than starting without it.
+        let checked = self
+            .checked_list
+            .take()
+            .or_else(|| self.whitelist.rechecking.take());
+        self.whitelist.rechecking = checked.clone();
         self.whitelist.lines = Pane::Loading;
         vec![Effect::ReadWhitelist(self.whitelist.request, checked)]
+    }
+    /// Drops the checked list, with the copy a read in flight rechecks: a password check, an
+    /// edit or a failed pane decides it, as a read's result does.
+    pub(super) fn drop_checked_list(&mut self) {
+        self.checked_list = None;
+        self.whitelist.rechecking = None;
     }
     fn whitelist_verified(&mut self) -> bool {
         let Some(checked) = self.checked_list.as_ref() else {
@@ -838,6 +854,7 @@ impl App {
                     && self.whitelist.read_generation == Some(self.generation) =>
             {
                 self.whitelist.read_generation = None;
+                self.whitelist.rechecking = None;
                 match result {
                     Ok(read) => {
                         self.checked_list = read.checked;
@@ -921,7 +938,7 @@ impl App {
                     let id = review.id;
                     self.whitelist.stage = Stage::Applying(review);
                     self.password = PasswordState::Checking;
-                    self.checked_list = None;
+                    self.drop_checked_list();
                     vec![Effect::ApplyWhitelist(id)]
                 } else {
                     self.whitelist.stage = stage;

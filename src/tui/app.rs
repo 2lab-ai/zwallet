@@ -374,7 +374,7 @@ impl App {
                     && let Some(key) = self.pending_key.clone()
                 {
                     self.password = PasswordState::Checking;
-                    self.checked_list = None;
+                    self.drop_checked_list();
                     return vec![match self.password_purpose {
                         PasswordPurpose::Warm | PasswordPurpose::Unlock(_) => {
                             Effect::CheckPassword {
@@ -688,7 +688,7 @@ impl App {
 
     fn fail_pane(&mut self, error: WalletError) {
         self.invalidate_reads();
-        self.checked_list = None;
+        self.drop_checked_list();
         self.nav.lines = Pane::Failed(Outside::error(&error));
         self.keys = Pane::Failed(Outside::error(&error));
         if self.quit {

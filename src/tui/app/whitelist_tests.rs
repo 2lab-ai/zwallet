@@ -1024,3 +1024,234 @@ fn a_tab_round_trip_on_the_summary_keeps_the_prepared_plan_applicable() {
     assert!(matches!(app.whitelist.stage, Stage::List));
     assert!(work.iter().any(|e| matches!(e, Effect::ReadWhitelist(..))));
 }
+
+/// #63: a home whose whitelist.json is a signed list of `generation`, and that list checked
+/// against those bytes, as a password check or an edit's recheck leaves it.
+fn signed_home(generation: u64) -> (tempfile::TempDir, CheckedList) {
+    use crate::core::store;
+    let home = tempfile::Builder::new()
+        .prefix("zwt-wlrace-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    store::create_master(
+        home.path(),
+        "whitelist race test password",
+        "main",
+        store::MasterOptions {
+            kdf: store::KdfParams {
+                log_n: store::KDF_MIN_LOG_N,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        &crate::chains::derive_addresses,
+    )
+    .unwrap();
+    let mut list = checked().list;
+    list.generation = generation;
+    sign_into(home.path(), &list);
+    let checked = CheckedList {
+        list,
+        source: "whitelist.json",
+        fingerprint: ListFiles::read(home.path()).fingerprint(),
+    };
+    (home, checked)
+}
+fn sign_into(home: &Path, list: &Whitelist) {
+    use crate::core::whitelist::{WHITELIST_FILE, WhitelistKey};
+    let signed = WhitelistKey::from_secret(&[9; 32]).sign(list);
+    std::fs::write(home.join(WHITELIST_FILE), signed.to_file_bytes().unwrap()).unwrap();
+}
+/// The one whitelist read among `effects`, run now as `tui::start` runs it (`read` of `home`):
+/// the checked list it carried, and the message it sends.
+fn run_read(home: &Path, effects: Vec<Effect>) -> (Option<CheckedList>, Msg) {
+    let mut reads = effects.into_iter().filter_map(|effect| match effect {
+        Effect::ReadWhitelist(id, carried) => Some((id, carried)),
+        _ => None,
+    });
+    let (id, carried) = reads.next().expect("a whitelist read");
+    assert!(reads.next().is_none(), "one whitelist read");
+    (carried.clone(), Msg::WhitelistRead(id, read(home, carried)))
+}
+/// An add applied through its review and password, its recheck `checked`; `lock` presses L while
+/// it runs, so the outcome locks after it.
+fn apply_edit(app: &mut App, checked: &CheckedList, lock: bool) -> Vec<Effect> {
+    prepare_add(app, "0x3333333333333333333333333333333333333333", false);
+    review(
+        app,
+        "The password authorizes this exact change\nafter the change: the wallet stays locked",
+    );
+    enter_password(app);
+    let id = app.whitelist.request;
+    assert_eq!(
+        app.update(Msg::PasswordSubmitted),
+        vec![Effect::ApplyWhitelist(id)]
+    );
+    if lock {
+        assert!(key(app, Key::Char('L')).is_empty());
+    }
+    let outcome = WhitelistOutcome {
+        list: checked.list.clone(),
+        stopped_daemons: vec![8],
+        session: EditSession::Locked,
+        warning: None,
+        checked: Ok(checked.clone()),
+        output: json!({"locked":true}),
+        text: "added bob; stopped daemon 8; wallet stays locked".into(),
+    };
+    let work = app.update(Msg::WhitelistApplied(id, Applied(Ok(outcome))));
+    assert_eq!(app.checked_list(), Some(checked));
+    work
+}
+
+/// #63, as the pty test met it (`t2_t6_t7`): Enter on the outcome reads the list with the edit's
+/// checked list, and the refresh tick (`tui::REFRESH`) reads it again before that read lands. The
+/// superseded read is dropped; the checked list it carried must not go with it.
+#[test]
+fn t7_a_refresh_superseding_the_outcome_read_keeps_the_edited_list_verified() {
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    let work = apply_edit(&mut app, &checked, false);
+    assert!(!work.contains(&Effect::LockAll), "{work:?}");
+    let (_, stale) = run_read(home.path(), key(&mut app, Key::Enter));
+    assert!(matches!(app.whitelist.stage, Stage::List));
+    let (carried, fresh) = run_read(home.path(), app.update(Msg::Tick));
+    app.update(stale);
+    app.update(fresh);
+    let shown = frame(&app, "tick-superseded");
+    assert!(shown.contains("verified by password: gen 2"), "{shown}");
+    assert_eq!(app.checked_list(), Some(&checked));
+    assert_eq!(
+        carried.as_ref(),
+        Some(&checked),
+        "the newer read rechecks it"
+    );
+}
+
+/// #63, as the issue reads it: L during the edit locks after it, the lock's reload reads the list
+/// with the checked list, and Enter on the outcome reads it again before that read lands.
+#[test]
+fn t7_enter_superseding_the_lock_reload_read_keeps_the_edited_list_verified() {
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    let work = apply_edit(&mut app, &checked, true);
+    assert!(work.contains(&Effect::LockAll), "{work:?}");
+    let (_, stale) = run_read(home.path(), app.update(Msg::Locked(Ok(vec![8]))));
+    assert!(matches!(app.whitelist.stage, Stage::Outcome { .. }));
+    let (carried, fresh) = run_read(home.path(), key(&mut app, Key::Enter));
+    app.update(stale);
+    app.update(fresh);
+    let shown = frame(&app, "lock-reload-superseded");
+    assert!(shown.contains("verified by password: gen 2"), "{shown}");
+    assert_eq!(app.checked_list(), Some(&checked));
+    assert_eq!(
+        carried.as_ref(),
+        Some(&checked),
+        "the newer read rechecks it"
+    );
+}
+
+/// A list changed under a read in flight is never shown as verified. The newer read rechecks the
+/// carried list against the files as they are then; the superseded read checked the old bytes and
+/// says verified, and it is dropped whichever of the two lands first.
+#[test]
+fn t7_a_list_changed_under_a_superseded_read_ends_not_verified() {
+    for stale_first in [true, false] {
+        let (home, checked) = signed_home(2);
+        let mut app = new_app();
+        apply_edit(&mut app, &checked, false);
+        let (_, stale) = run_read(home.path(), key(&mut app, Key::Enter));
+        assert!(matches!(&stale, Msg::WhitelistRead(_, Ok(r)) if r.checked.is_some()));
+        let mut changed = checked.list.clone();
+        changed.generation = 3;
+        changed
+            .add(Entry::new_address(
+                "mallory",
+                "0x4444444444444444444444444444444444444444",
+                &["base"],
+            ))
+            .unwrap();
+        sign_into(home.path(), &changed);
+        let (carried, fresh) = run_read(home.path(), app.update(Msg::Tick));
+        let (first, second) = if stale_first {
+            (stale, fresh)
+        } else {
+            (fresh, stale)
+        };
+        app.update(first);
+        app.update(second);
+        let shown = frame(&app, "changed-under-read");
+        assert!(!shown.contains("verified by password"), "{shown}");
+        assert!(shown.contains("not verified"), "{shown}");
+        assert!(app.checked_list().is_none());
+        assert_eq!(
+            carried.as_ref(),
+            Some(&checked),
+            "the newer read rechecks it"
+        );
+    }
+}
+
+/// What drops the checked list while a read of it is in flight stays dropped: the next read
+/// carries nothing a failed pane, a password check or an edit's submission dropped, and the
+/// in-flight read's verified result is stale when it lands.
+#[test]
+fn t7_a_checked_list_dropped_under_a_read_in_flight_stays_dropped() {
+    for drop in ["failed pane", "password check", "edit"] {
+        let (home, checked) = signed_home(2);
+        let mut app = new_app();
+        app.checked_list = Some(checked.clone());
+        let (_, stale) = run_read(home.path(), app.load_whitelist());
+        let next = match drop {
+            "failed pane" => {
+                let generation = app.generation;
+                app.update(Msg::Keys(
+                    generation,
+                    Err(WalletError::validation("the key list changed")),
+                ));
+                app.update(Msg::Tick)
+            }
+            "password check" => {
+                key(&mut app, Key::Char('V'));
+                app.update(Msg::Prepared(Ok(())));
+                app.update(Msg::PasswordSubmitted);
+                let opened = crate::wallet::Opened {
+                    keys: vec![],
+                    active: "main".into(),
+                    warning: None,
+                    anchor: Ok(None),
+                    salted: false,
+                };
+                app.update(Msg::Checked(Ok((opened, Err("list refused".into())))))
+            }
+            _ => {
+                prepare_add(
+                    &mut app,
+                    "0x3333333333333333333333333333333333333333",
+                    false,
+                );
+                review(&mut app, "The password authorizes this exact change");
+                enter_password(&mut app);
+                app.update(Msg::PasswordSubmitted);
+                let id = app.whitelist.request;
+                app.update(Msg::WhitelistApplied(
+                    id,
+                    Applied(Err(WalletError::validation("edit refused before writing"))),
+                ));
+                key(&mut app, Key::Enter)
+            }
+        };
+        let (carried, fresh) = run_read(home.path(), next);
+        assert!(
+            carried.is_none(),
+            "{drop}: the next read carried a dropped list"
+        );
+        app.update(stale);
+        app.update(fresh);
+        assert!(app.checked_list().is_none(), "{drop}");
+        assert!(
+            !frame(&app, "dropped").contains("verified by password"),
+            "{drop}"
+        );
+    }
+}
