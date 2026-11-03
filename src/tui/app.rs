@@ -446,7 +446,7 @@ impl App {
                                 self.list_reason = None;
                             }
                             Err(reason) => {
-                                self.checked_list = None;
+                                self.drop_checked_list();
                                 self.list_reason = Some(Outside::warning(&reason));
                             }
                         }

@@ -477,7 +477,7 @@ impl App {
         if error.details.get("checkedListChanged") == Some(&Value::Bool(true))
             || error.message.contains("changed after it was shown")
         {
-            self.checked_list = None;
+            self.drop_checked_list();
             self.transfer.payees.clear();
             self.transfer.tron = TronTransfer::default();
             self.transfer.review = None;

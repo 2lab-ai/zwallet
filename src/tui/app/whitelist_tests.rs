@@ -1025,8 +1025,10 @@ fn a_tab_round_trip_on_the_summary_keeps_the_prepared_plan_applicable() {
     assert!(work.iter().any(|e| matches!(e, Effect::ReadWhitelist(..))));
 }
 
-/// #63: a home whose whitelist.json is a signed list of `generation`, and that list checked
-/// against those bytes, as a password check or an edit's recheck leaves it.
+/// #63: a home whose whitelist.json is a list of `generation` signed with a fixed test key, and
+/// an injected, previously checked fixture of it: the `CheckedList` a password check or an edit's
+/// recheck would leave, built here against those bytes. It is not proof of password
+/// authentication; the read under test only rechecks the bytes.
 fn signed_home(generation: u64) -> (tempfile::TempDir, CheckedList) {
     use crate::core::store;
     let home = tempfile::Builder::new()
@@ -1192,9 +1194,10 @@ fn t7_a_list_changed_under_a_superseded_read_ends_not_verified() {
     }
 }
 
-/// What drops the checked list while a read of it is in flight stays dropped: the next read
-/// carries nothing a failed pane, a password check or an edit's submission dropped, and the
-/// in-flight read's verified result is stale when it lands.
+/// What drops the checked list while a read of it is in flight stays dropped. The in-flight
+/// read's verified result lands right after the drop, before any newer read, and restores
+/// nothing; the next read carries nothing a failed pane, a password check or an edit's
+/// submission dropped.
 #[test]
 fn t7_a_checked_list_dropped_under_a_read_in_flight_stays_dropped() {
     for drop in ["failed pane", "password check", "edit"] {
@@ -1202,6 +1205,13 @@ fn t7_a_checked_list_dropped_under_a_read_in_flight_stays_dropped() {
         let mut app = new_app();
         app.checked_list = Some(checked.clone());
         let (_, stale) = run_read(home.path(), app.load_whitelist());
+        let deliver_stale = |app: &mut App, stale: Msg| {
+            app.update(stale);
+            assert!(
+                app.checked_list().is_none(),
+                "{drop}: the in-flight read restored a dropped list"
+            );
+        };
         let next = match drop {
             "failed pane" => {
                 let generation = app.generation;
@@ -1209,12 +1219,14 @@ fn t7_a_checked_list_dropped_under_a_read_in_flight_stays_dropped() {
                     generation,
                     Err(WalletError::validation("the key list changed")),
                 ));
+                deliver_stale(&mut app, stale);
                 app.update(Msg::Tick)
             }
             "password check" => {
                 key(&mut app, Key::Char('V'));
                 app.update(Msg::Prepared(Ok(())));
                 app.update(Msg::PasswordSubmitted);
+                deliver_stale(&mut app, stale);
                 let opened = crate::wallet::Opened {
                     keys: vec![],
                     active: "main".into(),
@@ -1233,6 +1245,7 @@ fn t7_a_checked_list_dropped_under_a_read_in_flight_stays_dropped() {
                 review(&mut app, "The password authorizes this exact change");
                 enter_password(&mut app);
                 app.update(Msg::PasswordSubmitted);
+                deliver_stale(&mut app, stale);
                 let id = app.whitelist.request;
                 app.update(Msg::WhitelistApplied(
                     id,
@@ -1246,7 +1259,6 @@ fn t7_a_checked_list_dropped_under_a_read_in_flight_stays_dropped() {
             carried.is_none(),
             "{drop}: the next read carried a dropped list"
         );
-        app.update(stale);
         app.update(fresh);
         assert!(app.checked_list().is_none(), "{drop}");
         assert!(
@@ -1254,4 +1266,35 @@ fn t7_a_checked_list_dropped_under_a_read_in_flight_stays_dropped() {
             "{drop}"
         );
     }
+}
+
+/// A read's result decides the carried copy for good: a read that finds whitelist.json changed
+/// drops the list, and no later read carries it back, even once the file holds exactly the
+/// verified bytes again.
+#[test]
+fn t7_a_read_that_finds_the_list_changed_drops_the_carried_copy_for_good() {
+    let (home, checked) = signed_home(2);
+    let mut app = new_app();
+    app.checked_list = Some(checked.clone());
+    let mut changed = checked.list.clone();
+    changed.generation = 3;
+    sign_into(home.path(), &changed);
+    let (carried, found_changed) = run_read(home.path(), app.update(Msg::Tick));
+    assert_eq!(carried.as_ref(), Some(&checked));
+    app.update(found_changed);
+    assert!(
+        app.checked_list().is_none(),
+        "the read found the list changed"
+    );
+    sign_into(home.path(), &checked.list);
+    assert_eq!(
+        ListFiles::read(home.path()).fingerprint(),
+        checked.fingerprint,
+        "the verified bytes are back"
+    );
+    let (carried, restored) = run_read(home.path(), app.update(Msg::Tick));
+    app.update(restored);
+    assert!(carried.is_none(), "a copy a read decided came back");
+    assert!(app.checked_list().is_none());
+    assert!(!frame(&app, "decided-for-good").contains("verified by password"));
 }

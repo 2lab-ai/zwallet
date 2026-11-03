@@ -341,7 +341,7 @@ impl App {
             self.quit_error.get_or_insert_with(|| e.clone());
         }
         if e.message.contains("changed after it was shown") {
-            self.checked_list = None;
+            self.drop_checked_list();
             self.list_reason = Some(Outside::detail(
                 "not verified: whitelist changed; V checks it again",
             ));

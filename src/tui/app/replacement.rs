@@ -376,7 +376,7 @@ impl App {
     }
     fn replacement_error(&mut self, error: WalletError) {
         if error.message.contains("changed after it was shown") {
-            self.checked_list = None;
+            self.drop_checked_list();
             self.list_reason = Some(Outside::detail(
                 "not verified: whitelist changed; V checks it again",
             ));

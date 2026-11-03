@@ -201,8 +201,9 @@ pub struct WhitelistUi {
     pub request: u64,
     // A read may restore cached authority only in the trust generation that requested it.
     read_generation: Option<u64>,
-    // The checked list the newest read rechecks, until a read's result decides it. Never shown
-    // or used: a newer read takes it over, so a superseded read cannot drop it unchecked (#63).
+    // The checked list the newest read rechecks, until a read's result or `drop_checked_list`
+    // decides it. Never shown or used: a newer read takes it over, so a superseded read cannot
+    // drop it unchecked (#63).
     rechecking: Option<CheckedList>,
     pub home: PathBuf,
 }
@@ -862,7 +863,7 @@ impl App {
                         self.whitelist.lines = Pane::Ready(list_rows(&read.text));
                     }
                     Err(error) => {
-                        self.checked_list = None;
+                        self.drop_checked_list();
                         self.whitelist.lines = Pane::Failed(Outside::error(&error));
                     }
                 }
@@ -890,7 +891,7 @@ impl App {
             {
                 self.password = PasswordState::Idle;
                 self.pending_key = None;
-                self.checked_list = None;
+                self.drop_checked_list();
                 let text = match result {
                     Ok(outcome) => {
                         let mut text = outcome.text;

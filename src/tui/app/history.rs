@@ -254,7 +254,7 @@ impl App {
         }
         self.history.labels = if unchanged { checked } else { None };
         if !unchanged {
-            self.checked_list = None;
+            self.drop_checked_list();
         }
     }
     pub(super) fn history_tick(&mut self) -> Vec<Effect> {
