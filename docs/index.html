@@ -1,75 +1,715 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <meta name="description" content="Give your agent a wallet. Keep control. A 36-second introduction to zwallet.">
-  <title>zwallet — Give your agent a wallet</title>
-  <style>
-    :root { color-scheme: dark; background: #080808; color: #f5f5f5; font-family: "Avenir Next", "Apple SD Gothic Neo", system-ui, sans-serif; }
-    * { box-sizing: border-box; }
-    body { margin: 0 auto; max-width: 1440px; padding: 32px clamp(20px, 4vw, 64px) 48px; }
-    header, nav, footer { display: flex; align-items: center; gap: 24px; }
-    header { justify-content: space-between; padding-bottom: 26px; border-bottom: 1px solid #303030; }
-    .wordmark { font-size: 25px; font-weight: 500; letter-spacing: -.04em; }
-    a { color: inherit; text-underline-offset: 5px; }
-    nav { gap: 18px; font-size: 14px; }
-    nav a { color: #a3a3a3; text-decoration: none; }
-    nav a[aria-current="page"] { color: #f5f5f5; text-decoration: underline; }
-    h1 { margin: 42px 0 12px; font-size: clamp(30px, 4.5vw, 56px); font-weight: 500; line-height: 1.16; letter-spacing: -.04em; }
-    .intro { margin: 0 0 28px; color: #a3a3a3; line-height: 1.6; }
-    video { display: block; width: 100%; aspect-ratio: 16 / 10; background: #080808; border: 1px solid #303030; }
-    .caption { margin: 16px 0 32px; max-width: 78ch; font-size: 14px; line-height: 1.6; color: #a3a3a3; }
-    footer { flex-wrap: wrap; justify-content: space-between; border-top: 1px solid #303030; padding-top: 22px; font-size: 14px; }
-    :focus-visible { outline: 2px solid #f5f5f5; outline-offset: 6px; }
-    @media (max-width: 560px) { body { padding-top: 22px; } header { gap: 12px; } h1 { margin-top: 30px; } footer { gap: 18px; } }
-  </style>
-</head>
-<body>
-  <header>
-    <a class="wordmark" href="https://github.com/2lab-ai/zwallet" aria-label="zwallet on GitHub">zwallet.</a>
-    <nav aria-label="Video language">
-      <a href="?lang=en&v=foil-20261102" lang="en" data-language="en" aria-current="page">English</a>
-      <a href="?lang=ko&v=foil-20261102" lang="ko" data-language="ko">한국어</a>
-    </nav>
-  </header>
-  <main>
-    <h1 id="headline">Give your agent a wallet. Keep control.</h1>
-    <p class="intro" id="intro">Working funds. Your rules. Results and receipts. A 36-second introduction.</p>
-    <video id="film" controls playsinline preload="metadata" poster="assets/agent-story-poster.png?v=foil-20261102" aria-label="zwallet illustrated introduction in English" aria-describedby="caption">
-      <source src="assets/agent-story.mp4?v=foil-20261102" type="video/mp4">
-      <a href="assets/agent-story.mp4?v=foil-20261102">Download the film</a>
-    </video>
-    <p class="caption" id="caption">An illustrated workflow, with all explanations on screen. Future service-payment, shopping and investment integrations are labeled WIP. Reports are assembled by your agent; per-payment caps are not cumulative budgets.</p>
-  </main>
-  <footer>
-    <a id="start" href="https://github.com/2lab-ai/zwallet#quick-start">Get started</a>
-    <a id="transcript" href="https://github.com/ai-insightquest/zwallet/blob/docs/agent-story-film/examples/agent-story/README.md#story-and-transcript">Read the transcript</a>
-    <a id="download" href="assets/agent-story.mp4?v=foil-20261102" download>Download MP4</a>
-  </footer>
-  <script>
-    const korean = new URLSearchParams(location.search).get('lang') === 'ko';
-    if (korean) {
-      document.documentElement.lang = 'ko';
-      document.title = 'zwallet — 내 에이전트를 위한 지갑';
-      document.getElementById('headline').textContent = '내 에이전트에게 지갑을 주세요.';
-      document.getElementById('intro').textContent = '작업비를 맡기고, 규칙을 정하고, 결과와 내역을 받으세요. 36초로 보는 zwallet.';
-      document.getElementById('caption').textContent = '작동 원리를 보여주는 설명 영상입니다. 모든 설명은 화면에 표시됩니다. 서비스 결제·구매·투자 연동은 WIP입니다. 보고는 에이전트가 만들며, 거래별 한도는 누적 예산이 아닙니다.';
-      document.getElementById('start').textContent = '시작하기';
-      document.getElementById('transcript').textContent = '영상 설명 읽기';
-      const download = document.getElementById('download');
-      download.textContent = 'MP4 다운로드';
-      download.href = 'assets/agent-story-ko.mp4?v=foil-20261102';
-      const film = document.getElementById('film');
-      film.poster = 'assets/agent-story-ko-poster.png?v=foil-20261102';
-      film.setAttribute('aria-label', 'zwallet 한국어 설명 영상');
-      film.querySelector('source').src = 'assets/agent-story-ko.mp4?v=foil-20261102';
-      film.querySelector('a').href = 'assets/agent-story-ko.mp4?v=foil-20261102';
-      film.load();
-      document.querySelector('[data-language="en"]').removeAttribute('aria-current');
-      document.querySelector('[data-language="ko"]').setAttribute('aria-current', 'page');
-    }
-  </script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>zwallet — Your agent. Your money. Your rules.</title>
+    <meta
+      name="description"
+      content="Give your AI agent working funds without handing over your keys. A local, open-source wallet with payment rules you control."
+    />
+    <meta
+      property="og:title"
+      content="zwallet — Your agent. Your money. Your rules."
+    />
+    <meta
+      property="og:description"
+      content="A local, open-source wallet for agents. Fund the task, set payment rules, and get back the result."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://2lab-ai.github.io/zwallet/" />
+    <meta
+      property="og:image"
+      content="https://2lab-ai.github.io/zwallet/assets/agent-story-poster.png"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href="https://2lab-ai.github.io/zwallet/" />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="assets/site.css?v=landing-20261102b" />
+    <script src="assets/site.js?v=landing-20261102b" defer></script>
+  </head>
+  <body>
+    <a data-ko="본문으로 이동" class="skip" href="#main">Skip to content</a>
+    <div class="wrap">
+      <header class="topbar">
+        <a class="wordmark" href="./" aria-label="zwallet home">zwallet.</a>
+        <nav aria-label="Main navigation">
+          <a class="nav-section" href="#how-it-works"
+            ><span data-ko="작동 방식">How it works</span></a
+          ><a class="nav-section" href="#controls"
+            ><span data-ko="안전장치">Controls</span></a
+          ><a
+            class="nav-section"
+            href="https://github.com/2lab-ai/zwallet#quick-start"
+            ><span data-ko="문서">Docs</span></a
+          ><a
+            id="language"
+            class="lang"
+            href="?lang=ko"
+            lang="ko"
+            aria-label="한국어로 보기"
+            >한국어</a
+          ><a
+            class="github-link"
+            href="https://github.com/2lab-ai/zwallet"
+            aria-label="zwallet on GitHub"
+            ><svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 1a11 11 0 0 0-3.5 21.4c.5.1.7-.2.7-.5v-2c-3 .6-3.6-1.3-3.6-1.3-.5-1.2-1.2-1.6-1.2-1.6-1-.6.1-.6.1-.6 1.1.1 1.7 1.1 1.7 1.1 1.2 2 3 .8 3 .8.1-.7.4-1.2.7-1.5-2.4-.3-4.9-1.2-4.9-5.4 0-1.2.4-2.2 1.1-2.9-.1-.3-.5-1.4.1-2.9 0 0 .9-.3 3 1.1a11 11 0 0 1 5.6 0c2.1-1.4 3-1.1 3-1.1.6 1.5.2 2.6.1 2.9.7.8 1.1 1.7 1.1 2.9 0 4.2-2.5 5.1-4.9 5.4.4.3.7 1 .7 2v3.1c0 .3.2.6.8.5A11 11 0 0 0 12 1Z"
+              /></svg
+            ><span>GitHub ↗</span></a
+          >
+        </nav>
+      </header>
+      <main id="main">
+        <section class="hero" aria-labelledby="hero-title">
+          <div>
+            <div class="eyebrow">
+              <i class="dot" aria-hidden="true"></i
+              ><span data-ko="에이전트를 위한 오픈소스 지갑"
+                >An open-source wallet for agents</span
+              >
+            </div>
+            <h1 id="hero-title">
+              <span data-ko="일은 에이전트에게." style="color: inherit"
+                >Give your agent<br />a wallet.</span
+              ><span data-ko="통제는 나에게.">Keep control.</span>
+            </h1>
+            <p
+              data-ko="작업비와 결제 규칙을 정해 주세요. 에이전트가 허용된 작업을 실행하고, 결과와 사용 내역을 가져옵니다. 키는 내 기기에 남습니다."
+              class="intro"
+            >
+              Set aside working funds and define the payment rules. Your agent
+              does the permitted work and brings back the receipts. Your keys
+              stay on your device.
+            </p>
+            <div class="actions">
+              <a class="button" href="#get-started"
+                ><span data-ko="시작하기 ↗">Get started ↗</span></a
+              ><a class="textlink" href="#how-it-works"
+                ><span data-ko="▷ 36초로 이해하기"
+                  >▷ &nbsp; See it in 36 seconds</span
+                ></a
+              >
+            </div>
+            <p
+              data-ko="macOS · Linux · MIT 라이선스 · 서비스 가입 없이"
+              class="micro"
+            >
+              macOS · Linux · MIT licensed · No service account
+            </p>
+          </div>
+          <div
+            class="hero-art"
+            aria-label="Illustration of a silver zwallet card"
+          >
+            <div class="orbit" aria-hidden="true"></div>
+            <div class="orbit second" aria-hidden="true"></div>
+            <div class="metal-card" aria-hidden="true">
+              <div class="card-top">
+                <span class="card-brand">zwallet.</span
+                ><svg class="card-icon" viewBox="0 0 32 32">
+                  <rect x="4" y="9" width="24" height="19" rx="3" />
+                  <path d="M5 9V5h18v4m5 8H18v6h10" />
+                  <circle cx="22" cy="20" r=".8" />
+                </svg>
+              </div>
+              <div class="card-bottom">
+                <span>YOUR AGENT.<br />YOUR RULES.</span><b>LOCAL / OPEN</b>
+              </div>
+            </div>
+            <span class="orbit-label label-you"
+              >○ &nbsp; <span data-ko="내가 정한 규칙">Your rules</span></span
+            ><span class="orbit-label label-agent"
+              >✧ &nbsp; <span data-ko="내 에이전트">Your agent</span></span
+            ><span data-ko="키는 내 기기에" class="art-caption"
+              >Keys stay on your device</span
+            ><button
+              data-ko="모션 정지"
+              class="art-pause"
+              id="motion-toggle"
+              aria-pressed="false"
+            >
+              Pause motion
+            </button>
+          </div>
+        </section>
+        <div class="principles">
+          <span><b>01</b><span data-ko="내 기기의 키">Local keys</span></span
+          ><span
+            ><b>02</b
+            ><span data-ko="거래별 결제 규칙">Rules per payment</span></span
+          ><span
+            ><b>03</b
+            ><span data-ko="내가 선택한 에이전트"
+              >Your choice of agent</span
+            ></span
+          ><span
+            ><b>04</b
+            ><span data-ko="읽고, 바꿀 수 있는 코드"
+              >Code you can inspect</span
+            ></span
+          >
+        </div>
+        <section
+          class="section"
+          id="how-it-works"
+          aria-labelledby="story-title"
+        >
+          <div class="section-intro">
+            <div>
+              <div data-ko="01 / 작동 방식" class="eyebrow">01 / The flow</div>
+              <h2 data-ko="맡긴 작업이, 결과로 돌아오도록." id="story-title">
+                From working funds<br />to work done.
+              </h2>
+            </div>
+            <p
+              data-ko="결제 테스트를 맡기는 상황입니다. 자금이 어디로 가고, 무엇을 검사하며, 어디서 멈추는지 직접 따라가 보세요."
+            >
+              Follow one payment test. See where the funds go, what the wallet
+              checks, and where a request stops.
+            </p>
+          </div>
+          <div class="story">
+            <div class="story-top">
+              <span
+                ><i class="dot" aria-hidden="true"></i
+                ><span data-ko="작동 원리 예시"
+                  >An illustrated workflow</span
+                ></span
+              ><a class="film-link" href="film.html"
+                ><span data-ko="영상으로 보기 ↗">Watch the film ↗</span></a
+              >
+            </div>
+            <iframe
+              id="story-frame"
+              data-src="animation.html?embed"
+              title="Animated explanation of zwallet"
+              loading="lazy"
+              sandbox="allow-scripts allow-same-origin"
+            ></iframe>
+            <div class="story-controls">
+              <button data-ko="재생" id="play">Play</button
+              ><label data-ko="재생 위치" class="sr-only" for="seek"
+                >Playback position</label
+              ><input
+                id="seek"
+                type="range"
+                min="0"
+                max="36"
+                step=".1"
+                value="0"
+              /><span class="time" id="story-time">0:00 / 0:36</span
+              ><button data-ko="처음부터" id="replay">Replay</button>
+            </div>
+            <div class="chapters" role="group" aria-label="Choose a chapter">
+              <button data-time="0" aria-pressed="true">
+                <span>01</span><b data-ko="작업비">Fund</b></button
+              ><button data-time="11.7" aria-pressed="false">
+                <span>02</span><b data-ko="결과·내역">Receipts</b></button
+              ><button data-time="16.8" aria-pressed="false">
+                <span>03</span><b data-ko="한도">Limits</b></button
+              ><button data-time="22.2" aria-pressed="false">
+                <span>04</span><b data-ko="잠금">Lock</b></button
+              ><button data-time="26" aria-pressed="false">
+                <span>05 / WIP</span><b data-ko="앞으로">Next</b>
+              </button>
+            </div>
+          </div>
+          <div class="scene-description">
+            <p
+              data-ko="전용 지갑에 50 USDT와 가스비를 넣고, 수취인·거래별 한도·접근 시간을 정합니다. 에이전트에게는 작업을 맡깁니다."
+              id="scene-copy"
+              aria-live="polite"
+            >
+              Fund a dedicated wallet with 50 USDT and gas, choose the payees,
+              set a limit per payment and an access window. Give your agent the
+              task.
+            </p>
+            <a
+              class="textlink"
+              href="https://github.com/2lab-ai/zwallet/tree/main/examples/agent-story#story-and-transcript"
+              ><span data-ko="전체 설명 읽기 ↗"
+                >Read the transcript ↗</span
+              ></a
+            >
+          </div>
+          <p
+            data-ko="금액은 이해를 돕는 예시입니다. 내역 보고는 에이전트가 거래 증빙으로 작성합니다. 지갑 자체의 누적 예산·보고 기능은 WIP입니다."
+            class="story-note"
+          >
+            Amounts are illustrative. Reports are assembled by the agent from
+            transaction evidence. Built-in cumulative budgets and task reports
+            are WIP.
+          </p>
+          <noscript
+            ><style>
+              .story {
+                display: none;
+              }
+            </style>
+            <p>
+              JavaScript enables playback controls.
+              <a href="film.html">Watch the film</a> or read the linked
+              transcript.
+            </p></noscript
+          >
+        </section>
+        <section class="section origin" aria-labelledby="origin-title">
+          <div>
+            <div data-ko="왜 만들었나요" class="eyebrow">Why this exists</div>
+            <h2
+              data-ko="코드는 AI가 짰는데, 송금은 또 내 일."
+              id="origin-title"
+            >
+              The agent wrote the code.<br />You still had to pay.
+            </h2>
+          </div>
+          <div>
+            <blockquote
+              data-ko="“가스비 보내 주세요. USDT도 필요해요. 거래를 실행하고 작동하는지 확인해 주세요.”"
+            >
+              “Send me gas. I need USDT, too. Run the transaction and check if
+              it worked.”
+            </blockquote>
+            <p
+              data-ko="코딩 에이전트에게 블록체인 개발을 맡길 때마다 작업이 사람에게 돌아왔습니다. 필요한 자금을 맡기면 에이전트가 일을 끝내고, 나는 무엇을 썼는지 확인하고 싶었습니다. 그래서 로컬에서 직접 소유하고 쓸 수 있는 지갑을 만들었습니다."
+            >
+              Blockchain development kept handing the work back to the person. I
+              wanted to give my agent working funds, let it finish the task, and
+              see what it spent. So I built a wallet I could run and own
+              locally.
+            </p>
+          </div>
+        </section>
+        <section class="section" id="today" aria-labelledby="today-title">
+          <div class="section-intro">
+            <div>
+              <div data-ko="02 / 지금 쓸 수 있는 것" class="eyebrow">
+                02 / Available in the source today
+              </div>
+              <h2
+                data-ko="개발 작업에 필요한 돈의 흐름을 연결합니다."
+                id="today-title"
+              >
+                The wallet behind<br />your agent’s work.
+              </h2>
+            </div>
+            <p
+              data-ko="셸 명령을 실행할 수 있는 에이전트라면 CLI를 사용할 수 있습니다. 사람을 위한 터미널 UI도 같은 지갑과 규칙을 사용합니다."
+            >
+              Agents that can run shell commands can use the CLI. A terminal UI
+              gives the person at the keyboard access to the same wallet and
+              rules.
+            </p>
+          </div>
+          <div class="feature-rows">
+            <article class="feature-row">
+              <span class="index">01</span>
+              <h3 data-ko="잔액을 읽고, 결제를 실행">
+                Read balances. Make payments.
+              </h3>
+              <p
+                data-ko="8개 EVM 네트워크와 Tron에서 지원 자산의 잔액·전송·거래 결과를 확인합니다. 토큰 전송은 등록된 정확한 배포 주소에 한정됩니다."
+              >
+                Read balances, transfer supported assets and look up
+                transactions across eight EVM networks and Tron. Token transfers
+                use exact registry deployments.
+              </p>
+            </article>
+            <article class="feature-row">
+              <span class="index">02</span>
+              <h3 data-ko="허용한 컨트랙트와 상호작용">
+                Work with allowed contracts.
+              </h3>
+              <p
+                data-ko="EVM 컨트랙트를 읽고, 허용된 수취인과 함수에 호출합니다. 전송 전 확인과 거래 증빙으로 결제 기능 개발·테스트를 이어갑니다."
+              >
+                Read EVM contracts and invoke allowed recipients and selectors.
+                Use preflight checks and transaction evidence to develop and
+                test payment flows.
+              </p>
+            </article>
+            <article class="feature-row">
+              <span class="index">03</span>
+              <h3 data-ko="결과를 확인하고 보고">
+                Verify the outcome. Report back.
+              </h3>
+              <p
+                data-ko="JSON 결과, 거래 해시, 영수증과 로컬 전송 기록을 에이전트가 활용합니다. 결과가 pending 또는 unknown이면 해시를 먼저 조회해야 합니다."
+              >
+                Agents use JSON results, transaction hashes, receipts and the
+                local send journal. A pending or unknown result calls for a hash
+                lookup before another send.
+              </p>
+            </article>
+          </div>
+          <div class="networks" aria-label="Supported networks">
+            <span>Ethereum</span><span>Base</span><span>Arbitrum</span
+            ><span>Optimism</span><span>Polygon</span
+            ><span>BNB Smart Chain</span><span>Avalanche</span><span>Tron</span
+            ><span>Sepolia</span>
+          </div>
+          <p
+            data-ko="지원 범위는 네트워크마다 다릅니다. Tron은 등록 수취인에게 TRX·USDT 전송만 지원하며, 가스비는 별도로 필요합니다. 설치 채널별 포함 기능은 기능 현황에서 확인하세요."
+            class="limit-note"
+          >
+            Support varies by network. Tron sends TRX and registry USDT to
+            listed payees; native gas is still needed. Check feature status for
+            what your installed channel includes.
+          </p>
+          <div style="margin-top: 18px">
+            <a
+              class="textlink"
+              href="https://github.com/2lab-ai/zwallet/blob/main/docs/features.md"
+              ><span data-ko="기능 현황과 구현 근거 ↗"
+                >Feature status and implementation evidence ↗</span
+              ></a
+            >
+          </div>
+        </section>
+        <section
+          class="section control-layout"
+          id="controls"
+          aria-labelledby="control-title"
+        >
+          <div class="control-illustration">
+            <div data-ko="규칙 검사 예시" class="eyebrow">
+              An example policy check
+            </div>
+            <div class="policy-line">
+              <span data-ko="수취인">Recipient</span
+              ><b data-ko="허용 목록에 있음">On the allowlist</b>
+            </div>
+            <div class="policy-line">
+              <span data-ko="1회 결제 한도">Limit per payment</span
+              ><b>5 USDT</b>
+            </div>
+            <div class="policy-line">
+              <span data-ko="요청 금액">Requested amount</span><b>20 USDT</b>
+            </div>
+            <div class="policy-result">
+              <svg viewBox="0 0 28 28" aria-hidden="true">
+                <rect x="2" y="2" width="24" height="24" rx="7" />
+                <path d="m9 9 10 10m0-10L9 19" /></svg
+              ><span data-ko="서명 거절. 이 요청은 전송되지 않습니다."
+                >No signature. This request stops here.</span
+              >
+            </div>
+            <p
+              data-ko="거래 금액은 설명을 위한 예시입니다."
+              class="micro"
+              style="margin-top: 22px"
+            >
+              Illustrative amounts, not a live transaction.
+            </p>
+          </div>
+          <div class="control-copy">
+            <div data-ko="03 / 통제권" class="eyebrow">03 / Keep control</div>
+            <h2 data-ko="규칙은 프롬프트 밖에서 검사합니다." id="control-title">
+              Rules checked<br />outside the prompt.
+            </h2>
+            <p
+              data-ko="서명 프로세스가 요청된 거래를 직접 해석하고 규칙을 검사합니다. 에이전트가 ‘허용된 결제’라고 설명하는 것만으로 서명하지 않습니다."
+            >
+              The signing process decodes the requested transaction and checks
+              the policy itself. An agent calling it an “allowed payment” is not
+              enough.
+            </p>
+            <ul class="control-list">
+              <li>
+                <strong data-ko="수취인과 거래별 한도"
+                  >Recipients and limits per transaction</strong
+                ><span
+                  data-ko="허용한 수취인·EVM 함수와 선택한 금액·수수료 제한을 검사합니다."
+                  >Check allowed payees, EVM selectors and configured amount and
+                  fee limits.</span
+                >
+              </li>
+              <li>
+                <strong data-ko="사람이 열고, 시간이 지나면 종료"
+                  >Human unlock. Time-limited access.</strong
+                ><span
+                  data-ko="비밀번호는 사람이 입력합니다. 세션이 만료되면 새 서명은 끝납니다."
+                  >The person enters the password. When the session expires, new
+                  signing ends.</span
+                >
+              </li>
+              <li>
+                <strong data-ko="언제든 잠금">Lock whenever you need to.</strong
+                ><span
+                  data-ko="잠금은 같은 OS 사용자의 모든 zwallet 서명 세션을 끝냅니다."
+                  >Lock ends every zwallet signing session for your OS
+                  user.</span
+                >
+              </li>
+            </ul>
+            <p class="fineprint">
+              <span
+                data-ko="거래별 한도는 누적 예산이 아닙니다. 반복된 허용 거래는 잔액을 소진할 수 있고, 같은 OS 사용자의 프로세스는 접근 경계를 공유합니다. 이미 전송한 거래는 잠금으로 취소되지 않습니다."
+                >Per-payment limits are not cumulative budgets. Repeated
+                permitted payments can spend the balance, and same-user
+                processes share the access boundary. Lock does not reverse
+                transactions already sent.</span
+              >
+              <a
+                class="textlink"
+                href="https://github.com/2lab-ai/zwallet/blob/main/docs/security.md"
+                ><span data-ko="보안 모델 읽기 ↗"
+                  >Read the security model ↗</span
+                ></a
+              >
+            </p>
+          </div>
+        </section>
+        <section class="section" id="next" aria-labelledby="next-title">
+          <div class="section-intro">
+            <div>
+              <div data-ko="04 / 앞으로의 방향" class="eyebrow">
+                04 / Where this goes next
+              </div>
+              <h2
+                data-ko="지갑이 생기면, 가능한 일이 넓어집니다."
+                id="next-title"
+              >
+                A wallet for what<br />agents do next.
+              </h2>
+            </div>
+            <p
+              data-ko="지갑 위에 서비스 결제, 구매, 투자 에이전트가 연결되는 미래를 생각합니다. 아래는 아직 구현되지 않은 연동 구상입니다."
+            >
+              The wallet can become a foundation for service, shopping and
+              investment agents. The integrations below are future work.
+            </p>
+          </div>
+          <div class="future-list">
+            <article class="future-item">
+              <span class="future-index">01</span
+              ><span class="small-label">WIP</span>
+              <h3 data-ko="필요한 서비스 결제">Pay for useful services.</h3>
+              <p
+                data-ko="작업에 필요한 API와 도구를 구매하는 흐름. 결제 프로토콜·청구 검증·제공 증명이 필요합니다."
+              >
+                Buy the APIs and tools a task needs. Requires payment adapters,
+                invoice validation and proof of delivery.
+              </p>
+            </article>
+            <article class="future-item">
+              <span class="future-index">02</span
+              ><span class="small-label">WIP</span>
+              <h3 data-ko="지시한 물건 구매">Buy what you ask for.</h3>
+              <p
+                data-ko="조건에 맞는 상품을 찾아 주문하는 흐름. 판매처 연동·최종 견적·배송 정보 보호·환불 처리가 필요합니다."
+              >
+                Find an item and complete an order within your instructions.
+                Requires merchant adapters, final quotes, shipping privacy and
+                refunds.
+              </p>
+            </article>
+            <article class="future-item">
+              <span class="future-index">03</span
+              ><span class="small-label">WIP</span>
+              <h3 data-ko="정한 범위 안의 투자 실행">
+                Execute your investment mandate.
+              </h3>
+              <p
+                data-ko="내가 정한 자산·거래처·위험 범위 안에서 실행하는 흐름. 전략과 실행 통제는 아직 구현되지 않았으며 수익을 보장하지 않습니다."
+              >
+                Act within your asset, venue and risk constraints. Strategies
+                and execution controls are not implemented; returns are not
+                guaranteed.
+              </p>
+            </article>
+          </div>
+          <div class="future-bottom">
+            <p>
+              <span class="small-label">WIP</span>
+              <span
+                data-ko="누적 예산과 지갑 자체의 사용 내역 보고도 개발 예정입니다. 이 방향이 모든 거래처·에이전트에서 곧바로 동작한다는 뜻은 아닙니다."
+              >
+                Cumulative budgets and native spend reports are also future
+                work. These directions do not imply ready-to-use integrations
+                with every agent or merchant.
+              </span>
+            </p>
+            <a
+              class="textlink"
+              href="https://github.com/2lab-ai/zwallet/blob/main/.prd/07-agent-economy.md"
+              ><span data-ko="미래 기능 PRD ↗">Read the future PRD ↗</span></a
+            >
+          </div>
+        </section>
+        <section
+          class="section install"
+          id="get-started"
+          aria-labelledby="install-title"
+        >
+          <div>
+            <div data-ko="05 / 시작하기" class="eyebrow">
+              05 / Make it yours
+            </div>
+            <h2 data-ko="에이전트에게, 첫 작업비를." id="install-title">
+              Give your agent<br />its first working funds.
+            </h2>
+            <p
+              data-ko="설치는 내 기기에서. 지갑 생성과 잠금 해제는 내가 합니다. 첫 전송은 Sepolia 테스트넷으로 시도할 수 있습니다."
+            >
+              Install locally. Create and unlock the wallet yourself. Try the
+              first transfer on Sepolia with testnet funds.
+            </p>
+            <div class="install-links">
+              <a
+                class="textlink"
+                href="https://github.com/2lab-ai/zwallet#quick-start"
+                ><span data-ko="설치부터 첫 전송까지 ↗"
+                  >Follow the quick start ↗</span
+                ></a
+              ><a
+                class="textlink"
+                href="https://github.com/2lab-ai/zwallet/releases"
+                ><span data-ko="바이너리 다운로드 ↗"
+                  >Download a binary ↗</span
+                ></a
+              >
+            </div>
+          </div>
+          <div>
+            <span data-ko="Homebrew / 안정 버전" class="small-label"
+              >Homebrew / stable</span
+            >
+            <div class="command">
+              <code id="install-command">brew install 2lab-ai/tap/zwallet</code
+              ><button data-ko="복사" id="copy">Copy</button>
+            </div>
+            <span class="sr-only" id="copy-status" role="status"></span>
+            <ol class="setup">
+              <li>
+                <strong data-ko="지갑을 만들고 백업하세요."
+                  >Create and back up your wallet.</strong
+                >
+                <span data-ko="입금 전 수신 주소도 검증합니다."
+                  >Verify its receiving address before funding.</span
+                >
+              </li>
+              <li>
+                <strong data-ko="수취인과 거래별 한도를 정하세요."
+                  >Choose payees and per-payment limits.</strong
+                >
+                <span data-ko="그다음 필요한 시간만 잠금을 해제합니다."
+                  >Then unlock for the time you need.</span
+                >
+              </li>
+              <li>
+                <strong data-ko="작업과 보고 형식을 에이전트에게 주세요."
+                  >Give the agent a task and report format.</strong
+                >
+                <span data-ko="거래 해시와 결과를 받아 확인합니다."
+                  >Keep the hashes and verify the results.</span
+                >
+              </li>
+            </ol>
+            <a
+              class="textlink"
+              href="https://github.com/2lab-ai/zwallet/blob/main/docs/agent-workflow.md"
+              ><span data-ko="에이전트에게 줄 작업 예시 ↗"
+                >A task prompt for your agent ↗</span
+              ></a
+            >
+          </div>
+        </section>
+        <section class="section faq" aria-labelledby="faq-title">
+          <div>
+            <div data-ko="써보기 전에" class="eyebrow">Before you begin</div>
+            <h2
+              data-ko="궁금할 만한 것들."
+              id="faq-title"
+              style="margin-top: 20px"
+            >
+              A few useful answers.
+            </h2>
+          </div>
+          <div>
+            <details>
+              <summary data-ko="별도 계정이나 전용 토큰이 필요한가요?">
+                Do I need an account or a special token?
+              </summary>
+              <p
+                data-ko="zwallet 서비스 계정이나 전용 토큰은 필요하지 않습니다. 선택한 네트워크의 자금과 네이티브 가스비, RPC 접근은 필요합니다."
+              >
+                No zwallet service account or dedicated token is required. You
+                still need funds, native gas and RPC access for the network you
+                choose.
+              </p>
+            </details>
+            <details>
+              <summary data-ko="어떤 에이전트와 사용할 수 있나요?">
+                Which agents can use it?
+              </summary>
+              <p
+                data-ko="로컬 CLI를 실행하고 JSON 결과를 읽을 수 있는 에이전트와 연결할 수 있습니다. 사람은 먼저 지갑과 규칙을 설정합니다. 이 페이지의 그림은 제품 대시보드가 아닌 작동 원리 설명입니다."
+              >
+                Agents that can run the local CLI and read JSON results can use
+                it. The person sets up the wallet and policy first. The diagram
+                explains the workflow; it is not a shipped dashboard.
+              </p>
+            </details>
+            <details>
+              <summary data-ko="맡긴 금액은 강제되는 작업 예산인가요?">
+                Is the allocation a hard task budget?
+              </summary>
+              <p
+                data-ko="현재의 작업비 배분은 전용 지갑에 넣은 잔액입니다. 거래별 한도는 설정할 수 있지만 누적 작업·일일 예산 강제는 WIP입니다. 허용된 결제가 반복되면 잔액 전체를 사용할 수 있습니다."
+              >
+                Today, the allocation is the balance you put in a dedicated
+                wallet. Limits per transaction are available; enforced task and
+                daily budgets are WIP. Repeated permitted payments can spend the
+                full balance.
+              </p>
+            </details>
+            <details>
+              <summary data-ko="바로 투자하거나 물건을 살 수 있나요?">
+                Can it invest or shop for me today?
+              </summary>
+              <p
+                data-ko="내장 투자 전략, 판매처 결제, 서비스 결제 어댑터는 아직 없습니다. zwallet은 지갑 부품이며, 이 흐름들은 WIP입니다. 투자는 손실이 발생할 수 있습니다."
+              >
+                There is no built-in investment strategy, merchant checkout or
+                service-payment adapter today. zwallet is the wallet component;
+                these workflows are WIP. Investing can result in losses.
+              </p>
+            </details>
+          </div>
+        </section>
+        <section class="closing">
+          <h2 data-ko="내 에이전트. 내 돈. 내가 정한 규칙.">
+            Your agent. Your money.<br />Your rules.
+          </h2>
+          <a class="button" href="https://github.com/2lab-ai/zwallet"
+            ><span data-ko="GitHub에서 살펴보기 ↗"
+              >Explore on GitHub ↗</span
+            ></a
+          >
+        </section>
+      </main>
+      <footer class="footer">
+        <a class="wordmark" href="#main">zwallet.</a
+        ><span
+          data-ko="로컬에서 소유하고, 함께 만드는 오픈소스."
+          class="copyright"
+          >Locally owned. Built in the open.</span
+        >
+        <nav aria-label="Footer">
+          <a href="https://github.com/2lab-ai/zwallet/blob/main/LICENSE">MIT</a
+          ><a
+            class="textlink"
+            href="https://github.com/2lab-ai/zwallet/blob/main/docs/security.md"
+            ><span data-ko="보안">Security</span></a
+          ><a class="textlink" href="https://github.com/2lab-ai/zwallet/issues"
+            ><span data-ko="피드백">Feedback</span></a
+          >
+        </nav>
+      </footer>
+    </div>
+  </body>
 </html>

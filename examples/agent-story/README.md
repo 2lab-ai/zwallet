@@ -1,7 +1,7 @@
 # Your agent. Your money. Your rules.
 
-[Watch in English](https://ai-insightquest.github.io/zwallet/?v=foil-20261102) ·
-[한국어로 보기](https://ai-insightquest.github.io/zwallet/?lang=ko&v=foil-20261102) · [Back to zwallet](../../README.md)
+[Watch in English](https://2lab-ai.github.io/zwallet/film.html) ·
+[한국어로 보기](https://2lab-ai.github.io/zwallet/film.html?lang=ko) · [Back to zwallet](../../README.md)
 
 [English MP4](../../docs/assets/agent-story.mp4) · [한국어 MP4](../../docs/assets/agent-story-ko.mp4)
 
@@ -79,7 +79,7 @@ node examples/agent-story/render.mjs --lang ko
 Set `FFMPEG` to an existing FFmpeg executable to skip the Python dependency.
 Set `CHROME` if the browser is outside the standard macOS/Linux locations.
 The renderer uses a fresh temporary browser profile and removes it after rendering.
-It loads only the local [`motion.html`](motion.html), with no external scripts or assets.
+It loads the local [`docs/animation.html`](../../docs/animation.html) and its local playback script, with no third-party scripts or assets.
 
 Output is 1600×1000 H.264, 60 fps, 36 seconds (2,160 frames), with matching posters
 in `docs/assets/`. Each frame is evaluated at its exact timeline position and painted
@@ -96,7 +96,9 @@ intensity ease down during refusal and locking so those states stay clear.
 Use `--stills-only` to inspect representative frames before encoding, `--output DIR`
 to change the destination, or `--review DIR` for keyframe images. The default review
 directory is `zwallet-flow-en` or `zwallet-flow-ko` under the system temporary directory.
-Open `motion.html?lang=ko` in a browser to play or scrub the source timeline.
+Open `docs/animation.html?lang=ko` in a browser to play or scrub the source timeline.
+The old `motion.html` entry redirects there. The landing page embeds the same SVG
+with chapter controls and a separate mobile layout; its 36-second story is unchanged.
 The player includes pause, replay and seek controls.
 
 macOS uses Avenir Next and Apple SD Gothic Neo. Linux uses the system sans-serif font
@@ -104,11 +106,10 @@ and Noto Sans CJK KR; install the latter for Korean. Font metrics can vary by pl
 
 ## Playback and visual references
 
-The [playback page](../../docs/index.html) is hosted on the fork's GitHub Pages,
-from `docs/` on `docs/agent-story-film`. It provides native video controls, language
-links, a transcript and downloads, with no tracking or signup. GitHub's MP4 file view
-does not preview these files; link to the playback page. To move hosting, publish
-`docs/` on a static host and update the README links.
+The [landing page](../../docs/index.html) runs the SVG timeline directly in the browser.
+The [film page](../../docs/film.html) provides the optional MP4 player and downloads.
+Both publish from this repository on GitHub Pages. See [site setup and development](../../docs/site.md)
+for the one-time administrator setting and the main-branch deployment workflow.
 
 The [icedac monochrome profile](https://github.com/icedac/icedac/tree/codex/monochrome-profile-2026-10-29)
 informs the restrained black, white and gray palette, type and spacing.
