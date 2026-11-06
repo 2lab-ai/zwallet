@@ -594,4 +594,98 @@ mod tests {
         assert_eq!(f.estimated, U256::from(780_000));
         assert_eq!(f.fields["estimatedCostSun"], "780000");
     }
+    #[test]
+    fn bandwidth_and_activation_fields_follow_the_branch_today_selects() {
+        // 05-tron.md §Fees "Shown before sending". Prices unlike M5 (P_tx 1,000, P_e 100, P_sys
+        // 1 TRX, P_ca 0.1 TRX, R 1), so no constant can pass.
+        let p = Prices {
+            bandwidth: 2000,
+            energy: 210,
+            activation: 2_000_000,
+            new_bandwidth: 300_000,
+            rate: 3,
+            max_fee: 9_000_000_000,
+        };
+        let payee = |activated, contract| rpc::Account {
+            activated,
+            contract,
+            balance: 0,
+            warning: None,
+        };
+        let exists = payee(true, false);
+        let missing = payee(false, false);
+        let contract = payee(true, true);
+        // The payee `prepare_review` passes for USDT: never read, never new.
+        let usdt = payee(true, false);
+        // (token, payee, staked, free, bandwidthSource, bandwidthSun, activationSun). TRX: 1 TRX
+        // in 267 bytes; USDT: 345 bytes, 1,000 energy and a 1 TRX fee_limit.
+        for (token, payee, staked, free, source, bandwidth, activation) in [
+            // A payee that exists: staked, then free, then burn = bytes × P_tx.
+            (false, &exists, 267, 0, "staked", "0", "0"),
+            (false, &exists, 266, 267, "free", "0", "0"),
+            (false, &exists, 266, 266, "burn", "534000", "0"),
+            // A payee that does not exist: staked covers bytes × R, else burn P_ca; never free.
+            (false, &missing, 801, 0, "staked", "0", "2000000"),
+            (false, &missing, 800, 600_000, "burn", "300000", "2000000"),
+            (false, &missing, 0, 600_000, "burn", "300000", "2000000"),
+            // A contract account: as a payee that exists.
+            (false, &contract, 267, 0, "staked", "0", "0"),
+            (false, &contract, 266, 267, "free", "0", "0"),
+            (false, &contract, 266, 266, "burn", "534000", "0"),
+            // USDT: bandwidth as for a payee that exists; no activation.
+            (true, &usdt, 345, 0, "staked", "0", "0"),
+            (true, &usdt, 344, 345, "free", "0", "0"),
+            (true, &usdt, 344, 344, "burn", "690000", "0"),
+        ] {
+            let r = Resources {
+                staked,
+                free,
+                energy: 0,
+            };
+            let (bytes, energy, fee) = if token {
+                (345, 1000, 1_000_000)
+            } else {
+                (267, 0, 0)
+            };
+            let f = fees(
+                bytes,
+                U256::from(1_000_000),
+                token,
+                payee,
+                p,
+                r,
+                energy,
+                fee,
+                42,
+            );
+            let at = format!(
+                "token {token}, {payee:?}, staked {staked}, free {free}: {}",
+                f.fields
+            );
+            assert_eq!(f.fields["bandwidthSource"], source, "{at}");
+            assert_eq!(f.fields["bandwidthSun"], bandwidth, "{at}");
+            assert_eq!(f.fields["activationSun"], activation, "{at}");
+            assert_eq!(
+                f.fields["energySun"],
+                if token { "210000" } else { "0" },
+                "{at}"
+            );
+            // They are terms of the estimate; the maximum reads neither.
+            let native = if token { 0 } else { 1_000_000 };
+            let sun = |k: &str| f.fields[k].as_str().unwrap().parse::<u64>().unwrap();
+            assert_eq!(
+                f.estimated,
+                U256::from(native + sun("bandwidthSun") + sun("activationSun") + sun("energySun")),
+                "{at}"
+            );
+            // The maximum is the branch's own, whatever the resources: P_sys + P_ca is still
+            // allowed for a contract account.
+            let maximum = match (token, payee.activated && !payee.contract) {
+                (true, _) => "1690000",
+                (false, true) => "1534000",
+                (false, false) => "3300000",
+            };
+            assert_eq!(f.fields["maxCostSun"], maximum, "{at}");
+        }
+    }
 }

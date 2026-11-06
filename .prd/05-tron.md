@@ -459,7 +459,13 @@ Decisions:
       (`getaccount` `type: "Contract"`, which can self-destruct before the block): amount +
       max(P_sys + P_ca, `bytes` × P_tx). The first term is the new-account branch with staked
       bandwidth gone; the second is the normal branch. Each is the exact bill of its branch and
-      only one runs, so this is the exact maximum, not a sum of both;
+      only one runs, so this is the exact maximum, not a sum of both. java-tron at
+      GreatVoyage-v4.8.2.4 (E11) refuses TRX to a contract account at validation only when
+      `getForbidTransferToContract` is 1 (`TransferActuator.java:132-139`; mainnet 0 on
+      2026-11-06, M12) or when `getAllowTvmCompatibleEvm` is 1 and the contract's version is 1
+      (`:141-156`; mainnet 0 on 2026-11-06, M12), and a refused transfer is not packed and
+      burns nothing (`Manager.java:933-940, 1739-1754`; `CONTRACT_VALIDATE_ERROR`, TR21), so
+      the numbers do not change;
     - USDT: `bytes` × P_tx + the signed `fee_limit` (the node burns at most `fee_limit` for
       energy, whatever energy the call really uses, `VMActuator.java:583-621` and
       `ReceiptCapsule.java:275-302`, §Open questions; it is 1.2 × the simulated cost or more).
@@ -480,7 +486,17 @@ Decisions:
   "staked"|"free"|"burn", bandwidthSun, activationSun, energy, energySun, feeLimit,
   estimatedCostSun, maxCostSun, estimatedCost, maxCost, pricesAtBlock}` (`estimatedCost` and
   `maxCost` in TRX). "TRX left" anywhere (`nativeBalance` − cost, the TUI review) is balance −
-  `maxCostSun`, labelled "at least, at the prices of block N" (`pricesAtBlock`).
+  `maxCostSun`, labelled "at least, at the prices of block N" (`pricesAtBlock`). `bandwidthSun`
+  and `activationSun` are terms of `estimatedCostSun` (= amount for TRX + `bandwidthSun` +
+  `activationSun` + `energySun`) on the branch today's state selects; `maxCostSun` reads neither
+  and recomputes its own terms with no staked or free bandwidth (above):
+  - TRX to a payee that exists: `bandwidthSun` = 0 when staked or free bandwidth covers `bytes`
+    (`staked`, `free`), else `bytes` × P_tx (`burn`); `activationSun` = 0;
+  - TRX to a payee that does not exist: `bandwidthSun` = 0 when staked bandwidth covers `bytes` ×
+    R (`staked`), else P_ca (`burn`; never `free`); `activationSun` = P_sys;
+  - TRX to a contract-account payee: as a payee that exists (`activationSun` = 0), while
+    `maxCostSun` still allows P_sys + P_ca;
+  - USDT: `bandwidthSun` as for a payee that exists; `activationSun` = 0.
 - **After the send**, `--wait` adds `feeSun`, what the receipt says was burned. It can exceed
   `estimatedCostSun` (energy above the simulation) and stays within `maxCostSun` at unchanged
   prices. A call that runs out of energy is `success: false` (`OUT_OF_ENERGY`) with up to
@@ -652,7 +668,7 @@ therefore covers `energy_used` × price even when staked energy will pay.
 | TR14 | daemon `sign_tx` with a verified list: TRX and USDT to `bob` (tron); TRX to an unlisted `T…`; to an entry for `base` only; to a `*` entry's body; to self; USDT to the USDT contract; a non-registry TRC20 `transfer`; `approve`; owner = another key; `NoList`; `Unusable`; and every TR13 input through `sign_tx` | the first two signed; then `WHITELIST_DENIED` with `whitelist add <nick> T… --chains tron`; `WHITELIST_DENIED` without `command` ×6; `VALIDATION_ERROR`; `WHITELIST_INVALID` (with the add command); `WHITELIST_INVALID` (no command); `VALIDATION_ERROR`; zero signatures for every refusal (daemon-side count) |
 | TR15 | `fee_limit` above the cap; a list with no `tron` cap (a TRX send, then a USDT send); `fee_limit` on type 1; expiration > now + 5 min; expiration ≤ timestamp | `FEE_CAP_EXCEEDED` with `fee-cap tron <fee_limit in TRX>`, `feeWei`, `capWei`; `FEE_CAP_EXCEEDED` with `fee-cap tron 30` (TRX), then `fee-cap tron <max(fee_limit, 30)>`; `VALIDATION_ERROR` ×3 |
 | TR16 | a fake daemon replies with a `txHash` ≠ sha256(`rawData`), with `rawData` ≠ the bytes sent, or with a signature from another key | `VALIDATION_ERROR`, nothing broadcast, no journal line |
-| TR17 | mock: `transfer --chain tron --to @bob --amount 1 --dry-run`; and to an unlisted `T…`; TRX to a payee that does not exist with prices unlike M5 (P_sys 2 TRX, P_ca 0.3 TRX, P_tx 2,000 sun); the same with staked bandwidth that covers `bytes` × R; TRX to a payee whose `getaccount` says `type: "Contract"` | `fees`, `feeLimit`, `whitelist: {allowed: true}`, `txHash`, `recoveredFrom`, no raw bytes, no broadcast; the unlisted one: `whitelist: {allowed: false, …}` and no signature request; the new payee: `maxCostSun` = amount + max(2,300,000, `bytes` × 2,000) and `estimatedCostSun` = amount + 2,300,000, from the prices read; a balance between amount + 1,100,000 (M5's figure) and that maximum is `INSUFFICIENT_FUNDS`; with staked bandwidth, `estimatedCostSun` = amount + 2,000,000 while `maxCostSun` is unchanged; the contract payee: `maxCostSun` = amount + max(P_sys + P_ca, `bytes` × P_tx) |
+| TR17 | mock: `transfer --chain tron --to @bob --amount 1 --dry-run`; and to an unlisted `T…`; TRX to a payee that does not exist with prices unlike M5 (P_sys 2 TRX, P_ca 0.3 TRX, P_tx 2,000 sun); the same with staked bandwidth that covers `bytes` × R; TRX to a payee whose `getaccount` says `type: "Contract"` | `fees`, `feeLimit`, `whitelist: {allowed: true}`, `txHash`, `recoveredFrom`, no raw bytes, no broadcast; the unlisted one: `whitelist: {allowed: false, …}` and no signature request; the new payee: `maxCostSun` = amount + max(2,300,000, `bytes` × 2,000) and `estimatedCostSun` = amount + 2,300,000, from the prices read; a balance between amount + 1,100,000 (M5's figure) and that maximum is `INSUFFICIENT_FUNDS`; with staked bandwidth, `estimatedCostSun` = amount + 2,000,000 while `maxCostSun` is unchanged; the contract payee: `maxCostSun` = amount + max(P_sys + P_ca, `bytes` × P_tx), unchanged by java-tron's refusals of TRX to a contract, which burn nothing (§Fees, E11) |
 | TR18 | mock: TRX balance below amount + bandwidth + activation; USDT with too little TRX for energy; a TRX balance above `estimatedCostSun` but below `maxCostSun` (no staked energy, `fee_limit` = 1.2 × the estimate); an unactivated sender; a simulation that reverts | `INSUFFICIENT_FUNDS` ×4 (the third names `maxCostSun` and `shortfall` against it) and `RPC_ERROR`, each before signing (zero `SignTx`) |
 | TR19 | `transfer --chain tron` with `--nonce`, `--replace`, `--bump`, `--allow-pending`, `--max-fee-gwei` | `VALIDATION_ERROR` before any RPC |
 | TR20 | mock: TRX and USDT to `@bob` with `--wait`; a USDT receipt whose energy is above the simulation but within `fee_limit`; one with `OUT_OF_ENERGY` | `broadcasthex` bytes decode to the signed transaction; txHash = sha256(raw_data); one journal line with `expiresAt`; USDT receipt `SUCCESS` with all-zero `contractResult` → `success: true`; a `REVERT` receipt → `success: false`; the higher-energy receipt → `success: true`, `feeSun` above `estimatedCostSun` and within `maxCostSun`; a TRX send to a new payee whose receipt burns P_ca though staked bandwidth covered it at the preflight → within `maxCostSun`; `OUT_OF_ENERGY` → `success: false` with `feeSun` and a message that the fee was burned |
@@ -709,6 +725,7 @@ grok-4.7 APPROVE, fable APPROVE, gpt-6-astra REJECT on one residual of round 1's
 | E8 | https://tether.to/en/supported-protocols, fetched 2026-10-28 |
 | E9 | https://www.circle.com/blog/circle-is-discontinuing-support-for-usdc-on-the-tron-blockchain (2024-02-21) and https://developers.circle.com/stablecoins/usdc-contract-addresses, fetched 2026-10-28 |
 | E10 | https://developers.tron.network/reference/rate-limits, fetched 2026-10-28 |
+| E11 | java-tron tag GreatVoyage-v4.8.2.4, tronprotocol/java-tron@4e8389f159d0782f1ebcd9dab2fd88388c0e6fe9, read 2026-11-07: `actuator/.../TransferActuator.java:132-139, 141-156`; `framework/.../db/Manager.java:933-940, 1555-1561, 1739-1754`; `framework/.../runtime/RuntimeImpl.java:57`; `framework/.../Wallet.java:590-594, 1292-1295`; `framework/.../http/GetChainParametersServlet.java:18-21`; `framework/.../http/JsonFormat.java:85-91, 154-156`; `protocol/.../core/Tron.proto:122-128` |
 
 Measurements (2026-10-28, `curl`, both endpoints unless noted):
 - **M1** 03:13:58Z–03:16:51Z: the endpoint table and the burst above.
@@ -736,3 +753,8 @@ Measurements (2026-10-28, `curl`, both endpoints unless noted):
 - **M11** 2026-10-28, `caseflip.cjs` (scratch, `@scure/base` 1.2.6): every single-letter case
   flip inside the base58 alphabet, 28 for `TWer2…` and 25 for `TPjjv…`, decodes as base58 and
   fails the checksum.
+- **M12** 2026-11-06, PublicNode only: `getchainparameters` lists `getForbidTransferToContract`
+  (~17:30Z) and `getAllowTvmCompatibleEvm` (17:35:05Z) with no `value`, so both are 0:
+  `ChainParameter.value` is a proto3 `int64`, and the HTTP reply leaves out a field at its
+  default for every message outside a short default-output list that `ChainParameter` is not on
+  (E11 `JsonFormat.java:85-91, 154-156`, `Tron.proto:122-128`).
