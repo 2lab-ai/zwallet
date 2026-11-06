@@ -490,7 +490,8 @@ one source alone at a time, the text already escaped (`escape`, core/text.rs:40-
 `ascii_inert`, :69, runs first, turns an outside newline into `\u{a}`, so a newline can never
 start a row of its own), at the pane's inner width of at least 78 (the size rule keeps the
 terminal at 80 columns or more), or at 72 for the two added 2026-11-06. 512 characters then fill at
-most ⌈512 / 78⌉ = 7 rows (⌈512 / 72⌉ = 8 at 72; 2 wallet keeps 4). Two outside sources are never
+most ⌈512 / 78⌉ = 7 rows; broken at spaces at 72 they fill at most 13 (two lines in a row hold at
+least 73 characters), and 2 wallet keeps 4. Two outside sources are never
 wrapped in one block.
 
 **The message block (added 2026-10-28, review round 1).** One more single-source block: the
@@ -1414,6 +1415,6 @@ the 2026-10-20 text was written, or a decision of review round 1, 2 or 3 (marked
 39. Trade-off Q decided by the owner (2026-11-06): Q5, the receive view's QR code of a verified
     address on any chain, Tron included; rule 1 lets `█▀▄` pass only in the style `QR`.
 40. T17 and rule 4: a key made before Tron, read locked on Tron, keeps 4 receive's rows, its
-    header showing the error whole; the status bar's read of that missing address fails no pane;
+    header showing the password's pin or the error whole; the status bar's read of that missing address fails no pane;
     a failed balance read on 2 wallet is wrapped in its four balance rows (#67, PR #70,
     2026-11-06; v0-2-tui/loop.done.md R4).
