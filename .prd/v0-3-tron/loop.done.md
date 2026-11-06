@@ -75,3 +75,18 @@ Rows here are snapshots taken when they moved.
 **Next (as it was).** Finish PR #42's deterministic observation/deadline repair and verify its new commit on both CI platforms. A/B1/B2 are implemented, independently reviewed and green at the linked commits; they await upstream merge permission. Complete TUI12 integration and its tests, then record final stress/live-read/Intel/preview evidence explicitly. Owner-funded TR23 and release publication are not authorized by the handoff. Completion is tracked in ../handoff-completion/completion-checklist.md. Done 2026-10-30 (PR #42 at 1a4f36f, CI40847935216; TUI-12 as #49; preview and real-terminal acceptance above), except TR23.
 
 **Spec review.** The spec passed the three-engine review in round 3 (2026-10-28: grok-4.7, gpt-6-astra and fable all APPROVE; rounds 1 and 2 are summarised in 05-tron.md). fable's two non-blocking round-3 remarks for C stay open in [`loop.md`](loop.md).
+
+## Doc notes — closed 2026-11-07 (PR #69)
+
+fable's two non-blocking round-3 remarks (spec review round 3, 2026-10-28), as they were in `loop.md`,
+with the result:
+- §Fees names the `fees` fields `activationSun` and `bandwidthSun` but not their values in each
+  branch; define them in one line, so the TUI's "activation fee" and "bandwidth burn" rows are fixed.
+  **Result:** 05-tron.md §Fees "Shown before sending" defines both per branch from `fees()`
+  (`src/chains/tron/send.rs`); the unit test `bandwidth_and_activation_fields_follow_the_branch_today_selects`
+  pins them (432 lib tests; removing the new-payee free-bandwidth guard fails it).
+- Whether java-tron refuses a TRX `TransferContract` to a contract account
+  (`TransferActuator.validate`) is unverified; read it and note it at TR17's contract case (no change
+  to the numbers). **Result:** at GreatVoyage-v4.8.2.4 it refuses only when
+  `getForbidTransferToContract` is 1, or `getAllowTvmCompatibleEvm` is 1 and the contract is version 1;
+  both were 0 on mainnet on 2026-11-06 (M12); a refusal burns nothing, so TR17's numbers stand (E11).
