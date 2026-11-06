@@ -26,7 +26,7 @@ pub use unlock_channel::{
 };
 use unlock_channel::{expect_stage, line_reader, next_response};
 
-use crate::core::error::{ErrorCode, Result, WalletError};
+use crate::core::error::{ErrorCode, Result, WARNING, WalletError};
 use crate::core::store;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -347,7 +347,7 @@ fn relayed_error(home: &Path, who: &Peer, resp: Response) -> WalletError {
         let said = ascii_inert(raw_said, PROSE_MAX);
         let e = WalletError::new(code, format!("{reason}, and it reported: {said}; {RELOCK}"));
         return match check.warning() {
-            Some(w) => e.with_detail("warning", w),
+            Some(w) => e.with_detail(WARNING, w),
             None => e,
         };
     }

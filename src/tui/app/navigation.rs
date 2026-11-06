@@ -499,7 +499,14 @@ impl App {
                 match result {
                     Ok(read) => {
                         for row in &read.rows {
-                            if row.error.is_some() {
+                            if let Some(error) = &row.error {
+                                // `wallet::addresses` makes any Tron `WALLET_LOCKED` a row, an
+                                // impostor's too: one naming another process stops the pane, as
+                                // the bar's read does, before any pin or code is shown.
+                                if error.details.contains_key(crate::core::error::WARNING) {
+                                    self.fail_pane(error.clone());
+                                    return std::ops::ControlFlow::Continue(Vec::new());
+                                }
                                 continue;
                             }
                             if let Err(error) = self.check_family_pin(&key, row.chain, &row.address)

@@ -307,4 +307,45 @@ mod tests {
         // No row at all still shows the start.
         assert_eq!(Outside::details_within(&message, 0).len(), 1);
     }
+
+    #[test]
+    fn details_of_text_outside_ascii_are_escaped_ascii_lines_within_the_budget() {
+        let tether = format!("{}\u{20ae}", "a".repeat(71));
+        let sentence = "잔액이 없습니다: Tron 주소 \u{20ae} \u{2014} «verify» 먼저";
+        let both = format!("{tether} {sentence}");
+        for text in [tether.as_str(), sentence, both.as_str()] {
+            let escaped = ascii_inert(text, PROSE_MAX);
+            for rows in [None, Some(1), Some(2), Some(4)] {
+                let lines = match rows {
+                    None => Outside::details(text),
+                    Some(rows) => Outside::details_within(text, rows),
+                };
+                assert!(!lines.is_empty(), "{text:?} {rows:?}");
+                assert!(lines.len() <= rows.unwrap_or(usize::MAX), "{lines:#?}");
+                for line in &lines {
+                    let shown = line.text();
+                    assert!(
+                        shown.bytes().all(|b| (0x20..=0x7e).contains(&b)),
+                        "{shown:?}"
+                    );
+                    assert!(shown.len() <= Source::Detail.budget(), "{shown:?}");
+                }
+            }
+            // Nothing lost: the lines are the escaped text, broken at its spaces, a word longer
+            // than a line inside it.
+            let lines = Outside::details(text);
+            let texts: Vec<&str> = lines.iter().map(Outside::text).collect();
+            assert_eq!(
+                texts.concat().replace(' ', ""),
+                escaped.replace(' ', ""),
+                "{text:?}"
+            );
+        }
+        // The sentence's words all fit a line: joined at spaces, it is the escaped sentence.
+        let texts: Vec<String> = Outside::details(sentence)
+            .iter()
+            .map(|l| l.text().to_string())
+            .collect();
+        assert_eq!(texts.join(" "), ascii_inert(sentence, PROSE_MAX));
+    }
 }

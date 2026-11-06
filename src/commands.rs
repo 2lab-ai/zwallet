@@ -13,7 +13,7 @@ use crate::cli::{
     render_human,
 };
 use crate::core::amount::{format_units, parse_units};
-use crate::core::error::{ErrorCode, Result, WalletError};
+use crate::core::error::{ErrorCode, Result, WARNING, WalletError};
 use crate::core::password::read_password;
 use crate::core::protocol::{self, Peer, PeerCheck, Request, SIGN_TIMEOUT};
 use crate::core::seed::Seed;
@@ -538,7 +538,7 @@ impl<'a> Daemon<'a> {
                     protocol::RELOCK
                 );
                 let w = w.to_string();
-                WalletError { message, ..e }.with_detail("warning", w)
+                WalletError { message, ..e }.with_detail(WARNING, w)
             }
             _ => e,
         }
@@ -579,7 +579,7 @@ impl<'a> Daemon<'a> {
         };
         let e = mismatch_error(&key.name, chain.key, &cached, derived, &by);
         Err(match self.trust().warning() {
-            Some(w) => e.with_detail("warning", w),
+            Some(w) => e.with_detail(WARNING, w),
             None => e,
         })
     }

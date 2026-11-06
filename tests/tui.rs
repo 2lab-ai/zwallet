@@ -2715,11 +2715,10 @@ mod navigation {
         shows_the_rows(&app, "Esc");
     }
 
-    /// With the password's pin of that key's Tron address (the password check derives every
-    /// family), the same read shows the pin as the header, verified by password, beside the
-    /// Tron row's error (the cache still has none), and `Q` draws its code.
-    #[test]
-    fn receive_on_tron_without_a_cached_tron_address_shows_the_password_pin() {
+    /// `home` with key `a` made before Tron, and the app with `a` opened by the password while
+    /// locked: the password check derived every family, so `a`'s Tron address is pinned. Returns
+    /// that address too.
+    fn pinned_a_without_a_tron_cache() -> (Home, App, String) {
         let home = Home::new();
         let evm = a_without_a_tron_cache(&home);
         let mut app = app();
@@ -2742,12 +2741,28 @@ mod navigation {
         app.update(Msg::Verified(Ok((checked, Err("no checked list".into())))));
         app.update(Msg::Status(app.generation(), Ok(status_of_a(&evm, true))));
         assert_eq!(app.open_key(), Some("a"));
+        (home, app, tron)
+    }
+
+    /// With the password's pin of that key's Tron address (the password check derives every
+    /// family), the same read shows the pin as the header, verified by password, beside the
+    /// Tron row's error (the cache still has none); the bar keeps the pin, and `Q` draws its
+    /// code.
+    #[test]
+    fn receive_on_tron_without_a_cached_tron_address_shows_the_password_pin() {
+        let (home, mut app, tron) = pinned_a_without_a_tron_cache();
         receive_a_on_tron(&mut app, &home);
         let text = view(&app);
+        let bar = format!(
+            "tron | a {}...{} | verified by password",
+            &tron[..6],
+            &tron[tron.len() - 4..]
+        );
         for line in [
             tron.as_str(),
             "Address trust: verified by password",
             "tron: error: key 'a' has no cached tron address yet",
+            bar.as_str(),
         ] {
             assert!(text.contains(line), "no {line:?}\n{text}");
         }
@@ -2864,31 +2879,98 @@ mod navigation {
         }
     }
 
+    /// A `WALLET_LOCKED` answer from a process that is not this build's key daemon, as
+    /// `relayed_error` words one: named, with the [`zwallet::core::error::WARNING`] detail it
+    /// and the guards share.
+    fn impostor_locked() -> WalletError {
+        let reason = "the process answering on d.sock runs /tmp/zwt-x/fakebin";
+        let relock = zwallet::core::protocol::RELOCK;
+        WalletError::new(
+            ErrorCode::WalletLocked,
+            format!("{reason}, and it reported: no such session; {relock}"),
+        )
+        .with_detail(zwallet::core::error::WARNING, format!("{reason}; {relock}"))
+    }
+
     /// The same bar read, but from a process that is not this build's key daemon (as
-    /// `relayed_error` words it, with the `warning` detail), still stops the pane.
+    /// `relayed_error` words it, with the warning detail), still stops the pane.
     #[test]
     fn a_bar_read_naming_another_process_on_tron_still_fails_the_pane() {
         let (home, mut app, _) = locked_a_without_a_tron_cache();
         receive_a_on_tron(&mut app, &home);
         assert!(view(&app).contains("Addresses by network:"));
-        let reason = "the process answering on d.sock runs /tmp/zwt-x/fakebin";
-        let relayed = WalletError::new(
-            ErrorCode::WalletLocked,
-            format!(
-                "{reason}, and it reported: no such session; {}",
-                zwallet::core::protocol::RELOCK
-            ),
-        )
-        .with_detail(
-            "warning",
-            format!("{reason}; {}", zwallet::core::protocol::RELOCK),
-        );
-        app.update(Msg::Address(app.generation(), "a".into(), Err(relayed)));
+        app.update(Msg::Address(
+            app.generation(),
+            "a".into(),
+            Err(impostor_locked()),
+        ));
         assert!(matches!(app.keys(), zwallet::tui::app::Pane::Failed(_)));
         let text = view(&app);
         assert!(
             text.contains("could not be completed") && text.contains("/tmp/zwt-x/fakebin"),
             "{text}"
+        );
+    }
+
+    /// The bar read passes only a Tron `WALLET_LOCKED`: the same code on an EVM chain, or
+    /// another error on Tron, still stops the pane.
+    #[test]
+    fn a_bar_read_other_than_a_tron_wallet_locked_still_fails_the_pane() {
+        for (chain, error) in [
+            ("ethereum", WalletError::locked()),
+            (
+                "tron",
+                WalletError::validation("the bar read was refused for this test"),
+            ),
+        ] {
+            let (_home, mut app, _) = locked_a_without_a_tron_cache();
+            if app.chain().key != chain {
+                choose_chain(&mut app, chain);
+            }
+            let at = format!("{chain}: {}", error.message);
+            app.update(Msg::Address(app.generation(), "a".into(), Err(error)));
+            assert!(
+                matches!(app.keys(), zwallet::tui::app::Pane::Failed(_)),
+                "{at}\n{}",
+                view(&app)
+            );
+            assert!(view(&app).contains("could not be completed"), "{at}");
+        }
+    }
+
+    /// #70 review: `wallet::addresses` makes any Tron `WALLET_LOCKED` a row, an impostor's too.
+    /// A row whose error names another process stops the pane as the bar read does, pin or not:
+    /// no pinned address in its place, and `Q` draws no code.
+    #[test]
+    fn an_address_row_naming_another_process_fails_the_pane_with_the_pin_too() {
+        let (home, mut app, _) = pinned_a_without_a_tron_cache();
+        choose_chain(&mut app, "tron");
+        app.update(Msg::Key(Key::Char('4')));
+        let mut read = block_on(wallet::addresses(home.path(), "a")).unwrap();
+        let row = read
+            .rows
+            .iter_mut()
+            .find(|r| r.chain.key == "tron")
+            .unwrap();
+        assert!(row.error.is_some());
+        row.error = Some(impostor_locked());
+        app.update(Msg::Addresses(app.generation(), "a".into(), Ok(read)));
+        let text = view(&app);
+        assert!(
+            matches!(app.keys(), zwallet::tui::app::Pane::Failed(_)),
+            "{text}"
+        );
+        assert!(
+            text.contains("could not be completed")
+                && text.contains("/tmp/zwt-x/fakebin")
+                && !text.contains("Address trust:"),
+            "{text}"
+        );
+        app.update(Msg::Key(Key::Char('Q')));
+        assert_no_code(
+            &app,
+            &["No QR: the address read failed:", "/tmp/zwt-x/fakebin"],
+            "impostor row",
         );
     }
 
@@ -3369,7 +3451,19 @@ fn t18_on_a_pty_a_key_made_before_tron_keeps_its_rows_on_tron_once_locked() {
             .iter()
             .any(|r| r.contains("tron: error: ") || r.contains("could not be completed"))
     };
-    shows_the_rows(&tui.wait_frame(PTY_WAIT, read), "r");
+    // The bar: no address on Tron (the read of the session went with `r`), never one verified
+    // by the session that ended.
+    let bar_after_lock = |frame: &Frame, at: &str| {
+        let (one, two) = bar(frame);
+        assert!(
+            one.trim_end() == "tron | main" && two.starts_with("locked | "),
+            "{at}\n{frame}"
+        );
+        assert!(!one.contains("verified by session"), "{at}\n{frame}");
+    };
+    let frame = tui.wait_frame(PTY_WAIT, |f| read(f) && bar(f).1.starts_with("locked | "));
+    shows_the_rows(&frame, "r");
+    bar_after_lock(&frame, "r");
     tui.send(b"Q");
     let frame = tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains("No QR: ")));
     let text = frame.rows.join("\n");
@@ -3380,7 +3474,9 @@ fn t18_on_a_pty_a_key_made_before_tron_keeps_its_rows_on_tron_once_locked() {
     assert!(!text.contains(['█', '▀', '▄']), "{frame}");
     tui.send(b"Q");
     std::thread::sleep(zwallet::tui::REFRESH + Duration::from_secs(1));
-    shows_the_rows(&tui.wait_frame(PTY_WAIT, read), "a refresh later");
+    let frame = tui.wait_frame(PTY_WAIT, read);
+    shows_the_rows(&frame, "a refresh later");
+    bar_after_lock(&frame, "a refresh later");
     tui.resize((80, 24));
     let frame = tui.wait_frame(PTY_WAIT, |f| {
         read(f)

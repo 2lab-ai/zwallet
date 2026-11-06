@@ -60,6 +60,10 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+/// The detail of an error that names another process answering on the key daemon's socket
+/// (its reason, then what to do). Whoever reads an error checks this key, never its own copy.
+pub const WARNING: &str = "warning";
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct WalletError {
