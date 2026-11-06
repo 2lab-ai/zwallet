@@ -63,6 +63,8 @@ pub struct Navigation {
     pub lines: Pane<Vec<Outside>>,
     pub scroll: usize,
     pub popup_scroll: usize,
+    /// `Q` on 4 receive: the open key's verified address as a QR code instead of the list.
+    pub receive_qr: bool,
     pub every: bool,
     pub session: Option<StatusView>,
     pub home: Outside,
@@ -90,6 +92,7 @@ impl Navigation {
             lines: Pane::Loading,
             scroll: 0,
             popup_scroll: 0,
+            receive_qr: false,
             every: false,
             session: None,
             home: Outside::home(""),
@@ -669,11 +672,13 @@ impl App {
                 self.invalidate_reads();
                 Some(self.load_view())
             }
+            Key::Esc if self.nav.tab == Tab::Receive && self.nav.receive_qr => {
+                self.nav.receive_qr = false;
+                Some(Vec::new())
+            }
             Key::Char('Q') if self.nav.tab == Tab::Receive => {
-                self.nav.popup = Some(Popup::Lines {
-                    title: "QR code",
-                    lines: vec![Outside::detail("zwallet address shows it as a QR code")],
-                });
+                self.nav.receive_qr = !self.nav.receive_qr;
+                self.nav.scroll = 0;
                 Some(Vec::new())
             }
             Key::Up | Key::Char('k') if self.nav.tab != Tab::Keys => {
@@ -931,7 +936,7 @@ impl App {
             ActionId::Repair => return self.begin_password(PasswordPurpose::Repair),
             ActionId::Qr => {
                 self.nav.tab = Tab::Receive;
-                return self.navigation_key(Key::Char('Q')).unwrap_or_default();
+                self.nav.receive_qr = true;
             }
             ActionId::Balance | ActionId::AllBalances => {
                 self.nav.tab = Tab::Wallet;

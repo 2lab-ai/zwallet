@@ -649,6 +649,18 @@ const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwal
 /// surface).
 const TRON_ONLY: &str = "(Tron only: TRX and TRC20 tokens; not an EVM address)";
 
+/// What a QR code's caption starts with, the address after it (the CLI's and the TUI's).
+pub(crate) const SCAN_TO_SEND: &str = "scan to send to ";
+
+/// The caption's line under [`SCAN_TO_SEND`] for an address on `chain`: [`EVERY_EVM_NETWORK`] or
+/// [`TRON_ONLY`].
+pub(crate) fn qr_networks(chain: &Chain) -> &'static str {
+    match chain.family {
+        Family::Evm(_) => EVERY_EVM_NETWORK,
+        Family::Tron(_) => TRON_ONLY,
+    }
+}
+
 /// `out` with `address` (on `chain`) as a QR code after its human text and any code before it
 /// ([`Out::qr`]), for a phone wallet to scan, under the lines `scan to send to <address>` and
 /// [`EVERY_EVM_NETWORK`] or [`TRON_ONLY`]. Only for an address reported `verified: true` (by the
@@ -663,12 +675,8 @@ fn with_qr(mut out: Out, verified: bool, chain: &Chain, address: Option<&str>, n
     let Some(code) = qr::render(address, color) else {
         return out;
     };
-    let networks = match chain.family {
-        Family::Evm(_) => EVERY_EVM_NETWORK,
-        Family::Tron(_) => TRON_ONLY,
-    };
     out.qr.push(Qr {
-        caption: format!("scan to send to {address}\n{networks}"),
+        caption: format!("{SCAN_TO_SEND}{address}\n{}", qr_networks(chain)),
         code,
     });
     out

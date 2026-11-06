@@ -17,12 +17,13 @@ use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 /// The one way the TUI writes cells to a terminal, as `write_human` is the CLI's: a cell whose
-/// symbol is not exactly one [`terminal_ok`] character other than the newline reaches the inner
-/// backend as `?`, and is counted. A replaced glyph two columns wide becomes one `?`, and this
+/// symbol is not exactly one [`terminal_ok`] character other than the newline (or, in the QR
+/// style only, one half block: [`cell_ok`]) reaches the inner backend as `?`, and is counted. A
+/// replaced glyph two columns wide becomes one `?`, and this
 /// writes a space into the column it covered, whether or not ratatui's diff sends that column,
 /// once a size has passed through it ([`FilteredBackend::width`]). So no byte of a cell's content
-/// (an ESC, a CSI or OSC sequence, a BEL, a block glyph) reaches the terminal; the inner backend's
-/// own cursor and style sequences do.
+/// (an ESC, a CSI or OSC sequence, a BEL, a block glyph outside a QR code) reaches the terminal;
+/// the inner backend's own cursor and style sequences do.
 pub struct FilteredBackend<B> {
     inner: B,
     replaced: usize,
@@ -60,10 +61,12 @@ impl<B> FilteredBackend<B> {
     }
 }
 
-/// Whether a cell's symbol may reach the terminal as it is.
-fn cell_ok(symbol: &str) -> bool {
-    let mut chars = symbol.chars();
-    matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && terminal_ok(c))
+/// Whether a cell's symbol may reach the terminal as it is. A QR code's half blocks pass only in
+/// [`QR`](crate::tui::style::QR), the style only zwallet's own code of a verified address has.
+fn cell_ok(cell: &Cell) -> bool {
+    let mut chars = cell.symbol().chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && (terminal_ok(c)
+        || (crate::tui::style::is_qr(cell.style()) && matches!(c, '█' | '▀' | '▄'))))
 }
 
 /// The columns ratatui's diff counts `cell` as covering (it skips all but the first): its own
@@ -87,7 +90,7 @@ impl<B: Backend> Backend for FilteredBackend<B> {
         let mut cells: Vec<(u16, u16, Cell)> = Vec::new();
         let width = self.width.load(Ordering::Relaxed);
         for (x, y, cell) in content {
-            if cell_ok(cell.symbol()) {
+            if cell_ok(cell) {
                 cells.push((x, y, cell.clone()));
                 continue;
             }
@@ -724,6 +727,47 @@ mod tests {
         hand_over(terminal.backend_mut(), &[(3, 0, "\u{1b}")]);
         assert_eq!(terminal.backend().replaced(), 6);
         assert_eq!(row(terminal.backend().inner().buffer(), 0), "   ?    yz  ");
+    }
+
+    #[test]
+    fn only_the_qr_style_lets_half_blocks_through_and_nothing_else() {
+        use ratatui::style::{Color, Modifier, Style};
+        // The QR code's style, written here rather than read from `style`: white on black.
+        let qr = Style::new().fg(Color::White).bg(Color::Black);
+        let mut terminal = Terminal::new(FilteredBackend::new(TestBackend::new(8, 2))).unwrap();
+        let drawn = terminal.draw(|f| {
+            let buffer = f.buffer_mut();
+            for (x, symbol) in (0..).zip(["█", "▀", "▄", " "]) {
+                buffer[(x, 0)].set_symbol(symbol).set_style(qr);
+                buffer[(x + 4, 0)].set_symbol(symbol);
+            }
+            // In the QR style any other glyph is still replaced, and so is a block in another
+            // style: bold, or the colours the other way round.
+            buffer[(0, 1)].set_symbol("\u{2591}").set_style(qr);
+            buffer[(1, 1)].set_symbol("x\u{301}").set_style(qr);
+            buffer[(2, 1)]
+                .set_symbol("█")
+                .set_style(qr.add_modifier(Modifier::BOLD));
+            buffer[(3, 1)]
+                .set_symbol("█")
+                .set_style(Style::new().fg(Color::Black).bg(Color::White));
+        });
+        assert!(drawn.is_ok());
+        assert_eq!(terminal.backend().replaced(), 7);
+        let got = terminal.backend().inner().buffer();
+        assert_eq!(row(got, 0), "█▀▄ ??? ");
+        assert_eq!(row(got, 1), "????    ");
+        // A lone ESC in the QR style (handed over directly: ratatui's diff asserts on it).
+        let mut esc = Cell::default();
+        esc.set_symbol("\u{1b}").set_style(qr);
+        assert!(
+            terminal
+                .backend_mut()
+                .draw([(7, 1, &esc)].into_iter())
+                .is_ok()
+        );
+        assert_eq!(terminal.backend().replaced(), 8);
+        assert_eq!(row(terminal.backend().inner().buffer(), 1), "????   ?");
     }
 
     #[test]

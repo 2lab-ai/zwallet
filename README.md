@@ -71,7 +71,7 @@ or message signing.
 
 A person at the keyboard can reach every CLI function from the [terminal UI](#terminal-ui)
 (`zwallet tui`), under the same password, session and signing policy; the recovery phrase
-and QR codes stay in the CLI.
+stays in the CLI.
 
 For the task prompt, retry rules and receipt-based report format, see
 [Using zwallet with an agent](docs/agent-workflow.md). zwallet is the wallet component;
@@ -236,7 +236,7 @@ history and lookup, whitelist and per-transaction limit editing, and EVM contrac
 tools. Pending EVM transactions expose speed-up/cancel only after original-intent
 verification; uncertain sends can be retried from their retained review in the same
 session. Tron has no nonce replacement. The TUI never shows the recovery phrase (`B` points
-to `zwallet backup`), and `Q` points to `zwallet address` for a QR code. See the
+to `zwallet backup`); `Q` on `4 receive` shows a verified address as a QR code. See the
 [TUI command reference](docs/commands.md#key-management-and-terminal-ui) and [UI specification](.prd/03-tui.md).
 
 ## Before funding a wallet
