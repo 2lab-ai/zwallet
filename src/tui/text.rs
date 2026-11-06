@@ -95,6 +95,52 @@ impl Outside {
     pub fn detail(text: &str) -> Self {
         Self::inert(Source::Detail, text)
     }
+    /// `text` escaped and bounded as an error is, then broken at spaces into [`Outside::detail`]
+    /// lines within their budget: a message whose end matters (the command it names) is shown
+    /// whole, line by line, never cut. A word longer than a line is broken inside it.
+    pub fn details(text: &str) -> Vec<Self> {
+        let whole = Self::inert(Source::Error, text).text;
+        let width = Source::Detail.budget();
+        let mut lines = Vec::new();
+        let mut line = String::new();
+        for word in whole.split(' ') {
+            if !line.is_empty() && line.len() + 1 + word.len() <= width {
+                line.push(' ');
+            } else if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            // Only an empty line gets here with a word that does not fit.
+            let mut rest = word;
+            while line.len() + rest.len() > width {
+                let (head, tail) = rest.split_at(width - line.len());
+                line.push_str(head);
+                lines.push(std::mem::take(&mut line));
+                rest = tail;
+            }
+            line.push_str(rest);
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+        lines.iter().map(|line| Self::detail(line)).collect()
+    }
+    /// [`Outside::details`] in at most `rows` lines (one at least): when the text needs more, the
+    /// last line holds the rest (its lines joined), cut with `...` as [`Outside::cut`] cuts a
+    /// value to fit.
+    pub fn details_within(text: &str, rows: usize) -> Vec<Self> {
+        let mut lines = Self::details(text);
+        let keep = rows.max(1) - 1;
+        if lines.len() > keep + 1 {
+            let rest: Vec<&str> = lines[keep..].iter().map(Self::text).collect();
+            let rest = Self {
+                source: Source::Detail,
+                text: rest.join(" "),
+            };
+            lines.truncate(keep);
+            lines.push(rest.cut(Source::Detail.budget()));
+        }
+        lines
+    }
     pub fn list_row(text: &str) -> Self {
         Self::inert(Source::ListRow, text)
     }
@@ -199,5 +245,107 @@ impl Outside {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn details_show_a_long_message_whole_in_lines_within_the_detail_budget() {
+        let message = "key 'a' has no cached tron address yet; unlock once (`zwallet unlock 24h`) \
+                       to derive it, or run `zwallet address --chain tron --verify` (with the \
+                       password) to add it";
+        let lines = Outside::details(message);
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+        for line in &lines {
+            assert_eq!(line.source(), Source::Detail);
+            assert!(line.text().len() <= Source::Detail.budget(), "{line:?}");
+        }
+        let texts: Vec<&str> = lines.iter().map(Outside::text).collect();
+        assert_eq!(texts.join(" "), message);
+        // A word longer than a line is broken inside it; a control character is escaped.
+        let long = "x".repeat(100);
+        let lines = Outside::details(&format!("a {long} \u{1b}b"));
+        let texts: Vec<&str> = lines.iter().map(Outside::text).collect();
+        let escaped = format!("{} {}", "x".repeat(28), ascii_inert("\u{1b}b", 64));
+        assert_eq!(texts, ["a", "x".repeat(72).as_str(), escaped.as_str()]);
+        // Bounded as an error is: cut once, at its end.
+        let lines = Outside::details(&"word ".repeat(200));
+        let all: Vec<&str> = lines.iter().map(Outside::text).collect();
+        let all = all.join(" ");
+        assert!(all.len() <= PROSE_MAX && all.ends_with("...(cut)"), "{all}");
+        assert_eq!(all.matches("(cut)").count(), 1);
+    }
+
+    #[test]
+    fn details_within_rows_cut_only_the_last_line_and_mark_it() {
+        let message = (0..60)
+            .map(|i| format!("w{i:02}xq"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Twelve words of six characters to a line.
+        let all = Outside::details(&message);
+        assert_eq!(all.len(), 5);
+        // What fits is the same lines.
+        assert_eq!(Outside::details_within(&message, 5), all);
+        assert_eq!(Outside::details_within(&message, 9), all);
+        // Fewer rows: the lines before the last whole, the last the rest cut with `...`.
+        let four = Outside::details_within(&message, 4);
+        assert_eq!(four.len(), 4);
+        assert_eq!(four[..3], all[..3]);
+        let rest = all[3..]
+            .iter()
+            .map(Outside::text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let last = four[3].text();
+        assert_eq!(last.len(), Source::Detail.budget());
+        assert_eq!(last, format!("{}...", &rest[..69]));
+        assert_eq!(four[3].source(), Source::Detail);
+        // No row at all still shows the start.
+        assert_eq!(Outside::details_within(&message, 0).len(), 1);
+    }
+
+    #[test]
+    fn details_of_text_outside_ascii_are_escaped_ascii_lines_within_the_budget() {
+        let tether = format!("{}\u{20ae}", "a".repeat(71));
+        let sentence = "잔액이 없습니다: Tron 주소 \u{20ae} \u{2014} «verify» 먼저";
+        let both = format!("{tether} {sentence}");
+        for text in [tether.as_str(), sentence, both.as_str()] {
+            let escaped = ascii_inert(text, PROSE_MAX);
+            for rows in [None, Some(1), Some(2), Some(4)] {
+                let lines = match rows {
+                    None => Outside::details(text),
+                    Some(rows) => Outside::details_within(text, rows),
+                };
+                assert!(!lines.is_empty(), "{text:?} {rows:?}");
+                assert!(lines.len() <= rows.unwrap_or(usize::MAX), "{lines:#?}");
+                for line in &lines {
+                    let shown = line.text();
+                    assert!(
+                        shown.bytes().all(|b| (0x20..=0x7e).contains(&b)),
+                        "{shown:?}"
+                    );
+                    assert!(shown.len() <= Source::Detail.budget(), "{shown:?}");
+                }
+            }
+            // Nothing lost: the lines are the escaped text, broken at its spaces, a word longer
+            // than a line inside it.
+            let lines = Outside::details(text);
+            let texts: Vec<&str> = lines.iter().map(Outside::text).collect();
+            assert_eq!(
+                texts.concat().replace(' ', ""),
+                escaped.replace(' ', ""),
+                "{text:?}"
+            );
+        }
+        // The sentence's words all fit a line: joined at spaces, it is the escaped sentence.
+        let texts: Vec<String> = Outside::details(sentence)
+            .iter()
+            .map(|l| l.text().to_string())
+            .collect();
+        assert_eq!(texts.join(" "), ascii_inert(sentence, PROSE_MAX));
     }
 }

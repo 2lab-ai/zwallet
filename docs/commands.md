@@ -79,7 +79,11 @@ Commands that act on a key take `--key <name>` (default: the active key).
   partial failures, and Esc returns to one network. `c` chooses a chain; `e` in the picker
   enters an RPC URL for this process only. It is accepted only after a chain-id check; the
   field hides credentials, path/query and key-like host labels. No endpoint is saved to disk.
-  `4 receive` shows the full address, its trust and every network address. `Q` shows the open
+  `4 receive` shows the full address, its trust and every network address. A key made before
+  Tron, read while locked, has no Tron address yet: on Tron, `4 receive` then shows the
+  address the password pinned in this TUI (verified by password) if there is one, and
+  otherwise the read's error whole in its place, which says how to get the address; the
+  `tron` row of the list shows that error either way. `Q` shows the open
   key's address on the selected chain (a Tron T-address too) as the CLI's QR code with the CLI's
   caption, only when the password or this build's session verified it; otherwise it says why
   and that `V` verifies it. `Q` or Esc goes back; the code fits 80x24 whole. `V` verifies all
@@ -149,7 +153,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   a cached value that is no such address (a case flip fails the checksum) is `VALIDATION_ERROR`,
   shown escaped. A key made before this version has no cached Tron address: while locked
   `address --chain tron` is `WALLET_LOCKED` (unlock once, or run `zwallet address --chain tron
-  --verify`, which adds it and says so in `added`), and its `addresses` row shows that error. After
+  --verify`, which adds it and says so in `added`), and its `addresses` row shows that error. In the
+  TUI, with Tron chosen, neither `4 receive` (see `tui` above) nor `2 wallet`, which shows the error
+  whole in its balance rows, fails the pane. After
   `unlock`, `address --chain tron` is verified by the session as for EVM, with no prompt.
   `sign-message`, `call` and `invoke` on `tron` are `CAPABILITY_UNSUPPORTED`.
   `whitelist add bob <T-address> --chains tron` adds a payee; `*` covers EVM only, never Tron.
