@@ -240,9 +240,8 @@ at 80x24: Q2. Until the owner picked, Q1 was what was built.
 |---|---|---|---|---|
 | Q5 | zwallet's QR in half blocks (`qr::lines`, the CLI's encoder at level M with its quiet zone), each cell in one style constant `QR` (white on black: the blocks draw the light modules, as `qr::render` does without colour), on the whole screen with the CLI's caption below it, for an address verified by the password or the session | rule 1 gains one exception: `█`, `▀` and `▄` pass the write filter only in a cell whose style is `QR` (`cell_ok`, src/tui/term.rs); only the receive view (src/tui/ui/receive.rs) draws in `QR`, and its glyphs come from the encoder alone; no write goes past the filter | 80x24 (37x19, a caption, a hint: 24 rows), the TUI's own minimum; the view also refuses to draw a code that does not fit whole (a guard: it names the size and `zwallet address`), never a partial code | under `NO_COLOR` crossterm writes no colour, and the same blocks still draw the light modules, which scans on a dark terminal |
 
-**Decided: Q5** (owner, 2026-11-06, verbatim: "qa 코드를 시발년아 tron 도 출력하게 하고 보여줘
-그래야 보내주지"; "qa" reads as "QR": the owner funds by scanning, and the CLI already printed a
-Tron code). Q5 rather than Q3: the owner's terminal is the one that must scan it, and Q3 does not fit
+**Decided: Q5** (owner, 2026-11-06: the TUI must show the receive address as a QR code, a Tron
+address included, so the owner can fund the wallet by scanning it). Q5 rather than Q3: the owner's terminal is the one that must scan it, and Q3 does not fit
 80x24. The cost against Q3 is the rule 1 exception above, limited to three glyphs in one style that
 no outside text can carry (rule 2).
 

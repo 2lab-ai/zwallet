@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn the_qr_scan_finds_every_way_to_name_the_style_and_nothing_else() {
+    fn the_qr_scan_catches_the_supported_spellings_and_nothing_else() {
         for named in [
             "frame.render_widget(p.style(crate::tui::style::QR), area);",
             "let s = style::QR;",

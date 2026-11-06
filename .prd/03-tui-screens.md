@@ -2,7 +2,9 @@
 
 Status: **shipped** (preview 2026.10.29.2134, PR #51, 2026-10-30). The screens below are
 implemented; this page is their as-built layout, not a future target. The frames are generated
-ASCII mockups with illustrative values, not captures: the real frames are the acceptance captures
+ASCII mockups with illustrative values, not captures (one exception: the `Q` QR frame of 4
+receive is a real-terminal capture, whose code is drawn in half blocks, rule 1's one exception in
+03-tui.md): the real frames are the acceptance captures
 of [`v0-2-tui/loop.done.md`](v0-2-tui/loop.done.md) R1, and where a mockup and the code differ in
 a detail, [`03-tui.md`](03-tui.md) and the code win. See [feature status](../docs/features.md).
 
