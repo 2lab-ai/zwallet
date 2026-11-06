@@ -4,20 +4,20 @@ Status: done (shipped to preview 2026.10.29.2134, 2026-10-30). Every v2 unit (TU
 merged in PR #51 (599bde9); closed rows, units, build facts and receipts are in
 [`loop.done.md`](loop.done.md) R1. Target = [`ssot.md`](ssot.md), [`../03-tui.md`](../03-tui.md)
 §Coverage matrix and acceptance T1–T44. Post-delivery fixes #52, #55 and #63 merged and shipped
-to preview 2026.11.03.1955: [`loop.done.md`](loop.done.md) R2. This file holds only what is still open.
+to preview 2026.11.03.1955: [`loop.done.md`](loop.done.md) R2. T18 (trade-off Q, decided Q5) merged in
+PR #66 and shipped to preview 2026.11.06.1138: [`loop.done.md`](loop.done.md) R3. This file holds only
+what is still open.
 
 ## Open gaps
 
-| ID | Acceptance | Gap | Source | Status |
-|---|---|---|---|---|
-| T18 | the QR code (trade-off Q) | the owner picked Q5 (2026-11-06); built in PR #66 (`Q` on 4 receive draws the verified address's code, Tron included; real-terminal decode passes at 120x40 and 80x24 on a debug build). Closes with the merge and the preview's real-terminal receipt | TUI-3+4 | 🟡 |
+None. Every acceptance row T1–T44 is closed ([`loop.done.md`](loop.done.md) R1–R3).
 
 ## Waiting on the owner
 
 - **Trade-off B** (03-tui.md §Open trade-offs): the recovery phrase in the TUI. B1, the CLI
   pointer, is shipped (T32); B2 is built only if the owner picks it (recommended: B1). The
   handoff does not authorize phrase display.
-- **The owner's acceptance on preview 2026.11.03.1955** (or later): upgrade, `zwallet lock` and
+- **The owner's acceptance on preview 2026.11.06.1138** (or later): upgrade, `zwallet lock` and
   unlock again (session verification compares the daemon's cdhash, which changes with every
   build), then accept the TUI on it. The dispatcher's real-terminal acceptance passed on preview
   2026.10.29.2134 (loop.done.md R1) and on the merged code 8eaf051 (R2); neither stands in for
