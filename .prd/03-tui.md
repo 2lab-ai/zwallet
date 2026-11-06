@@ -458,7 +458,7 @@ environment, and what the human types.
 | what the human types | input fields | each field takes only its own alphabet at the key event: an amount `0-9` and one `.`; a nickname `a-z 0-9 _ -`, at most 32 (`validate_nickname`, core/whitelist.rs:455); an address `0x` then `0-9 a-f A-F`, at most 42; a duration `0-9` and one of `s m h d w y`; the password any byte, shown only as `*`. Any other key changes nothing and nothing else is echoed. Added 2026-10-28: a key name as `create` takes it (`validate_key_name`, core/store.rs:176); a tx hash `0x` and 64 hex digits; a selector `0x` and 8 hex digits; calldata `0x` and hex digits, at most 4096; a function signature and its arguments printable ASCII, at most 256 and 512; a message to sign printable ASCII, at most 512 (a paste holding anything else is refused whole, §Coverage matrix row 59); a word count one of `12 15 18 21 24`; a bump factor `0-9` and one `.`; a Tron address per 05-tron.md; an RPC URL printable ASCII, at most 512, drawn as its scheme and host as typed and every character after them as `*` (a path or query may hold an API key, [README.md:694-700](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L694-L700)), and once taken only as the RPC host row below draws it |
 | `call`'s result | 6 tools | the CLI's `render_human` of the decoded result and the returned bytes as hex cut to 512 (commands.rs:1424-1435); drawn as a result view, rule 4 |
 | a token's own `symbol()` and `decimals()` | 6 tools, token | escaped, the symbol at most 32 (`erc20_meta`, chains/evm/rpc.rs:209; [README.md:212-213](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L212-L213)) |
-| assembled read-only pane text | balances, receive, session and repair rows | printable ASCII, at most 72 per line; fields are checked/redacted before assembly; no wrapping or input-selected style |
+| assembled read-only pane text | balances, receive, session and repair rows | printable ASCII, at most 72 per line; fields are checked/redacted before assembly; no wrapping (except the two errors rule 4 adds on 2026-11-06) and no input-selected style |
 | the home path (`ZWALLET_HOME` or `HOME`) | 7 session | escaped, at most 64, cut with `...` |
 | `status`'s pids | 7 session | numbers only; at most 8 of another home's pids, then how many more |
 | `address --verify`'s `repaired` list | 1 keys after `A` | key names as above; `was` escaped at most 64, `now` derived from the seed ([README.md:119-123](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L119-L123)) |
@@ -481,12 +481,18 @@ CLI's prose budget); the selected entry shows its full address (EIP-55, or `T…
 chains and selectors on rows of their own. The change summary before the password still wraps. Only an error view wraps text: the error detail view (Enter on
 an error line), a pane whose whole content is one error (the keys pane when the key list
 cannot be read), or, added 2026-10-28, `call`'s result view (one result, nothing else in the
-pane):
+pane), or, added 2026-11-06 (#67), two errors that share their pane with rows of their own: 4
+receive's header when the current chain's address row is an error (that error alone, above the
+"Addresses by network" rows), and 2 wallet's failed balance read (in its four balance rows, only
+the last cut with `...`, above the history); these two break at spaces into lines of at most 72
+(`Outside::details`, `Outside::details_within`, tui/text.rs). Each of these is
 one source alone at a time, the text already escaped (`escape`, core/text.rs:40-50, which
 `ascii_inert`, :69, runs first, turns an outside newline into `\u{a}`, so a newline can never
 start a row of its own), at the pane's inner width of at least 78 (the size rule keeps the
-terminal at 80 columns or more). 512 characters then fill at most ⌈512 / 78⌉ = 7 rows. Two
-outside sources are never wrapped in one block.
+terminal at 80 columns or more), or at 72 for the two added 2026-11-06. 512 characters then fill at
+most ⌈512 / 78⌉ = 7 rows; broken at spaces at 72 they fill at most 13 (two lines in a row hold at
+least 73 characters), and 2 wallet keeps 4. Two outside sources are never
+wrapped in one block.
 
 **The message block (added 2026-10-28, review round 1).** One more single-source block: the
 sign-message review, which must show every byte the key will sign. Its source is the message the
@@ -1107,7 +1113,7 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T14 | 7 session, `u`, `10m`, the password | the bar says `signing (agent too) until` ≈ now+10m; `zwallet status --json` has the same `expiresAt` |
 | T15 | 2 wallet, `a`, with all 8 `ZWALLET_RPC_<CHAIN>` set: two to mock nodes that answer, one to a mock that refuses, the other five to a closed port (`http://127.0.0.1:1`) | one line per network, testnet last; each failed one `error: … [CODE]` cut to 72 (`brief`); `2 of 8 networks have a balance; 6 did not answer`; zero tokens hidden; no test reaches a public RPC |
 | T16 | 7 session, a daemon of this home and one of another home | lock state, expiry, daemon pid, `other homes: 1 daemon`, the session's whitelist as `reports gen N, M entries (not checked here)`; with TUI-1c's argv-listed fake: its values escaped within their budgets, nothing drawn verified |
-| T17 | 4 receive, warm; then locked | warm: the full EIP-55 address and `verified by password`; locked: `not verified` and the `V` hint; every chain named under it |
+| T17 | 4 receive, warm; then locked | warm: the full EIP-55 address and `verified by password`; locked: `not verified` and the `V` hint; every chain named under it; a key made before Tron, read locked on Tron: the other chains' rows stay and the header shows the password's pin or the read's error whole (it names `--verify`), never a pane failure, and an error naming another process still fails the pane (#67) |
 | T18 | `Q` on 4 receive | Q5: on Tron and on EVM, at 120x40 and 80x24, with the password or the session, the frame's `QR` cells read back to `qrcode`'s modules for the address and decode (`rqrr`) to it, with the CLI's caption below it; an unverified, locked, impostor-answered or not-yet-read address draws no code and says why; a lock, a chain switch or a pin mismatch with the code on screen removes it; a body too small for the whole code says the size and names `zwallet address` (unit test of the guard); the pty run checks the colour bytes, and that `NO_COLOR` writes none (tests/tui.rs `t18_*`) |
 | T19 | 1 keys `V`; then wallet.json's cached address of `beta` edited, `V` again, then `A` and the password | every row `verified`; after the edit `V` shows the CLI's `VALIDATION_ERROR` naming `A`; `A` shows `repaired` (`was` escaped, at most 64) and every row `verified`; `zwallet list --verify` agrees |
 | T20 | Linux, `kernel.yama.ptrace_scope` 0: the warm-up; then `zwallet tui --allow-ptrace-scope-0` and the warm-up; the menu row `unlock --allow-ptrace-scope-0`, Enter | the first refuses before the password field and names the start flag; the second shows `ptrace_scope 0 accepted` on 7 session and in the warm-up's password popup, and opens the session (`prepare_unlock` called with the flag); the menu row gives the start flag and its security reason, and Enter on it starts no `Effect`; no key in the TUI sets the flag |
@@ -1408,3 +1414,7 @@ the 2026-10-20 text was written, or a decision of review round 1, 2 or 3 (marked
     the checked list's policy is the list's own (R3).
 39. Trade-off Q decided by the owner (2026-11-06): Q5, the receive view's QR code of a verified
     address on any chain, Tron included; rule 1 lets `█▀▄` pass only in the style `QR`.
+40. T17 and rule 4: a key made before Tron, read locked on Tron, keeps 4 receive's rows, its
+    header showing the password's pin or the error whole; the status bar's read of that missing address fails no pane;
+    a failed balance read on 2 wallet is wrapped in its four balance rows (#67, PR #70,
+    2026-11-06; v0-2-tui/loop.done.md R4).

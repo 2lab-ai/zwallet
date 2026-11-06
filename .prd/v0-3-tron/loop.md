@@ -9,7 +9,7 @@ are in [`loop.done.md`](loop.done.md) R1. Target = [`ssot.md`](ssot.md),
 
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
-| TR23 | owner-gated mainnet TRX and USDT send | TRON-7 is shipped (PR #51; current preview 2026.11.06.1138); the live send needs the owner's funds and decision; the owner's Tron address is not activated yet (0 TRX), so the first step is a TRX deposit; it also closes Q2 | owner | 🚪 |
+| TR23 | owner-gated mainnet TRX and USDT send | TRON-7 is shipped (PR #51; current preview 2026.11.06.2001); the live send needs the owner's funds and decision; the owner's Tron address is not activated yet (0 TRX), so the first step is a TRX deposit; it also closes Q2 | owner | 🚪 |
 
 ## Round 2 (2026-11-04)
 

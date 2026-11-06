@@ -198,3 +198,39 @@ matrix's 59 TUI rows PASS at each size; no QA daemon left. New checks: after `Q`
 captured screen's code, rebuilt from its half blocks, decodes with zbarimg to exactly the address,
 on EVM (s2) and on Tron (s6) at both sizes. The QA logs are kept off-repo.
 
+## R4 — closed 2026-11-06 (post-delivery fix: #67)
+
+- result: the review of PR #66 found #67; it was reproduced with RED first (in-app and a pty run of the real binary), fixed with a second break found on the way, reviewed in two rounds by two external reviewers, merged and shipped to preview 2026.11.06.2001 (tap PR 2lab-ai/homebrew-tap#22) · closed: #67 · merge: 2eab208
+
+### Closed rows
+
+| Issue | What | PR · merge | Evidence | State |
+|---|---|---|---|---|
+| [#67](https://github.com/2lab-ai/zwallet/issues/67) | a key made before Tron, read while locked with Tron chosen, failed the whole TUI pane: 4 receive observed the Tron error row (empty address), and the status bar's own read sent the same `WALLET_LOCKED` to `fail_pane` every status and every 5 s, on any tab; 2 wallet cut the failed read to one row, hiding the fix | [#70](https://github.com/2lab-ai/zwallet/pull/70) · 2eab208 (2026-11-06) | RED on 47c5421 (`… is not a Tron address … [INVALID_ADDRESS]` in place of the pane); with only the receive fix the next bar read failed it again; an impostor's row with a pin showed `verified by password` before review round 1 closed it; each guard condition mutated fails a test; macOS full 960/0/15 | ✅ |
+
+### Round section (as it was, with the result)
+
+**Fix.** 4 receive skips the error row: the header shows the password's pin if this TUI has one,
+otherwise the read's error whole (wrapped; it names `zwallet unlock 24h` and `zwallet address
+--chain tron --verify`); the other chains' rows stay. The bar read ignores only a Tron
+`WALLET_LOCKED` without the `warning` detail; one naming another process, on the bar or in a row,
+still fails the pane before any pin or code is shown (`core::error::WARNING` is the one key its
+three producers and both guards use). 2 wallet wraps any failed balance read in its four rows.
+
+**Gates and reviews.** At 27a6486: fmt, clippy `-D warnings` 0, `--lib` 434, `--test tui` 93,
+`--test cli` 120, full suite 960 passed / 0 failed / 15 ignored; CI macOS and Ubuntu pass, and
+main CI passes on 2eab208. `gpt6-reviewer` APPROVE (no MUST-FIX; two nice-to-haves done in round 1);
+`zworkflow:code-reviewer` APPROVE in round 1 (two non-blocking findings) and in round 2 on the delta.
+
+**Preview.** `preview-2026-11-06-2001-2eab208ca1c7` = Homebrew `zwallet-preview 2026.11.06.2001`; the
+installed macOS aarch64 binary has the release asset's digest, reports `preview 2eab208ca1c7`, and
+`brew test` passes.
+
+**Real-terminal acceptance on the installed preview (2026-11-06).** Seven scenarios at 120×40 and
+80×24 under tmux with loopback mocks: 14 of 14 PASS, 176 checks, 0 failed, 0 not run; the coverage
+matrix's 59 TUI rows PASS at each size; no non-loopback connection; no QA daemon left. The new
+scenario s7 takes a key made before Tron (its cached Tron address removed), opens it in a session,
+stops that home's daemon and refreshes: 4 receive keeps the chains' rows and shows the error
+whole, a refresh tick later it still holds, `Q` draws no code, 2 wallet shows the error whole, and
+wallet.json gains no Tron address; opened with the password instead, the header shows the pin and
+`Q`'s code decodes (zbarimg) to the seed-derived T-address. The QA logs are kept off-repo.
