@@ -515,8 +515,8 @@ impl App {
                     // While locked, a key made before Tron has no Tron address yet, which
                     // `wallet::addresses` makes a row of (#67): nothing is observed, so the bar,
                     // which `display_bar` recomputes from `displayed_address`, shows the
-                    // password's pin or no address, and 4 receive says why. One naming another
-                    // process still stops the pane.
+                    // password's pin, an earlier read now shown as not verified, or no address,
+                    // and 4 receive says why. One naming another process still stops the pane.
                     Err(e)
                         if e.code == ErrorCode::WalletLocked
                             && !e.details.contains_key(WARNING)

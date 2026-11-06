@@ -154,8 +154,8 @@ Commands that act on a key take `--key <name>` (default: the active key).
   shown escaped. A key made before this version has no cached Tron address: while locked
   `address --chain tron` is `WALLET_LOCKED` (unlock once, or run `zwallet address --chain tron
   --verify`, which adds it and says so in `added`), and its `addresses` row shows that error. In the
-  TUI, with Tron chosen, `4 receive` keeps the other networks' rows and shows that error whole above
-  them, and `2 wallet` shows it whole in its balance rows; neither fails the pane. After
+  TUI, with Tron chosen, neither `4 receive` (see `tui` above) nor `2 wallet`, which shows the error
+  whole in its balance rows, fails the pane. After
   `unlock`, `address --chain tron` is verified by the session as for EVM, with no prompt.
   `sign-message`, `call` and `invoke` on `tron` are `CAPABILITY_UNSUPPORTED`.
   `whitelist add bob <T-address> --chains tron` adds a payee; `*` covers EVM only, never Tron.
