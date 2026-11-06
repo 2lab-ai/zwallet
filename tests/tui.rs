@@ -2599,6 +2599,299 @@ mod navigation {
         }
     }
 
+    /// Key `a` in `home` as a wallet made before this build knew Tron, as `tr3` in tests/cli.rs
+    /// makes one: no `tron` in its cache. Returns its EVM address.
+    fn a_without_a_tron_cache(home: &Home) -> String {
+        let evm = home.create("a", &[])["address"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        home.edit_wallet(|v| {
+            v["keys"][0]["addresses"]
+                .as_object_mut()
+                .unwrap()
+                .remove("tron");
+        });
+        evm
+    }
+
+    /// The status of `home`'s key `a` at `evm`: locked, or served by this build's daemon.
+    fn status_of_a(evm: &str, locked: bool) -> StatusView {
+        let a = || Some("a".to_string());
+        if locked {
+            StatusView {
+                active: a(),
+                address: Some((Some(evm.into()), Trust::Locked)),
+                ..locked_status()
+            }
+        } else {
+            StatusView {
+                active: a(),
+                address: Some((Some(evm.into()), Trust::Session)),
+                ..open_status(now() + 3600)
+            }
+        }
+    }
+
+    /// `c` Tron, `4`, and the reads of `home`'s key `a` as the TUI's workers make them, in one
+    /// generation: its addresses for the pane, then its Tron address for the bar, which every
+    /// status asks for.
+    fn receive_a_on_tron(app: &mut App, home: &Home) {
+        choose_chain(app, "tron");
+        app.update(Msg::Key(Key::Char('4')));
+        let generation = app.generation();
+        let read = block_on(wallet::addresses(home.path(), "a"));
+        app.update(Msg::Addresses(generation, "a".into(), read));
+        let read = block_on(wallet::address(home.path(), "a", app.chain()));
+        app.update(Msg::Address(generation, "a".into(), read));
+    }
+
+    /// `home` with key `a` made before Tron ([`a_without_a_tron_cache`]), and the app with `a`
+    /// open: opened while this build's daemon served the session, then locked, so nothing pins
+    /// it. Returns `a`'s EVM address too.
+    fn locked_a_without_a_tron_cache() -> (Home, App, String) {
+        let home = Home::new();
+        let evm = a_without_a_tron_cache(&home);
+        let mut app = app();
+        app.update(Msg::Keys(
+            app.generation(),
+            block_on(wallet::keys(home.path())),
+        ));
+        app.update(Msg::Status(app.generation(), Ok(status_of_a(&evm, false))));
+        app.update(Msg::Key(Key::Enter));
+        assert_eq!(app.open_key(), Some("a"));
+        app.update(Msg::Status(app.generation(), Ok(status_of_a(&evm, true))));
+        (home, app, evm)
+    }
+
+    /// #67: a key made before Tron, opened while this build's daemon served the session, then
+    /// locked. On 4 receive with Tron chosen the read has an error row for Tron, with no address.
+    /// The pane shows every EVM network's address and that row's error, cut as the CLI's
+    /// `addresses` cuts it; the header shows no address and no trust, but that error whole,
+    /// wrapped in the rows the address header has, so both ways to get the address are on the
+    /// screen. `Q` draws no code and says why.
+    #[test]
+    fn receive_on_tron_without_a_cached_tron_address_while_locked_shows_the_rows() {
+        let (home, mut app, evm) = locked_a_without_a_tron_cache();
+        receive_a_on_tron(&mut app, &home);
+        let message = no_cached_tron_address(&home, "a");
+        let shows_the_rows = |app: &App, at: &str| {
+            for (width, height) in [(80, 24), (120, 40)] {
+                let at = format!("{at}, {width}x{height}");
+                let rows = checked_frame(&mut screen(width, height), app).0;
+                let text = rows.join("\n");
+                assert!(!text.contains("could not be completed"), "{at}\n{text}");
+                assert!(text.contains("Addresses by network:"), "{at}\n{text}");
+                for chain in chains::CHAINS.iter().filter(|c| c.key != "tron") {
+                    let row = format!("{}: {evm}", chain.key);
+                    assert!(text.contains(&row), "{at}: no {row:?}\n{text}");
+                }
+                let error = "tron: error: key 'a' has no cached tron address yet; unlock once";
+                assert!(
+                    rows.iter()
+                        .any(|r| r.contains(error) && r.contains("...(cut)")),
+                    "{at}\n{text}"
+                );
+                // The header: the error whole, no address and no trust.
+                let header = receive_header(&rows);
+                assert!(
+                    header.len() <= 3 && header.join(" ") == message,
+                    "{at}: {header:#?}\n{text}"
+                );
+                assert!(!text.contains("Address trust:"), "{at}\n{text}");
+            }
+        };
+        shows_the_rows(&app, "4 receive");
+        app.update(Msg::Key(Key::Char('Q')));
+        assert_no_code(
+            &app,
+            &[
+                "No QR: this key's address on this chain is not read yet.",
+                "r reads it again; V verifies it from the seed.",
+            ],
+            "Q",
+        );
+        app.update(Msg::Key(Key::Esc));
+        shows_the_rows(&app, "Esc");
+    }
+
+    /// With the password's pin of that key's Tron address (the password check derives every
+    /// family), the same read shows the pin as the header, verified by password, beside the
+    /// Tron row's error (the cache still has none), and `Q` draws its code.
+    #[test]
+    fn receive_on_tron_without_a_cached_tron_address_shows_the_password_pin() {
+        let home = Home::new();
+        let evm = a_without_a_tron_cache(&home);
+        let mut app = app();
+        app.update(Msg::Keys(
+            app.generation(),
+            block_on(wallet::keys(home.path())),
+        ));
+        app.update(Msg::Status(app.generation(), Ok(status_of_a(&evm, true))));
+        app.update(Msg::Key(Key::Enter));
+        app.update(Msg::Prepared(Ok(())));
+        app.update(Msg::PasswordSubmitted);
+        let checked = wallet::check_password(home.path(), PW, Some(&["a"])).unwrap();
+        let tron = checked
+            .addresses
+            .iter()
+            .find(|a| a.chain == "tron")
+            .unwrap()
+            .address
+            .clone();
+        app.update(Msg::Verified(Ok((checked, Err("no checked list".into())))));
+        app.update(Msg::Status(app.generation(), Ok(status_of_a(&evm, true))));
+        assert_eq!(app.open_key(), Some("a"));
+        receive_a_on_tron(&mut app, &home);
+        let text = view(&app);
+        for line in [
+            tron.as_str(),
+            "Address trust: verified by password",
+            "tron: error: key 'a' has no cached tron address yet",
+        ] {
+            assert!(text.contains(line), "no {line:?}\n{text}");
+        }
+        app.update(Msg::Key(Key::Char('Q')));
+        assert_code(&app, (80, 24), &tron, TRON_ONLY, "pinned");
+    }
+
+    /// An error row on the chosen chain does not skip the other rows' pin check: a read whose
+    /// EVM address contradicts the password's pin still stops the pane, and `Q` draws no code.
+    #[test]
+    fn receive_on_tron_without_a_cached_tron_address_still_refuses_a_contradicted_pin() {
+        let home = Home::new();
+        let evm = a_without_a_tron_cache(&home);
+        assert_ne!(evm, A);
+        // `a` pinned at A on every family by the password; the read gives `evm`.
+        let mut app = password_opened_a();
+        receive_a_on_tron(&mut app, &home);
+        let text = view(&app);
+        assert!(text.contains("does not match"), "{text}");
+        app.update(Msg::Key(Key::Char('Q')));
+        assert_no_code(&app, &["No QR", "does not match"], "contradicted");
+    }
+
+    /// The bar's read of that key's Tron address (which every status asks for, on every tab)
+    /// answers `WALLET_LOCKED` while locked. On 2 wallet it fails neither the key list nor the
+    /// pane, and starts nothing again. The balance read then fails 2 wallet's balances alone,
+    /// its error whole in the balance rows, so both ways to get the address are on the screen;
+    /// and 1 keys still lists the key.
+    #[test]
+    fn the_bar_read_without_a_cached_tron_address_while_locked_fails_no_pane_off_4_receive() {
+        let (home, mut app, evm) = locked_a_without_a_tron_cache();
+        choose_chain(&mut app, "tron");
+        assert_eq!(app.tab(), Tab::Wallet);
+        let generation = app.generation();
+        let tron = chains::find("tron").unwrap();
+        let read = block_on(wallet::address(home.path(), "a", tron));
+        let error = read.as_ref().unwrap_err();
+        assert_eq!(error.code, ErrorCode::WalletLocked, "{}", error.message);
+        assert!(error.details.is_empty(), "{:?}", error.details);
+        app.update(Msg::Address(generation, "a".into(), read));
+        assert!(
+            !matches!(app.keys(), zwallet::tui::app::Pane::Failed(_)),
+            "{}",
+            view(&app)
+        );
+        assert!(
+            matches!(app.navigation().lines, zwallet::tui::app::Pane::Loading),
+            "{}",
+            view(&app)
+        );
+        assert_eq!(app.generation(), generation);
+        // The balance read in that state fails before any RPC; the endpoint is a closed port.
+        let net = Net {
+            chain: tron,
+            rpc_url: "http://127.0.0.1:1".into(),
+        };
+        let read = block_on(wallet::balances(home.path(), "a", net));
+        app.update(Msg::Balances(generation, "a".into(), read));
+        assert!(
+            !matches!(app.keys(), zwallet::tui::app::Pane::Failed(_)),
+            "{}",
+            view(&app)
+        );
+        let error = format!("{} [WALLET_LOCKED]", no_cached_tron_address(&home, "a"));
+        for (width, height) in [(80, 24), (120, 40)] {
+            let rows = checked_frame(&mut screen(width, height), &app).0;
+            let balances = balance_rows(&rows);
+            let shown: Vec<&str> = balances
+                .iter()
+                .map(String::as_str)
+                .filter(|r| !r.is_empty())
+                .collect();
+            assert!(
+                balances.len() == 4 && shown.join(" ") == error,
+                "{width}x{height}: {balances:#?}\n{}",
+                rows.join("\n")
+            );
+        }
+        app.update(Msg::Key(Key::Char('1')));
+        let text = view(&app);
+        // On Tron the list has no address for a key without one yet.
+        assert!(text.contains("|>* a ") && !text.contains(&evm), "{text}");
+        assert!(!text.contains("could not be completed"), "{text}");
+    }
+
+    /// A failed balance read on 2 wallet shows its error wrapped in the four balance rows. One
+    /// longer than they hold is cut once, on the last row, with `...`; the history stays below.
+    #[test]
+    fn a_failed_balance_read_longer_than_the_balance_rows_cuts_only_the_last_row() {
+        let mut app = session_opened_a();
+        assert_eq!(app.tab(), Tab::Wallet);
+        let words: Vec<String> = (0..60).map(|i| format!("w{i:02}xq")).collect();
+        let message = words.join(" ");
+        app.update(Msg::Balances(
+            app.generation(),
+            "a".into(),
+            Err(WalletError::rpc(message.clone())),
+        ));
+        let error = format!("{message} [RPC_ERROR]");
+        for (width, height) in [(80, 24), (120, 40)] {
+            let rows = checked_frame(&mut screen(width, height), &app).0;
+            let at = format!("{width}x{height}\n{}", rows.join("\n"));
+            let balances = balance_rows(&rows);
+            assert_eq!(balances.len(), 4, "{at}");
+            // Three rows of the error's start, broken at spaces, whole.
+            let whole = balances[..3].join(" ");
+            assert!(error.starts_with(&whole) && whole.len() > 3 * 60, "{at}");
+            // The last: the rest from there, cut with `...` at the line's budget.
+            let last = &balances[3];
+            assert!(last.len() == 72 && last.ends_with("..."), "{at}");
+            let rest = &error[whole.len() + 1..];
+            assert!(rest.starts_with(last.trim_end_matches("...")), "{at}");
+            assert!(!rows.join(" ").contains("RPC_ERROR"), "{at}");
+        }
+    }
+
+    /// The same bar read, but from a process that is not this build's key daemon (as
+    /// `relayed_error` words it, with the `warning` detail), still stops the pane.
+    #[test]
+    fn a_bar_read_naming_another_process_on_tron_still_fails_the_pane() {
+        let (home, mut app, _) = locked_a_without_a_tron_cache();
+        receive_a_on_tron(&mut app, &home);
+        assert!(view(&app).contains("Addresses by network:"));
+        let reason = "the process answering on d.sock runs /tmp/zwt-x/fakebin";
+        let relayed = WalletError::new(
+            ErrorCode::WalletLocked,
+            format!(
+                "{reason}, and it reported: no such session; {}",
+                zwallet::core::protocol::RELOCK
+            ),
+        )
+        .with_detail(
+            "warning",
+            format!("{reason}; {}", zwallet::core::protocol::RELOCK),
+        );
+        app.update(Msg::Address(app.generation(), "a".into(), Err(relayed)));
+        assert!(matches!(app.keys(), zwallet::tui::app::Pane::Failed(_)));
+        let text = view(&app);
+        assert!(
+            text.contains("could not be completed") && text.contains("/tmp/zwt-x/fakebin"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn nav_verify_is_read_only_and_duration_is_typed_before_preparing() {
         let mut app = locked_ab();
@@ -2972,6 +3265,132 @@ fn t18_on_a_pty_q_on_4_receive_shows_the_tron_address_as_a_qr_code() {
         }
         quit(&mut tui);
     }
+}
+
+/// What a read of `key`'s Tron address in `home` says while locked with no `tron` in its cache:
+/// the CLI's whole `WALLET_LOCKED` message, which names both ways to get the address.
+fn no_cached_tron_address(home: &Home, key: &str) -> String {
+    let tron = chains::find("tron").unwrap();
+    let error = block_on(wallet::address(home.path(), key, tron)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::WalletLocked, "{}", error.message);
+    for fix in [
+        "unlock once (`zwallet unlock 24h`)",
+        "run `zwallet address --chain tron --verify`",
+    ] {
+        assert!(error.message.contains(fix), "{}", error.message);
+    }
+    error.message
+}
+
+/// The rows of a frame's `rows` from below the top border that starts with `border` to above
+/// the first row with `until`, without the borders and the padding.
+fn pane_rows(rows: &[String], border: &str, until: &str) -> Vec<String> {
+    rows.iter()
+        .skip_while(|r| !r.starts_with(border))
+        .skip(1)
+        .take_while(|r| !r.contains(until))
+        .map(|r| {
+            let r = r.trim_end().trim_start_matches('|').trim_end_matches('|');
+            r.trim_end().to_string()
+        })
+        .collect()
+}
+
+/// 4 receive's header in a frame's `rows`: between the pane's top border and
+/// `Addresses by network:`.
+fn receive_header(rows: &[String]) -> Vec<String> {
+    pane_rows(rows, "+ receive ", "Addresses by network:")
+}
+
+/// 2 wallet's balance rows in a frame's `rows`: between the pane's top border and the history
+/// below them.
+fn balance_rows(rows: &[String]) -> Vec<String> {
+    pane_rows(rows, "+ wallet ", "Recent transactions")
+}
+
+/// #67 on a pty: a key made before Tron (no `tron` in its cache), opened during a session that
+/// then ends. `r` on 4 receive with Tron chosen shows every EVM network's address and the Tron
+/// row's error, not a failed pane, with the whole error as the header, and `Q` draws no code. A
+/// refresh later (whose status asks for the bar's Tron address again) the rows are still there,
+/// and at 80x24 too.
+#[test]
+fn t18_on_a_pty_a_key_made_before_tron_keeps_its_rows_on_tron_once_locked() {
+    let home = Home::new();
+    let evm = home.create("main", &[])["address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let no_tron = |home: &Home| {
+        let v: Value = serde_json::from_slice(&std::fs::read(home.wallet_json()).unwrap()).unwrap();
+        v["keys"][0]["addresses"].get("tron").is_none()
+    };
+    home.edit_wallet(|v| {
+        v["keys"][0]["addresses"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tron");
+    });
+    home.unlock("10m");
+    // The session derives the Tron address; it does not add it to the cache.
+    assert!(no_tron(&home));
+    let mut tui = PtyChild::spawn_full_screen(tui_without_public_rpc(&home), PTY_SIZE);
+    tui.wait_frame(PTY_WAIT, |f| {
+        f.rows.iter().any(|r| r.contains("* main ")) && bar(f).1.starts_with("signing ")
+    });
+    // Unlocked: Enter opens the key without the password.
+    tui.send(b"\r");
+    tui.send(b"cjjjjjjj\r");
+    tui.wait_frame(PTY_WAIT, |f| bar(f).0.starts_with("tron | main T"));
+    tui.send(b"4");
+    tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains("tron: T")));
+    home.stop_daemons();
+    let message = no_cached_tron_address(&home, "main");
+    tui.send(b"r");
+    let shows_the_rows = |frame: &Frame, at: &str| {
+        let text = frame.rows.join("\n");
+        assert!(!text.contains("could not be completed"), "{at}\n{frame}");
+        for chain in chains::CHAINS.iter().filter(|c| c.key != "tron") {
+            let row = format!("{}: {evm}", chain.key);
+            assert!(text.contains(&row), "{at}: no {row:?}\n{frame}");
+        }
+        assert!(
+            text.contains("tron: error: key 'main' has no cached tron address yet"),
+            "{at}\n{frame}"
+        );
+        let header = receive_header(&frame.rows);
+        assert!(
+            header.len() <= 3 && header.join(" ") == message,
+            "{at}: {header:#?}\n{frame}"
+        );
+        assert!(!text.contains("Address trust:"), "{at}\n{frame}");
+    };
+    let read = |f: &Frame| {
+        f.rows
+            .iter()
+            .any(|r| r.contains("tron: error: ") || r.contains("could not be completed"))
+    };
+    shows_the_rows(&tui.wait_frame(PTY_WAIT, read), "r");
+    tui.send(b"Q");
+    let frame = tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains("No QR: ")));
+    let text = frame.rows.join("\n");
+    assert!(
+        text.contains("No QR: this key's address on this chain is not read yet."),
+        "{frame}"
+    );
+    assert!(!text.contains(['█', '▀', '▄']), "{frame}");
+    tui.send(b"Q");
+    std::thread::sleep(zwallet::tui::REFRESH + Duration::from_secs(1));
+    shows_the_rows(&tui.wait_frame(PTY_WAIT, read), "a refresh later");
+    tui.resize((80, 24));
+    let frame = tui.wait_frame(PTY_WAIT, |f| {
+        read(f)
+            && f.rows
+                .iter()
+                .any(|r| r.starts_with("+ receive ") && r.trim_end().len() == 80)
+    });
+    shows_the_rows(&frame, "80x24");
+    quit(&mut tui);
+    assert!(no_tron(&home));
 }
 
 mod creation {

@@ -511,27 +511,48 @@ impl App {
                         let mut lines = Vec::new();
                         if let Some(row) = read.rows.iter().find(|r| r.chain.key == self.chain.key)
                         {
-                            if let Err(error) = self.observe_family_address(
-                                &key,
-                                row.chain,
-                                &row.address,
-                                read.trust.clone(),
-                            ) {
-                                self.fail_pane(error);
-                                return std::ops::ControlFlow::Continue(Vec::new());
-                            }
-                            lines.push(Outside::detail(&format!("{} / {}", self.chain.name, key)));
-                            lines.push(Outside::address(&row.address));
-                            let trust = if matches!(read.trust, Trust::Unverified(Some(_))) {
-                                "not verified: another process answered"
-                            } else if self.family_pinned(&key, self.chain) {
-                                "verified by password"
-                            } else if read.trust.verified() {
-                                "verified by session"
-                            } else {
-                                "not verified: V checks from the seed before funding"
+                            // An error row has no address (a key made before Tron, read while
+                            // locked: #67). The header shows the password's pin of it if this TUI
+                            // has one, and otherwise the row's error whole: it says how to get
+                            // the address, which the row below cuts as `addresses` does.
+                            let address = match &row.error {
+                                None => {
+                                    if let Err(error) = self.observe_family_address(
+                                        &key,
+                                        row.chain,
+                                        &row.address,
+                                        read.trust.clone(),
+                                    ) {
+                                        self.fail_pane(error);
+                                        return std::ops::ControlFlow::Continue(Vec::new());
+                                    }
+                                    Ok(row.address.clone())
+                                }
+                                Some(error) => {
+                                    self.family_pin(&key, self.chain).cloned().ok_or(error)
+                                }
                             };
-                            lines.push(Outside::detail(&format!("Address trust: {trust}")));
+                            match address {
+                                Ok(address) => {
+                                    lines.push(Outside::detail(&format!(
+                                        "{} / {}",
+                                        self.chain.name, key
+                                    )));
+                                    lines.push(Outside::address(&address));
+                                    let trust = if matches!(read.trust, Trust::Unverified(Some(_)))
+                                    {
+                                        "not verified: another process answered"
+                                    } else if self.family_pinned(&key, self.chain) {
+                                        "verified by password"
+                                    } else if read.trust.verified() {
+                                        "verified by session"
+                                    } else {
+                                        "not verified: V checks from the seed before funding"
+                                    };
+                                    lines.push(Outside::detail(&format!("Address trust: {trust}")));
+                                }
+                                Err(error) => lines.extend(Outside::details(&error.message)),
+                            }
                         }
                         lines.push(Outside::detail("Addresses by network:"));
                         for row in read.rows {

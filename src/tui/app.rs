@@ -15,7 +15,7 @@ use history::{DetailRead, DetailRequest, HistoryRead, HistoryScope, HistoryTarge
 pub use navigation::{FieldPurpose, Navigation, Popup, RpcChoice, UserText};
 
 use crate::chains::{Chain, Net};
-use crate::core::error::{Result, WalletError};
+use crate::core::error::{ErrorCode, Result, WalletError};
 use crate::core::time::unix_secs;
 use crate::tui::actions::Tab;
 use crate::tui::text::Outside;
@@ -512,6 +512,14 @@ impl App {
                             });
                         }
                     }
+                    // While locked, a key made before Tron has no Tron address yet, which
+                    // `wallet::addresses` makes a row of (#67): the bar keeps what the status
+                    // gave it (the password's pin, or no address), and 4 receive says why. One
+                    // naming another process still stops the pane.
+                    Err(e)
+                        if e.code == ErrorCode::WalletLocked
+                            && !e.details.contains_key("warning")
+                            && matches!(self.chain.family, crate::chains::Family::Tron(_)) => {}
                     Err(e) => self.fail_pane(e),
                 }
                 Vec::new()

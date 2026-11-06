@@ -83,9 +83,15 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 .text("reading balances...", HINT)
                 .draw(frame, line(inner, 0), placed)
         }
-        Pane::Failed(error) => Row::default()
-            .outside(&error.cut(usize::from(inner.width)), ERROR)
-            .draw(frame, line(inner, 0), placed),
+        // The error wrapped in the four balance rows, so its end (what to do) shows too; cut
+        // only on the last row when it needs more.
+        Pane::Failed(error) => {
+            for (y, value) in (0..).zip(Outside::details_within(error.text(), 4)) {
+                Row::default()
+                    .outside(&value.cut(usize::from(inner.width)), ERROR)
+                    .draw(frame, line(inner, y), placed);
+            }
+        }
     }
     Row::default()
         .text(
