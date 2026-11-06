@@ -166,3 +166,35 @@ v0.2; avalanche through Routescan stays out of v0.2; the coverage per chain is u
 **Real-terminal acceptance on 8eaf051 (2026-11-04).** All six scenarios at 120×40 and 80×24 under tmux with loopback mocks and `sandbox-exec`, on a debug build scoped to `/tmp/zqa-` (every lock and whitelist edit stops only QA daemons; the harness refuses that mode for a release binary). Coverage matrix: 59 of 59 rows PASS at each size; 3 rows are not TUI features (row 8 `unlock --allow-ptrace-scope-0`, row 57 `--json`/`--password-stdin`/`--no-qr`, row 58 `daemon`). No non-loopback connection. A live owner session on the same machine was untouched. The QA logs are kept off-repo.
 
 **Preview.** `preview-2026-11-03-1955-8eaf05155751` = Homebrew `zwallet-preview 2026.11.03.1955`; the macOS aarch64 asset matched its release digest and SHA256SUMS and reports `preview 8eaf05155751`.
+
+## R3 — closed 2026-11-06 (T18: trade-off Q decided, Q5 shipped)
+
+- result: the owner decided trade-off Q on 2026-11-06 (the TUI must show the receive address as a QR code, a Tron address included); Q5 was built from the receive-QR slice of draft PR #59 with the CLI's encoder and caption, reviewed in two rounds, merged and shipped to preview 2026.11.06.1138 (tap PR 2lab-ai/homebrew-tap#21) · closed: T18 · merge: 36e8483
+
+### Closed rows
+
+| ID | Acceptance | Gap | Source | Status |
+|---|---|---|---|---|
+| T18 | the QR code (trade-off Q) | Q5: `Q` on 4 receive fills the screen with zwallet's own code of the open key's verified address on the current chain (Tron included), the CLI's caption below it; no code for an unverified, locked, impostor-answered or unread address; leaving the tab closes it · [#66](https://github.com/2lab-ai/zwallet/pull/66) · 36e8483 (2026-11-06) | TUI-3+4 | ✅ |
+
+### Round section (as it was, with the result)
+
+**RED and gates.** RED on 846b08d: `--test tui` 0 passed, 5 failed (main's pointer popup); the
+write-filter test `left: 10 right: 7`. Round 2 RED on c5e51cb: leaving the tab kept the QR view. At
+a4279b7: fmt, clippy `-D warnings` 0, `--lib` 431, `--test tui` 84, full suite 948 passed / 0
+failed / 15 ignored. CI on fdedd54 and on main 36e8483: macOS and Ubuntu pass.
+
+**Reviews.** `gpt6-reviewer` APPROVE (round 1 after the provenance evidence; round 2); no MUST-FIX.
+`zworkflow:code-reviewer` round 1 code APPROVE with a spec MUST-FIX (Q1/Q3 text) and transition-test
+SHOULDs, round 2 APPROVE with all closed. Out of scope, filed: #67.
+
+**Preview.** `preview-2026-11-06-1138-36e848324dad` = Homebrew `zwallet-preview 2026.11.06.1138`; the
+macOS aarch64 asset matched its release digest and SHA256SUMS and reports `preview 36e848324dad`;
+`brew test` passes and the installed binary has the same digest.
+
+**Real-terminal acceptance on the installed preview (2026-11-06).** All six scenarios at 120×40 and
+80×24 under tmux with loopback mocks: 12 of 12 PASS, 156 checks, 0 failed, 0 not run; the coverage
+matrix's 59 TUI rows PASS at each size; no QA daemon left. New checks: after `Q` on 4 receive the
+captured screen's code, rebuilt from its half blocks, decodes with zbarimg to exactly the address,
+on EVM (s2) and on Tron (s6) at both sizes. The QA logs are kept off-repo.
+
