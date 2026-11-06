@@ -622,6 +622,7 @@ mod tests {
         for (token, payee, staked, free, source, bandwidth, activation) in [
             // A payee that exists: staked, then free, then burn = bytes × P_tx.
             (false, &exists, 267, 0, "staked", "0", "0"),
+            (false, &exists, 267, 267, "staked", "0", "0"),
             (false, &exists, 266, 267, "free", "0", "0"),
             (false, &exists, 266, 266, "burn", "534000", "0"),
             // A payee that does not exist: staked covers bytes × R, else burn P_ca; never free.

@@ -725,7 +725,7 @@ grok-4.7 APPROVE, fable APPROVE, gpt-6-astra REJECT on one residual of round 1's
 | E8 | https://tether.to/en/supported-protocols, fetched 2026-10-28 |
 | E9 | https://www.circle.com/blog/circle-is-discontinuing-support-for-usdc-on-the-tron-blockchain (2024-02-21) and https://developers.circle.com/stablecoins/usdc-contract-addresses, fetched 2026-10-28 |
 | E10 | https://developers.tron.network/reference/rate-limits, fetched 2026-10-28 |
-| E11 | java-tron tag GreatVoyage-v4.8.2.4, tronprotocol/java-tron@4e8389f159d0782f1ebcd9dab2fd88388c0e6fe9, read 2026-11-07: `actuator/.../TransferActuator.java:132-139, 141-156`; `framework/.../db/Manager.java:933-940, 1555-1561, 1739-1754`; `framework/.../runtime/RuntimeImpl.java:57`; `framework/.../Wallet.java:590-594, 1292-1295`; `framework/.../http/GetChainParametersServlet.java:18-21`; `framework/.../http/JsonFormat.java:85-91, 154-156`; `protocol/.../core/Tron.proto:122-128` |
+| E11 | java-tron tag GreatVoyage-v4.8.2.4, tronprotocol/java-tron@4e8389f159d0782f1ebcd9dab2fd88388c0e6fe9, read 2026-11-06 (UTC): `actuator/.../TransferActuator.java:132-139, 141-156`; `framework/.../db/Manager.java:933-940, 1555-1561, 1739-1754`; `framework/.../runtime/RuntimeImpl.java:57`; `framework/.../Wallet.java:590-594, 1292-1295`; `framework/.../http/GetChainParametersServlet.java:18-21`; `framework/.../http/JsonFormat.java:85-91, 154-156`; `protocol/.../core/Tron.proto:122-128` |
 
 Measurements (2026-10-28, `curl`, both endpoints unless noted):
 - **M1** 03:13:58Z–03:16:51Z: the endpoint table and the burst above.

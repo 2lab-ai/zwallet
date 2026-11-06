@@ -76,12 +76,13 @@ Rows here are snapshots taken when they moved.
 
 **Spec review.** The spec passed the three-engine review in round 3 (2026-10-28: grok-4.7, gpt-6-astra and fable all APPROVE; rounds 1 and 2 are summarised in 05-tron.md). fable's two non-blocking round-3 remarks for C stay open in [`loop.md`](loop.md).
 
-## Doc notes — closed 2026-11-07 (PR #69)
+## Doc notes — closed 2026-11-06 (PR #69)
 
 fable's two non-blocking round-3 remarks (spec review round 3, 2026-10-28), as they were in `loop.md`,
 with the result:
 - §Fees names the `fees` fields `activationSun` and `bandwidthSun` but not their values in each
-  branch; define them in one line, so the TUI's "activation fee" and "bandwidth burn" rows are fixed.
+  branch (05-tron.md:479); define them in one line, so the TUI's "activation fee" and "bandwidth burn"
+  rows are fixed.
   **Result:** 05-tron.md §Fees "Shown before sending" defines both per branch from `fees()`
   (`src/chains/tron/send.rs`); the unit test `bandwidth_and_activation_fields_follow_the_branch_today_selects`
   pins them (432 lib tests; removing the new-payee free-bandwidth guard fails it).

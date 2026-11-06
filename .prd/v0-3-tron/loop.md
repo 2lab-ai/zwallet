@@ -20,4 +20,4 @@ re-verified ✅: TR2, TR6, TR7, TR8 · 2026-11-06, read-only on the owner's own 
 
 The owner decides TR23 (funds, timing) on preview 2026.10.29.2134 or a later build; the agent
 records its receipt here and closes Q2 with it. Release publication (a `v*` tag) is the owner's.
-The two round-3 doc notes are closed in [`loop.done.md`](loop.done.md) (doc notes, 2026-11-07).
+The two round-3 doc notes are closed in [`loop.done.md`](loop.done.md) (doc notes, 2026-11-06).
