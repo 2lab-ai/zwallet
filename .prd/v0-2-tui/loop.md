@@ -10,15 +10,13 @@ to preview 2026.11.03.1955: [`loop.done.md`](loop.done.md) R2. This file holds o
 
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
-| T18 | the QR code (trade-off Q) | the Q1 pointer (`Q` names `zwallet address`) is shipped (PR #51, preview 2026.10.29.2134); Q3 waits on the owner's trade-off Q | TUI-3+4 | 🚪 |
+| T18 | the QR code (trade-off Q) | the owner picked Q5 (2026-11-06); built in PR #66 (`Q` on 4 receive draws the verified address's code, Tron included; real-terminal decode passes at 120x40 and 80x24 on a debug build). Closes with the merge and the preview's real-terminal receipt | TUI-3+4 | 🟡 |
 
 ## Waiting on the owner
 
-- **Trade-off Q** (03-tui.md §Open trade-offs): a QR code on receive, T18 above. Q1, the CLI
-  pointer, is the shipped default.
 - **Trade-off B** (03-tui.md §Open trade-offs): the recovery phrase in the TUI. B1, the CLI
   pointer, is shipped (T32); B2 is built only if the owner picks it (recommended: B1). The
-  handoff does not authorize phrase display or a new QR implementation.
+  handoff does not authorize phrase display.
 - **The owner's acceptance on preview 2026.11.03.1955** (or later): upgrade, `zwallet lock` and
   unlock again (session verification compares the daemon's cdhash, which changes with every
   build), then accept the TUI on it. The dispatcher's real-terminal acceptance passed on preview

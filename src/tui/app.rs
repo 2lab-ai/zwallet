@@ -303,6 +303,16 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        let work = self.dispatch(msg);
+        // The QR view is 4 receive's: any way to another tab (a tab key, an action, opening a
+        // key) closes it, so coming back shows the address list until `Q`.
+        if self.nav.tab != Tab::Receive {
+            self.nav.receive_qr = false;
+        }
+        work
+    }
+
+    fn dispatch(&mut self, msg: Msg) -> Vec<Effect> {
         let msg = match self.create_update(msg) {
             std::ops::ControlFlow::Continue(work) => return work,
             std::ops::ControlFlow::Break(msg) => msg,

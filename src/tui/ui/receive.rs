@@ -1,5 +1,5 @@
 //! `Q` on 4 receive: the open key's address on the selected chain as zwallet's own QR code
-//! (`crate::qr`, the CLI's encoder) under the CLI's caption, on the whole screen. Only an address
+//! (`crate::qr`, the CLI's encoder) with the CLI's caption below it, on the whole screen. Only an address
 //! the password or this build's session verified is encoded, by the CLI's `with_qr` rule. This is
 //! the one drawing in [`QR`], and its glyphs come from the encoder alone.
 use super::*;

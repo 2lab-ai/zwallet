@@ -133,7 +133,7 @@ which stays a start flag for the security reason written in it (review round 2).
 | 11 | `backup` | `backup` | 1 keys | `B` | trade-off B: B1 (recommended, built) is the line `run zwallet backup in a shell to see the recovery phrase`; B2 only if the owner picks it | T32 | TUI-10 |
 | 12 | `address [--chain]` | `address` | 4 receive | `4`, `c` | the full EIP-55 address and its trust words | T17 | TUI-4 |
 | 13 | `address --verify` (repair) | `address --verify` | 1 keys | `A` | the password, then the cached addresses repaired from the seed; the `repaired` list shown | T19 | TUI-4 |
-| 14 | `address` QR code | `qr` | 4 receive | `Q` | trade-off Q, Q5: the whole screen holds the code of the open key's verified address on the current chain (Tron included), under the CLI's caption; `Q` or Esc closes it | T18 | TUI-4 |
+| 14 | `address` QR code | `qr` | 4 receive | `Q` | trade-off Q, Q5: the whole screen holds the code of the open key's verified address on the current chain (Tron included), with the CLI's caption below it; `Q`, Esc or leaving the tab closes it | T18 | TUI-4 |
 | 15 | `addresses` | `addresses` | 4 receive | the list under the address | one address per family, every chain named | T17 | TUI-4 |
 | 16 | `balance` (every network) | `balance` | 2 wallet | `a` | every chain, the testnet last, a failed one on its own line | T15 | TUI-3 |
 | 17 | `balance --chain` | `balance --chain` | 2 wallet | `2`, `c` | the native coin and the registry tokens with a balance | T5 | TUI-3 |
@@ -212,18 +212,17 @@ conditional on it.
 
 Two re-decided non-goals had no safe default. Each is stated with its options and a
 recommendation; the dispatcher takes them to review and the owner decides. The owner decided Q on
-2026-11-06 (Q5); B is still open. Neither blocks a
-unit: the TUI-3+4 PR builds Q1 and TUI-10 builds B1, the one-line pointers to the CLI, and both
-rows count as CLI pointers until then (§Coverage matrix, Count). Q3, if picked, lands as a delta
-of T18; B2 is built only if the owner picks it (T32).
+2026-11-06 (Q5, PR #66); B is still open. TUI-10 builds B1, the one-line pointer to the CLI, and
+that row counts as a CLI pointer until the owner picks (§Coverage matrix, Count); B2 is built only
+if the owner picks it (T32).
 
 ### Q. The QR code on 4 receive
 
 Facts: the CLI ends human output with a QR of an address verified by the password or by the
 session ([README.md:250-262](https://github.com/2lab-ai/zwallet/blob/9ecfe93/README.md#L250-L262); `with_qr`, commands.rs:620). That code is the CLI's one write past its
 filter (core/terminal.rs:6-7). It is version 3: 29 modules and a quiet zone of 4, 37 columns and
-19 lines of half blocks (src/qr.rs:119-122), which rule 1 would turn into `?`. Rule 5 says the TUI
-draws no QR.
+19 lines of half blocks (src/qr.rs:119-122), which rule 1 would turn into `?`. Before the owner
+picked, rule 5 said the TUI draws no QR; with Q5 it draws exactly one, its own (rule 5).
 
 | Option | What | Security | Fits | Cost |
 |---|---|---|---|---|
@@ -239,7 +238,7 @@ at 80x24: Q2. Until the owner picked, Q1 was what was built.
 
 | Option | What | Security | Fits | Cost |
 |---|---|---|---|---|
-| Q5 | zwallet's QR in half blocks (`qr::lines`, the CLI's encoder at level M with its quiet zone), each cell in one style constant `QR` (white on black: the blocks draw the light modules, as `qr::render` does without colour), on the whole screen under the CLI's caption, for an address verified by the password or the session | rule 1 gains one exception: `█`, `▀` and `▄` pass the write filter only in a cell whose style is `QR` (`cell_ok`, src/tui/term.rs); only the receive view (src/tui/ui/receive.rs) draws in `QR`, and its glyphs come from the encoder alone; no write goes past the filter | 80x24 (37x19, a caption, a hint: 24 rows); a smaller screen gets a line naming the size and `zwallet address`, never a partial code | under `NO_COLOR` crossterm writes no colour, and the same blocks still draw the light modules, which scans on a dark terminal |
+| Q5 | zwallet's QR in half blocks (`qr::lines`, the CLI's encoder at level M with its quiet zone), each cell in one style constant `QR` (white on black: the blocks draw the light modules, as `qr::render` does without colour), on the whole screen with the CLI's caption below it, for an address verified by the password or the session | rule 1 gains one exception: `█`, `▀` and `▄` pass the write filter only in a cell whose style is `QR` (`cell_ok`, src/tui/term.rs); only the receive view (src/tui/ui/receive.rs) draws in `QR`, and its glyphs come from the encoder alone; no write goes past the filter | 80x24 (37x19, a caption, a hint: 24 rows), the TUI's own minimum; the view also refuses to draw a code that does not fit whole (a guard: it names the size and `zwallet address`), never a partial code | under `NO_COLOR` crossterm writes no colour, and the same blocks still draw the light modules, which scans on a dark terminal |
 
 **Decided: Q5** (owner, 2026-11-06, verbatim: "qa 코드를 시발년아 tron 도 출력하게 하고 보여줘
 그래야 보내주지"; "qa" reads as "QR": the owner funds by scanning, and the CLI already printed a
@@ -1110,7 +1109,7 @@ each is in [`v0-2-tui/units.md`](v0-2-tui/units.md).
 | T15 | 2 wallet, `a`, with all 8 `ZWALLET_RPC_<CHAIN>` set: two to mock nodes that answer, one to a mock that refuses, the other five to a closed port (`http://127.0.0.1:1`) | one line per network, testnet last; each failed one `error: … [CODE]` cut to 72 (`brief`); `2 of 8 networks have a balance; 6 did not answer`; zero tokens hidden; no test reaches a public RPC |
 | T16 | 7 session, a daemon of this home and one of another home | lock state, expiry, daemon pid, `other homes: 1 daemon`, the session's whitelist as `reports gen N, M entries (not checked here)`; with TUI-1c's argv-listed fake: its values escaped within their budgets, nothing drawn verified |
 | T17 | 4 receive, warm; then locked | warm: the full EIP-55 address and `verified by password`; locked: `not verified` and the `V` hint; every chain named under it |
-| T18 | `Q` on 4 receive | Q5: on Tron and on EVM, at 120x40 and 80x24, with the password or the session, the frame's `QR` cells read back to `qrcode`'s modules for the address and decode (`rqrr`) to it, under the CLI's caption; an unverified, locked or impostor-answered address draws no code and says why; a screen too small says the size and names `zwallet address`; the pty run checks the colour bytes, and that `NO_COLOR` writes none (tests/tui.rs `t18_*`) |
+| T18 | `Q` on 4 receive | Q5: on Tron and on EVM, at 120x40 and 80x24, with the password or the session, the frame's `QR` cells read back to `qrcode`'s modules for the address and decode (`rqrr`) to it, with the CLI's caption below it; an unverified, locked, impostor-answered or not-yet-read address draws no code and says why; a lock, a chain switch or a pin mismatch with the code on screen removes it; a body too small for the whole code says the size and names `zwallet address` (unit test of the guard); the pty run checks the colour bytes, and that `NO_COLOR` writes none (tests/tui.rs `t18_*`) |
 | T19 | 1 keys `V`; then wallet.json's cached address of `beta` edited, `V` again, then `A` and the password | every row `verified`; after the edit `V` shows the CLI's `VALIDATION_ERROR` naming `A`; `A` shows `repaired` (`was` escaped, at most 64) and every row `verified`; `zwallet list --verify` agrees |
 | T20 | Linux, `kernel.yama.ptrace_scope` 0: the warm-up; then `zwallet tui --allow-ptrace-scope-0` and the warm-up; the menu row `unlock --allow-ptrace-scope-0`, Enter | the first refuses before the password field and names the start flag; the second shows `ptrace_scope 0 accepted` on 7 session and in the warm-up's password popup, and opens the session (`prepare_unlock` called with the flag); the menu row gives the start flag and its security reason, and Enter on it starts no `Effect`; no key in the TUI sets the flag |
 | T21 | review with nonce 12 pending; then a repeat of a send from 5 min ago | the pending line and `p`; confirm without `p` signs nothing (zero `SignTx`), with `p` once; the same for the repeat with `d` |

@@ -357,7 +357,7 @@ Commands that act on a key take `--key <name>` (default: the active key).
   on every EVM chain) then the Tron one, each under its lines, and `balance` shows the EVM one after
   the networks. Nothing unverified prints one, and neither
   `--json` nor output into a pipe ever has one, so agents see the same text as before. In
-  `zwallet tui`, `Q` on `4 receive` draws the same code under the same lines, white blocks on
+  `zwallet tui`, `Q` on `4 receive` draws the same code with the same lines below it, white blocks on
   black (with `NO_COLOR`, the terminal's own colours: the blocks are the light modules).
 ## The whitelist
 

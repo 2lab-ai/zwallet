@@ -2317,10 +2317,8 @@ mod navigation {
         app
     }
 
-    /// `chain`, then `4`, the read of `a`'s addresses answering with `trust`, then `Q`.
-    fn q_on_4(app: &mut App, chain: &str, trust: Trust) {
-        choose_chain(app, chain);
-        app.update(Msg::Key(Key::Char('4')));
+    /// The read of `a`'s addresses for the current generation, answering with `trust`.
+    fn read_a(app: &mut App, trust: Trust) {
         app.update(Msg::Addresses(
             app.generation(),
             "a".into(),
@@ -2329,7 +2327,50 @@ mod navigation {
                 ..address_rows(A)
             }),
         ));
+    }
+
+    /// `chain`, then `4`, the read of `a`'s addresses answering with `trust`, then `Q`.
+    fn q_on_4(app: &mut App, chain: &str, trust: Trust) {
+        choose_chain(app, chain);
+        app.update(Msg::Key(Key::Char('4')));
+        read_a(app, trust);
         app.update(Msg::Key(Key::Char('Q')));
+    }
+
+    /// Asserts the frame `app` draws at `size` shows `address` as its QR code, whole: read back
+    /// from the cells, exactly the modules `qrcode` gives it (level M, quiet zone 4), decoded by
+    /// rqrr on a dark terminal, with `scan to send to <address>` and `networks` under it. Returns
+    /// the frame's rows.
+    fn assert_code(app: &App, size: (u16, u16), address: &str, networks: &str, at: &str) -> String {
+        let (text, qr) = qr_view(app, size.0, size.1);
+        let (area, lines) = qr.unwrap_or_else(|| panic!("no QR code: {at}\n{text}"));
+        // Version 3 (29 modules) and the quiet zone, 37 columns and 19 lines, whole.
+        assert_eq!((area.width, area.height), (37, 19), "{at}");
+        assert_eq!(qr_modules(&lines), expected_qr(address), "{at}");
+        assert_eq!(common::decode_qr_lines(&lines, false), address, "{at}");
+        let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
+        let caption = format!("scan to send to {address}");
+        let below = |line: &str| {
+            rows.iter()
+                .position(|r| *r == line)
+                .is_some_and(|y| y >= usize::from(area.bottom()))
+        };
+        assert!(below(&caption) && below(networks), "{at}\n{text}");
+        assert!(rows[usize::from(size.1) - 1].ends_with("? actions"), "{at}");
+        text
+    }
+
+    /// Asserts the frames `app` draws at 120x40 and 80x24 have no cell in the QR style and say
+    /// each of `lines` (an error wrapped at the edge read as one line).
+    fn assert_no_code(app: &App, lines: &[&str], at: &str) {
+        for (width, height) in [(120, 40), (80, 24)] {
+            let (text, qr) = qr_view(app, width, height);
+            assert!(qr.is_none(), "{at}: a QR code at {width}x{height}\n{text}");
+            let unwrapped: String = text.lines().collect();
+            for line in lines {
+                assert!(unwrapped.contains(line), "{at}: no {line:?}\n{text}");
+            }
+        }
     }
 
     /// T18: `Q` on 4 receive draws the open key's address on the chosen chain as zwallet's own
@@ -2351,24 +2392,10 @@ mod navigation {
         ];
         for ((mut app, verified), chain, trust, address, networks) in cases {
             q_on_4(&mut app, chain, trust);
-            for (width, height) in [(120, 40), (80, 24)] {
-                let at = format!("{chain}, {verified}, {width}x{height}");
-                let (text, qr) = qr_view(&app, width, height);
-                let (area, lines) = qr.unwrap_or_else(|| panic!("no QR code: {at}\n{text}"));
-                // Version 3 (29 modules) and the quiet zone, 37 columns and 19 lines, whole.
-                assert_eq!((area.width, area.height), (37, 19), "{at}");
-                assert_eq!(qr_modules(&lines), expected_qr(address), "{at}");
-                assert_eq!(common::decode_qr_lines(&lines, false), address, "{at}");
-                let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
-                let caption = format!("scan to send to {address}");
-                let below = |line: &str| {
-                    rows.iter()
-                        .position(|r| *r == line)
-                        .is_some_and(|y| y >= usize::from(area.bottom()))
-                };
-                assert!(below(&caption) && below(networks), "{at}\n{text}");
+            for size in [(120, 40), (80, 24)] {
+                let at = format!("{chain}, {verified}, {size:?}");
+                let text = assert_code(&app, size, address, networks, &at);
                 assert!(text.contains(verified), "{at}\n{text}");
-                assert!(rows[usize::from(height) - 1].ends_with("? actions"), "{at}");
             }
             app.update(Msg::Key(Key::Esc));
             let (text, qr) = qr_view(&app, 80, 24);
@@ -2383,21 +2410,15 @@ mod navigation {
             app.update(Msg::Key(Key::Char('?')));
             paste(&mut app, "qr");
             app.update(Msg::Key(Key::Enter));
-            app.update(Msg::Addresses(
-                app.generation(),
-                "a".into(),
-                Ok(wallet::Addresses {
-                    trust: if verified.ends_with("session") {
-                        Trust::Session
-                    } else {
-                        Trust::Locked
-                    },
-                    ..address_rows(A)
-                }),
-            ));
-            let (text, qr) = qr_view(&app, 80, 24);
-            let (_, lines) = qr.unwrap_or_else(|| panic!("no QR code after `qr`:\n{text}"));
-            assert_eq!(qr_modules(&lines), expected_qr(address), "{chain}");
+            read_a(
+                &mut app,
+                if verified.ends_with("session") {
+                    Trust::Session
+                } else {
+                    Trust::Locked
+                },
+            );
+            assert_code(&app, (80, 24), address, networks, &format!("`qr`, {chain}"));
         }
     }
 
@@ -2418,13 +2439,163 @@ mod navigation {
             for (mut app, trust) in cases {
                 let at = format!("{chain}, {trust:?}");
                 q_on_4(&mut app, chain, trust);
-                for (width, height) in [(120, 40), (80, 24)] {
-                    let (text, qr) = qr_view(&app, width, height);
-                    assert!(qr.is_none(), "{at}: a QR code at {width}x{height}\n{text}");
-                    assert!(text.contains("No QR"), "{at}\n{text}");
-                    assert!(text.contains("V verifies"), "{at}\n{text}");
+                assert_no_code(&app, &["No QR", "V verifies"], &at);
+            }
+        }
+    }
+
+    /// The QR view belongs to 4 receive: every way away from it closes it (a tab key, `[` or `]`,
+    /// an action that shows another tab, opening a key), so `4` again shows the address list,
+    /// with no QR cell, until `Q`.
+    #[test]
+    fn t18_leaving_4_receive_by_any_way_closes_the_qr_view() {
+        for way in ["2", "]", "[", "? status", "? whitelist list", "? --key"] {
+            let mut app = session_opened_a();
+            q_on_4(&mut app, "ethereum", Trust::Session);
+            assert_code(&app, (80, 24), A, EVERY_EVM_NETWORK, way);
+            match way.strip_prefix("? ") {
+                Some(action) => {
+                    app.update(Msg::Key(Key::Char('?')));
+                    paste(&mut app, action);
+                    app.update(Msg::Key(Key::Enter));
+                }
+                None => {
+                    let key = way.chars().next().unwrap();
+                    app.update(Msg::Key(Key::Char(key)));
                 }
             }
+            assert_ne!(app.tab(), Tab::Receive, "{way}");
+            let left_open = app.navigation().receive_qr;
+            app.update(Msg::Key(Key::Char('4')));
+            read_a(&mut app, Trust::Session);
+            let (text, qr) = qr_view(&app, 80, 24);
+            assert!(
+                qr.is_none() && text.contains("Addresses by network:"),
+                "{way}\n{text}"
+            );
+            assert!(!left_open, "{way}: closed only when 4 receive shows again");
+            app.update(Msg::Key(Key::Char('Q')));
+            assert_code(&app, (80, 24), A, EVERY_EVM_NETWORK, way);
+        }
+    }
+
+    /// The open code follows the trust under it: a status that says the wallet is locked revokes
+    /// the session's word for the address, and the code goes, with the reason.
+    #[test]
+    fn t18_a_status_that_says_locked_takes_a_session_verified_code_down() {
+        let tron = family_address(chains::find("tron").unwrap(), A);
+        for (chain, address, networks) in [
+            ("tron", tron.as_str(), TRON_ONLY),
+            ("ethereum", A, EVERY_EVM_NETWORK),
+        ] {
+            let mut app = session_opened_a();
+            q_on_4(&mut app, chain, Trust::Session);
+            assert_code(&app, (80, 24), address, networks, chain);
+            app.update(Msg::Status(app.generation(), Ok(locked_status())));
+            assert_no_code(
+                &app,
+                &["No QR: the wallet is locked", "V verifies", address],
+                chain,
+            );
+        }
+    }
+
+    /// `c` and another chain with the code open: no code while the new read is out (an answer
+    /// from before the switch changes nothing), then the code of the new chain's address under
+    /// its own caption, by the password or by the session.
+    #[test]
+    fn t18_a_chain_switch_with_the_code_open_shows_the_new_chains_code_after_its_read() {
+        let tron = family_address(chains::find("tron").unwrap(), A);
+        for (mut app, trust) in [
+            (session_opened_a(), Trust::Session),
+            (password_opened_a(), Trust::Locked),
+        ] {
+            let at = format!("{trust:?}");
+            q_on_4(&mut app, "tron", trust.clone());
+            assert_code(&app, (80, 24), &tron, TRON_ONLY, &at);
+            let before = app.generation();
+            choose_chain(&mut app, "ethereum");
+            assert!(app.navigation().receive_qr, "{at}");
+            assert_no_code(&app, &["reading..."], &at);
+            app.update(Msg::Addresses(
+                before,
+                "a".into(),
+                Ok(wallet::Addresses {
+                    trust: trust.clone(),
+                    ..address_rows(A)
+                }),
+            ));
+            assert_no_code(&app, &["reading..."], &format!("{at}, old read"));
+            read_a(&mut app, trust);
+            for size in [(120, 40), (80, 24)] {
+                assert_code(&app, size, A, EVERY_EVM_NETWORK, &at);
+            }
+        }
+    }
+
+    /// With the code open, a read that contradicts the password-pinned address stops the pane:
+    /// no code, the refusal in its place; Esc shows the list with the same refusal.
+    #[test]
+    fn t18_a_read_that_contradicts_the_pin_with_the_code_open_draws_no_code() {
+        let mut app = pinned_app_with_checked_list();
+        app.update(Msg::Key(Key::Char('4')));
+        app.update(Msg::Addresses(
+            app.generation(),
+            "a".into(),
+            Ok(address_rows(A)),
+        ));
+        app.update(Msg::Key(Key::Char('Q')));
+        assert_code(&app, (80, 24), A, EVERY_EVM_NETWORK, "pinned");
+        app.update(Msg::Addresses(
+            app.generation(),
+            "a".into(),
+            Ok(address_rows(B)),
+        ));
+        assert!(app.checked_list().is_none());
+        assert_no_code(&app, &["No QR", "does not match"], "mismatch");
+        app.update(Msg::Key(Key::Esc));
+        let text = view(&app);
+        assert!(text.contains("does not match"), "{text}");
+        assert!(text.contains("0x7099...79C8"), "{text}");
+    }
+
+    /// No code while nothing read this address for this view: a password check started and
+    /// cancelled with the code open drops the session's reads. On Tron nothing else has the
+    /// address (not read yet); on an EVM chain only the cached key list does, and that is not
+    /// verified. `r` reads it again and the code comes back.
+    #[test]
+    fn t18_no_code_of_an_unread_address_or_of_the_cached_key_list() {
+        let tron = family_address(chains::find("tron").unwrap(), A);
+        for (chain, address, networks, why) in [
+            (
+                "tron",
+                tron.as_str(),
+                TRON_ONLY,
+                "No QR: this key's address on this chain is not read yet.",
+            ),
+            (
+                "ethereum",
+                A,
+                EVERY_EVM_NETWORK,
+                "No QR: no session of this build verified this address.",
+            ),
+        ] {
+            let mut app = session_opened_a();
+            q_on_4(&mut app, chain, Trust::Session);
+            assert_code(&app, (80, 24), address, networks, chain);
+            app.update(Msg::Key(Key::Char('V')));
+            app.update(Msg::Prepared(Ok(())));
+            app.update(Msg::PasswordCancelled);
+            assert_eq!(app.password_state(), PasswordState::Idle);
+            assert!(app.navigation().receive_qr, "{chain}");
+            assert_no_code(&app, &[why], chain);
+            if chain == "ethereum" {
+                // The key list's cached address, shown as not verified.
+                assert_no_code(&app, &[&format!("not verified: {A}"), "V verifies"], chain);
+            }
+            app.update(Msg::Key(Key::Char('r')));
+            read_a(&mut app, Trust::Session);
+            assert_code(&app, (80, 24), address, networks, chain);
         }
     }
 
