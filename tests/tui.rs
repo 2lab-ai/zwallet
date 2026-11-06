@@ -49,10 +49,22 @@ fn row(buffer: &Buffer, y: u16) -> String {
         .collect()
 }
 
+/// The one style of a QR code's cells, written here rather than read from the code: white half
+/// blocks (the light modules) on black (the dark ones), the cells `src/qr.rs` draws without
+/// colour. Ratatui gives a cell's style every colour field, so the fields are compared.
+fn qr_style(style: ratatui::style::Style) -> bool {
+    use ratatui::style::Color;
+    style.fg == Some(Color::White)
+        && style.bg == Some(Color::Black)
+        && style.add_modifier.is_empty()
+        && style.sub_modifier.is_empty()
+}
+
 /// Draws `app` on `screen` and asserts what every frame holds, then returns its rows and the
 /// outside values it drew:
 /// 1. no cell was replaced by the write point, and every cell is exactly one `terminal_ok`
-///    character, so no string from outside reached a cell raw;
+///    character, so no string from outside reached a cell raw; the one exception is a QR code's
+///    half blocks, only in [`qr_style`], whose cells hold nothing else;
 /// 2. every cell's style is one of `style::ALL`;
 /// 3. every outside value is printable ASCII within its source's budget, and is drawn where the
 ///    UI says, on one line (an error view: one block of at most 7 rows), and nowhere else.
@@ -77,8 +89,10 @@ fn checked_frame(screen: &mut Screen, app: &App) -> (Vec<String>, Vec<Placed>) {
         for x in 0..buffer.area.width {
             let cell = &buffer[(x, y)];
             let mut chars = cell.symbol().chars();
+            let qr = qr_style(cell.style());
             assert!(
-                matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && terminal_ok(c)),
+                matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n'
+                    && if qr { matches!(c, ' ' | '█' | '▀' | '▄') } else { terminal_ok(c) }),
                 "rule 1: cell ({x},{y}) holds {:?}",
                 cell.symbol()
             );
@@ -94,6 +108,76 @@ fn checked_frame(screen: &mut Screen, app: &App) -> (Vec<String>, Vec<Placed>) {
         assert_placed(&rows, p, &placed);
     }
     (rows, placed)
+}
+
+/// The line the CLI prints under `scan to send to <address>` on Tron, and on an EVM chain,
+/// written here rather than read from the code.
+const TRON_ONLY: &str = "(Tron only: TRX and TRC20 tokens; not an EVM address)";
+const EVERY_EVM_NETWORK: &str = "(the same address on every EVM network in `zwallet chains`)";
+
+/// The QR code `buffer` shows: its cells in [`qr_style`], which fill one rectangle, as lines of
+/// half blocks. `None` when no cell has that style.
+fn drawn_qr(buffer: &Buffer) -> Option<(Rect, Vec<String>)> {
+    let cells: Vec<(u16, u16)> = (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| qr_style(buffer[(x, y)].style()))
+        .collect();
+    let (&(left, top), &(right, bottom)) = (cells.first()?, cells.last()?);
+    let area = Rect::new(left, top, right + 1 - left, bottom + 1 - top);
+    assert_eq!(
+        cells.len(),
+        usize::from(area.width) * usize::from(area.height),
+        "the QR cells are no rectangle: {cells:?}"
+    );
+    let lines = (area.top()..area.bottom())
+        .map(|y| {
+            (area.left()..area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
+    Some((area, lines))
+}
+
+/// The modules `lines` draw, `true` for dark, two rows per line, read as `src/qr.rs`'s tests
+/// read them: a half block draws light modules (white on black, or the terminal's own colour).
+fn qr_modules(lines: &[String]) -> Vec<Vec<bool>> {
+    let mut rows = Vec::new();
+    for line in lines {
+        let (mut top, mut bottom) = (Vec::new(), Vec::new());
+        for c in line.chars() {
+            let (t, b) = match c {
+                '█' => (true, true),
+                '▀' => (true, false),
+                '▄' => (false, true),
+                ' ' => (false, false),
+                other => panic!("{other:?} in {line:?}"),
+            };
+            top.push(!t);
+            bottom.push(!b);
+        }
+        rows.push(top);
+        rows.push(bottom);
+    }
+    rows
+}
+
+/// The modules of a code of `text` from the `qrcode` crate itself: level M, a quiet zone of 4
+/// light modules on every side, and one light row more when the size is odd (two rows a line).
+fn expected_qr(text: &str) -> Vec<Vec<bool>> {
+    use qrcode::{Color, EcLevel, QrCode};
+    const QUIET: usize = 4;
+    let code = QrCode::with_error_correction_level(text, EcLevel::M).unwrap();
+    let (width, modules) = (code.width(), code.to_colors());
+    let size = width + 2 * QUIET;
+    let dark = |x: usize, y: usize| {
+        (QUIET..QUIET + width).contains(&x)
+            && (QUIET..QUIET + width).contains(&y)
+            && modules[(y - QUIET) * width + x - QUIET] == Color::Dark
+    };
+    (0..size.next_multiple_of(2))
+        .map(|y| (0..size).map(|x| dark(x, y)).collect())
+        .collect()
 }
 
 /// Each source's budget (03-tui.md rule 3), written here rather than read from the code, so a
@@ -1857,8 +1941,8 @@ mod navigation {
         assert_eq!(app.tab(), Tab::Session);
     }
 
-    /// D1: the chain picker and a read-only lines popup are lists, not text fields: the global
-    /// tab keys close them and switch tabs.
+    /// D1: the chain picker, a read-only lines popup and the receive QR view are not text fields:
+    /// the global tab keys close them and switch tabs.
     #[test]
     fn nav_chain_picker_and_lines_popup_pass_the_global_tab_keys() {
         let mut app = locked_ab();
@@ -1868,11 +1952,18 @@ mod navigation {
         assert_eq!(app.tab(), Tab::Wallet, "{}", view(&app));
         assert!(app.navigation().popup.is_none());
         app.update(Msg::Key(Key::Char('4')));
-        app.update(Msg::Key(Key::Char('Q')));
+        app.update(Msg::Key(Key::Char('?')));
+        paste(&mut app, "version");
+        app.update(Msg::Key(Key::Enter));
         assert!(matches!(app.navigation().popup, Some(Popup::Lines { .. })));
         app.update(Msg::Key(Key::Char(']')));
         assert_eq!(app.tab(), Tab::Whitelist, "{}", view(&app));
         assert!(app.navigation().popup.is_none());
+        app.update(Msg::Key(Key::Char('4')));
+        app.update(Msg::Key(Key::Char('Q')));
+        assert!(app.navigation().popup.is_none(), "{}", view(&app));
+        app.update(Msg::Key(Key::Char(']')));
+        assert_eq!(app.tab(), Tab::Whitelist, "{}", view(&app));
     }
 
     /// The Keys tab's hint names every key it acts on, `u unlock` included (#43's merge dropped
@@ -2141,7 +2232,8 @@ mod navigation {
             assert!(text.contains(&format!("{}:", chain.key)));
         }
         app.update(Msg::Key(Key::Char('Q')));
-        assert!(view(&app).contains("zwallet address shows it as a QR code"));
+        let (_, lines) = qr_view(&app, 80, 24).1.expect("a QR code");
+        assert_eq!(qr_modules(&lines), expected_qr(A));
         app.update(Msg::Key(Key::Esc));
         app.update(Msg::Addresses(
             app.generation(),
@@ -2152,6 +2244,188 @@ mod navigation {
         let text = view(&app);
         assert!(text.contains("does not match"));
         assert!(text.contains("0x7099...79C8"));
+    }
+
+    /// The frame `app` draws at `width` x `height` ([`checked_frame`]), its rows joined, and the
+    /// QR code in it ([`drawn_qr`]).
+    fn qr_view(app: &App, width: u16, height: u16) -> (String, Option<(Rect, Vec<String>)>) {
+        let mut shown = screen(width, height);
+        let text = checked_frame(&mut shown, app).0.join("\n");
+        let qr = drawn_qr(shown.backend().inner().buffer());
+        (text, qr)
+    }
+
+    /// Chooses `key` in the chain picker (`c`, then `j`/`k` from the current chain, Enter).
+    fn choose_chain(app: &mut App, key: &str) {
+        let at = |key: &str| chains::CHAINS.iter().position(|c| c.key == key).unwrap();
+        let (from, to) = (at(app.chain().key), at(key));
+        app.update(Msg::Key(Key::Char('c')));
+        for _ in to..from {
+            app.update(Msg::Key(Key::Char('k')));
+        }
+        for _ in from..to {
+            app.update(Msg::Key(Key::Char('j')));
+        }
+        app.update(Msg::Key(Key::Enter));
+        assert_eq!(app.chain().key, key);
+    }
+
+    /// [`locked_ab`] after Enter on key `a` and the password: both keys' addresses derived on
+    /// every chain ([`family_address`] of [`A`] and [`B`]) and pinned, `a` open.
+    fn password_opened_a() -> App {
+        let mut app = locked_ab();
+        app.update(Msg::Key(Key::Enter));
+        app.update(Msg::Prepared(Ok(())));
+        app.update(Msg::PasswordSubmitted);
+        let addresses = keys_ab()
+            .rows
+            .iter()
+            .flat_map(|row| {
+                chains::CHAINS.iter().map(|chain| wallet::VerifiedAddress {
+                    key: row.name.clone(),
+                    chain: chain.key,
+                    family: chain.family.name(),
+                    address: family_address(chain, row.address.as_deref().unwrap()),
+                })
+            })
+            .collect();
+        let checked = wallet::PasswordCheck {
+            opened: wallet::Opened {
+                keys: keys_ab().rows,
+                active: "b".into(),
+                warning: None,
+                anchor: Ok(None),
+                salted: false,
+            },
+            addresses,
+            repairs: vec![],
+        };
+        app.update(Msg::Verified(Ok((checked, Err("no checked list".into())))));
+        app.update(Msg::Status(app.generation(), Ok(locked_status())));
+        assert_eq!(app.open_key(), Some("a"));
+        app
+    }
+
+    /// [`keys_ab`] read while this build's daemon serves the session, and Enter on key `a`: open
+    /// without the password, so nothing is pinned.
+    fn session_opened_a() -> App {
+        let mut app = app();
+        app.update(Msg::Keys(app.generation(), Ok(keys_ab())));
+        app.update(Msg::Status(app.generation(), Ok(open_status(now() + 3600))));
+        app.update(Msg::Key(Key::Enter));
+        assert_eq!(app.open_key(), Some("a"));
+        app
+    }
+
+    /// `chain`, then `4`, the read of `a`'s addresses answering with `trust`, then `Q`.
+    fn q_on_4(app: &mut App, chain: &str, trust: Trust) {
+        choose_chain(app, chain);
+        app.update(Msg::Key(Key::Char('4')));
+        app.update(Msg::Addresses(
+            app.generation(),
+            "a".into(),
+            Ok(wallet::Addresses {
+                trust,
+                ..address_rows(A)
+            }),
+        ));
+        app.update(Msg::Key(Key::Char('Q')));
+    }
+
+    /// T18: `Q` on 4 receive draws the open key's address on the chosen chain as zwallet's own
+    /// QR code once the password or this build's session verified it: the T-address on Tron,
+    /// the 0x address on an EVM chain. Read back from the cells, the code has exactly the modules
+    /// `qrcode` gives that address (level M, quiet zone 4), whole at 120x40 and at 80x24, with
+    /// the CLI's caption under it. `Q` and Esc go back to the address list; the `qr` action opens
+    /// the code again.
+    #[test]
+    fn t18_q_on_4_receive_draws_the_verified_address_as_its_qr_code_on_tron_and_evm() {
+        let tron = family_address(chains::find("tron").unwrap(), A);
+        let password = || (password_opened_a(), "verified by password");
+        let session = || (session_opened_a(), "verified by session");
+        let cases = [
+            (password(), "tron", Trust::Locked, tron.as_str(), TRON_ONLY),
+            (session(), "tron", Trust::Session, tron.as_str(), TRON_ONLY),
+            (password(), "ethereum", Trust::Locked, A, EVERY_EVM_NETWORK),
+            (session(), "base", Trust::Session, A, EVERY_EVM_NETWORK),
+        ];
+        for ((mut app, verified), chain, trust, address, networks) in cases {
+            q_on_4(&mut app, chain, trust);
+            for (width, height) in [(120, 40), (80, 24)] {
+                let at = format!("{chain}, {verified}, {width}x{height}");
+                let (text, qr) = qr_view(&app, width, height);
+                let (area, lines) = qr.unwrap_or_else(|| panic!("no QR code: {at}\n{text}"));
+                // Version 3 (29 modules) and the quiet zone, 37 columns and 19 lines, whole.
+                assert_eq!((area.width, area.height), (37, 19), "{at}");
+                assert_eq!(qr_modules(&lines), expected_qr(address), "{at}");
+                assert_eq!(common::decode_qr_lines(&lines, false), address, "{at}");
+                let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
+                let caption = format!("scan to send to {address}");
+                let below = |line: &str| {
+                    rows.iter()
+                        .position(|r| *r == line)
+                        .is_some_and(|y| y >= usize::from(area.bottom()))
+                };
+                assert!(below(&caption) && below(networks), "{at}\n{text}");
+                assert!(text.contains(verified), "{at}\n{text}");
+                assert!(rows[usize::from(height) - 1].ends_with("? actions"), "{at}");
+            }
+            app.update(Msg::Key(Key::Esc));
+            let (text, qr) = qr_view(&app, 80, 24);
+            assert!(
+                qr.is_none() && text.contains("Addresses by network:"),
+                "{text}"
+            );
+            app.update(Msg::Key(Key::Char('Q')));
+            assert!(qr_view(&app, 80, 24).1.is_some());
+            app.update(Msg::Key(Key::Char('Q')));
+            assert!(qr_view(&app, 80, 24).1.is_none());
+            app.update(Msg::Key(Key::Char('?')));
+            paste(&mut app, "qr");
+            app.update(Msg::Key(Key::Enter));
+            app.update(Msg::Addresses(
+                app.generation(),
+                "a".into(),
+                Ok(wallet::Addresses {
+                    trust: if verified.ends_with("session") {
+                        Trust::Session
+                    } else {
+                        Trust::Locked
+                    },
+                    ..address_rows(A)
+                }),
+            ));
+            let (text, qr) = qr_view(&app, 80, 24);
+            let (_, lines) = qr.unwrap_or_else(|| panic!("no QR code after `qr`:\n{text}"));
+            assert_eq!(qr_modules(&lines), expected_qr(address), "{chain}");
+        }
+    }
+
+    /// T18: no QR code of an address nothing verified (the CLI's `with_qr` rule): the cached one
+    /// while the read says locked, one no session check verified, and one another process
+    /// answered for, password pin or not. A line says why and that `V` verifies it, and no cell
+    /// has the QR style.
+    #[test]
+    fn t18_q_on_4_receive_draws_no_code_of_an_address_nothing_verified() {
+        let impostor = || Trust::Unverified(Some("an argv-listed zwallet answered".into()));
+        for chain in ["tron", "ethereum"] {
+            let cases = [
+                (session_opened_a(), Trust::Locked),
+                (session_opened_a(), Trust::Unverified(None)),
+                (session_opened_a(), impostor()),
+                (password_opened_a(), impostor()),
+            ];
+            for (mut app, trust) in cases {
+                let at = format!("{chain}, {trust:?}");
+                q_on_4(&mut app, chain, trust);
+                for (width, height) in [(120, 40), (80, 24)] {
+                    let (text, qr) = qr_view(&app, width, height);
+                    assert!(qr.is_none(), "{at}: a QR code at {width}x{height}\n{text}");
+                    assert!(text.contains("No QR"), "{at}\n{text}");
+                    assert!(text.contains("V verifies"), "{at}\n{text}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2445,6 +2719,88 @@ fn t19_on_a_pty_verify_all_refuses_bad_cache_then_repair_agrees_with_cli() {
     }
     assert_eq!(home.run(&["status", "--json"]).ok()["locked"], true);
     quit(&mut tui);
+}
+
+/// T18 on a pty, as the owner funds the wallet: Enter and the password open the key, `c` chooses
+/// Tron, `4`, `Q`. The terminal shows the T-address as a QR code with the CLI's caption under
+/// it, read back from the screen to exactly `qrcode`'s modules for that address and decoded with
+/// a dark terminal around it, at 120x40 and again after a resize to 80x24. In colour its cells
+/// are white on black; with `NO_COLOR` crossterm writes no colour at all and the cells are the
+/// same, their blocks the light modules, as `src/qr.rs` draws a code for a dark terminal.
+#[test]
+fn t18_on_a_pty_q_on_4_receive_shows_the_tron_address_as_a_qr_code() {
+    for no_color in [false, true] {
+        let home = Home::new();
+        home.create("main", &[]);
+        let seed = store::unlock(home.path(), PW, &chains::derive_addresses)
+            .unwrap()
+            .0
+            .seed;
+        let tron = chains::derive_addresses(&seed, 0).unwrap()["tron"].clone();
+        drop(seed);
+        let mut command = tui_without_public_rpc(&home);
+        if no_color {
+            command.env("NO_COLOR", "1");
+        }
+        let mut tui = PtyChild::spawn_full_screen(command, PTY_SIZE);
+        tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains("* main ")));
+        tui.send(b"\r");
+        tui.wait_frame(PTY_WAIT, |f| {
+            f.rows.iter().any(|r| r.contains("Wallet password:"))
+        });
+        tui.send(format!("{PW}\r").as_bytes());
+        tui.wait_frame(PTY_WAIT, |f| bar(f).0.contains("verified by password"));
+        // Tron is the eighth chain in the picker.
+        tui.send(b"cjjjjjjj\r");
+        tui.wait_frame(PTY_WAIT, |f| bar(f).0.starts_with("tron | main T"));
+        tui.send(b"4");
+        tui.wait_frame(PTY_WAIT, |f| f.rows.iter().any(|r| r.contains(&tron)));
+        tui.send(b"Q");
+        let caption = format!("scan to send to {tron}");
+        for (columns, rows) in [PTY_SIZE, (80, 24)] {
+            let at = format!("{columns}x{rows}, NO_COLOR {no_color}");
+            if (columns, rows) != PTY_SIZE {
+                tui.resize((columns, rows));
+            }
+            // The hint is the last row drawn.
+            let frame = tui.wait_frame(PTY_WAIT, |f| {
+                f.rows[usize::from(rows) - 1]
+                    .trim_end()
+                    .ends_with("? actions")
+                    && f.rows.iter().any(|r| r.trim_end() == caption)
+            });
+            let shown: Vec<String> = frame
+                .rows
+                .iter()
+                .map(|r| r.trim_end().to_string())
+                .collect();
+            assert!(shown.iter().any(|r| r == TRON_ONLY), "{at}\n{frame}");
+            assert!(
+                shown[usize::from(rows)..].iter().all(String::is_empty),
+                "{at}"
+            );
+            let code: Vec<String> = shown
+                .iter()
+                .filter(|r| !r.is_empty() && r.chars().all(|c| " ▀▄█".contains(c)))
+                .cloned()
+                .collect();
+            assert_eq!(code.len(), 19, "{at}\n{frame}");
+            assert_eq!(qr_modules(&code), expected_qr(&tron), "{at}\n{frame}");
+            assert_eq!(common::scan_qr(&shown.join("\n")), [tron.as_str()], "{at}");
+        }
+        let output = tui.output();
+        let holds = |needle: &[u8]| output.windows(needle.len()).any(|w| w == needle);
+        if no_color {
+            assert!(
+                !holds(b"38;5;") && !holds(b"48;5;"),
+                "a colour under NO_COLOR"
+            );
+        } else {
+            // White on black, as crossterm writes `Color::White` and `Color::Black`.
+            assert!(holds(b"\x1b[38;5;15;48;5;0m"), "no white-on-black cell");
+        }
+        quit(&mut tui);
+    }
 }
 
 mod creation {

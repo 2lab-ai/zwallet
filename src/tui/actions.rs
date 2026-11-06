@@ -264,7 +264,7 @@ pub static ACTIONS: [Action; 55] = [
     action!(Backup, 11, "backup", "B", Keys, "recovery phrase in a shell", Always, Any),
     action!(Address, 12, "address", "4", Receive, "receive on this chain", OpenKey, Any),
     action!(Repair, 13, "address --verify", "A", Keys, "repair cached addresses", Wallet, Any),
-    action!(Qr, 14, "qr", "Q", Receive, "QR code in a shell", OpenKey, Any),
+    action!(Qr, 14, "qr", "Q", Receive, "QR code of the verified address", OpenKey, Any),
     action!(Addresses, 15, "addresses", "4", Receive, "addresses on every family", OpenKey, Any),
     action!(AllBalances, 16, "balance", "a", Wallet, "balances on every network", OpenKey, Any),
     action!(Balance, 17, "balance --chain", "2", Wallet, "balances on this chain", OpenKey, Any),

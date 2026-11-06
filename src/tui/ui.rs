@@ -5,6 +5,7 @@
 
 mod create;
 pub(crate) mod history;
+mod receive;
 mod replacement;
 mod tools;
 mod transfer;
@@ -96,6 +97,10 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         Row::default()
             .text(TOO_SMALL, NORMAL)
             .draw(frame, line(area, 0), &mut placed);
+        return placed;
+    }
+    if receive::active(app) {
+        receive::draw(frame, app, &mut placed);
         return placed;
     }
     let [title, pane, hint, bar1, bar2] = Layout::vertical([
@@ -198,7 +203,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
             Tab::Wallet => {
                 "Tab focus  j/k  Enter detail  / hash  a networks  c chain  r  ? actions"
             }
-            Tab::Receive => "V verify  Q QR hint  c chain  r refresh  q quit  ? actions",
+            Tab::Receive => "V verify  Q QR code  c chain  r refresh  q quit  ? actions",
             Tab::Session => "u unlock  L lock all  r refresh  q quit  ? actions",
             _ => "1 keys  c chain  L lock all  q quit  ? actions",
         };

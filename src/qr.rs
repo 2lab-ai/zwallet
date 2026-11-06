@@ -15,6 +15,22 @@ const RESET: &str = "\x1b[0m";
 /// on a white background. Without (`NO_COLOR`), plain characters for a dark terminal: the blocks
 /// draw the light modules. `None` when `text` does not fit.
 pub fn render(text: &str, color: bool) -> Option<String> {
+    let lines = lines(text, color)?;
+    if !color {
+        return Some(lines.join("\n"));
+    }
+    let lines: Vec<String> = lines
+        .iter()
+        .map(|cells| format!("{BLACK_ON_WHITE}{cells}{RESET}"))
+        .collect();
+    Some(lines.join("\n"))
+}
+
+/// The lines of [`render`] without colour codes: half blocks and spaces only, each line as wide
+/// as the code and its quiet zone. With `color` the blocks are the dark modules (for black on
+/// white), without the light ones (white on black, or a dark terminal's own colours: the TUI
+/// draws these).
+pub fn lines(text: &str, color: bool) -> Option<Vec<String>> {
     let code = QrCode::with_error_correction_level(text, EcLevel::M).ok()?;
     let width = code.width();
     let modules = code.to_colors();
@@ -25,10 +41,10 @@ pub fn render(text: &str, color: bool) -> Option<String> {
             && (QUIET..QUIET + width).contains(&y)
             && modules[(y - QUIET) * width + x - QUIET] == Color::Dark
     };
-    let lines: Vec<String> = (0..size)
+    let lines = (0..size)
         .step_by(2)
         .map(|y| {
-            let cells: String = (0..size)
+            (0..size)
                 .map(|x| {
                     // The blocks draw the dark modules in colour, the light ones without.
                     match (dark(x, y) == color, dark(x, y + 1) == color) {
@@ -38,15 +54,10 @@ pub fn render(text: &str, color: bool) -> Option<String> {
                         (false, false) => ' ',
                     }
                 })
-                .collect();
-            if color {
-                format!("{BLACK_ON_WHITE}{cells}{RESET}")
-            } else {
-                cells
-            }
+                .collect()
         })
         .collect();
-    Some(lines.join("\n"))
+    Some(lines)
 }
 
 #[cfg(test)]
@@ -139,6 +150,29 @@ mod tests {
         assert_eq!(scan(&rows, true), ADDRESS);
         // The same modules as the coloured code.
         assert_eq!(rows, modules(&render(ADDRESS, true).unwrap(), true));
+    }
+
+    #[test]
+    fn lines_are_the_rendered_code_without_colour_codes() {
+        for color in [true, false] {
+            let lines = lines(ADDRESS, color).unwrap();
+            assert_eq!(lines.len(), 19);
+            assert!(
+                lines
+                    .iter()
+                    .all(|l| l.chars().count() == 37 && l.chars().all(|c| " ▀▄█".contains(c)))
+            );
+            let rendered = render(ADDRESS, color).unwrap();
+            let plain: Vec<_> = rendered
+                .lines()
+                .map(|l| {
+                    l.strip_prefix(BLACK_ON_WHITE)
+                        .and_then(|l| l.strip_suffix(RESET))
+                        .unwrap_or(l)
+                })
+                .collect();
+            assert_eq!(plain, lines, "colour {color}");
+        }
     }
 
     #[test]

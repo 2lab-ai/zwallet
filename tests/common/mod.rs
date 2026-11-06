@@ -1498,7 +1498,10 @@ pub fn strip_ansi(text: &str) -> String {
     out
 }
 
-fn decode_qr_lines(lines: &[String], colored: bool) -> String {
+/// The text of the one QR code drawn in `lines` (half blocks, two rows of modules per line), read
+/// as [`scan_qr`] reads each code it finds: a block is a dark module when `colored`, a light one
+/// otherwise.
+pub fn decode_qr_lines(lines: &[String], colored: bool) -> String {
     // Modules, `true` for dark: the block characters draw the dark modules in colour, the light
     // ones without.
     let mut rows: Vec<Vec<bool>> = Vec::new();

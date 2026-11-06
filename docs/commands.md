@@ -68,9 +68,10 @@ Commands that act on a key take `--key <name>` (default: the active key).
   never asks to verify the key the bar shows verified by session; it then flags the other keys,
   as `list` does. It needs 80x24 and says so on one line when the terminal is smaller. Text from
   wallet.json, the daemon socket and the environment is escaped and bounded as in the CLI, every
-  cell goes through one filter that lets only printable ASCII and `₮` through, and no QR code is
-  drawn. Tabs `1`–`7` and `[`/`]` navigate from any list, review or popup that is not a text
-  field; `?` or `:` opens the 55-action menu. Typing in a field or menu keeps `q`, `?` and
+  cell goes through one filter that lets only printable ASCII and `₮` through; the one exception
+  is zwallet's own QR code of a verified address (`Q` on `4 receive`), whose half blocks pass
+  only in that code's style. Tabs `1`–`7` and `[`/`]` navigate from any list, review or popup
+  that is not a text field; `?` or `:` opens the 55-action menu. Typing in a field or menu keeps `q`, `?` and
   digits as input; Esc closes it. Actions belonging to later work are listed with their
   disabled reason.
 
@@ -78,9 +79,11 @@ Commands that act on a key take `--key <name>` (default: the active key).
   partial failures, and Esc returns to one network. `c` chooses a chain; `e` in the picker
   enters an RPC URL for this process only. It is accepted only after a chain-id check; the
   field hides credentials, path/query and key-like host labels. No endpoint is saved to disk.
-  `4 receive` shows the full address, its trust and every network address. `Q` points to
-  `zwallet address` for a terminal QR code. `V` verifies all keys from the seed on `1 keys`,
-  and the open plus active key elsewhere, without changing a signing session. `A` on `1 keys`
+  `4 receive` shows the full address, its trust and every network address. `Q` shows the open
+  key's address on the selected chain (a Tron T-address too) as the CLI's QR code with the CLI's
+  caption, only when the password or this build's session verified it; otherwise it says why
+  and that `V` verifies it. `Q` or Esc goes back; the code fits 80x24 whole. `V` verifies all
+  keys from the seed on `1 keys`, and the open plus active key elsewhere, without changing a signing session. `A` on `1 keys`
   repairs cached addresses and shows old/new values. `u` asks for a duration and then the wallet
   password before starting that signing session. `7 session` shows the home, expiry, daemon
   pids, and the daemon's reported whitelist generation/count as information only. The startup
@@ -353,7 +356,9 @@ Commands that act on a key take `--key <name>` (default: the active key).
   `--no-qr` leaves either out. `addresses` shows two codes, the EVM one (the address is the same
   on every EVM chain) then the Tron one, each under its lines, and `balance` shows the EVM one after
   the networks. Nothing unverified prints one, and neither
-  `--json` nor output into a pipe ever has one, so agents see the same text as before.
+  `--json` nor output into a pipe ever has one, so agents see the same text as before. In
+  `zwallet tui`, `Q` on `4 receive` draws the same code under the same lines, white blocks on
+  black (with `NO_COLOR`, the terminal's own colours: the blocks are the light modules).
 ## The whitelist
 
 - **The whitelist** ([`.prd/04-whitelist.md`](../.prd/04-whitelist.md)): the key daemon signs a
