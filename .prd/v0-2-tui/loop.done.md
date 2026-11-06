@@ -198,7 +198,6 @@ matrix's 59 TUI rows PASS at each size; no QA daemon left. New checks: after `Q`
 captured screen's code, rebuilt from its half blocks, decodes with zbarimg to exactly the address,
 on EVM (s2) and on Tron (s6) at both sizes. The QA logs are kept off-repo.
 
-
 ## R4 — closed 2026-11-06 (post-delivery fix: #67)
 
 - result: the review of PR #66 found #67; it was reproduced with RED first (in-app and a pty run of the real binary), fixed with a second break found on the way, reviewed in two rounds by two external reviewers, merged and shipped to preview 2026.11.06.2001 (tap PR 2lab-ai/homebrew-tap#22) · closed: #67 · merge: 2eab208

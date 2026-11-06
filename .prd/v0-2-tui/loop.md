@@ -21,8 +21,8 @@ None. Every acceptance row T1–T44 is closed ([`loop.done.md`](loop.done.md) R1
 - **The owner's acceptance on preview 2026.11.06.2001** (or later): upgrade, `zwallet lock` and
   unlock again (session verification compares the daemon's cdhash, which changes with every
   build), then accept the TUI on it. The dispatcher's real-terminal acceptance passed on preview
-  2026.10.29.2134 (loop.done.md R1) and on the merged code 8eaf051 (R2); neither stands in for
-  the owner's.
+  2026.10.29.2134 (loop.done.md R1), on the merged code 8eaf051 (R2) and on the installed previews
+  2026.11.06.1138 (R3) and 2026.11.06.2001 (R4); none stands in for the owner's.
 
 ## Open test notes (TUI-1c review rounds 1 and 2, 2026-10-28)
 
@@ -38,5 +38,5 @@ For the next unit whose pty runs resize or print after the TUI. Both still hold 
 
 ## Next
 
-The owner: the three items above. The agent: nothing queued; pick up the test notes with the next
+The owner: the two items above. The agent: nothing queued; pick up the test notes with the next
 TUI change that touches resize or post-exit output.
