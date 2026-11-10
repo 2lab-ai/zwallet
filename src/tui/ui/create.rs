@@ -4,7 +4,7 @@ use crate::tui::app::create::{BACKUP_HINT, CreateStage};
 
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
     let state = app.creation();
-    let block = Block::bordered().border_set(ASCII).title(" create a key ");
+    let block = pane_block(" create a key ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     match &state.stage {

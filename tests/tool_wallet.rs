@@ -918,8 +918,9 @@ fn screen(app: &App) -> String {
         })
         .collect();
     for cell in &buffer.content {
-        assert_eq!(cell.symbol().len(), 1, "not a single ASCII cell");
-        assert!(cell.symbol().bytes().all(|b| (0x20..=0x7e).contains(&b)));
+        let shown = style::ascii_chrome(cell);
+        assert_eq!(shown.len(), 1, "not a single ASCII cell (or frame glyph)");
+        assert!(shown.bytes().all(|b| (0x20..=0x7e).contains(&b)));
         assert!(styles.contains(&cell.style()), "style: {:?}", cell.style());
     }
     for p in placed {
@@ -950,7 +951,9 @@ fn screen(app: &App) -> String {
             assert_eq!(usize::from(p.area.width), p.outside.text().len());
         }
         let shown = (p.area.y..p.area.bottom())
-            .flat_map(|y| (p.area.x..p.area.right()).map(move |x| buffer[(x, y)].symbol()))
+            .flat_map(|y| {
+                (p.area.x..p.area.right()).map(move |x| style::ascii_chrome(&buffer[(x, y)]))
+            })
             .collect::<String>();
         assert!(
             shown.starts_with(p.outside.text()),
@@ -960,7 +963,11 @@ fn screen(app: &App) -> String {
         assert!(shown[p.outside.text().len()..].bytes().all(|b| b == b' '));
     }
     (0..24)
-        .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..80)
+                .map(|x| style::ascii_chrome(&buffer[(x, y)]))
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }

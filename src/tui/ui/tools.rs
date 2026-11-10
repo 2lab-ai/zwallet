@@ -5,9 +5,7 @@ use crate::tui::app::tools::{Purpose, Stage, Tool, ToolResult};
 
 pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
     let state = app.tools();
-    let block = Block::bordered()
-        .border_set(ASCII)
-        .title(format!(" tools / {} ", state.tool.title()));
+    let block = pane_block(format!(" tools / {} ", state.tool.title()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let row = |frame: &mut Frame,

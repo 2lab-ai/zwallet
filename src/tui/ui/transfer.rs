@@ -5,7 +5,7 @@ use crate::tui::app::transfer::{ReceiptState, Stage};
 use alloy::primitives::U256;
 
 pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
-    let block = Block::bordered().border_set(ASCII).title(" send ");
+    let block = pane_block(" send ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let state = app.transfer();

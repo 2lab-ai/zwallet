@@ -254,7 +254,7 @@ fn screen(app: &App) -> String {
     assert_eq!(t.backend().replaced(), 0);
     let b = t.backend().inner().buffer();
     let rows: Vec<String> = (0..24)
-        .map(|y| (0..80).map(|x| b[(x, y)].symbol()).collect())
+        .map(|y| (0..80).map(|x| style::ascii_chrome(&b[(x, y)])).collect())
         .collect();
     let styles: Vec<_> = style::ALL
         .iter()
@@ -267,7 +267,7 @@ fn screen(app: &App) -> String {
     for c in &b.content {
         assert!(styles.contains(&c.style()));
         assert!(
-            c.symbol()
+            style::ascii_chrome(c)
                 .chars()
                 .all(|c| c.is_ascii_graphic() || c == ' ' || c == '₮')
         );

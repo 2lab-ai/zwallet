@@ -1,8 +1,11 @@
-//! Every style the TUI draws with (03-tui.md §Display integrity rule 2). Code picks one of these
-//! for each piece of text it draws, and nothing from outside chooses a colour, a reverse video or
-//! a background. Each cell carries exactly one of them: the UI never layers a style over another.
+//! Every style the TUI draws with (03-tui.md §Display integrity rule 2, amended by 10-tui-look.md
+//! F2). Code picks one of these for each piece of text it draws, and nothing from outside chooses a
+//! colour, a reverse video or a background. Every cell's style is one of [`ALL`]: a widget's patched
+//! style included, as the frame checks prove.
 
+use ratatui::buffer::Cell;
 use ratatui::style::{Color, Modifier, Style};
+use twolab_tui::{Motion, Palette, Theme};
 
 /// Text and the empty screen.
 pub const NORMAL: Style = Style::new();
@@ -21,20 +24,177 @@ pub const ERROR: Style = Style::new().fg(Color::Red);
 /// `NO_COLOR` crossterm writes no colour, and the same cells are that code on a dark terminal.
 pub const QR: Style = Style::new().fg(Color::White).bg(Color::Black);
 
-/// Whether a cell's `style` is [`QR`]. Ratatui gives a cell's style every colour field, so the
-/// fields [`QR`] sets are compared.
-pub fn is_qr(style: Style) -> bool {
-    style.fg == QR.fg
-        && style.bg == QR.bg
-        && style.add_modifier.is_empty()
-        && style.sub_modifier.is_empty()
-}
+/// The palette the `twolab-tui` widgets draw with (10-tui-look.md F2): the 16 named colours of
+/// `Theme::ansi()`, so the user's own terminal palette decides the hues, with no yellow, red or
+/// green, which would equal [`WARNING`] or [`ERROR`] or read as "verified".
+pub const THEME: Theme = Theme {
+    palette: Palette::Ansi,
+    text: Color::Reset,
+    text_secondary: Color::Gray,
+    muted: Color::DarkGray,
+    border: Color::DarkGray,
+    accent: Color::Cyan,
+    surface_raised: Color::Reset,
+    run: Color::LightBlue,
+    wait: Color::LightYellow,
+    done: Color::Reset,
+    fail: Color::LightRed,
+    ok: Color::Reset,
+    warn: Color::LightYellow,
+    crit: Color::LightRed,
+    motion: Motion::Full,
+};
+
+/// Frame lines, the tab divider and the bar's separators: `THEME.border()` and `THEME.dim()`.
+pub const BORDER: Style = Style::new().fg(Color::DarkGray);
+/// A pane's title and the other tabs' labels: `THEME.accent()`.
+pub const ACCENT: Style = Style::new().fg(Color::Cyan);
+/// A key in the hint row and the chain in the bar: `THEME.accent()` in bold.
+pub const ACCENT_BOLD: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+/// The current tab: `THEME.selected()` patched with `THEME.accent()`, in bold.
+pub const TAB: Style = Style::new()
+    .fg(Color::Cyan)
+    .add_modifier(Modifier::REVERSED.union(Modifier::BOLD));
+/// What a key in the hint row does: `THEME.secondary()`.
+pub const SECONDARY: Style = Style::new().fg(Color::Gray);
+
+/// The chrome styles (10-tui-look.md F1): only in these may a [`FRAME_GLYPHS`] glyph pass the write
+/// point, and no outside value is ever drawn in one (`Row::outside` refuses them).
+pub const FRAME: [Style; 5] = [BORDER, ACCENT, ACCENT_BOLD, TAB, SECONDARY];
+
+/// The rounded light frame, the only glyphs besides ASCII, `₮` and the QR half blocks that reach the
+/// terminal, and only in a [`FRAME`] style.
+pub const FRAME_GLYPHS: [char; 6] = ['╭', '╮', '╰', '╯', '─', '│'];
 
 /// Every style above.
-pub const ALL: [Style; 7] = [NORMAL, TITLE, SELECTED, HINT, WARNING, ERROR, QR];
+pub const ALL: [Style; 12] = [
+    NORMAL,
+    TITLE,
+    SELECTED,
+    HINT,
+    WARNING,
+    ERROR,
+    QR,
+    BORDER,
+    ACCENT,
+    ACCENT_BOLD,
+    TAB,
+    SECONDARY,
+];
+
+/// Whether `style` and `other` draw the same: ratatui gives a cell's style every colour field, so
+/// an unset colour counts as `Reset`.
+fn same(style: Style, other: Style) -> bool {
+    let reset = |c: Option<Color>| c.unwrap_or(Color::Reset);
+    reset(style.fg) == reset(other.fg)
+        && reset(style.bg) == reset(other.bg)
+        && style.add_modifier == other.add_modifier
+        && style.sub_modifier.is_empty()
+        && other.sub_modifier.is_empty()
+}
+
+/// Whether a cell's `style` is [`QR`].
+pub fn is_qr(style: Style) -> bool {
+    same(style, QR)
+}
+
+/// Whether a cell's `style` (or a style code is about to draw with) is one of the [`FRAME`] styles.
+pub fn is_frame(style: Style) -> bool {
+    FRAME.iter().any(|frame| same(style, *frame))
+}
+
+/// Whether `c` in a cell of `style` is a frame glyph the write point lets through.
+pub fn frame_glyph(c: char, style: Style) -> bool {
+    FRAME_GLYPHS.contains(&c) && is_frame(style)
+}
+
+/// What `cell` shows in the old ASCII chrome: a frame glyph in a frame style as `+`, `-` or `|`,
+/// anything else as it is. The tests read screens through this, so a layout check reads the rows
+/// it read before the rounded frame, one byte per column (10-tui-look.md L1.5).
+pub fn ascii_chrome(cell: &Cell) -> &str {
+    let mut chars = cell.symbol().chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if frame_glyph(c, cell.style()) => match c {
+            '─' => "-",
+            '│' => "|",
+            _ => "+",
+        },
+        _ => cell.symbol(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_frame_styles_are_the_widgets_and_none_is_a_text_style() {
+        use super::*;
+        // 10-tui-look.md F2: no yellow or red (they are WARNING and ERROR) and no green (it would
+        // read as "verified") anywhere in the widgets' palette.
+        for colour in [
+            THEME.text,
+            THEME.text_secondary,
+            THEME.muted,
+            THEME.border,
+            THEME.accent,
+            THEME.surface_raised,
+            THEME.run,
+            THEME.wait,
+            THEME.done,
+            THEME.fail,
+            THEME.ok,
+            THEME.warn,
+            THEME.crit,
+        ] {
+            assert!(
+                !matches!(
+                    colour,
+                    Color::Yellow | Color::Red | Color::Green | Color::LightGreen
+                ),
+                "{colour:?}"
+            );
+        }
+        // Each frame style is what the widgets draw with THEME, composed as ratatui composes it.
+        assert_eq!(THEME.border(), BORDER);
+        assert_eq!(THEME.dim(), BORDER);
+        assert_eq!(THEME.accent(), ACCENT);
+        assert_eq!(THEME.accent().add_modifier(Modifier::BOLD), ACCENT_BOLD);
+        assert_eq!(
+            THEME
+                .selected()
+                .patch(THEME.accent())
+                .add_modifier(Modifier::BOLD),
+            TAB
+        );
+        assert_eq!(THEME.secondary(), SECONDARY);
+        // No frame style draws like a style that carries outside text.
+        for frame in FRAME {
+            for text in [NORMAL, TITLE, SELECTED, HINT, WARNING, ERROR, QR] {
+                assert!(!same(frame, text), "{frame:?} draws like {text:?}");
+            }
+            assert!(is_frame(frame) && !is_qr(frame));
+        }
+        for text in [NORMAL, TITLE, SELECTED, HINT, WARNING, ERROR, QR] {
+            assert!(!is_frame(text), "{text:?}");
+        }
+        assert_eq!(ALL.len(), 7 + FRAME.len());
+    }
+
+    #[test]
+    fn the_old_chrome_reads_a_frame_glyph_only_in_a_frame_style() {
+        use super::*;
+        let cell = |symbol: &str, style: Style| {
+            let mut cell = Cell::default();
+            cell.set_symbol(symbol).set_style(style);
+            cell
+        };
+        assert_eq!(ascii_chrome(&cell("╭", BORDER)), "+");
+        assert_eq!(ascii_chrome(&cell("╯", BORDER)), "+");
+        assert_eq!(ascii_chrome(&cell("─", BORDER)), "-");
+        assert_eq!(ascii_chrome(&cell("│", BORDER)), "|");
+        assert_eq!(ascii_chrome(&cell("│", NORMAL)), "│");
+        assert_eq!(ascii_chrome(&cell("x", BORDER)), "x");
+    }
+
     use std::path::{Path, PathBuf};
 
     /// Where `source` (Rust text) names [`super::QR`] through this module: a path ending in

@@ -32,6 +32,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "=0.10.9"
 thiserror = "2"
+# The TUI's widgets and palette (`.prd/10-tui-look.md`): 2lab's own ratatui 0.30 library, pinned to a
+# commit so a push to it never changes a build.
+twolab-tui = { git = "https://github.com/2lab-ai/tui", rev = "2e224c804be82749a91f27ef3c41f70d4883ef00" }
 tokio = { version = "1", features = ["rt", "macros", "time", "net", "io-util", "signal", "sync"] }
 zeroize = { version = "1", features = ["serde"] }
 

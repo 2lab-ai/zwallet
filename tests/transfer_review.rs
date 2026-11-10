@@ -669,7 +669,11 @@ fn frame(app: &App) -> String {
         assert!(styles.contains(&cell.style()));
     }
     let rows: Vec<String> = (0..24)
-        .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect())
+        .map(|y| {
+            (0..80)
+                .map(|x| style::ascii_chrome(&buffer[(x, y)]))
+                .collect()
+        })
         .collect();
     for p in placed {
         let max = match p.outside.source() {

@@ -82,7 +82,7 @@ fn selected_fields(entry: &crate::core::whitelist::Entry) -> Vec<Outside> {
     rows
 }
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
-    let block = Block::bordered().border_set(ASCII).title(" whitelist ");
+    let block = pane_block(" whitelist ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if app.password_purpose() == PasswordPurpose::WhitelistVerify

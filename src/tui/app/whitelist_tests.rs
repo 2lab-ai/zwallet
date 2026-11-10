@@ -68,12 +68,13 @@ fn frame(app: &App, name: &str) -> String {
         })
         .collect();
     for cell in &buf.content {
-        assert_eq!(cell.symbol().len(), 1, "not a single ASCII cell");
-        assert!(cell.symbol().bytes().all(|b| (0x20..=0x7e).contains(&b)));
+        let shown = style::ascii_chrome(cell);
+        assert_eq!(shown.len(), 1, "not a single ASCII cell (or frame glyph)");
+        assert!(shown.bytes().all(|b| (0x20..=0x7e).contains(&b)));
         assert!(styles.contains(&cell.style()), "style: {:?}", cell.style());
     }
     let rows: Vec<String> = (0..24)
-        .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect())
+        .map(|y| (0..80).map(|x| style::ascii_chrome(&buf[(x, y)])).collect())
         .collect();
     for row in &rows {
         assert!(row.bytes().all(|b| (0x20..=0x7e).contains(&b)));
@@ -108,7 +109,9 @@ fn frame(app: &App, name: &str) -> String {
             assert_eq!(usize::from(p.area.width), p.outside.text().len());
         }
         let shown = (p.area.y..p.area.bottom())
-            .flat_map(|y| (p.area.x..p.area.right()).map(move |x| buf[(x, y)].symbol()))
+            .flat_map(|y| {
+                (p.area.x..p.area.right()).map(move |x| style::ascii_chrome(&buf[(x, y)]))
+            })
             .collect::<String>();
         assert!(
             shown.starts_with(p.outside.text()),
@@ -916,7 +919,11 @@ fn the_list_pane_never_wraps_and_the_selection_shows_full_fields() {
         assert_eq!(terminal.backend().replaced(), 0);
         let b = terminal.backend().inner().buffer();
         (0..height)
-            .map(|y| (0..width).map(|x| b[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..width)
+                    .map(|x| crate::tui::style::ascii_chrome(&b[(x, y)]))
+                    .collect::<String>()
+            })
             .collect()
     };
     for (width, height) in [(120, 40), (80, 24)] {

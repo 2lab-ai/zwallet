@@ -62,11 +62,14 @@ impl<B> FilteredBackend<B> {
 }
 
 /// Whether a cell's symbol may reach the terminal as it is. A QR code's half blocks pass only in
-/// [`QR`](crate::tui::style::QR), the style only zwallet's own code of a verified address has.
+/// [`QR`](crate::tui::style::QR), the style only zwallet's own code of a verified address has; the
+/// rounded frame's six glyphs only in a [`FRAME`](crate::tui::style::FRAME) style, which no outside
+/// value is drawn in (10-tui-look.md F1).
 fn cell_ok(cell: &Cell) -> bool {
     let mut chars = cell.symbol().chars();
     matches!((chars.next(), chars.next()), (Some(c), None) if c != '\n' && (terminal_ok(c)
-        || (crate::tui::style::is_qr(cell.style()) && matches!(c, '█' | '▀' | '▄'))))
+        || (crate::tui::style::is_qr(cell.style()) && matches!(c, '█' | '▀' | '▄'))
+        || crate::tui::style::frame_glyph(c, cell.style())))
 }
 
 /// The columns ratatui's diff counts `cell` as covering (it skips all but the first): its own
@@ -768,6 +771,79 @@ mod tests {
         );
         assert_eq!(terminal.backend().replaced(), 8);
         assert_eq!(row(terminal.backend().inner().buffer(), 1), "????   ?");
+    }
+
+    #[test]
+    fn only_the_frame_styles_let_the_six_frame_glyphs_through() {
+        use ratatui::style::{Color, Modifier, Style};
+        // 10-tui-look.md F1 and F2, written here rather than read from `style`: the rounded frame's
+        // six glyphs pass in the five chrome styles only; nothing else non-ASCII passes in them.
+        let frame_styles = [
+            Style::new().fg(Color::DarkGray),
+            Style::new().fg(Color::Cyan),
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            Style::new().fg(Color::Gray),
+        ];
+        let text_styles = [
+            Style::new(),
+            Style::new().add_modifier(Modifier::BOLD),
+            Style::new().add_modifier(Modifier::REVERSED),
+            Style::new().add_modifier(Modifier::DIM),
+            Style::new().fg(Color::Yellow),
+            Style::new().fg(Color::Red),
+            Style::new().fg(Color::White).bg(Color::Black),
+            // A frame colour with a modifier it does not have, or another colour.
+            Style::new()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+            Style::new().fg(Color::Green),
+        ];
+        let glyphs = ["╭", "╮", "╰", "╯", "─", "│"];
+        let others = [
+            "✓", "✗", "▸", "•", "·", "…", "┼", "├", "█", "‹", "←", "\u{2591}",
+        ];
+        let width = glyphs.len().max(others.len()) as u16;
+        let rows = (frame_styles.len() * 2 + text_styles.len()) as u16;
+        let mut terminal =
+            Terminal::new(FilteredBackend::new(TestBackend::new(width, rows))).unwrap();
+        let drawn = terminal.draw(|f| {
+            let buffer = f.buffer_mut();
+            let mut y = 0;
+            for style in frame_styles {
+                for (x, glyph) in (0..).zip(glyphs) {
+                    buffer[(x, y)].set_symbol(glyph).set_style(style);
+                }
+                for (x, glyph) in (0..).zip(others) {
+                    buffer[(x, y + 1)].set_symbol(glyph).set_style(style);
+                }
+                y += 2;
+            }
+            for style in text_styles {
+                for (x, glyph) in (0..).zip(glyphs) {
+                    buffer[(x, y)].set_symbol(glyph).set_style(style);
+                }
+                y += 1;
+            }
+        });
+        assert!(drawn.is_ok());
+        let got = terminal.backend().inner().buffer();
+        let mut y = 0;
+        for _ in frame_styles {
+            assert_eq!(row(got, y), format!("{}{}", glyphs.concat(), " ".repeat(6)));
+            assert_eq!(row(got, y + 1), "?".repeat(others.len()));
+            y += 2;
+        }
+        for _ in text_styles {
+            assert_eq!(row(got, y), format!("{}{}", "?".repeat(6), " ".repeat(6)));
+            y += 1;
+        }
+        assert_eq!(
+            terminal.backend().replaced(),
+            frame_styles.len() * others.len() + text_styles.len() * glyphs.len()
+        );
     }
 
     #[test]

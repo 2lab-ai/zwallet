@@ -93,13 +93,14 @@ fn frame(app: &App, width: u16, height: u16) -> String {
         })
         .collect();
     for cell in &b.content {
-        assert_eq!(cell.symbol().len(), 1, "not a single ASCII cell");
-        assert!(cell.symbol().bytes().all(|b| (0x20..=0x7e).contains(&b)));
+        let shown = style::ascii_chrome(cell);
+        assert_eq!(shown.len(), 1, "not a single ASCII cell (or frame glyph)");
+        assert!(shown.bytes().all(|b| (0x20..=0x7e).contains(&b)));
         assert!(styles.contains(&cell.style()), "style: {:?}", cell.style());
     }
     for p in &places {
         let shown = (p.area.y..p.area.bottom())
-            .flat_map(|y| (p.area.x..p.area.right()).map(move |x| b[(x, y)].symbol()))
+            .flat_map(|y| (p.area.x..p.area.right()).map(move |x| style::ascii_chrome(&b[(x, y)])))
             .collect::<String>();
         assert!(
             shown.starts_with(p.outside.text()),
@@ -108,7 +109,11 @@ fn frame(app: &App, width: u16, height: u16) -> String {
         );
     }
     (0..height)
-        .map(|y| (0..width).map(|x| b[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..width)
+                .map(|x| style::ascii_chrome(&b[(x, y)]))
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }

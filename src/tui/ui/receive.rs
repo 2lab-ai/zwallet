@@ -206,7 +206,11 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let rows = (0..height)
-            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .map(|y| {
+                (0..width)
+                    .map(|x| crate::tui::style::ascii_chrome(&buffer[(x, y)]))
+                    .collect()
+            })
             .collect();
         let qr = buffer
             .content

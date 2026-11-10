@@ -1677,6 +1677,14 @@ impl Frame {
                 '\u{8}' => x = x.saturating_sub(1),
                 c if c.is_control() => stray.push(format!("{c:?}")),
                 c => {
+                    // The rounded frame reads as the old ASCII chrome, one char per column
+                    // (10-tui-look.md L1.5); the in-process frame checks prove where it is drawn.
+                    let c = match c {
+                        '╭' | '╮' | '╰' | '╯' => '+',
+                        '─' => '-',
+                        '│' => '|',
+                        c => c,
+                    };
                     if let Some(cell) = cells.get_mut(y).and_then(|r| r.get_mut(x)) {
                         *cell = c;
                     }
