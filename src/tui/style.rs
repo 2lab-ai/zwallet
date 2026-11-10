@@ -57,10 +57,6 @@ pub const TAB: Style = Style::new()
     .add_modifier(Modifier::REVERSED.union(Modifier::BOLD));
 /// What a key in the hint row does: `THEME.secondary()`.
 pub const SECONDARY: Style = Style::new().fg(Color::Gray);
-/// A review row's label beside its value (10-tui-look.md L3): `THEME.muted`, the colour of the
-/// frames, so it draws as [`BORDER`] and is a frame style. Not [`SECONDARY`]: Gray (ANSI 7) is the
-/// default text colour of many dark terminals, where a label in it looked like its value.
-pub const LABEL: Style = Style::new().fg(Color::DarkGray);
 
 /// The chrome styles (10-tui-look.md F1): only in these may a [`FRAME_GLYPHS`] glyph pass the write
 /// point, and no outside value is ever drawn in one (`Row::outside` refuses them).
@@ -141,16 +137,6 @@ pub fn ascii_chrome(cell: &Cell) -> &str {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_review_label_draws_as_the_frames_and_unlike_its_value() {
-        use super::*;
-        // 10-tui-look.md L3: a label is a frame style (so only zwallet's constants reach it),
-        // the frames' own grey, and not the colour a value is drawn in.
-        assert!(is_frame(LABEL) && same(LABEL, BORDER));
-        assert_eq!(LABEL.fg, Some(THEME.muted));
-        assert!(!same(LABEL, NORMAL) && !same(LABEL, SECONDARY));
-    }
-
     #[test]
     fn the_frame_styles_are_the_widgets_and_none_is_a_text_style() {
         use super::*;

@@ -902,15 +902,13 @@ fn outside_style(style: Style) -> Style {
 }
 
 /// The style of a review row's label when a value follows it on the row (10-tui-look.md L3): a
-/// plain row's label in `LABEL` (the frames' dark grey), so the eye lands on the value; any other style unchanged. Its
-/// callers, the review row helpers, take the label only as a `&'static str`, so no text built from
-/// a value is drawn in this style.
+/// plain row's label in `HINT` (dim), so the eye lands on the value; any other style unchanged.
+/// Dim is the terminal's own text colour, fainter: it reads on a dark, a light and a Solarized
+/// palette alike, and under `NO_COLOR`, where a fixed grey (Gray, DarkGray) is either the text
+/// colour itself or the background. The review row helpers take the label only as a
+/// `&'static str`.
 fn label_style(style: Style) -> Style {
-    if style == NORMAL {
-        crate::tui::style::LABEL
-    } else {
-        style
-    }
+    if style == NORMAL { HINT } else { style }
 }
 
 /// A piece of a [`Row`]: zwallet's own text, or a value from outside.
