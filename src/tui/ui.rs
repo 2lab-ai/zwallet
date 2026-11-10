@@ -234,15 +234,15 @@ fn tab_line(current: Tab) -> twolab_tui::tabs::Tabs<'static> {
 }
 
 /// A hint row of zwallet's own `words` (`key what  key what  ...`), drawn by `twolab-tui`'s
-/// `KeyHints`: each key in [`ACCENT_BOLD`], what it does in `SECONDARY`, two spaces between hints
-/// (10-tui-look.md F1, the widget adapter rule). Pinned to `KeyGlyphs::Ascii`: arrows are spelled
-/// out. Laid out at the row's width: a row that did not fit would drop whole hints and end in
-/// `... ? more`; every hint row today is zwallet's own and fits 80 columns, as the tests show. (A
-/// lone hint wider than the row would end in `…`, which the write point replaces: it fails
-/// closed, and the frame checks count it.)
+/// `KeyHints`: each key in [`ACCENT_BOLD`], what it does in `SECONDARY` (10-tui-look.md F1, the
+/// widget adapter rule). Pinned to `KeyGlyphs::Ascii`: arrows are spelled out. Two spaces between
+/// hints, or one when two would not fit the row, so no hint is dropped; every hint row is
+/// zwallet's own and fits 80 columns with one space, as `every_hint_row_shows_all_its_hints_at_80`
+/// checks. (A row that still did not fit would drop whole hints and end in `... ? more`; a lone
+/// hint wider than the row would end in `…`, which the write point replaces: it fails closed.)
 fn key_hints(words: &str, width: u16) -> Paragraph<'static> {
-    use twolab_tui::key_hints::KeyHint;
-    let hints = words
+    use twolab_tui::key_hints::{KeyGlyphs, KeyHint, KeyHints};
+    let hints: Vec<KeyHint> = words
         .split("  ")
         .map(str::trim)
         .filter(|w| !w.is_empty())
@@ -254,12 +254,17 @@ fn key_hints(words: &str, width: u16) -> Paragraph<'static> {
                 // A note among the hints (`password input is never echoed`): one dim piece.
                 KeyHint::new(hint.to_string(), "").disabled(true)
             }
-        });
-    let line = twolab_tui::key_hints::KeyHints::new(hints)
-        .glyphs(twolab_tui::key_hints::KeyGlyphs::Ascii)
-        .theme(THEME)
-        .line(width);
-    Paragraph::new(line)
+        })
+        .collect();
+    let row = |separator: &'static str| {
+        KeyHints::new(hints.clone())
+            .separator(separator)
+            .glyphs(KeyGlyphs::Ascii)
+            .theme(THEME)
+    };
+    let wide = row("  ");
+    let fits = wide.fit(usize::from(width)).dropped == 0;
+    Paragraph::new(if fits { wide } else { row(" ") }.line(width))
 }
 
 /// Whether a hint's first word names a key: one character (`n`, `?`, `/`), a capitalised key name
@@ -1032,13 +1037,73 @@ mod tests {
             let buffer = drawn(key_hints(words, MIN_WIDTH));
             assert_eq!(checked(&buffer).trim_end(), shown);
             // A key is drawn bold cyan, a note dim: the first cell is a key's.
-            assert_eq!(buffer[(0, 0)].style().fg, ACCENT_BOLD.fg);
+            let first = buffer[(0, 0)].style();
+            assert_eq!(first.fg, ACCENT_BOLD.fg);
+            assert!(first.add_modifier.contains(ratatui::style::Modifier::BOLD));
         }
         let note = drawn(key_hints(
             "Enter apply/check   Esc cancel   password input is never echoed",
+            MIN_WIDTH,
         ));
         let at = checked(&note).find("password").unwrap() as u16;
         assert_eq!(note[(at, 0)].style().fg, BORDER.fg);
+    }
+
+    /// Every hint row's words in the source: the string literals of `draw`'s hint chain and of
+    /// the other panes' hint functions that hold two spaces (how hints are separated).
+    fn hint_literals() -> Vec<String> {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tui");
+        let mut found = Vec::new();
+        for (file, start, end) in [
+            ("ui.rs", "let hint_row = if", "match hint_row {"),
+            ("ui/whitelist.rs", "pub(super) fn hint(", "\n}\n"),
+            ("app/tools.rs", "pub fn tools_hint(", "\n    }\n"),
+            (
+                "app/replacement.rs",
+                "pub fn replacement_hint(",
+                "\n    }\n",
+            ),
+            ("app/transfer.rs", "pub fn transfer_hint(", "\n    }\n"),
+        ] {
+            let text = std::fs::read_to_string(src.join(file)).unwrap();
+            let at = text
+                .find(start)
+                .unwrap_or_else(|| panic!("{file}: {start}"));
+            let body = &text[at..at + text[at..].find(end).unwrap()];
+            let mut parts = body.split('"').skip(1).step_by(2);
+            for literal in parts.by_ref() {
+                if literal.contains("  ") {
+                    found.push(literal.to_string());
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_hint_row_shows_all_its_hints_at_80() {
+        let rows = hint_literals();
+        assert!(rows.len() > 20, "the scan found {} hint rows", rows.len());
+        for words in rows {
+            let hints: Vec<&str> = words
+                .split("  ")
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .collect();
+            if words.contains("...") {
+                // A busy state is a note, drawn by `Row` as it is: it must fit too.
+                assert!(words.len() <= usize::from(MIN_WIDTH), "{words:?}");
+                continue;
+            }
+            let shown = checked(&drawn(key_hints(&words, MIN_WIDTH)));
+            let two = hints.join("  ");
+            let want = if two.len() <= usize::from(MIN_WIDTH) {
+                two
+            } else {
+                hints.join(" ")
+            };
+            assert_eq!(shown.trim_end(), want, "{words:?}");
+        }
     }
 
     #[test]

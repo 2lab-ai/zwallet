@@ -1242,6 +1242,33 @@ impl PtyChild {
         Frame::last(&output, size).unwrap()
     }
 
+    /// Once the child has exited: everything it wrote, after the reader has read the last byte
+    /// (the reader ends when the pty does: this process holds no slave of a full-screen child's
+    /// pty). Panics past `limit`.
+    #[track_caller]
+    pub fn all_output(&mut self, limit: Duration) -> Vec<u8> {
+        assert!(
+            matches!(self.child.try_wait(), Ok(Some(_))),
+            "the child still runs"
+        );
+        let start = Instant::now();
+        loop {
+            let drained = self
+                .full_screen()
+                .reader
+                .as_ref()
+                .is_none_or(JoinHandle::is_finished);
+            if drained {
+                return self.output();
+            }
+            assert!(
+                start.elapsed() < limit,
+                "the pty reader did not end within {limit:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Sets the window to `(columns, rows)`, as a human resizing the terminal does: the kernel
     /// sends SIGWINCH to the child, its terminal's foreground process group.
     pub fn resize(&mut self, (columns, rows): (u16, u16)) {

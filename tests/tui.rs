@@ -970,7 +970,8 @@ fn quit(tui: &mut PtyChild) -> Frame {
             .map_or(output.len(), |at| at + common::LEAVE_ALTERNATE_SCREEN.len());
         output[leave..].to_vec()
     };
-    let output = tui.wait_output(PTY_WAIT, |output| after(output).ends_with(b"\x1b[?25h"));
+    // Every byte, once the reader has read the last one: a later read cannot escape the check.
+    let output = tui.all_output(PTY_WAIT);
     let tail = after(&output);
     assert_eq!(
         tail,
