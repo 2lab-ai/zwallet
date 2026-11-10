@@ -24,19 +24,7 @@ None. Every acceptance row T1–T44 is closed ([`loop.done.md`](loop.done.md) R1
   2026.10.29.2134 (loop.done.md R1), on the merged code 8eaf051 (R2) and on the installed previews
   2026.11.06.1138 (R3) and 2026.11.06.2001 (R4); none stands in for the owner's.
 
-## Open test notes (TUI-1c review rounds 1 and 2, 2026-10-28)
-
-For the next unit whose pty runs resize or print after the TUI. Both still hold at 599bde9:
-- T9 shrinks a running terminal (120x40 to 79x24) and sees the warning alone, but does not tell
-  whether SIGWINCH's `Msg::Resize` or the next refresh tick redrew it (a probe on 2026-10-28 saw
-  the redraw 5 ms after the resize), and no test grows the window back
-  (`t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo`, tests/tui.rs:950-973,
-  only shrinks).
-- `quit()`'s stray and pending check (tests/tui.rs:858) covers only the bytes before the first
-  `CSI ?1049l` (`Frame::last`, tests/common/mod.rs:1645-1650). What is written after it goes
-  unchecked: the line for a failed `L` stop, and the panic hook's fixed line.
-
 ## Next
 
-The owner: the two items above. The agent: nothing queued; pick up the test notes with the next
-TUI change that touches resize or post-exit output.
+The owner: the two items above. The agent: nothing queued. The two open test notes closed with
+v0.4 L1 (PR #72): [`loop.done.md`](loop.done.md) R5.

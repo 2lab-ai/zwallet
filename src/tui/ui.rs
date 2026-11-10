@@ -45,6 +45,23 @@ fn pane_block<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
         .title(Span::styled(title.into(), ACCENT))
 }
 
+/// The menu's key column. A longer key (`p d g w s x b R`, `calldata-cap`) is cut with `...` on
+/// its row and drawn whole on the detail line, so the label and the CLI spelling stay whole at 80
+/// columns.
+const MENU_KEY: usize = 8;
+
+/// The menu's label column: the widest label of the action table.
+const MENU_LABEL: usize = 35;
+
+/// A key as the menu's key column shows it: whole when it fits, else cut with `...`.
+fn menu_key(key: &str) -> String {
+    if key.len() <= MENU_KEY {
+        key.to_string()
+    } else {
+        format!("{}...", &key[..MENU_KEY - 3])
+    }
+}
+
 const SEP: &str = " | ";
 
 /// The question after `make <key>` that `s` asks: the active key is what the agent signs with.
@@ -370,30 +387,39 @@ fn popup_pane(frame: &mut Frame, area: Rect, app: &App, popup: &Popup, placed: &
             let first = (menu.selected_index() + 1).saturating_sub(count);
             for (y, (index, action)) in rows.iter().enumerate().skip(first).take(count).enumerate()
             {
-                let style = if index == menu.selected_index() {
-                    SELECTED
+                // What the action does first, then its key, then the CLI spelling, dim
+                // (10-tui-look.md L2.1). The column widths are the whole table's, so a filter
+                // never moves a column.
+                let (label, key, cli) = if index == menu.selected_index() {
+                    (SELECTED, SELECTED, SELECTED)
                 } else {
-                    NORMAL
+                    (NORMAL, ACCENT_BOLD, HINT)
                 };
                 Row::default()
-                    .text(&format!("{:>2} {:<15} ", action.row, action.key), style)
-                    .outside(&Outside::input(&format!("[{}]", action.alias)), style)
                     .text(
-                        &format!(
-                            "{} tab {}",
-                            " ".repeat(34usize.saturating_sub(action.alias.len() + 2)),
-                            action.tab.number()
-                        ),
-                        style,
+                        &format!("{:<width$} ", action.label, width = MENU_LABEL),
+                        label,
                     )
+                    .text(
+                        &format!("{:<width$} ", menu_key(action.key), width = MENU_KEY),
+                        key,
+                    )
+                    .outside(&Outside::input(&format!("[{}]", action.alias)), cli)
                     .draw(frame, line(inner, y as u16 + 1), placed);
             }
             if let Some(action) = rows.get(menu.selected_index()) {
-                Row::default().text(action.label, TITLE).draw(
-                    frame,
-                    line(inner, inner.height - 4),
-                    placed,
-                );
+                Row::default()
+                    .text(action.label, TITLE)
+                    .text(
+                        &format!(
+                            "   key {}   tab {} {}",
+                            action.key,
+                            action.tab.number(),
+                            action.tab.name()
+                        ),
+                        HINT,
+                    )
+                    .draw(frame, line(inner, inner.height - 4), placed);
                 let reason = match action.availability(&app.menu_context()) {
                     Availability::Ready => "Enter opens this action",
                     Availability::Disabled(reason) => reason,
@@ -1103,6 +1129,29 @@ mod tests {
                 hints.join(" ")
             };
             assert_eq!(shown.trim_end(), want, "{words:?}");
+        }
+    }
+
+    #[test]
+    fn the_menu_columns_keep_every_label_and_cli_spelling_whole_at_80() {
+        let actions = &crate::tui::actions::ACTIONS;
+        let label = actions.iter().map(|a| a.label.len()).max().unwrap();
+        let alias = actions.iter().map(|a| a.alias.len()).max().unwrap();
+        assert_eq!(label, MENU_LABEL);
+        // The widest label, the key column and the widest CLI spelling in its brackets in the 78
+        // inner columns.
+        assert!(
+            MENU_LABEL + 1 + MENU_KEY + 1 + alias + 2 <= usize::from(MIN_WIDTH - 2),
+            "{alias}"
+        );
+        for action in actions {
+            let shown = menu_key(action.key);
+            assert!(shown.len() <= MENU_KEY, "{shown:?}");
+            assert!(
+                shown == action.key || shown.ends_with("..."),
+                "{:?} cut silently",
+                action.key
+            );
         }
     }
 
