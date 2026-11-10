@@ -20,15 +20,16 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
     }
     let row = |frame: &mut Frame,
                y: u16,
-               label: &str,
+               label: &'static str,
                value: Option<Outside>,
                style: Style,
                placed: &mut Vec<Placed>| {
-        let r = Row::default().text(label, style);
         let r = if let Some(value) = value {
-            r.outside(&value, style)
+            Row::default()
+                .text(label, label_style(style))
+                .outside(&value, style)
         } else {
-            r
+            Row::default().text(label, style)
         };
         r.draw(frame, line(inner, y), placed);
     };

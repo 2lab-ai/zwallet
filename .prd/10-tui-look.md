@@ -113,7 +113,7 @@ ambiguous-wide on.
 |---|---|---|---|
 | L1 chrome | rounded frames on every pane; the tab line with the current tab marked; the hint row with keys bold cyan and their actions grey; the chain and the bar's separators coloured | `Theme`, `Tabs`, `KeyHints` | L1.1–L1.7 |
 | L2 content | the action menu names what an action does, then its key, then its CLI spelling (dim); 2 wallet's amounts aligned on the decimal point under their heading | none (`Row` only; see the L2 adapter table) | L2.1–L2.4 |
-| L3 reviews and popups | send, whitelist and tool reviews laid out as cards; the password popup in a modal frame | frames and layout only; every field still drawn by `Row` | L3.1–L3.4 |
+| L3 reviews | the send reviews (EVM and Tron) and the tool rows drawn as label and value: each label dim, its value as before, so the eye lands on the values (the invoke review's `To:`/`From:` sit inside one outside line and stay as they are) | none (`Row` only; see the L3 adapter table) | L3.1, L3.3, L3.4 |
 
 **Before L2 and L3 start**, each amends this spec with its widget adapter table (widget, what zwallet
 hands it, the glyphs and styles it draws, the F1 list or `FRAME` entries it adds) and gets a trinity
@@ -134,6 +134,24 @@ address or a trust word.
 The menu keeps its order, its filter (CLI spelling or label) and its keys: only what each row says
 changes, from `NN key [cli spelling] tab N` to `what it does  key  [cli spelling]`. The every-network
 view (`a`) stays one line per network.
+
+### L3 adapter table (2026-11-10)
+
+| Part | Widget | What zwallet hands it | Glyphs and styles | F1 / `FRAME` change |
+|---|---|---|---|---|
+| a review row with a label and a value (`ui/transfer.rs`, `ui/tron_transfer.rs`, `ui/tools.rs`) | none: `Row` | the label is a `&'static str` (the row helpers take nothing else, so a label built from a value does not compile); the value is the `Outside` it was | ASCII only; the label in `HINT` (dim, a text style) when the row's style is `NORMAL` (`label_style`), else the row's style; the value in the row's style, as before | none |
+| a tool row of zwallet's own text built at run time (`Argument 2`, `Decimals: 6`, the message metadata) | none: `Row` | code text from numbers and constants | ASCII only; its style as before (`HINT` or `NORMAL`), never a frame style | none |
+
+L3 changes no text, no row and no key; only the colour of a label beside a value. The label is dim
+(`HINT`), not a fixed grey: the first QA capture showed `SECONDARY`'s Gray (ANSI 7) is the default
+text colour of many dark terminals, so the label looked like its value; DarkGray (ANSI 8) is the
+background colour of palettes such as Solarized Dark, where `To:` and `From:` would vanish. Dim is the
+terminal's own text colour, fainter, on any palette and under `NO_COLOR`. A label in a text style
+needs no frame-style argument: it is zwallet's own `&'static str`, as before. The password popup
+stays as it is: a modal frame would move its mask and refusal rows, which the tests and the QA pin,
+for little gain; it is left for a later unit if the owner wants it. Toasts are left out for the same
+reason as in the L3 constraints above: an outcome row with a timer needs a clock, and the outcome
+rows already stay until the next key.
 
 ## Acceptance
 

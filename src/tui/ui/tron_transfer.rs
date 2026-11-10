@@ -4,13 +4,17 @@ use crate::{core::amount::format_units, tui::app::transfer::Stage};
 
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
     let state = app.transfer();
-    let row =
-        |frame: &mut Frame, y, label: &str, value: Outside, style, placed: &mut Vec<Placed>| {
-            Row::default()
-                .text(label, style)
-                .outside(&value, style)
-                .draw(frame, line(area, y), placed);
-        };
+    let row = |frame: &mut Frame,
+               y,
+               label: &'static str,
+               value: Outside,
+               style,
+               placed: &mut Vec<Placed>| {
+        Row::default()
+            .text(label, label_style(style))
+            .outside(&value, style)
+            .draw(frame, line(area, y), placed);
+    };
     match state.stage {
         Stage::Payees => {
             row(
