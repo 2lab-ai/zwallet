@@ -6,13 +6,11 @@ use crate::tui::app::history::{detail_lines, state_label};
 
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
     let state = app.history();
-    let block = Block::bordered()
-        .border_set(ASCII)
-        .title(if state.detail.is_some() {
-            " transaction "
-        } else {
-            " wallet "
-        });
+    let block = pane_block(if state.detail.is_some() {
+        " transaction "
+    } else {
+        " wallet "
+    });
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if let Pane::Failed(error) = app.keys() {

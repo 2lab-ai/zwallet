@@ -504,9 +504,17 @@ fn frame(app: &App, width: u16, height: u16) -> String {
     for cell in &buffer.content {
         assert!(styles.contains(&cell.style()));
         assert!(
-            cell.symbol()
+            style::ascii_chrome(cell)
                 .chars()
                 .all(|c| c.is_ascii_graphic() || c == ' ' || c == '₮')
+        );
+    }
+    // 10-tui-look.md F1: no outside value is drawn in a frame style.
+    for p in &placed {
+        assert!(
+            !style::frame_style_in(buffer, p.area),
+            "an outside value in a frame style at {:?}",
+            p.area
         );
     }
     for p in placed {
@@ -524,7 +532,7 @@ fn frame(app: &App, width: u16, height: u16) -> String {
         assert!(p.outside.text().len() <= max);
         if p.area.height == 1 {
             let actual: String = (p.area.x..p.area.right())
-                .map(|x| buffer[(x, p.area.y)].symbol())
+                .map(|x| style::ascii_chrome(&buffer[(x, p.area.y)]))
                 .collect();
             assert_eq!(actual, p.outside.text());
         }
@@ -532,7 +540,7 @@ fn frame(app: &App, width: u16, height: u16) -> String {
     (0..height)
         .map(|y| {
             (0..width)
-                .map(|x| buffer[(x, y)].symbol())
+                .map(|x| style::ascii_chrome(&buffer[(x, y)]))
                 .collect::<String>()
         })
         .collect::<Vec<_>>()

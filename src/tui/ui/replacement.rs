@@ -5,7 +5,7 @@ use crate::tui::app::replacement::Stage;
 use crate::wallet::replacement::{Action, CANCEL_RACE};
 
 pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
-    let border = Block::bordered().border_set(ASCII).title(" replacement ");
+    let border = pane_block(" replacement ");
     let inner = border.inner(area);
     frame.render_widget(border, area);
     let state = app.replacement();

@@ -236,8 +236,12 @@ history and lookup, whitelist and per-transaction limit editing, and EVM contrac
 tools. Pending EVM transactions expose speed-up/cancel only after original-intent
 verification; uncertain sends can be retried from their retained review in the same
 session. Tron has no nonce replacement. The TUI never shows the recovery phrase (`B` points
-to `zwallet backup`); `Q` on `4 receive` shows a verified address as a QR code. See the
-[TUI command reference](docs/commands.md#key-management-and-terminal-ui) and [UI specification](.prd/03-tui.md).
+to `zwallet backup`); `Q` on `4 receive` shows a verified address as a QR code. The screens are
+drawn with 2lab's [twolab-tui](https://2lab.ai/tui) widgets: rounded frames, the current tab
+highlighted, keys bold in the hint row. Colours follow your terminal's 16-colour palette;
+`NO_COLOR` turns them off. See the
+[TUI command reference](docs/commands.md#key-management-and-terminal-ui), the
+[UI specification](.prd/03-tui.md) and [the look](.prd/10-tui-look.md).
 
 ## Before funding a wallet
 

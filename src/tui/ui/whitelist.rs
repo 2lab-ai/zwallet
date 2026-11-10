@@ -20,7 +20,7 @@ pub(super) fn hint(app: &App) -> &'static str {
     }
     match &app.whitelist_ui().stage {
         Stage::List => {
-            "a add C contract d remove f fee n/t/b caps m msgs R reset V verify ? actions"
+            "a add  C contract  d remove  f fee  n/t/b caps  m msgs  R reset  V verify  ? actions"
         }
         Stage::Form(_) => "Tab/Up/Down fields   Enter next/review   Esc cancel   Ctrl-C quit",
         Stage::Review(_) => {
@@ -82,7 +82,7 @@ fn selected_fields(entry: &crate::core::whitelist::Entry) -> Vec<Outside> {
     rows
 }
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
-    let block = Block::bordered().border_set(ASCII).title(" whitelist ");
+    let block = pane_block(" whitelist ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if app.password_purpose() == PasswordPurpose::WhitelistVerify

@@ -1,6 +1,7 @@
 //! Drawing: one frame from the [`App`], nothing else. Outside values are drawn only as the
 //! [`Outside`] the state made of them, each on its own line, cut to the width (an error alone in a
-//! pane is wrapped there, 03-tui.md §Display integrity rule 4); the chrome is ASCII; every style
+//! pane is wrapped there, 03-tui.md §Display integrity rule 4); the chrome is ASCII and the rounded
+//! frame (10-tui-look.md F1), drawn partly by `twolab-tui` from zwallet's own words; every style
 //! is one of `style`'s. [`draw`] returns where it put each outside value, for the tests.
 
 mod create;
@@ -17,7 +18,9 @@ use crate::tui::app::{
     App, Bar, FieldPurpose, KeyList, LockLine, Pane, PasswordPurpose, PasswordState, Popup,
     TrustLine,
 };
-use crate::tui::style::{ERROR, HINT, NORMAL, SELECTED, TITLE, WARNING};
+use crate::tui::style::{
+    ACCENT, ACCENT_BOLD, BORDER, ERROR, HINT, NORMAL, SELECTED, THEME, TITLE, WARNING,
+};
 use crate::tui::text::{Outside, Source};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -33,17 +36,14 @@ pub const MIN_HEIGHT: u16 = 24;
 /// The one line drawn on a smaller terminal.
 pub const TOO_SMALL: &str = "terminal too small (80x24 needed)";
 
-/// Borders in ASCII: the TUI's own chrome keeps to the cell rule too.
-const ASCII: border::Set = border::Set {
-    top_left: "+",
-    top_right: "+",
-    bottom_left: "+",
-    bottom_right: "+",
-    vertical_left: "|",
-    vertical_right: "|",
-    horizontal_top: "-",
-    horizontal_bottom: "-",
-};
+/// A pane's frame (10-tui-look.md F1): the rounded light frame in [`BORDER`], its title, zwallet's
+/// own words, in [`ACCENT`].
+fn pane_block<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
+    Block::bordered()
+        .border_set(border::ROUNDED)
+        .border_style(BORDER)
+        .title(Span::styled(title.into(), ACCENT))
+}
 
 const SEP: &str = " | ";
 
@@ -111,14 +111,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         Constraint::Length(1),
     ])
     .areas(area);
-    let mut tabs = Row::default();
-    for tab in Tab::ALL {
-        tabs = tabs.text(
-            &format!("{} {}  ", tab.number(), tab.name()),
-            if tab == app.tab() { SELECTED } else { NORMAL },
-        );
-    }
-    tabs.draw(frame, title, &mut placed);
+    frame.render_widget(tab_line(app.tab()), title);
     if app.creation().stage.active() {
         create::draw(frame, pane, app, &mut placed);
     } else if whitelist::active(app) {
@@ -144,57 +137,57 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
         app.creation().stage,
         super::app::create::CreateStage::Done(_)
     ) {
-        Row::default().text("Enter/Esc keys   B backup hint   L lock all   q quit", HINT)
+        Hint::Words("Enter/Esc keys   B backup hint   L lock all   q quit")
     } else if app.creation().stage.active() {
-        Row::default().text(
-            "Enter next/confirm   Tab next   Shift-Tab previous   Esc back   Ctrl-C quit",
-            HINT,
-        )
+        Hint::Words("Enter next/confirm   Tab next   Shift-Tab previous   Esc back   Ctrl-C quit")
     } else if whitelist::active(app) {
-        Row::default().text(whitelist::hint(app), HINT)
+        Hint::Words(whitelist::hint(app))
     } else if matches!(app.password_state(), PasswordState::Input { .. }) {
-        Row::default().text("Enter check   Esc cancel   Ctrl-C quit", HINT)
+        Hint::Words("Enter check   Esc cancel   Ctrl-C quit")
     } else if app.password_state() == PasswordState::Failed {
-        Row::default().text("Enter/Esc dismiss   Ctrl-C quit", HINT)
+        Hint::Words("Enter/Esc dismiss   Ctrl-C quit")
     } else if app.password_state() != PasswordState::Idle {
-        Row::default().text("checking...   Ctrl-C quits when done", HINT)
+        Hint::Words("checking...   Ctrl-C quits when done")
     } else if app.navigation().popup.is_some() {
-        Row::default().text(
-            "arrows move/edit   Enter choose   Esc back   Ctrl-C quit",
-            HINT,
-        )
+        Hint::Words("arrows move/edit   Enter choose   Esc back   Ctrl-C quit")
     } else if app.tab() == Tab::Tools {
         if let Some(notice) = &app.tools().notice {
-            Row::default().outside(&notice.cut(usize::from(hint.width)), ERROR)
+            Hint::Row(Row::default().outside(&notice.cut(usize::from(hint.width)), ERROR))
         } else {
-            Row::default().text(app.tools_hint(), HINT)
+            Hint::Words(app.tools_hint())
         }
     } else if app.replacement_visible() {
-        Row::default().text(app.replacement_hint(), HINT)
+        Hint::Words(app.replacement_hint())
     } else if app.tab() == Tab::Send {
         if let Some(notice) = &app.transfer().notice {
-            Row::default()
-                .outside(
-                    &notice.cut(usize::from(hint.width).saturating_sub(12)),
-                    ERROR,
-                )
-                .text("   ? actions", HINT)
+            Hint::Row(
+                Row::default()
+                    .outside(
+                        &notice.cut(usize::from(hint.width).saturating_sub(12)),
+                        ERROR,
+                    )
+                    .text("   ? actions", HINT),
+            )
         } else {
-            Row::default().text(app.transfer_hint(), HINT)
+            Hint::Words(app.transfer_hint())
         }
     } else if let Some(key) = app.confirming() {
         let room = usize::from(hint.width).saturating_sub(5 + MAKE_ACTIVE.len());
-        Row::default()
-            .text("make ", WARNING)
-            .outside(&key.name.cut(room.max(8)), WARNING)
-            .text(MAKE_ACTIVE, WARNING)
+        Hint::Row(
+            Row::default()
+                .text("make ", WARNING)
+                .outside(&key.name.cut(room.max(8)), WARNING)
+                .text(MAKE_ACTIVE, WARNING),
+        )
     } else if let Some(error) = app.notice() {
-        Row::default()
-            .outside(
-                &error.cut(usize::from(hint.width).saturating_sub(12)),
-                ERROR,
-            )
-            .text("   ? actions", HINT)
+        Hint::Row(
+            Row::default()
+                .outside(
+                    &error.cut(usize::from(hint.width).saturating_sub(12)),
+                    ERROR,
+                )
+                .text("   ? actions", HINT),
+        )
     } else {
         let words = match app.tab() {
             Tab::Keys => {
@@ -207,11 +200,81 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
             Tab::Session => "u unlock  L lock all  r refresh  q quit  ? actions",
             _ => "1 keys  c chain  L lock all  q quit  ? actions",
         };
-        Row::default().text(words, HINT)
+        Hint::Words(words)
     };
-    hint_row.draw(frame, hint, &mut placed);
+    match hint_row {
+        Hint::Row(row) => row.draw(frame, hint, &mut placed),
+        // A busy state (`checking...`, `sending...`) is a note, not a list of keys.
+        Hint::Words(words) if words.contains("...") => {
+            Row::default()
+                .text(words, HINT)
+                .draw(frame, hint, &mut placed)
+        }
+        Hint::Words(words) => frame.render_widget(key_hints(words, hint.width), hint),
+    }
     status_bar(frame, [bar1, bar2], app, &mut placed);
     placed
+}
+
+/// The tab line: `twolab-tui`'s `Tabs` over the seven tab names, zwallet's own words (10-tui-look.md
+/// F1, the widget adapter rule), the current one in `TAB`, the others in [`ACCENT`], the divider in
+/// [`BORDER`]. Pinned: no key hints, no scroll buttons, no drop marker, no action; the labels take
+/// 75 of the 80 columns, so nothing overflows.
+fn tab_line(current: Tab) -> twolab_tui::tabs::Tabs<'static> {
+    twolab_tui::tabs::Tabs::new(
+        Tab::ALL
+            .iter()
+            .map(|tab| twolab_tui::tabs::Tab::new(format!("{} {}", tab.number(), tab.name()))),
+    )
+    .hints(twolab_tui::tabs::Hints::Off)
+    .divider(" \u{2502} ")
+    .scroll_buttons(false)
+    .active(Tab::ALL.iter().position(|t| *t == current).unwrap_or(0))
+    .theme(THEME)
+}
+
+/// A hint row of zwallet's own `words` (`key what  key what  ...`), drawn by `twolab-tui`'s
+/// `KeyHints`: each key in [`ACCENT_BOLD`], what it does in `SECONDARY` (10-tui-look.md F1, the
+/// widget adapter rule). Pinned to `KeyGlyphs::Ascii`: arrows are spelled out. Two spaces between
+/// hints, or one when two would not fit the row, so no hint is dropped; every hint row is
+/// zwallet's own and fits 80 columns with one space, as `every_hint_row_shows_all_its_hints_at_80`
+/// checks. (A row that still did not fit would drop whole hints and end in `... ? more`; a lone
+/// hint wider than the row would end in `…`, which the write point replaces: it fails closed.)
+fn key_hints(words: &str, width: u16) -> Paragraph<'static> {
+    use twolab_tui::key_hints::{KeyGlyphs, KeyHint, KeyHints};
+    let hints: Vec<KeyHint> = words
+        .split("  ")
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(|hint| {
+            let (key, what) = hint.split_once(' ').unwrap_or((hint, ""));
+            if is_key(key) {
+                KeyHint::new(key.to_string(), what.to_string())
+            } else {
+                // A note among the hints (`password input is never echoed`): one dim piece.
+                KeyHint::new(hint.to_string(), "").disabled(true)
+            }
+        })
+        .collect();
+    let row = |separator: &'static str| {
+        KeyHints::new(hints.clone())
+            .separator(separator)
+            .glyphs(KeyGlyphs::Ascii)
+            .theme(THEME)
+    };
+    let wide = row("  ");
+    let fits = wide.fit(usize::from(width)).dropped == 0;
+    Paragraph::new(if fits { wide } else { row(" ") }.line(width))
+}
+
+/// Whether a hint's first word names a key: one character (`n`, `?`, `/`), a capitalised key name
+/// (`Enter`, `Esc`, `Tab`, `Ctrl-C`), keys joined by `/` (`j/k`, `Up/Down`), a digit range
+/// (`1-7`), or `arrows`. Anything else (`password`, `needs:`, `type`) is a note.
+fn is_key(word: &str) -> bool {
+    word.len() == 1
+        || word.starts_with(|c: char| c.is_ascii_uppercase() || c.is_ascii_digit())
+        || (word.contains('/') && word.len() <= 18)
+        || word == "arrows"
 }
 
 /// Row `y` of `area`.
@@ -224,9 +287,7 @@ fn line(area: Rect, y: u16) -> Rect {
 }
 
 fn data_pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
-    let block = Block::bordered()
-        .border_set(ASCII)
-        .title(format!(" {} ", app.tab().name()));
+    let block = pane_block(format!(" {} ", app.tab().name()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     match &app.navigation().lines {
@@ -295,9 +356,7 @@ fn popup_pane(frame: &mut Frame, area: Rect, app: &App, popup: &Popup, placed: &
         Popup::Error(_) => "refused".to_string(),
         Popup::Lines { title, .. } => title.to_string(),
     };
-    let block = Block::bordered()
-        .border_set(ASCII)
-        .title(format!(" {title} "));
+    let block = pane_block(format!(" {title} "));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     match popup {
@@ -446,9 +505,7 @@ fn popup_pane(frame: &mut Frame, area: Rect, app: &App, popup: &Popup, placed: &
 }
 
 fn keys_pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
-    let block = Block::bordered()
-        .border_set(ASCII)
-        .title(" keys (* active, > open) ");
+    let block = pane_block(" keys (* active, > open) ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     match app.password_state() {
@@ -673,8 +730,8 @@ fn error_view(
 /// Line 1: chain, key, short address, address trust. Line 2: the lock state, the RPC host.
 fn status_bar(frame: &mut Frame, [one, two]: [Rect; 2], app: &App, placed: &mut Vec<Placed>) {
     let first = Row::default()
-        .text(app.chain().key, NORMAL)
-        .text(SEP, NORMAL);
+        .text(app.chain().key, ACCENT_BOLD)
+        .text(SEP, BORDER);
     let second = match app.status() {
         Pane::Loading => {
             first.text("checking...", HINT).draw(frame, one, placed);
@@ -698,7 +755,7 @@ fn status_bar(frame: &mut Frame, [one, two]: [Rect; 2], app: &App, placed: &mut 
         }
     };
     second
-        .text(SEP, NORMAL)
+        .text(SEP, BORDER)
         .outside(app.rpc_host(), NORMAL)
         .draw(frame, two, placed);
 }
@@ -743,7 +800,7 @@ fn key_line(row: Row, chain: &str, bar: &Bar, width: usize) -> Row {
         return row;
     }
     let room = width.saturating_sub(fixed + name_shown + SEP.len());
-    let row = row.text(SEP, NORMAL).text(&cut_words(words, room), style);
+    let row = row.text(SEP, BORDER).text(&cut_words(words, room), style);
     match warning {
         Some(w) if words.len() <= room => row.outside(w, style),
         _ => row,
@@ -800,6 +857,24 @@ fn lock_line(app: &App, bar: &Bar) -> Row {
     }
 }
 
+/// The hint row: zwallet's own words of keys and what they do, or a row that holds a value from
+/// outside (a notice) and so is drawn by [`Row`].
+enum Hint {
+    Words(&'static str),
+    Row(Row),
+}
+
+/// The style an outside value is drawn in when code asks for `style`: never a frame style
+/// (10-tui-look.md F1 point 1). A frame style becomes [`NORMAL`] in every build, so a frame glyph
+/// the value might hold is replaced by the write point.
+fn outside_style(style: Style) -> Style {
+    if crate::tui::style::is_frame(style) {
+        NORMAL
+    } else {
+        style
+    }
+}
+
 /// A piece of a [`Row`]: zwallet's own text, or a value from outside.
 enum Part {
     Text(String),
@@ -819,8 +894,16 @@ impl Row {
         self
     }
 
+    /// A value from outside, never in a frame style (10-tui-look.md F1): a frame style is refused
+    /// in every build, the value drawn in [`NORMAL`] instead, and a debug build panics so a test
+    /// finds the call.
     fn outside(mut self, value: &Outside, style: Style) -> Self {
-        self.parts.push((Part::Outside(value.clone()), style));
+        debug_assert!(
+            !crate::tui::style::is_frame(style),
+            "an outside value in a frame style"
+        );
+        self.parts
+            .push((Part::Outside(value.clone()), outside_style(style)));
         self
     }
 
@@ -854,5 +937,189 @@ impl Row {
             spans.push(Span::styled(text, style));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The widget adapters of 10-tui-look.md F1: each `twolab-tui` widget the TUI draws gets only
+    //! zwallet's own words, draws them whole at 80 columns, and draws nothing the write point would
+    //! replace, in no style but `NORMAL` and the frame styles.
+    use super::*;
+    use crate::core::terminal::terminal_ok;
+    use crate::tui::style::{ascii_chrome, frame_glyph, is_frame};
+    use ratatui::buffer::Buffer;
+    use ratatui::widgets::Widget;
+
+    fn drawn(widget: impl Widget) -> Buffer {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, MIN_WIDTH, 1));
+        widget.render(buffer.area, &mut buffer);
+        buffer
+    }
+
+    /// The row as the old ASCII chrome reads it, after asserting each cell passes the write point
+    /// and holds `NORMAL` or a frame style.
+    fn checked(buffer: &Buffer) -> String {
+        (0..MIN_WIDTH)
+            .map(|x| {
+                let cell = &buffer[(x, 0)];
+                let mut chars = cell.symbol().chars();
+                let (Some(c), None) = (chars.next(), chars.next()) else {
+                    panic!("cell {x} holds {:?}", cell.symbol())
+                };
+                assert!(
+                    terminal_ok(c) || frame_glyph(c, cell.style()),
+                    "cell {x}: {c:?}"
+                );
+                let normal = cell.style() == {
+                    let mut blank = ratatui::buffer::Cell::default();
+                    blank.set_style(NORMAL);
+                    blank.style()
+                };
+                assert!(
+                    normal || is_frame(cell.style()),
+                    "cell {x}: {:?}",
+                    cell.style()
+                );
+                ascii_chrome(cell).to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_tab_line_draws_every_tab_whole_at_80_columns() {
+        for current in Tab::ALL {
+            let buffer = drawn(tab_line(current));
+            let text = checked(&buffer);
+            let mut at = 0;
+            for tab in Tab::ALL {
+                let label = format!("{} {}", tab.number(), tab.name());
+                let found = text[at..].find(&label).map(|i| at + i);
+                let Some(start) = found else {
+                    panic!("{label:?} not whole in {text:?}")
+                };
+                // The current tab, and only it, in `TAB`.
+                let style = buffer[(start as u16, 0)].style();
+                let reversed = style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::REVERSED);
+                assert_eq!(reversed, tab == current, "{label}: {style:?}");
+                assert!(is_frame(style), "{label}: {style:?}");
+                at = start + label.len();
+            }
+            assert!(
+                !text.contains('?') && text.trim_end().len() <= 75,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hint_row_keeps_its_words_and_draws_keys_and_notes_in_frame_styles() {
+        for (words, shown) in [
+            (
+                "Enter open  n new  B backup  V verify  A repair  s active  u unlock  ? actions",
+                "Enter open  n new  B backup  V verify  A repair  s active  u unlock  ? actions",
+            ),
+            (
+                "Tab focus  j/k  Enter detail  / hash  a networks  c chain  r  ? actions",
+                "Tab focus  j/k  Enter detail  / hash  a networks  c chain  r  ? actions",
+            ),
+            (
+                "Enter next/confirm   Tab next   Shift-Tab previous   Esc back   Ctrl-C quit",
+                "Enter next/confirm  Tab next  Shift-Tab previous  Esc back  Ctrl-C quit",
+            ),
+            (
+                "Enter apply/check   Esc cancel   password input is never echoed",
+                "Enter apply/check  Esc cancel  password input is never echoed",
+            ),
+        ] {
+            let buffer = drawn(key_hints(words, MIN_WIDTH));
+            assert_eq!(checked(&buffer).trim_end(), shown);
+            // A key is drawn bold cyan, a note dim: the first cell is a key's.
+            let first = buffer[(0, 0)].style();
+            assert_eq!(first.fg, ACCENT_BOLD.fg);
+            assert!(first.add_modifier.contains(ratatui::style::Modifier::BOLD));
+        }
+        let note = drawn(key_hints(
+            "Enter apply/check   Esc cancel   password input is never echoed",
+            MIN_WIDTH,
+        ));
+        let at = checked(&note).find("password").unwrap() as u16;
+        assert_eq!(note[(at, 0)].style().fg, BORDER.fg);
+    }
+
+    /// Every hint row's words in the source: the string literals of `draw`'s hint chain and of
+    /// the other panes' hint functions that hold two spaces (how hints are separated).
+    fn hint_literals() -> Vec<String> {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tui");
+        let mut found = Vec::new();
+        for (file, start, end) in [
+            ("ui.rs", "let hint_row = if", "match hint_row {"),
+            ("ui/whitelist.rs", "pub(super) fn hint(", "\n}\n"),
+            ("app/tools.rs", "pub fn tools_hint(", "\n    }\n"),
+            (
+                "app/replacement.rs",
+                "pub fn replacement_hint(",
+                "\n    }\n",
+            ),
+            ("app/transfer.rs", "pub fn transfer_hint(", "\n    }\n"),
+        ] {
+            let text = std::fs::read_to_string(src.join(file)).unwrap();
+            let at = text
+                .find(start)
+                .unwrap_or_else(|| panic!("{file}: {start}"));
+            let body = &text[at..at + text[at..].find(end).unwrap()];
+            let mut parts = body.split('"').skip(1).step_by(2);
+            for literal in parts.by_ref() {
+                if literal.contains("  ") {
+                    found.push(literal.to_string());
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_hint_row_shows_all_its_hints_at_80() {
+        let rows = hint_literals();
+        assert!(rows.len() > 20, "the scan found {} hint rows", rows.len());
+        for words in rows {
+            let hints: Vec<&str> = words
+                .split("  ")
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .collect();
+            if words.contains("...") {
+                // A busy state is a note, drawn by `Row` as it is: it must fit too.
+                assert!(words.len() <= usize::from(MIN_WIDTH), "{words:?}");
+                continue;
+            }
+            let shown = checked(&drawn(key_hints(&words, MIN_WIDTH)));
+            let two = hints.join("  ");
+            let want = if two.len() <= usize::from(MIN_WIDTH) {
+                two
+            } else {
+                hints.join(" ")
+            };
+            assert_eq!(shown.trim_end(), want, "{words:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "an outside value in a frame style")]
+    fn an_outside_value_in_a_frame_style_panics_in_a_debug_build() {
+        let _ = Row::default().outside(&Outside::input("x"), ACCENT);
+    }
+
+    #[test]
+    fn an_outside_value_is_never_drawn_in_a_frame_style_in_any_build() {
+        for frame in crate::tui::style::FRAME {
+            assert_eq!(outside_style(frame), NORMAL, "{frame:?}");
+        }
+        for text in [NORMAL, TITLE, SELECTED, HINT, WARNING, ERROR] {
+            assert_eq!(outside_style(text), text);
+        }
     }
 }

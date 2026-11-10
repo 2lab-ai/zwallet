@@ -160,9 +160,18 @@ mod warmup_sync {
             })
             .collect();
         for cell in &buffer.content {
-            assert_eq!(cell.symbol().len(), 1);
-            assert!(cell.symbol().bytes().all(|b| (0x20..=0x7e).contains(&b)));
+            let shown = style::ascii_chrome(cell);
+            assert_eq!(shown.len(), 1);
+            assert!(shown.bytes().all(|b| (0x20..=0x7e).contains(&b)));
             assert!(styles.contains(&cell.style()));
+        }
+        // 10-tui-look.md F1: no outside value is drawn in a frame style.
+        for p in &placed {
+            assert!(
+                !style::frame_style_in(buffer, p.area),
+                "an outside value in a frame style at {:?}",
+                p.area
+            );
         }
         for p in placed {
             let budget = match p.outside.source() {
@@ -185,14 +194,20 @@ mod warmup_sync {
                 assert_eq!(usize::from(p.area.width), p.outside.text().len());
             }
             let shown = (p.area.y..p.area.bottom())
-                .flat_map(|y| (p.area.x..p.area.right()).map(move |x| buffer[(x, y)].symbol()))
+                .flat_map(|y| {
+                    (p.area.x..p.area.right()).map(move |x| style::ascii_chrome(&buffer[(x, y)]))
+                })
                 .collect::<String>();
             assert!(shown.starts_with(p.outside.text()));
             assert!(shown[p.outside.text().len()..].bytes().all(|b| b == b' '));
         }
         Frame {
             rows: (0..24)
-                .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect())
+                .map(|y| {
+                    (0..80)
+                        .map(|x| style::ascii_chrome(&buffer[(x, y)]))
+                        .collect()
+                })
                 .collect(),
             stray: Vec::new(),
             pending: String::new(),
