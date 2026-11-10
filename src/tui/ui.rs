@@ -45,11 +45,22 @@ fn pane_block<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
         .title(Span::styled(title.into(), ACCENT))
 }
 
-/// The menu's key column: the widest key of the action table (`p d g w s x b R`).
-const MENU_KEY: usize = 15;
+/// The menu's key column. A longer key (`p d g w s x b R`, `calldata-cap`) is cut with `...` on
+/// its row and drawn whole on the detail line, so the label and the CLI spelling stay whole at 80
+/// columns.
+const MENU_KEY: usize = 9;
 
 /// The menu's label column: the widest label of the action table.
 const MENU_LABEL: usize = 35;
+
+/// A key as the menu's key column shows it: whole when it fits, else cut with `...`.
+fn menu_key(key: &str) -> String {
+    if key.len() <= MENU_KEY {
+        key.to_string()
+    } else {
+        format!("{}...", &key[..MENU_KEY - 3])
+    }
+}
 
 const SEP: &str = " | ";
 
@@ -389,7 +400,10 @@ fn popup_pane(frame: &mut Frame, area: Rect, app: &App, popup: &Popup, placed: &
                         &format!(" {:<width$} ", action.label, width = MENU_LABEL),
                         label,
                     )
-                    .text(&format!("{:<width$} ", action.key, width = MENU_KEY), key)
+                    .text(
+                        &format!("{:<width$} ", menu_key(action.key), width = MENU_KEY),
+                        key,
+                    )
                     .outside(&Outside::input(action.alias), cli)
                     .draw(frame, line(inner, y as u16 + 1), placed);
             }
@@ -397,7 +411,12 @@ fn popup_pane(frame: &mut Frame, area: Rect, app: &App, popup: &Popup, placed: &
                 Row::default()
                     .text(action.label, TITLE)
                     .text(
-                        &format!("   tab {} {}", action.tab.number(), action.tab.name()),
+                        &format!(
+                            "   key {}   tab {} {}",
+                            action.key,
+                            action.tab.number(),
+                            action.tab.name()
+                        ),
                         HINT,
                     )
                     .draw(frame, line(inner, inner.height - 4), placed);
@@ -1114,18 +1133,25 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_columns_fit_the_widest_key_and_label_of_the_action_table() {
-        let key = crate::tui::actions::ACTIONS
-            .iter()
-            .map(|a| a.key.len())
-            .max();
-        let label = crate::tui::actions::ACTIONS
-            .iter()
-            .map(|a| a.label.len())
-            .max();
-        assert_eq!((key, label), (Some(MENU_KEY), Some(MENU_LABEL)));
-        // The label and key columns leave the CLI spelling room at 80 columns.
-        assert!(1 + MENU_LABEL + 1 + MENU_KEY + 1 + 20 <= usize::from(MIN_WIDTH - 2));
+    fn the_menu_columns_keep_every_label_and_cli_spelling_whole_at_80() {
+        let actions = &crate::tui::actions::ACTIONS;
+        let label = actions.iter().map(|a| a.label.len()).max().unwrap();
+        let alias = actions.iter().map(|a| a.alias.len()).max().unwrap();
+        assert_eq!(label, MENU_LABEL);
+        // The widest label, the key column and the widest CLI spelling in the 78 inner columns.
+        assert!(
+            1 + MENU_LABEL + 1 + MENU_KEY + 1 + alias <= usize::from(MIN_WIDTH - 2),
+            "{alias}"
+        );
+        for action in actions {
+            let shown = menu_key(action.key);
+            assert!(shown.len() <= MENU_KEY, "{shown:?}");
+            assert!(
+                shown == action.key || shown.ends_with("..."),
+                "{:?} cut silently",
+                action.key
+            );
+        }
     }
 
     #[test]

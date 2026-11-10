@@ -112,7 +112,7 @@ ambiguous-wide on.
 | Unit | What the owner sees once it is merged | Uses from twolab-tui | Acceptance |
 |---|---|---|---|
 | L1 chrome | rounded frames on every pane; the tab line with the current tab marked; the hint row with keys bold cyan and their actions grey; the chain and the bar's separators coloured | `Theme`, `Tabs`, `KeyHints` | L1.1–L1.7 |
-| L2 content | the action menu names what an action does, the CLI spelling dim beside it, grouped by tab; 2 wallet's balances as a ledger aligned on the decimal point, every network as columns | `ledger` alignment math, `rule` (zwallet's own labels only) | L2.1–L2.4 |
+| L2 content | the action menu names what an action does, then its key, then its CLI spelling (dim); 2 wallet's amounts aligned on the decimal point under their heading | none (`Row` only; see the L2 adapter table) | L2.1–L2.4 |
 | L3 reviews and popups | send, whitelist and tool reviews laid out as cards; the password popup in a modal frame | frames and layout only; every field still drawn by `Row` | L3.1–L3.4 |
 
 **Before L2 and L3 start**, each amends this spec with its widget adapter table (widget, what zwallet
@@ -128,11 +128,12 @@ address or a trust word.
 
 | Part | Widget | What zwallet hands it | Glyphs and styles | F1 / `FRAME` change |
 |---|---|---|---|---|
-| the action menu | none: every row is a `Row` | each action's key, label and CLI spelling are constants of the action table (`src/tui/actions.rs`); the filter is the human's typed input (`Outside::input`, as today) | ASCII only; key in `ACCENT_BOLD` on an unselected row, label in `NORMAL`, the CLI spelling in `HINT`; the selected row all in `SELECTED`; the tab of the selected action named on the detail line | none |
-| 2 wallet's balances | none: `Row`, padded so the decimal points line up (the idea of `twolab_tui::ledger`, not the widget: `ledger::Amount` takes an `f64` and a currency sign, which would lose a token amount's digits) | amounts are `Outside` (`Source::Quantity`), drawn by `Row` | ASCII only; the symbol column in `NORMAL` | none |
+| the action menu | none: every row is a `Row` | each action's label, key and CLI spelling are constants of the action table (`src/tui/actions.rs`); the CLI spelling and the filter are drawn as `Outside::input`, as today | ASCII only; label in `NORMAL`, key in `ACCENT_BOLD` (a constant, the only frame-style text), CLI spelling in `HINT`; the selected row all in `SELECTED`. At 80 columns the widest label (35) and CLI spelling (31) stay whole; a key wider than 9 is cut with `...` on its row and drawn whole on the detail line with the action's tab | none |
+| 2 wallet's balances | none: `Row`, padded so the decimal points line up (the idea of `twolab_tui::ledger`, not the widget: `ledger::Amount` takes an `f64` and a currency sign, which would lose a token amount's digits) | each amount row is one `Outside` (`Source::Detail`, as today), drawn whole by `Row` after zwallet's own spaces; the indent gives way when it would cut a value | ASCII only; `NORMAL`, or `SELECTED` for the focused row | none |
 
 The menu keeps its order, its filter (CLI spelling or label) and its keys: only what each row says
-changes, from `NN key [cli spelling] tab N` to `key  what it does  cli spelling`.
+changes, from `NN key [cli spelling] tab N` to `what it does  key  cli spelling`. The every-network
+view (`a`) stays one line per network.
 
 ## Acceptance
 

@@ -2194,6 +2194,37 @@ mod navigation {
         assert_eq!(row("1234.5 USDC").find("1234.5").unwrap(), start + 2);
     }
 
+    /// L2.2: an amount with a very long integer part never cuts another: alignment gives way, and
+    /// each value is still drawn whole.
+    #[test]
+    fn nav_a_huge_amount_never_cuts_a_small_one() {
+        let mut app = pinned_app_with_checked_list();
+        let big = U256::from(10u64).pow(U256::from(69u64));
+        let tokens = vec![chains::TokenBalance {
+            address: A.into(),
+            symbol: "BIG".into(),
+            decimals: 0,
+            raw: Ok(big),
+        }];
+        app.update(Msg::Balances(
+            app.generation(),
+            "a".into(),
+            Ok(wallet::ChainBalances {
+                activated: None,
+                warning: None,
+                chain: chains::find("ethereum").unwrap(),
+                key: "a".into(),
+                address: A.into(),
+                trust: Trust::Locked,
+                native: native(1),
+                tokens,
+            }),
+        ));
+        let text = view(&app);
+        assert!(text.contains("0.000000000000000001 ETH"), "{text}");
+        assert!(text.contains(&format!("{big} BIG")), "{text}");
+    }
+
     #[test]
     fn nav_all_networks_render_one_row_each_and_failure_summary() {
         let mut app = pinned_app_with_checked_list();

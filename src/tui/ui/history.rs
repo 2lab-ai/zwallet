@@ -87,8 +87,11 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 } else {
                     NORMAL
                 };
+                // Aligned only while the value still fits whole: one amount with a very long
+                // integer part never cuts another.
                 let indent = if amounts.contains(&i) {
-                    AMOUNT_INDENT + widest.saturating_sub(whole(value.text()))
+                    let aligned = AMOUNT_INDENT + widest.saturating_sub(whole(value.text()));
+                    aligned.min(usize::from(inner.width).saturating_sub(value.text().len()))
                 } else {
                     0
                 };
