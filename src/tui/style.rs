@@ -55,7 +55,8 @@ pub const ACCENT_BOLD: Style = Style::new().fg(Color::Cyan).add_modifier(Modifie
 pub const TAB: Style = Style::new()
     .fg(Color::Cyan)
     .add_modifier(Modifier::REVERSED.union(Modifier::BOLD));
-/// What a key in the hint row does: `THEME.secondary()`.
+/// What `KeyHints` draws a key's action in: `THEME.secondary()`. zwallet redraws those spans in
+/// [`HINT`] (`ui::key_hints`), so no cell is drawn in it; it stays for the widget equality check.
 pub const SECONDARY: Style = Style::new().fg(Color::Gray);
 
 /// The chrome styles (10-tui-look.md F1): only in these may a [`FRAME_GLYPHS`] glyph pass the write
