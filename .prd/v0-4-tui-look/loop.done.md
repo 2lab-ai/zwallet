@@ -26,3 +26,25 @@ P0, a test call missing an argument, fixed in a3b376f). CI green on macOS and ub
 | L1.5 | screen text unchanged except frame glyphs and tab spacing | closed: the frame checks read screens through `style::ascii_chrome` and every existing layout assertion passes; hint rows keep their words (`every_hint_row_shows_all_its_hints_at_80`; one row too wide for two spaces falls back to one) | L1 | ✅ |
 | L1.6 | v0.2 test notes: grow back after shrink; bytes after the first `CSI ?1049l` checked | closed: `t9` grows the window back; `quit()` compares the bytes after the first `CSI ?1049l` with exactly `CSI ?25h`, after the pty reader ended | L1 | ✅ |
 | L1.7 | real-terminal QA 80x24 and 120x40 on L1's build, captures before and after | closed: the dispatcher's tmux harness on a scoped debug build of a3b376f (opt-level 3), s1–s7 at both sizes: 176/176 checks, 59/59 reachable coverage rows at both sizes; owner's daemon untouched, no QA daemon left, no traffic off loopback; before/after captures in the task thread. Not done: the ambiguous-wide capture (no terminal set that way here) | L1 | ✅ |
+
+## R2 — L2 closed (PR #73)
+
+L2 (the `?` action menu named by what each action does, then its key, then its CLI spelling; 2
+wallet's amounts aligned on the decimal point) merged as PR #73 (56d2f0d) on 2026-11-10, after
+trinity on the L2 adapter table and the code (astra-zhuge, grok-elon and fable-zhuge
+APPROVE-WITH-CHANGES; their P1s, three CLI spellings cut at 80 columns and one huge amount cutting
+the others, fixed in 31d8169). CI green on macOS and ubuntu at aecce04.
+
+### Closed rows
+
+| WU | Repo · branch | Scope | Owner | State |
+|---|---|---|---|---|
+| L2 | zwallet · `feat/tui-look-u2` | the action menu by label (label, key, `[cli spelling]`); 2 wallet's amounts aligned on the decimal point | coding agent + dispatcher gate | merged as PR #73 (56d2f0d), 2026-11-10: 9996fd4, 31d8169 (trinity), 116ef11, aecce04 |
+
+| ID | Acceptance | Gap | Source | Status |
+|---|---|---|---|---|
+| L2.1 | the menu shows each action's label; CLI spelling visible and filterable | closed: `the_menu_columns_keep_every_label_and_cli_spelling_whole_at_80` over the whole action table; the filter matches label or CLI spelling as before | L2 | ✅ |
+| L2.2 | balances aligned on the decimal point, cut visibly | closed: `nav_balance_amounts_line_up_on_the_decimal_point`, `nav_a_huge_amount_never_cuts_a_small_one` | L2 | ✅ |
+| L2.3 | outside sources, budgets and lines unchanged | closed: the CLI spelling and the typed filter stay `Outside::input`; every placement check passes | L2 | ✅ |
+| L2.4 | real-terminal QA 80x24 and 120x40, captures before and after | closed: the tmux harness on a scoped debug build of aecce04 (opt-level 3), s1–s7 at both sizes: 175/176 checks (s5–s7 run again after a session restart, 88/88); owner's daemon untouched, no QA daemon left, no traffic off loopback; before/after captures in the task thread. The one failure, `s2 80x24 Q`, is not L2's: the `qrcode` crate made that run's address a version 4 code, too big for 80x24; fixed by PR #74 (byte mode) | L2 | ✅ |
+

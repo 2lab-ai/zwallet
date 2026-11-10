@@ -1,6 +1,6 @@
 # v0.4 TUI look — loop
 
-Status: **in progress**, 2026-11-10. L1 merged as PR #72 (6787d08): [`loop.done.md`](loop.done.md) R1. Target = [`ssot.md`](ssot.md),
+Status: **in progress**, 2026-11-10. L1 merged as PR #72 (6787d08), L2 as PR #73 (56d2f0d): [`loop.done.md`](loop.done.md) R1, R2. Target = [`ssot.md`](ssot.md),
 [`../10-tui-look.md`](../10-tui-look.md) units L1–L3 and acceptance L1.1–L3.3. This file holds only
 open work; closed rows move to [`loop.done.md`](loop.done.md).
 
@@ -8,17 +8,12 @@ open work; closed rows move to [`loop.done.md`](loop.done.md).
 
 | WU | Repo · branch | Scope | Owner | State |
 |---|---|---|---|---|
-| L2 | zwallet · `feat/tui-look-u2` | the action menu by label (label, key, `[cli spelling]`); 2 wallet's amounts aligned on the decimal point | coding agent + dispatcher gate | in review |
-| L3 | zwallet · `feat/tui-look-u3` | review labels grey beside their values (send EVM and Tron, tools); labels type-checked as constants | coding agent + dispatcher gate | in progress |
+| L3 | zwallet · `feat/tui-look-u3` | review labels grey beside their values (send EVM and Tron, tools); labels type-checked as constants | coding agent + dispatcher gate | in review |
 
 ## Open gaps
 
 | ID | Acceptance | Gap | Source | Status |
 |---|---|---|---|---|
-| L2.1 | the menu shows each action's label; CLI spelling visible and filterable | L2 planned | L2 | 🟡 |
-| L2.2 | balances aligned on the decimal point, cut visibly | L2 planned | L2 | 🟡 |
-| L2.3 | outside sources, budgets and lines unchanged | L2 planned | L2 | 🟡 |
-| L2.4 | real-terminal QA 80x24 and 120x40, captures before and after | L2 planned | L2 | 🟡 |
 | L3.1 | reviews keep every field whole; confirm sends exactly the reviewed intent | L3 planned | L3 | 🟡 |
 | L3.2 | password popup keeps mask, purpose and refusal lines | L3 leaves it unchanged; a modal frame for it waits on the owner (see the L3 adapter table) | owner | 🚪 |
 | L3.3 | no outside value handed to a widget; adversarial strings through every adapter | L3 planned | L3 | 🟡 |
@@ -36,5 +31,5 @@ constraints; a capture gate per unit. Round 2 reviews the revised spec with L1's
 
 ## Next
 
-L2 in review (its adapter table passed trinity on 2026-11-10 with changes, written in). L3 starts
-from L2's merge, after its adapter table passes trinity.
+L3 in review (its adapter table passed trinity on 2026-11-10: two APPROVE, one APPROVE-WITH-CHANGES,
+the changes written in). The password popup's modal frame (L3.2) waits on the owner.
