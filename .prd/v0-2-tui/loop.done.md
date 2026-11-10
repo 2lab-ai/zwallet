@@ -234,3 +234,12 @@ stops that home's daemon and refreshes: 4 receive keeps the chains' rows and sho
 whole, a refresh tick later it still holds, `Q` draws no code, 2 wallet shows the error whole, and
 wallet.json gains no Tron address; opened with the password instead, the header shows the pin and
 `Q`'s code decodes (zbarimg) to the seed-derived T-address. The QA logs are kept off-repo.
+
+## R5 — the two open test notes closed (v0.4 L1, PR #72, 2026-11-10)
+
+The two notes of TUI-1c review rounds 1 and 2 (2026-10-28) moved out of [`loop.md`](loop.md):
+- `t9_on_a_pty_q_gives_the_terminal_back_in_canonical_mode_with_echo` now grows the window back
+  after shrinking it to 79x24 and sees the key list and the bar again, the warning gone.
+- `quit()` (tests/tui.rs) now also checks what is written after the first `CSI ?1049l`: once the
+  pty reader has ended, those bytes must be exactly the guard's `CSI ?25h`.
+Merged in PR #72 (6787d08); [`../v0-4-tui-look/loop.done.md`](../v0-4-tui-look/loop.done.md) R1, row L1.6.
