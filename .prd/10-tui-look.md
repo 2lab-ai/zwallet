@@ -88,6 +88,7 @@ lists exactly the styles the L1 chrome and widgets draw, composed as ratatui com
 | `ACCENT_BOLD` | fg `Cyan`, bold | `KeyHints`' keys (`accent()` + bold), the bar's chain |
 | `TAB` | reversed, fg `Cyan`, bold | `Tabs`' current label (`selected()` patched with `accent()`, + bold); no underline with `Hints::Off` |
 | `SECONDARY` | fg `Gray` | `KeyHints`' labels (`THEME.secondary()`) |
+| `LABEL` (L3) | fg `DarkGray` | a review row's label beside its value; equal to `BORDER` (`THEME.muted`), not a new frame style |
 
 A unit test asserts each constant equals the style its widget composes from `THEME` (the theme
 methods, composed as the widget composes them) and that no frame style equals `NORMAL`, `TITLE`,
@@ -139,10 +140,12 @@ view (`a`) stays one line per network.
 
 | Part | Widget | What zwallet hands it | Glyphs and styles | F1 / `FRAME` change |
 |---|---|---|---|---|
-| a review row with a label and a value (`ui/transfer.rs`, `ui/tron_transfer.rs`, `ui/tools.rs`) | none: `Row` | the label is a `&'static str` (the row helpers take nothing else, so a label built from a value does not compile); the value is the `Outside` it was | ASCII only; the label in `SECONDARY` when the row's style is `NORMAL` (`label_style`), else the row's style; the value in the row's style, as before | none |
+| a review row with a label and a value (`ui/transfer.rs`, `ui/tron_transfer.rs`, `ui/tools.rs`) | none: `Row` | the label is a `&'static str` (the row helpers take nothing else, so a label built from a value does not compile); the value is the `Outside` it was | ASCII only; the label in `LABEL` (fg `DarkGray`, `THEME.muted`, equal to `BORDER`, so a frame style) when the row's style is `NORMAL` (`label_style`), else the row's style; the value in the row's style, as before | none |
 | a tool row of zwallet's own text built at run time (`Argument 2`, `Decimals: 6`, the message metadata) | none: `Row` | code text from numbers and constants | ASCII only; its style as before (`HINT` or `NORMAL`), never a frame style | none |
 
-L3 changes no text, no row and no key; only the colour of a label beside a value. The password popup
+L3 changes no text, no row and no key; only the colour of a label beside a value. The label is dark
+grey, not `SECONDARY`'s Gray: the first QA capture showed Gray (ANSI 7) is the default text colour of
+many dark terminals, so the label looked like its value and L3 changed nothing on screen. The password popup
 stays as it is: a modal frame would move its mask and refusal rows, which the tests and the QA pin,
 for little gain; it is left for a later unit if the owner wants it. Toasts are left out for the same
 reason as in the L3 constraints above: an outcome row with a timer needs a clock, and the outcome

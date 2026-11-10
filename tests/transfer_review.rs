@@ -1246,7 +1246,7 @@ async fn tui_send_review_guard_labels_say_clear_blocked_or_override() {
     assert!(shown.contains("repeats 0 OVERRIDE"), "{shown}");
 }
 
-/// 10-tui-look.md L3: on the review, a row's label is grey (`SECONDARY`, a constant of the code)
+/// 10-tui-look.md L3: on the review, a row's label is dark grey (`LABEL`, a constant of the code)
 /// and its value keeps the style it had, never a frame style.
 #[tokio::test]
 async fn tui_review_labels_are_grey_and_values_keep_their_style() {
@@ -1278,7 +1278,7 @@ async fn tui_review_labels_are_grey_and_values_keep_their_style() {
             buffer[(at + label.len() as u16, y)].style(),
         );
         assert!(
-            style::is_frame(shown) && shown.fg == style::SECONDARY.fg,
+            style::is_frame(shown) && shown.fg == style::LABEL.fg,
             "{label}: {shown:?}"
         );
         assert!(!style::is_frame(value), "{label} value: {value:?}");

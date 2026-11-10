@@ -1171,7 +1171,7 @@ async fn tron_send_review_survives_a_tab_round_trip_and_sends_once() {
     assert_eq!(app.transfer().stage, Stage::Status, "{}", screen(&app));
 }
 
-/// 10-tui-look.md L3 on the Tron review: each label beside a value is grey (`SECONDARY`), and the
+/// 10-tui-look.md L3 on the Tron review: each label beside a value is dark grey (`LABEL`), and the
 /// value (the payee, the addresses, the amount) keeps a style that is not a frame style.
 #[tokio::test]
 async fn l3_tron_review_labels_are_grey_and_values_keep_their_style() {
@@ -1200,7 +1200,7 @@ async fn l3_tron_review_labels_are_grey_and_values_keep_their_style() {
         let shown = buffer[(at, y)].style();
         let value = buffer[(at + label.len() as u16, y)].style();
         assert!(
-            style::is_frame(shown) && shown.fg == style::SECONDARY.fg,
+            style::is_frame(shown) && shown.fg == style::LABEL.fg,
             "{label}: {shown:?}"
         );
         assert!(!style::is_frame(value), "{label} value: {value:?}");
