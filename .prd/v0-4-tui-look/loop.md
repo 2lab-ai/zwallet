@@ -20,7 +20,7 @@ open work; closed rows move to [`loop.done.md`](loop.done.md).
 | L2.3 | outside sources, budgets and lines unchanged | L2 planned | L2 | 🟡 |
 | L2.4 | real-terminal QA 80x24 and 120x40, captures before and after | L2 planned | L2 | 🟡 |
 | L3.1 | reviews keep every field whole; confirm sends exactly the reviewed intent | L3 planned | L3 | 🟡 |
-| L3.2 | password popup keeps mask, purpose and refusal lines | L3 leaves it unchanged (no modal frame; see the L3 adapter table) | L3 | 🟡 |
+| L3.2 | password popup keeps mask, purpose and refusal lines | L3 leaves it unchanged; a modal frame for it waits on the owner (see the L3 adapter table) | owner | 🚪 |
 | L3.3 | no outside value handed to a widget; adversarial strings through every adapter | L3 planned | L3 | 🟡 |
 | L3.4 | real-terminal QA 80x24 and 120x40, captures before and after | L3 planned | L3 | 🟡 |
 

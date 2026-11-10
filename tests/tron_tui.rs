@@ -1170,3 +1170,39 @@ async fn tron_send_review_survives_a_tab_round_trip_and_sends_once() {
     assert_eq!(f.count(), 1);
     assert_eq!(app.transfer().stage, Stage::Status, "{}", screen(&app));
 }
+
+/// 10-tui-look.md L3 on the Tron review: each label beside a value is grey (`SECONDARY`), and the
+/// value (the payee, the addresses, the amount) keeps a style that is not a frame style.
+#[tokio::test]
+async fn l3_tron_review_labels_are_grey_and_values_keep_their_style() {
+    use ratatui::{Terminal, backend::TestBackend};
+    use zwallet::tui::style;
+    let f = Fixture::new(0);
+    let n = Node::new();
+    let mut app = app(&f, &n);
+    review(&mut app, &f, false).await;
+    let mut t = Terminal::new(FilteredBackend::new(TestBackend::new(80, 24))).unwrap();
+    t.draw(|frame| {
+        ui::draw(frame, &app);
+    })
+    .unwrap();
+    let buffer = t.backend().inner().buffer();
+    let text = |y: u16| -> String {
+        (0..80)
+            .map(|x| style::ascii_chrome(&buffer[(x, y)]))
+            .collect()
+    };
+    for label in ["To: ", "From: ", "Amount: "] {
+        let y = (0..24)
+            .find(|&y| text(y).contains(label))
+            .unwrap_or_else(|| panic!("no {label:?} row"));
+        let at = text(y).find(label).unwrap() as u16;
+        let shown = buffer[(at, y)].style();
+        let value = buffer[(at + label.len() as u16, y)].style();
+        assert!(
+            style::is_frame(shown) && shown.fg == style::SECONDARY.fg,
+            "{label}: {shown:?}"
+        );
+        assert!(!style::is_frame(value), "{label} value: {value:?}");
+    }
+}
