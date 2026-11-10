@@ -79,7 +79,8 @@ the TUI draws as a constant. `style::THEME` is zwallet's own `Theme` value: the 
 four changes, because `Theme::ansi()` itself uses yellow and red for `wait`, `warn`, `fail` and
 `crit`, which equal `WARNING` and `ERROR`: `wait` and `warn` are `LightYellow`, `fail` and `crit`
 are `LightRed`, and `done` and `ok` are `Reset` (no green anywhere in zwallet's theme). `FRAME`
-lists exactly the styles the L1 chrome and widgets draw, composed as ratatui composes them:
+lists exactly the styles the L1 widgets compose, as ratatui composes them (since #77 zwallet redraws
+`KeyHints`' `SECONDARY` and `BORDER` spans in `HINT`, so no cell is drawn in `SECONDARY`):
 
 | Constant | Style | Drawn by |
 |---|---|---|

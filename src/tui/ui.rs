@@ -255,11 +255,12 @@ fn tab_line(current: Tab) -> twolab_tui::tabs::Tabs<'static> {
 /// does, and a note, in [`HINT`] (dim), as before the widget. `KeyHints` draws those in
 /// `THEME.secondary()` (Gray) and `THEME.dim()` (DarkGray): Gray is nearly the background of a
 /// light terminal and DarkGray the background of Solarized Dark, while dim is the terminal's own
-/// text colour, fainter, on every palette. Pinned to `KeyGlyphs::Ascii`: arrows are spelled out. Two spaces between
-/// hints, or one when two would not fit the row, so no hint is dropped; every hint row is
-/// zwallet's own and fits 80 columns with one space, as `every_hint_row_shows_all_its_hints_at_80`
-/// checks. (A row that still did not fit would drop whole hints and end in `... ? more`; a lone
-/// hint wider than the row would end in `…`, which the write point replaces: it fails closed.)
+/// text colour, fainter, on every palette. Pinned to `KeyGlyphs::Ascii`: arrows are spelled out.
+/// Two spaces between hints, or one when two would not fit the row, so no hint is dropped; every
+/// hint row is zwallet's own and fits 80 columns with one space, as
+/// `every_hint_row_shows_all_its_hints_at_80` checks. (A row that still did not fit would drop
+/// whole hints and end in `... ? more`; a lone hint wider than the row would end in `…`, which the
+/// write point replaces: it fails closed.)
 fn key_hints(words: &str, width: u16) -> Paragraph<'static> {
     use twolab_tui::key_hints::{KeyGlyphs, KeyHint, KeyHints};
     let hints: Vec<KeyHint> = words
@@ -284,19 +285,13 @@ fn key_hints(words: &str, width: u16) -> Paragraph<'static> {
     };
     let wide = row("  ");
     let fits = wide.fit(usize::from(width)).dropped == 0;
-    let line = if fits { wide } else { row(" ") }.line(width);
-    let spans: Vec<Span<'static>> = line
-        .spans
-        .into_iter()
-        .map(|span| {
-            if span.style == SECONDARY || span.style == BORDER {
-                Span::styled(span.content, HINT)
-            } else {
-                span
-            }
-        })
-        .collect();
-    Paragraph::new(Line::from(spans))
+    let mut line = if fits { wide } else { row(" ") }.line(width);
+    for span in &mut line.spans {
+        if span.style == SECONDARY || span.style == BORDER {
+            span.style = HINT;
+        }
+    }
+    Paragraph::new(line)
 }
 
 /// Whether a hint's first word names a key: one character (`n`, `?`, `/`), a capitalised key name
@@ -985,7 +980,7 @@ impl Row {
 mod tests {
     //! The widget adapters of 10-tui-look.md F1: each `twolab-tui` widget the TUI draws gets only
     //! zwallet's own words, draws them whole at 80 columns, and draws nothing the write point would
-    //! replace, in no style but `NORMAL` and the frame styles.
+    //! replace, in no style but `NORMAL`, `HINT` and the frame styles.
     use super::*;
     use crate::core::terminal::terminal_ok;
     use crate::tui::style::{ascii_chrome, frame_glyph, is_frame};
