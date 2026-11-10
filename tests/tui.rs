@@ -2151,7 +2151,7 @@ mod navigation {
                 address: A.into(),
                 symbol: "DAI".into(),
                 decimals: 18,
-                raw: Ok(U256::from(42u64 * 10u64.pow(18))),
+                raw: Ok(U256::from(42u64) * U256::from(10u64).pow(U256::from(18u64))),
             },
         ];
         app.update(Msg::Balances(
@@ -2199,7 +2199,8 @@ mod navigation {
     #[test]
     fn nav_a_huge_amount_never_cuts_a_small_one() {
         let mut app = pinned_app_with_checked_list();
-        let big = U256::from(10u64).pow(U256::from(69u64));
+        // 60 digits: within an amount row's own budget (72), beside a 24-character fraction.
+        let big = U256::from(10u64).pow(U256::from(59u64));
         let tokens = vec![chains::TokenBalance {
             address: A.into(),
             symbol: "BIG".into(),

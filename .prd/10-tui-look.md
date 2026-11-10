@@ -128,11 +128,11 @@ address or a trust word.
 
 | Part | Widget | What zwallet hands it | Glyphs and styles | F1 / `FRAME` change |
 |---|---|---|---|---|
-| the action menu | none: every row is a `Row` | each action's label, key and CLI spelling are constants of the action table (`src/tui/actions.rs`); the CLI spelling and the filter are drawn as `Outside::input`, as today | ASCII only; label in `NORMAL`, key in `ACCENT_BOLD` (a constant, the only frame-style text), CLI spelling in `HINT`; the selected row all in `SELECTED`. At 80 columns the widest label (35) and CLI spelling (31) stay whole; a key wider than 9 is cut with `...` on its row and drawn whole on the detail line with the action's tab | none |
+| the action menu | none: every row is a `Row` | each action's label and key are constants of the action table (`src/tui/actions.rs`); the CLI spelling stays an `Outside::input` in brackets and the typed filter stays `Outside::input`, as today (the placement checks keep telling a typed filter from the spelling it matches) | ASCII only; label in `NORMAL`, key in `ACCENT_BOLD` (a constant, the only frame-style text), CLI spelling in `HINT`; the selected row all in `SELECTED`. At 80 columns the widest label (35) and CLI spelling (31, 33 with its brackets) stay whole; a key wider than 8 is cut with `...` on its row and drawn whole on the detail line with the action's tab | none |
 | 2 wallet's balances | none: `Row`, padded so the decimal points line up (the idea of `twolab_tui::ledger`, not the widget: `ledger::Amount` takes an `f64` and a currency sign, which would lose a token amount's digits) | each amount row is one `Outside` (`Source::Detail`, as today), drawn whole by `Row` after zwallet's own spaces; the indent gives way when it would cut a value | ASCII only; `NORMAL`, or `SELECTED` for the focused row | none |
 
 The menu keeps its order, its filter (CLI spelling or label) and its keys: only what each row says
-changes, from `NN key [cli spelling] tab N` to `what it does  key  cli spelling`. The every-network
+changes, from `NN key [cli spelling] tab N` to `what it does  key  [cli spelling]`. The every-network
 view (`a`) stays one line per network.
 
 ## Acceptance

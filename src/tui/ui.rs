@@ -48,7 +48,7 @@ fn pane_block<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
 /// The menu's key column. A longer key (`p d g w s x b R`, `calldata-cap`) is cut with `...` on
 /// its row and drawn whole on the detail line, so the label and the CLI spelling stay whole at 80
 /// columns.
-const MENU_KEY: usize = 9;
+const MENU_KEY: usize = 8;
 
 /// The menu's label column: the widest label of the action table.
 const MENU_LABEL: usize = 35;
@@ -397,14 +397,14 @@ fn popup_pane(frame: &mut Frame, area: Rect, app: &App, popup: &Popup, placed: &
                 };
                 Row::default()
                     .text(
-                        &format!(" {:<width$} ", action.label, width = MENU_LABEL),
+                        &format!("{:<width$} ", action.label, width = MENU_LABEL),
                         label,
                     )
                     .text(
                         &format!("{:<width$} ", menu_key(action.key), width = MENU_KEY),
                         key,
                     )
-                    .outside(&Outside::input(action.alias), cli)
+                    .outside(&Outside::input(&format!("[{}]", action.alias)), cli)
                     .draw(frame, line(inner, y as u16 + 1), placed);
             }
             if let Some(action) = rows.get(menu.selected_index()) {
@@ -1138,9 +1138,10 @@ mod tests {
         let label = actions.iter().map(|a| a.label.len()).max().unwrap();
         let alias = actions.iter().map(|a| a.alias.len()).max().unwrap();
         assert_eq!(label, MENU_LABEL);
-        // The widest label, the key column and the widest CLI spelling in the 78 inner columns.
+        // The widest label, the key column and the widest CLI spelling in its brackets in the 78
+        // inner columns.
         assert!(
-            1 + MENU_LABEL + 1 + MENU_KEY + 1 + alias <= usize::from(MIN_WIDTH - 2),
+            MENU_LABEL + 1 + MENU_KEY + 1 + alias + 2 <= usize::from(MIN_WIDTH - 2),
             "{alias}"
         );
         for action in actions {
