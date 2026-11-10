@@ -20,7 +20,7 @@ pub(super) fn hint(app: &App) -> &'static str {
     }
     match &app.whitelist_ui().stage {
         Stage::List => {
-            "a add C contract d remove f fee n/t/b caps m msgs R reset V verify ? actions"
+            "a add  C contract  d remove  f fee  n/t/b caps  m msgs  R reset  V verify  ? actions"
         }
         Stage::Form(_) => "Tab/Up/Down fields   Enter next/review   Esc cancel   Ctrl-C quit",
         Stage::Review(_) => {

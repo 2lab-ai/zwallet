@@ -107,6 +107,14 @@ fn checked_frame(screen: &mut Screen, app: &App) -> (Vec<String>, Vec<Placed>) {
         }
     }
     let rows: Vec<String> = (0..buffer.area.height).map(|y| row(buffer, y)).collect();
+    // 10-tui-look.md F1: no outside value is drawn in a frame style.
+    for p in &placed {
+        assert!(
+            !style::frame_style_in(buffer, p.area),
+            "an outside value in a frame style at {:?}",
+            p.area
+        );
+    }
     for p in &placed {
         assert_placed(&rows, p, &placed);
     }
@@ -952,8 +960,9 @@ fn quit(tui: &mut PtyChild) -> Frame {
     assert_ne!(modes & libc::ECHO, 0, "echo is off");
     let last = tui.final_frame(PTY_WAIT);
     assert!(last.stray.is_empty() && last.pending.is_empty(), "{last}");
-    // What is written after the terminal is given back (the first `CSI ?1049l`) holds no stray
-    // byte and no unfinished sequence either: on a clean quit, only the guard's `CSI ?25h`.
+    // What is written after the terminal is given back (the first `CSI ?1049l`): on a clean quit
+    // exactly the guard's `CSI ?25h`, byte for byte. Compared as bytes, not as a parsed screen, so
+    // text followed by a clear (`leaked\x1b[2J`) cannot hide in it.
     let after = |output: &[u8]| {
         let leave = output
             .windows(common::LEAVE_ALTERNATE_SCREEN.len())
@@ -963,14 +972,10 @@ fn quit(tui: &mut PtyChild) -> Frame {
     };
     let output = tui.wait_output(PTY_WAIT, |output| after(output).ends_with(b"\x1b[?25h"));
     let tail = after(&output);
-    let given_back = Frame::parse(&tail, (200, 60));
-    assert!(
-        given_back.stray.is_empty() && given_back.pending.is_empty(),
-        "after the terminal was given back: {given_back}"
-    );
-    assert!(
-        given_back.rows.iter().all(|r| r.trim().is_empty()),
-        "text after the terminal was given back: {:?}",
+    assert_eq!(
+        tail,
+        b"\x1b[?25h",
+        "after the terminal was given back: {:?}",
         String::from_utf8_lossy(&tail)
     );
     last

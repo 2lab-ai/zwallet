@@ -509,6 +509,14 @@ fn frame(app: &App, width: u16, height: u16) -> String {
                 .all(|c| c.is_ascii_graphic() || c == ' ' || c == '₮')
         );
     }
+    // 10-tui-look.md F1: no outside value is drawn in a frame style.
+    for p in &placed {
+        assert!(
+            !style::frame_style_in(buffer, p.area),
+            "an outside value in a frame style at {:?}",
+            p.area
+        );
+    }
     for p in placed {
         assert!(p.area.right() <= width && p.area.bottom() <= height);
         assert!(p.outside.text().is_ascii());

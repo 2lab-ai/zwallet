@@ -923,6 +923,14 @@ fn screen(app: &App) -> String {
         assert!(shown.bytes().all(|b| (0x20..=0x7e).contains(&b)));
         assert!(styles.contains(&cell.style()), "style: {:?}", cell.style());
     }
+    // 10-tui-look.md F1: no outside value is drawn in a frame style.
+    for p in &placed {
+        assert!(
+            !style::frame_style_in(buffer, p.area),
+            "an outside value in a frame style at {:?}",
+            p.area
+        );
+    }
     for p in placed {
         // These contract budgets are independent of the production Source::budget values.
         let max = match p.outside.source() {

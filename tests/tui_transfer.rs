@@ -165,6 +165,14 @@ mod warmup_sync {
             assert!(shown.bytes().all(|b| (0x20..=0x7e).contains(&b)));
             assert!(styles.contains(&cell.style()));
         }
+        // 10-tui-look.md F1: no outside value is drawn in a frame style.
+        for p in &placed {
+            assert!(
+                !style::frame_style_in(buffer, p.area),
+                "an outside value in a frame style at {:?}",
+                p.area
+            );
+        }
         for p in placed {
             let budget = match p.outside.source() {
                 Source::WhitelistName | Source::KeyName | Source::RpcHost => 32,

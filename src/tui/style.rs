@@ -108,6 +108,18 @@ pub fn frame_glyph(c: char, style: Style) -> bool {
     FRAME_GLYPHS.contains(&c) && is_frame(style)
 }
 
+/// Whether any cell of `area` in `buffer` holds a frame style. Every frame check asserts it is
+/// false for every placed outside value (10-tui-look.md F1 point 1, L1.3).
+pub fn frame_style_in(buffer: &ratatui::buffer::Buffer, area: ratatui::layout::Rect) -> bool {
+    (area.top()..area.bottom())
+        .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
+        .any(|(x, y)| {
+            buffer
+                .cell((x, y))
+                .is_some_and(|cell| is_frame(cell.style()))
+        })
+}
+
 /// What `cell` shows in the old ASCII chrome: a frame glyph in a frame style as `+`, `-` or `|`,
 /// anything else as it is. The tests read screens through this, so a layout check reads the rows
 /// it read before the rounded frame, one byte per column (10-tui-look.md L1.5).

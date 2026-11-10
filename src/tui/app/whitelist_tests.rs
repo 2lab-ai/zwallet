@@ -80,6 +80,14 @@ fn frame(app: &App, name: &str) -> String {
         assert!(row.bytes().all(|b| (0x20..=0x7e).contains(&b)));
     }
     let mut locations = Vec::new();
+    // 10-tui-look.md F1: no outside value is drawn in a frame style.
+    for p in &placed {
+        assert!(
+            !style::frame_style_in(buf, p.area),
+            "an outside value in a frame style at {:?}",
+            p.area
+        );
+    }
     for p in placed {
         // These contract budgets are independent of the production Source::budget values.
         let max = match p.outside.source() {

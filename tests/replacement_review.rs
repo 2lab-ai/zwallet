@@ -869,6 +869,14 @@ fn frame(app: &App) -> String {
                 .collect()
         })
         .collect();
+    // 10-tui-look.md F1: no outside value is drawn in a frame style.
+    for p in &placed {
+        assert!(
+            !style::frame_style_in(buffer, p.area),
+            "an outside value in a frame style at {:?}",
+            p.area
+        );
+    }
     for p in placed {
         let max = match p.outside.source() {
             Source::WhitelistName | Source::KeyName | Source::RpcHost => 32,

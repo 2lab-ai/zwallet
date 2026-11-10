@@ -210,7 +210,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<Placed> {
                 .text(words, HINT)
                 .draw(frame, hint, &mut placed)
         }
-        Hint::Words(words) => frame.render_widget(key_hints(words), hint),
+        Hint::Words(words) => frame.render_widget(key_hints(words, hint.width), hint),
     }
     status_bar(frame, [bar1, bar2], app, &mut placed);
     placed
@@ -235,9 +235,12 @@ fn tab_line(current: Tab) -> twolab_tui::tabs::Tabs<'static> {
 
 /// A hint row of zwallet's own `words` (`key what  key what  ...`), drawn by `twolab-tui`'s
 /// `KeyHints`: each key in [`ACCENT_BOLD`], what it does in `SECONDARY`, two spaces between hints
-/// (10-tui-look.md F1, the widget adapter rule). Pinned to `KeyGlyphs::Ascii`: arrows are spelled out
-/// and a row too narrow ends in `... ? more`, never `…`.
-fn key_hints(words: &str) -> Paragraph<'static> {
+/// (10-tui-look.md F1, the widget adapter rule). Pinned to `KeyGlyphs::Ascii`: arrows are spelled
+/// out. Laid out at the row's width: a row that did not fit would drop whole hints and end in
+/// `... ? more`; every hint row today is zwallet's own and fits 80 columns, as the tests show. (A
+/// lone hint wider than the row would end in `…`, which the write point replaces: it fails
+/// closed, and the frame checks count it.)
+fn key_hints(words: &str, width: u16) -> Paragraph<'static> {
     use twolab_tui::key_hints::KeyHint;
     let hints = words
         .split("  ")
@@ -255,7 +258,7 @@ fn key_hints(words: &str) -> Paragraph<'static> {
     let line = twolab_tui::key_hints::KeyHints::new(hints)
         .glyphs(twolab_tui::key_hints::KeyGlyphs::Ascii)
         .theme(THEME)
-        .line(u16::MAX);
+        .line(width);
     Paragraph::new(line)
 }
 
@@ -856,6 +859,17 @@ enum Hint {
     Row(Row),
 }
 
+/// The style an outside value is drawn in when code asks for `style`: never a frame style
+/// (10-tui-look.md F1 point 1). A frame style becomes [`NORMAL`] in every build, so a frame glyph
+/// the value might hold is replaced by the write point.
+fn outside_style(style: Style) -> Style {
+    if crate::tui::style::is_frame(style) {
+        NORMAL
+    } else {
+        style
+    }
+}
+
 /// A piece of a [`Row`]: zwallet's own text, or a value from outside.
 enum Part {
     Text(String),
@@ -883,12 +897,8 @@ impl Row {
             !crate::tui::style::is_frame(style),
             "an outside value in a frame style"
         );
-        let style = if crate::tui::style::is_frame(style) {
-            NORMAL
-        } else {
-            style
-        };
-        self.parts.push((Part::Outside(value.clone()), style));
+        self.parts
+            .push((Part::Outside(value.clone()), outside_style(style)));
         self
     }
 
@@ -1019,7 +1029,7 @@ mod tests {
                 "Enter apply/check  Esc cancel  password input is never echoed",
             ),
         ] {
-            let buffer = drawn(key_hints(words));
+            let buffer = drawn(key_hints(words, MIN_WIDTH));
             assert_eq!(checked(&buffer).trim_end(), shown);
             // A key is drawn bold cyan, a note dim: the first cell is a key's.
             assert_eq!(buffer[(0, 0)].style().fg, ACCENT_BOLD.fg);
@@ -1032,8 +1042,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "an outside value in a frame style")]
-    fn an_outside_value_in_a_frame_style_is_refused() {
+    fn an_outside_value_in_a_frame_style_panics_in_a_debug_build() {
         let _ = Row::default().outside(&Outside::input("x"), ACCENT);
+    }
+
+    #[test]
+    fn an_outside_value_is_never_drawn_in_a_frame_style_in_any_build() {
+        for frame in crate::tui::style::FRAME {
+            assert_eq!(outside_style(frame), NORMAL, "{frame:?}");
+        }
+        for text in [NORMAL, TITLE, SELECTED, HINT, WARNING, ERROR] {
+            assert_eq!(outside_style(text), text);
+        }
     }
 }

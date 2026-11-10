@@ -68,7 +68,8 @@ or fundable):
    verified", `WARNING` for an impostor).
 
 **Widget configuration, pinned.** `KeyHints` uses `KeyGlyphs::Ascii` (arrows spelled out, the
-overflow marker `...`, never `…`). `Tabs` uses `Hints::Off`, the divider ` │ `, no scroll buttons,
+overflow marker `...`) and is laid out at the row's width; every hint row is zwallet's own and fits,
+and a lone hint wider than the row would end in `…`, which the write point replaces (fails closed). `Tabs` uses `Hints::Off`, the divider ` │ `, no scroll buttons,
 no drop marker and no action; its seven labels take 75 of the 80 columns, so it never overflows (a
 test draws it at 80 columns and asserts every label is whole and no `‹ ›` is drawn).
 
@@ -88,9 +89,10 @@ lists exactly the styles the L1 chrome and widgets draw, composed as ratatui com
 | `TAB` | reversed, fg `Cyan`, bold | `Tabs`' current label (`selected()` patched with `accent()`, + bold); no underline with `Hints::Off` |
 | `SECONDARY` | fg `Gray` | `KeyHints`' labels (`THEME.secondary()`) |
 
-A unit test asserts each constant equals what its widget draws with `THEME` (rendered into a
-buffer, compared cell by cell) and that no frame style equals `NORMAL`, `TITLE`, `SELECTED`, `HINT`,
-`WARNING`, `ERROR` or `QR`. `style::ALL` is the old seven plus `FRAME`, so every frame test's rule 2
+A unit test asserts each constant equals the style its widget composes from `THEME` (the theme
+methods, composed as the widget composes them) and that no frame style equals `NORMAL`, `TITLE`,
+`SELECTED`, `HINT`, `WARNING`, `ERROR` or `QR`; the adapter tests render `Tabs` and `KeyHints` into a
+buffer and check every cell's glyph and style. `style::ALL` is the old seven plus `FRAME`, so every frame test's rule 2
 check covers them. Under `NO_COLOR` crossterm writes no colour; bold, reverse and the glyphs keep
 the meaning. Rule 2's sentence "each cell carries exactly one of them" stays true of the result: a
 widget's patched style is one of the constants above, which the cell check proves.
