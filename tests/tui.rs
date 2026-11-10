@@ -187,6 +187,8 @@ fn expected_qr(text: &str) -> Vec<Vec<bool>> {
             QrCode::with_bits(bits, EcLevel::M).ok()
         })
         .unwrap();
+    // Every EVM and Tron address is a version 3 code (`src/qr.rs`).
+    assert_eq!(code.width(), 29, "{text}");
     let (width, modules) = (code.width(), code.to_colors());
     let size = width + 2 * QUIET;
     let dark = |x: usize, y: usize| {

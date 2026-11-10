@@ -28,9 +28,10 @@ pub fn render(text: &str, color: bool) -> Option<String> {
 }
 
 /// `text` in byte mode at level M, at the smallest version that holds it; `None` when none does.
-/// The crate's own encoder splits a text into numeric, alphanumeric and byte runs, and for some
-/// EIP-55 addresses (`0xc7C0fF38e4e696E1cB88784BDc609caA19e1a9Bd`) its split costs more bits than
-/// byte mode, so the code grows to version 4 (41 columns, 21 lines) and no longer fits 80x24.
+/// The crate's own encoder splits a text into numeric, alphanumeric and byte runs, and for about
+/// one EIP-55 address in three (`0xc7C0fF38e4e696E1cB88784BDc609caA19e1a9Bd`) its split costs more
+/// bits than byte mode, so the code grows to version 4 (41 columns, 21 lines) and no longer fits
+/// 80x24.
 /// Byte mode holds any 42-byte address in version 3.
 fn code(text: &str) -> Option<QrCode> {
     (1..=40).find_map(|version| {
@@ -202,7 +203,8 @@ mod tests {
 
     #[test]
     fn every_address_is_a_version_3_code_whatever_its_digits() {
-        // The crate's mixed-mode split made these two version 4 (41 columns): no code at 80x24.
+        // The crate's mixed-mode split made the first version 4 (41 columns: no code at 80x24)
+        // and the all-digit ones version 2; every address is now the same version 3 code.
         for address in [
             "0xc7C0fF38e4e696E1cB88784BDc609caA19e1a9Bd",
             "0x1234567890123456789012345678901234567890",
