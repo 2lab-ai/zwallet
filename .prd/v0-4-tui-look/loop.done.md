@@ -48,3 +48,31 @@ the others, fixed in 31d8169). CI green on macOS and ubuntu at aecce04.
 | L2.3 | outside sources, budgets and lines unchanged | closed: the CLI spelling and the typed filter stay `Outside::input`; every placement check passes | L2 | ✅ |
 | L2.4 | real-terminal QA 80x24 and 120x40, captures before and after | closed: the tmux harness on a scoped debug build of aecce04 (opt-level 3), s1–s7 at both sizes: 175/176 checks (s5–s7 run again after a session restart, 88/88); owner's daemon untouched, no QA daemon left, no traffic off loopback; before/after captures in the task thread. The one failure, `s2 80x24 Q`, is not L2's: the `qrcode` crate made that run's address a version 4 code, too big for 80x24; fixed by PR #74 (byte mode) | L2 | ✅ |
 
+## R3 — L3 closed (PR #75), two fixes found by its QA (PR #74, PR #77)
+
+L3 (review labels dim beside their values on the send reviews, EVM and Tron, and the tool rows;
+labels typed `&'static str`) merged as PR #75 (67335b5) on 2026-11-10. Trinity on the L3 adapter
+table and code: astra-zhuge and grok-elon APPROVE, fable-zhuge APPROVE-WITH-CHANGES, no P0/P1. The
+label colour then changed twice on evidence: the first capture showed `SECONDARY` (Gray) drew no
+visible change on a dark default and almost vanished on a light terminal (851e4bc moved to
+DarkGray); fable-zhuge on 851e4bc found DarkGray is Solarized Dark's background, so `To:`/`From:`
+would vanish (97a65c3 moved to `HINT`, dim). CI green on macOS and ubuntu at 97a65c3.
+
+Found by the QA of L2 and L3 and fixed in their own PRs:
+- PR #74 (4b797ea): the `qrcode` crate's mixed-mode encoder made about one EIP-55 address in three a
+  version 4 code (41 columns), so 4 receive showed no QR at 80x24; byte mode makes every address
+  version 3. `zworkflow:code-reviewer` APPROVE (20,000 random addresses: 31% before, 0% after).
+- PR #77 (9884018): L1's hint row drew what a key does in Gray (`#bfbfbf` on a white Terminal.app) and its
+  notes in DarkGray; it now redraws both in `HINT`, as before L1. `zworkflow:code-reviewer` APPROVE.
+
+### Closed rows
+
+| WU | Repo · branch | Scope | Owner | State |
+|---|---|---|---|---|
+| L3 | zwallet · `feat/tui-look-u3` | review labels dim beside their values (send EVM and Tron, tools); labels type-checked as constants | coding agent + dispatcher gate | merged as PR #75 (67335b5), 2026-11-10: ce8ba00, dd591b0 (trinity), 4391178 (L2 ledger), 851e4bc, 97a65c3 (fable-zhuge) |
+
+| ID | Acceptance | Gap | Source | Status |
+|---|---|---|---|---|
+| L3.1 | reviews keep every field whole; confirm sends exactly the reviewed intent | closed: no text, row or key changed; `tests/transfer_review.rs` 25/25 and `tests/tron_tui.rs` 21/21; QA s3 and s6 check one signed tx equal to the review (mock log) | L3 | ✅ |
+| L3.3 | no outside value handed to a widget; adversarial strings through every adapter | closed: labels reach `label_style` only as `&'static str`; values stay `Row::outside` in their old style; `tui_review_labels_are_dim_and_values_keep_their_style`, `l3_tron_review_labels_are_dim_and_values_keep_their_style` | L3 | ✅ |
+| L3.4 | real-terminal QA 80x24 and 120x40, captures before and after | closed: the tmux harness on eaf25d2 (L3 + #74) and on 3afd636 (L3 + #74 + #77, whose tree main 9884018 has byte for byte), s1–s7 at both sizes: 176/176 each; owner's daemon untouched, no QA daemon left, no traffic off loopback; before/after of the send review and the hint row rendered in three palettes (iTerm2 dark, Terminal.app light, Solarized Dark) in the task thread | L3 | ✅ |
