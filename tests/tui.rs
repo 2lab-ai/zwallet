@@ -2135,6 +2135,65 @@ mod navigation {
         assert!(text.contains("BAD error:"));
     }
 
+    /// 10-tui-look.md L2.2: 2 wallet's amounts sit under their heading with their decimal points
+    /// in one column, a whole amount's last digit just before it; each value is still drawn whole.
+    #[test]
+    fn nav_balance_amounts_line_up_on_the_decimal_point() {
+        let mut app = pinned_app_with_checked_list();
+        let tokens = vec![
+            chains::TokenBalance {
+                address: A.into(),
+                symbol: "USDC".into(),
+                decimals: 6,
+                raw: Ok(U256::from(1_234_500_000u64)),
+            },
+            chains::TokenBalance {
+                address: A.into(),
+                symbol: "DAI".into(),
+                decimals: 18,
+                raw: Ok(U256::from(42u64 * 10u64.pow(18))),
+            },
+        ];
+        app.update(Msg::Balances(
+            app.generation(),
+            "a".into(),
+            Ok(wallet::ChainBalances {
+                activated: None,
+                warning: None,
+                chain: chains::find("ethereum").unwrap(),
+                key: "a".into(),
+                address: A.into(),
+                trust: Trust::Locked,
+                native: native(1_500_000_000_000_000_000),
+                tokens,
+            }),
+        ));
+        let rows = checked_frame(&mut screen(80, 24), &app).0;
+        let row = |value: &str| {
+            rows.iter()
+                .find(|r| r.contains(value))
+                .unwrap_or_else(|| panic!("{value} not shown:\n{}", rows.join("\n")))
+                .clone()
+        };
+        let heading = row("Ethereum balances");
+        let column =
+            |value: &str, at: &str| row(value).find(value).unwrap() + value.find(at).unwrap();
+        // The decimal point of each fraction, and the space after a whole amount, in one column.
+        let points = [
+            column("1.5 ETH", "."),
+            column("1234.5 USDC", "."),
+            column("42 DAI", " "),
+        ];
+        assert!(
+            points.iter().all(|&p| p == points[0]),
+            "{points:?}\n{}",
+            rows.join("\n")
+        );
+        // Indented under the heading: the widest amount starts two columns in.
+        let start = heading.find("Ethereum").unwrap();
+        assert_eq!(row("1234.5 USDC").find("1234.5").unwrap(), start + 2);
+    }
+
     #[test]
     fn nav_all_networks_render_one_row_each_and_failure_summary() {
         let mut app = pinned_app_with_checked_list();
