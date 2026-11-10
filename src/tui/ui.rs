@@ -19,7 +19,7 @@ use crate::tui::app::{
     TrustLine,
 };
 use crate::tui::style::{
-    ACCENT, ACCENT_BOLD, BORDER, ERROR, HINT, NORMAL, SELECTED, THEME, TITLE, WARNING,
+    ACCENT, ACCENT_BOLD, BORDER, ERROR, HINT, NORMAL, SECONDARY, SELECTED, THEME, TITLE, WARNING,
 };
 use crate::tui::text::{Outside, Source};
 use ratatui::Frame;
@@ -251,8 +251,11 @@ fn tab_line(current: Tab) -> twolab_tui::tabs::Tabs<'static> {
 }
 
 /// A hint row of zwallet's own `words` (`key what  key what  ...`), drawn by `twolab-tui`'s
-/// `KeyHints`: each key in [`ACCENT_BOLD`], what it does in `SECONDARY` (10-tui-look.md F1, the
-/// widget adapter rule). Pinned to `KeyGlyphs::Ascii`: arrows are spelled out. Two spaces between
+/// `KeyHints`: each key in [`ACCENT_BOLD`] (10-tui-look.md F1, the widget adapter rule); what it
+/// does, and a note, in [`HINT`] (dim), as before the widget. `KeyHints` draws those in
+/// `THEME.secondary()` (Gray) and `THEME.dim()` (DarkGray): Gray is nearly the background of a
+/// light terminal and DarkGray the background of Solarized Dark, while dim is the terminal's own
+/// text colour, fainter, on every palette. Pinned to `KeyGlyphs::Ascii`: arrows are spelled out. Two spaces between
 /// hints, or one when two would not fit the row, so no hint is dropped; every hint row is
 /// zwallet's own and fits 80 columns with one space, as `every_hint_row_shows_all_its_hints_at_80`
 /// checks. (A row that still did not fit would drop whole hints and end in `... ? more`; a lone
@@ -281,7 +284,19 @@ fn key_hints(words: &str, width: u16) -> Paragraph<'static> {
     };
     let wide = row("  ");
     let fits = wide.fit(usize::from(width)).dropped == 0;
-    Paragraph::new(if fits { wide } else { row(" ") }.line(width))
+    let line = if fits { wide } else { row(" ") }.line(width);
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .into_iter()
+        .map(|span| {
+            if span.style == SECONDARY || span.style == BORDER {
+                Span::styled(span.content, HINT)
+            } else {
+                span
+            }
+        })
+        .collect();
+    Paragraph::new(Line::from(spans))
 }
 
 /// Whether a hint's first word names a key: one character (`n`, `?`, `/`), a capitalised key name
@@ -984,7 +999,7 @@ mod tests {
     }
 
     /// The row as the old ASCII chrome reads it, after asserting each cell passes the write point
-    /// and holds `NORMAL` or a frame style.
+    /// and holds `NORMAL`, `HINT` (what a key does, a note) or a frame style.
     fn checked(buffer: &Buffer) -> String {
         (0..MIN_WIDTH)
             .map(|x| {
@@ -997,13 +1012,15 @@ mod tests {
                     terminal_ok(c) || frame_glyph(c, cell.style()),
                     "cell {x}: {c:?}"
                 );
-                let normal = cell.style() == {
-                    let mut blank = ratatui::buffer::Cell::default();
-                    blank.set_style(NORMAL);
-                    blank.style()
-                };
+                let text = [NORMAL, HINT].iter().any(|&style| {
+                    cell.style() == {
+                        let mut blank = ratatui::buffer::Cell::default();
+                        blank.set_style(style);
+                        blank.style()
+                    }
+                });
                 assert!(
-                    normal || is_frame(cell.style()),
+                    text || is_frame(cell.style()),
                     "cell {x}: {:?}",
                     cell.style()
                 );
@@ -1041,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hint_row_keeps_its_words_and_draws_keys_and_notes_in_frame_styles() {
+    fn a_hint_row_keeps_its_words_draws_keys_bold_cyan_and_the_rest_dim() {
         for (words, shown) in [
             (
                 "Enter open  n new  B backup  V verify  A repair  s active  u unlock  ? actions",
@@ -1062,17 +1079,27 @@ mod tests {
         ] {
             let buffer = drawn(key_hints(words, MIN_WIDTH));
             assert_eq!(checked(&buffer).trim_end(), shown);
-            // A key is drawn bold cyan, a note dim: the first cell is a key's.
+            // A key is drawn bold cyan: the first cell is a key's.
             let first = buffer[(0, 0)].style();
             assert_eq!(first.fg, ACCENT_BOLD.fg);
             assert!(first.add_modifier.contains(ratatui::style::Modifier::BOLD));
         }
+        // What a key does and a note are dim in the terminal's own colour (no fixed grey, which
+        // is the background of some palettes).
         let note = drawn(key_hints(
             "Enter apply/check   Esc cancel   password input is never echoed",
             MIN_WIDTH,
         ));
-        let at = checked(&note).find("password").unwrap() as u16;
-        assert_eq!(note[(at, 0)].style().fg, BORDER.fg);
+        let text = checked(&note);
+        for word in ["apply/check", "cancel", "password"] {
+            let style = note[(text.find(word).unwrap() as u16, 0)].style();
+            assert!(
+                style.add_modifier.contains(ratatui::style::Modifier::DIM)
+                    && style.fg.unwrap_or(ratatui::style::Color::Reset)
+                        == ratatui::style::Color::Reset,
+                "{word}: {style:?}"
+            );
+        }
     }
 
     /// Every hint row's words in the source: the string literals of `draw`'s hint chain and of

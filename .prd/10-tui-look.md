@@ -87,7 +87,7 @@ lists exactly the styles the L1 chrome and widgets draw, composed as ratatui com
 | `ACCENT` | fg `Cyan` | `Tabs`' other labels (`THEME.accent()`), a pane's title |
 | `ACCENT_BOLD` | fg `Cyan`, bold | `KeyHints`' keys (`accent()` + bold), the bar's chain |
 | `TAB` | reversed, fg `Cyan`, bold | `Tabs`' current label (`selected()` patched with `accent()`, + bold); no underline with `Hints::Off` |
-| `SECONDARY` | fg `Gray` | `KeyHints`' labels (`THEME.secondary()`) |
+| `SECONDARY` | fg `Gray` | `KeyHints`' labels (`THEME.secondary()`); zwallet redraws them, and `KeyHints`' notes (`THEME.dim()`), in `HINT` (dim) so they read on a light terminal and on Solarized Dark (2026-11-10, after the palette captures) |
 
 A unit test asserts each constant equals the style its widget composes from `THEME` (the theme
 methods, composed as the widget composes them) and that no frame style equals `NORMAL`, `TITLE`,
@@ -111,7 +111,7 @@ ambiguous-wide on.
 
 | Unit | What the owner sees once it is merged | Uses from twolab-tui | Acceptance |
 |---|---|---|---|
-| L1 chrome | rounded frames on every pane; the tab line with the current tab marked; the hint row with keys bold cyan and their actions grey; the chain and the bar's separators coloured | `Theme`, `Tabs`, `KeyHints` | L1.1–L1.7 |
+| L1 chrome | rounded frames on every pane; the tab line with the current tab marked; the hint row with keys bold cyan and their actions dim; the chain and the bar's separators coloured | `Theme`, `Tabs`, `KeyHints` | L1.1–L1.7 |
 | L2 content | the action menu names what an action does, then its key, then its CLI spelling (dim); 2 wallet's amounts aligned on the decimal point under their heading | none (`Row` only; see the L2 adapter table) | L2.1–L2.4 |
 | L3 reviews and popups | send, whitelist and tool reviews laid out as cards; the password popup in a modal frame | frames and layout only; every field still drawn by `Row` | L3.1–L3.4 |
 
