@@ -4,6 +4,9 @@ use crate::core::amount::format_units;
 use crate::history::{Source as HistorySource, State};
 use crate::tui::app::history::{detail_lines, state_label};
 
+/// How far an amount row sits in from its heading (`Base balances`).
+const AMOUNT_INDENT: usize = 2;
+
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Placed>) {
     let state = app.history();
     let block = pane_block(if state.detail.is_some() {
@@ -59,9 +62,22 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
     }
     match &app.navigation().lines {
         // With the balances focused, the top row is the one Enter acts on.
+        // The amounts line up on the decimal point under their heading (10-tui-look.md L2.2):
+        // each amount row is indented so its integer part ends in the column of the widest one,
+        // over every amount row, not only the four shown, so scrolling never moves a column. The
+        // value itself is drawn whole, as before; only the space before it is new.
         Pane::Ready(lines) => {
-            for (y, value) in lines
+            let amounts = app.balance_amount_rows();
+            let whole = |text: &str| text.find(['.', ' ']).unwrap_or(text.len());
+            let widest = amounts
                 .iter()
+                .filter_map(|&i| lines.get(i))
+                .map(|value| whole(value.text()))
+                .max()
+                .unwrap_or(0);
+            for (y, (i, value)) in lines
+                .iter()
+                .enumerate()
                 .skip(app.navigation().scroll)
                 .take(4)
                 .enumerate()
@@ -71,8 +87,15 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 } else {
                     NORMAL
                 };
+                let indent = if amounts.contains(&i) {
+                    AMOUNT_INDENT + widest.saturating_sub(whole(value.text()))
+                } else {
+                    0
+                };
+                let room = usize::from(inner.width).saturating_sub(indent);
                 Row::default()
-                    .outside(&value.cut(usize::from(inner.width)), style)
+                    .text(&" ".repeat(indent), style)
+                    .outside(&value.cut(room), style)
                     .draw(frame, line(inner, y as u16), placed);
             }
         }

@@ -166,6 +166,12 @@ const IMPLEMENTED: &[ActionId] = &[
 ];
 
 impl App {
+    /// The rows of the balance pane that are amounts (`<amount> <symbol>`), which the UI lines
+    /// up on the decimal point (10-tui-look.md L2.2).
+    pub fn balance_amount_rows(&self) -> Vec<usize> {
+        self.nav.balance_assets.keys().copied().collect()
+    }
+
     pub fn navigation(&self) -> &Navigation {
         &self.nav
     }
