@@ -173,12 +173,20 @@ fn qr_modules(lines: &[String]) -> Vec<Vec<bool>> {
     rows
 }
 
-/// The modules of a code of `text` from the `qrcode` crate itself: level M, a quiet zone of 4
-/// light modules on every side, and one light row more when the size is odd (two rows a line).
+/// The modules of a code of `text` from the `qrcode` crate itself: byte mode at level M in the
+/// smallest version that holds it, a quiet zone of 4 light modules on every side, and one light
+/// row more when the size is odd (two rows a line).
 fn expected_qr(text: &str) -> Vec<Vec<bool>> {
-    use qrcode::{Color, EcLevel, QrCode};
+    use qrcode::{Color, EcLevel, QrCode, Version, bits::Bits};
     const QUIET: usize = 4;
-    let code = QrCode::with_error_correction_level(text, EcLevel::M).unwrap();
+    let code = (1..=40)
+        .find_map(|version| {
+            let mut bits = Bits::new(Version::Normal(version));
+            bits.push_byte_data(text.as_bytes()).ok()?;
+            bits.push_terminator(EcLevel::M).ok()?;
+            QrCode::with_bits(bits, EcLevel::M).ok()
+        })
+        .unwrap();
     let (width, modules) = (code.width(), code.to_colors());
     let size = width + 2 * QUIET;
     let dark = |x: usize, y: usize| {

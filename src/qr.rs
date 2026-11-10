@@ -1,6 +1,7 @@
 //! A QR code as terminal text, so a phone wallet can scan an address off the screen.
 
-use qrcode::{Color, EcLevel, QrCode};
+use qrcode::bits::Bits;
+use qrcode::{Color, EcLevel, QrCode, Version};
 
 /// Light modules around the code (its quiet zone), as ISO/IEC 18004 asks: phone cameras need it,
 /// most of all on a dark terminal, where everything around it is dark.
@@ -26,12 +27,26 @@ pub fn render(text: &str, color: bool) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+/// `text` in byte mode at level M, at the smallest version that holds it; `None` when none does.
+/// The crate's own encoder splits a text into numeric, alphanumeric and byte runs, and for some
+/// EIP-55 addresses (`0xc7C0fF38e4e696E1cB88784BDc609caA19e1a9Bd`) its split costs more bits than
+/// byte mode, so the code grows to version 4 (41 columns, 21 lines) and no longer fits 80x24.
+/// Byte mode holds any 42-byte address in version 3.
+fn code(text: &str) -> Option<QrCode> {
+    (1..=40).find_map(|version| {
+        let mut bits = Bits::new(Version::Normal(version));
+        bits.push_byte_data(text.as_bytes()).ok()?;
+        bits.push_terminator(EcLevel::M).ok()?;
+        QrCode::with_bits(bits, EcLevel::M).ok()
+    })
+}
+
 /// The lines of [`render`] without colour codes: half blocks and spaces only, each line as wide
 /// as the code and its quiet zone. With `color` the blocks are the dark modules (for black on
 /// white), without the light ones (white on black, or a dark terminal's own colours: the TUI
 /// draws these).
 pub fn lines(text: &str, color: bool) -> Option<Vec<String>> {
-    let code = QrCode::with_error_correction_level(text, EcLevel::M).ok()?;
+    let code = code(text)?;
     let width = code.width();
     let modules = code.to_colors();
     let size = width + 2 * QUIET;
@@ -183,6 +198,23 @@ mod tests {
         let rows = modules(&render(TRON, true).unwrap(), true);
         assert_eq!(rows[0].len(), 29 + 2 * 4);
         assert_eq!(scan(&rows, true), TRON);
+    }
+
+    #[test]
+    fn every_address_is_a_version_3_code_whatever_its_digits() {
+        // The crate's mixed-mode split made these two version 4 (41 columns): no code at 80x24.
+        for address in [
+            "0xc7C0fF38e4e696E1cB88784BDc609caA19e1a9Bd",
+            "0x1234567890123456789012345678901234567890",
+            "0x0000000000000000000000000000000000000000",
+            ADDRESS,
+        ] {
+            let lines = lines(address, false).unwrap();
+            assert_eq!(lines.len(), 19, "{address}");
+            assert!(lines.iter().all(|l| l.chars().count() == 37), "{address}");
+            let rows = modules(&render(address, true).unwrap(), true);
+            assert_eq!(scan(&rows, true), address);
+        }
     }
 
     #[test]
