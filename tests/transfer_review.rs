@@ -1245,3 +1245,42 @@ async fn tui_send_review_guard_labels_say_clear_blocked_or_override() {
     let shown = frame(&app);
     assert!(shown.contains("repeats 0 OVERRIDE"), "{shown}");
 }
+
+/// 10-tui-look.md L3: on the review, a row's label is grey (`SECONDARY`, a constant of the code)
+/// and its value keeps the style it had, never a frame style.
+#[tokio::test]
+async fn tui_review_labels_are_grey_and_values_keep_their_style() {
+    use ratatui::{Terminal, backend::TestBackend};
+    use zwallet::tui::{style, term::FilteredBackend, ui};
+    let f = Fixture::new(false);
+    let node = Node::new("base");
+    let mut app = tui_app(&f, &node);
+    let _waits = to_review(&mut app, &f).await;
+    let mut terminal = Terminal::new(FilteredBackend::new(TestBackend::new(80, 24))).unwrap();
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &app);
+        })
+        .unwrap();
+    let buffer = terminal.backend().inner().buffer();
+    let text = |y: u16| -> String {
+        (0..80)
+            .map(|x| style::ascii_chrome(&buffer[(x, y)]))
+            .collect()
+    };
+    for label in ["To: ", "From: "] {
+        let y = (0..24)
+            .find(|&y| text(y).contains(&format!("{label}0x")))
+            .unwrap_or_else(|| panic!("no {label:?} row"));
+        let at = text(y).find(label).unwrap() as u16;
+        let (shown, value) = (
+            buffer[(at, y)].style(),
+            buffer[(at + label.len() as u16, y)].style(),
+        );
+        assert!(
+            style::is_frame(shown) && shown.fg == style::SECONDARY.fg,
+            "{label}: {shown:?}"
+        );
+        assert!(!style::is_frame(value), "{label} value: {value:?}");
+    }
+}

@@ -9,7 +9,7 @@ open work; closed rows move to [`loop.done.md`](loop.done.md).
 | WU | Repo · branch | Scope | Owner | State |
 |---|---|---|---|---|
 | L2 | zwallet · `feat/tui-look-u2` | the action menu by label (label, key, `[cli spelling]`); 2 wallet's amounts aligned on the decimal point | coding agent + dispatcher gate | in review |
-| L3 | zwallet · `feat/tui-look-u3` | approval-card reviews, modal password popup, toast outcomes | coding agent + dispatcher gate | planned, after L1 |
+| L3 | zwallet · `feat/tui-look-u3` | review labels grey beside their values (send EVM and Tron, tools); labels type-checked as constants | coding agent + dispatcher gate | in progress |
 
 ## Open gaps
 
@@ -20,7 +20,7 @@ open work; closed rows move to [`loop.done.md`](loop.done.md).
 | L2.3 | outside sources, budgets and lines unchanged | L2 planned | L2 | 🟡 |
 | L2.4 | real-terminal QA 80x24 and 120x40, captures before and after | L2 planned | L2 | 🟡 |
 | L3.1 | reviews keep every field whole; confirm sends exactly the reviewed intent | L3 planned | L3 | 🟡 |
-| L3.2 | password popup keeps mask, purpose and refusal lines | L3 planned | L3 | 🟡 |
+| L3.2 | password popup keeps mask, purpose and refusal lines | L3 leaves it unchanged (no modal frame; see the L3 adapter table) | L3 | 🟡 |
 | L3.3 | no outside value handed to a widget; adversarial strings through every adapter | L3 planned | L3 | 🟡 |
 | L3.4 | real-terminal QA 80x24 and 120x40, captures before and after | L3 planned | L3 | 🟡 |
 

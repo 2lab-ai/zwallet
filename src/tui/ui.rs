@@ -901,6 +901,17 @@ fn outside_style(style: Style) -> Style {
     }
 }
 
+/// The style of a review row's label when a value follows it on the row (10-tui-look.md L3): a
+/// plain row's label in `SECONDARY`, so the eye lands on the value; any other style unchanged. The
+/// label is always a constant of the code (`&'static str`), never text built from a value.
+fn label_style(style: Style) -> Style {
+    if style == NORMAL {
+        crate::tui::style::SECONDARY
+    } else {
+        style
+    }
+}
+
 /// A piece of a [`Row`]: zwallet's own text, or a value from outside.
 enum Part {
     Text(String),

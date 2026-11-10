@@ -10,17 +10,25 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
     frame.render_widget(block, area);
     let row = |frame: &mut Frame,
                y: u16,
-               label: &str,
+               label: &'static str,
                value: Option<Outside>,
                style: Style,
                placed: &mut Vec<Placed>| {
-        let r = Row::default().text(label, style);
         let r = if let Some(v) = value {
-            r.outside(&v, style)
+            Row::default()
+                .text(label, label_style(style))
+                .outside(&v, style)
         } else {
-            r
+            Row::default().text(label, style)
         };
         r.draw(frame, line(inner, y), placed);
+    };
+    // A row of zwallet's own text built at run time (`Argument 2`, `Decimals: 6`): never a label
+    // beside a value, so never in a frame style.
+    let note = |frame: &mut Frame, y: u16, text: &str, style: Style, placed: &mut Vec<Placed>| {
+        Row::default()
+            .text(text, style)
+            .draw(frame, line(inner, y), placed);
     };
     match state.stage {
         Stage::Menu => {
@@ -148,7 +156,7 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
             };
             row(frame, 4, label, None, TITLE, placed);
             if let Purpose::Argument(i) = state.purpose {
-                row(frame, 5, &format!("Argument {}", i + 1), None, HINT, placed);
+                note(frame, 5, &format!("Argument {}", i + 1), HINT, placed);
             }
             field(frame, inner, 7, app, placed);
             if state.purpose == Purpose::Message {
@@ -199,11 +207,10 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                 NORMAL,
                 placed,
             );
-            row(
+            note(
                 frame,
                 2,
                 &format!("{} / EIP-191 message", review.chain().key),
-                None,
                 HINT,
                 placed,
             );
@@ -218,7 +225,7 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                     placed,
                 );
             }
-            row(frame, 12, &review.metadata(), None, HINT, placed);
+            note(frame, 12, &review.metadata(), HINT, placed);
             if state.stage == Stage::MessageConfirm {
                 row(
                     frame,
@@ -441,11 +448,10 @@ pub(super) fn pane(frame: &mut Frame, area: Rect, app: &App, placed: &mut Vec<Pl
                     NORMAL,
                     placed,
                 );
-                row(
+                note(
                     frame,
                     4,
                     &format!("Decimals: {}", balance.decimals),
-                    None,
                     NORMAL,
                     placed,
                 );
